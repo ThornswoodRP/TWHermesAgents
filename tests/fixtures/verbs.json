@@ -1,0 +1,90 @@
+{
+  "issue": 2841,
+  "what": "Every verb the deploy gate runs, and all it runs (scripts/vps/gate/GateRules.ps1 reads this). A verb is one script of main, run on the box by the gate broker from a checkout of origin/main, with only the parameters named here. A parameter's rule is 'switch' (no value), 'text' (the text rule below) or a pattern its value must match whole. 'fixed' goes on every run of that verb. 'out' is the parameter that names the folder the verb writes its files into: the broker sets it to a folder of the run's own and sends back what lands there.",
+  "text": "^[A-Za-z0-9][A-Za-z0-9 .,:;'()!?_+-]{0,159}$",
+  "verbs": {
+    "Get-Logs": {
+      "script": "scripts/vps/Get-Logs.ps1",
+      "timeoutMinutes": 15,
+      "fixed": ["-NoPause"],
+      "out": "-Out",
+      "params": {
+        "Lines": "^[0-9]{1,6}$",
+        "All": "switch",
+        "Dev": "switch"
+      }
+    },
+    "Deploy-DevGamemode": {
+      "script": "scripts/deploy/Deploy-DevGamemode.ps1",
+      "timeoutMinutes": 45,
+      "fixed": [],
+      "params": {
+        "LoadOrder": "switch",
+        "LoadOrderRefuse": "^(on|off)$",
+        "RequirePass": "^(on|off)$",
+        "Npcs": "^(on|off)$",
+        "Minutes": "^[0-9]{1,2}(\\.[0-9]{1,2})?$",
+        "Mode": "^(notice|restart)$",
+        "Why": "text",
+        "Now": "switch",
+        "Wait": "^[0-9]{1,4}$",
+        "PutBack": "switch",
+        "Restart": "switch",
+        "ShipFollows": "switch"
+      }
+    },
+    "Deploy-Docs": {
+      "script": "scripts/deploy/Deploy-Docs.ps1",
+      "timeoutMinutes": 45,
+      "fixed": [],
+      "params": {
+        "SeedDocs": "switch",
+        "Boards": "switch",
+        "Site": "switch",
+        "Wait": "^[0-9]{1,4}$",
+        "PutBack": "switch"
+      }
+    },
+    "Install-Bot": {
+      "script": "scripts/deploy/Install-Bot.ps1",
+      "timeoutMinutes": 30,
+      "fixed": ["-CodeOnly", "-NoPause"],
+      "params": {
+        "Wait": "^[0-9]{1,4}$",
+        "PutBack": "switch"
+      }
+    },
+    "Install-Voice": {
+      "script": "scripts/deploy/Install-Voice.ps1",
+      "timeoutMinutes": 30,
+      "fixed": ["-NoPause"],
+      "params": {
+        "ChatRange": "^(off|on|[0-9]{1,4})$",
+        "Restart": "switch",
+        "Wait": "^[0-9]{1,4}$",
+        "PutBack": "switch"
+      }
+    },
+    "Request-Restart": {
+      "script": "scripts/vps/Request-Restart.ps1",
+      "timeoutMinutes": 10,
+      "fixed": [],
+      "params": {
+        "Minutes": "^[0-9]{1,2}(\\.[0-9]{1,2})?$",
+        "Mode": "^(notice|update|restart)$",
+        "Why": "text",
+        "Cancel": "switch",
+        "ThenRestart": "switch",
+        "RestartFollows": "switch"
+      }
+    },
+    "Read-LauncherStarts": {
+      "script": "scripts/vps/Read-LauncherStarts.ps1",
+      "timeoutMinutes": 10,
+      "fixed": [],
+      "params": {
+        "Days": "^[0-9]{1,3}$"
+      }
+    }
+  }
+}

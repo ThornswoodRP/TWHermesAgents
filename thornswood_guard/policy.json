@@ -1,0 +1,354 @@
+{
+  "version": 1,
+  "owner": "EvilPatrick06",
+  "repos": {
+    "app": "EvilPatrick06/Thornswood",
+    "fork": "EvilPatrick06/skymp",
+    "ops": "EvilPatrick06/Thornswood-Ops",
+    "hermes": "EvilPatrick06/Thornswood-Hermes"
+  },
+  "bots": {
+    "bramble": {
+      "name": "Bramble",
+      "role": "router",
+      "app": "bramble",
+      "claim_label": "claimed: Bramble",
+      "rooms": [
+        "Thornswood Workbench"
+      ],
+      "opens_working_rooms": true,
+      "cron": true
+    },
+    "rift": {
+      "name": "Rift",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Rift",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "sprocket": {
+      "name": "Sprocket",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Sprocket",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "echo": {
+      "name": "Echo",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Echo",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "magpie": {
+      "name": "Magpie",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Magpie",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "wisp": {
+      "name": "Wisp",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Wisp",
+      "rooms": [
+        "Thornswood Workbench"
+      ],
+      "fork_branches": true
+    }
+  },
+  "github_apps": {
+    "bramble": {
+      "workflows": true,
+      "may_merge": true
+    },
+    "workers": {
+      "workflows": false,
+      "may_merge": false
+    }
+  },
+  "merge": {
+    "required_check": {
+      "EvilPatrick06/Thornswood": "Launcher builds (VPS fallback)",
+      "EvilPatrick06/Thornswood-Ops": "check",
+      "EvilPatrick06/skymp": "build-pr"
+    },
+    "method": {
+      "EvilPatrick06/Thornswood": "squash",
+      "EvilPatrick06/Thornswood-Ops": "squash",
+      "EvilPatrick06/skymp": "merge"
+    },
+    "base": {
+      "EvilPatrick06/Thornswood": "main",
+      "EvilPatrick06/Thornswood-Ops": "main",
+      "EvilPatrick06/skymp": "thornswood/engine-changes"
+    },
+    "patrick_paths": [
+      ".github/workflows/**",
+      "scripts/vps/gate/**",
+      "scripts/release/nexus-verbs.json"
+    ],
+    "verb_lists": [
+      "scripts/vps/gate/verbs.json",
+      "scripts/release/nexus-verbs.json"
+    ]
+  },
+  "runs": {
+    "ref": "main",
+    "repo": "EvilPatrick06/Thornswood",
+    "workflows": {
+      "box-run.yml": {
+        "verbs": "scripts/vps/gate/verbs.json"
+      },
+      "nexus-run.yml": {
+        "verbs": "scripts/release/nexus-verbs.json"
+      },
+      "release.yml": {},
+      "release-tag.yml": {}
+    },
+    "refused_verbs": [
+      "Set-NexusKey"
+    ],
+    "patrick_switches": {
+      "New-NexusRevision": [
+        "Publish"
+      ]
+    }
+  },
+  "branches": {
+    "pattern": "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$",
+    "bramble_may_push_for": [
+      "magpie"
+    ]
+  },
+  "claims": {
+    "prefix": "claimed: ",
+    "retired_labels": [
+      "claimed: Claude",
+      "claimed: ChatGPT",
+      "claimed: Codex"
+    ]
+  },
+  "hands_off": {
+    "people": [
+      "WiccanDjinn",
+      "Jhinswife"
+    ],
+    "lanes": {
+      "names": [
+        "Anvil",
+        "Herald",
+        "Waystone",
+        "Wyrd",
+        "Smeagle",
+        "Codex"
+      ],
+      "labels": [
+        "claimed: Anvil",
+        "claimed: Herald",
+        "claimed: Waystone",
+        "claimed: Wyrd",
+        "claimed: Smeagle",
+        "claimed: Codex"
+      ],
+      "branch_prefixes": [
+        "anvil/",
+        "herald/",
+        "waystone/",
+        "wyrd/",
+        "smeagle/",
+        "codex/",
+        "grok/"
+      ]
+    }
+  },
+  "routes": [
+    {
+      "id": "max",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "who": "all",
+      "risk": "any"
+    },
+    {
+      "id": "credits",
+      "provider": "anthropic",
+      "via": "admission-proxy",
+      "key_env": "TW_CLAUDE_CREDITS_KEY",
+      "who": [
+        "bramble"
+      ],
+      "risk": "low",
+      "needs": "admission-proxy",
+      "monthly_usd": 200,
+      "refresh_day": 21,
+      "stop_below_usd": 10
+    },
+    {
+      "id": "chatgpt",
+      "provider": "openai-codex",
+      "model": "gpt-6.1-sol",
+      "who": "all",
+      "risk": "any"
+    },
+    {
+      "id": "qwen",
+      "provider": "custom",
+      "via": "admission-proxy",
+      "key_env": "TW_QWEN_TOKEN",
+      "who": "all",
+      "risk": "low",
+      "needs": "admission-proxy",
+      "needs_one": true
+    }
+  ],
+  "paid_providers": [
+    "openrouter",
+    "openai",
+    "openai-api",
+    "ai-gateway",
+    "nous",
+    "copilot",
+    "zai",
+    "kimi-coding",
+    "minimax",
+    "minimax-cn",
+    "deepseek",
+    "nvidia",
+    "gmi",
+    "upstage",
+    "bedrock",
+    "vertex",
+    "gemini",
+    "google",
+    "xai"
+  ],
+  "secrets": {
+    "oracle_allowed": [
+      {
+        "name": "DISCORD_BOT_TOKEN",
+        "where": "root"
+      }
+    ],
+    "oracle_settings": [
+      "DISCORD_ALLOWED_USERS",
+      "DISCORD_HIDE_SLASH_COMMANDS",
+      "DISCORD_COMMAND_SYNC_POLICY",
+      "DISCORD_REQUIRE_MENTION",
+      "DISCORD_HOME_CHANNEL",
+      "DISCORD_HOME_CHANNEL_NAME"
+    ],
+    "oracle_other_users": [
+      {
+        "name": "TW_GAMEDATA_NEXUS_KEY",
+        "user": "tw-gamedata",
+        "use": "download the collection's published revision files only"
+      }
+    ],
+    "oracle_later": [
+      {
+        "name": "TW_CLAUDE_CREDITS_KEY",
+        "where": "root"
+      },
+      {
+        "name": "TW_QWEN_TOKEN",
+        "where": "root"
+      }
+    ],
+    "qwen_env_file": "/home/hermes/.config/thornswood/qwen.env",
+    "forbidden_names": [
+      "ANTHROPIC_API_KEY",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "GITHUB_APP_*",
+      "*NEXUS*",
+      "DESK_KEY*",
+      "*SIGNING*",
+      "AZURE_*",
+      "CLOUDFLARE_*",
+      "CF_API_*",
+      "*BOX_KEY*",
+      "*BRIDGE_TOKEN*",
+      "OPENAI_API_KEY",
+      "OPENROUTER_API_KEY",
+      "THORNSWOOD_NOTICE_*",
+      "GOOGLE_*",
+      "DISCORD_ALLOW_ALL_USERS",
+      "DISCORD_ALLOW_BOTS",
+      "DISCORD_ALLOWED_ROLES"
+    ],
+    "secret_name_parts": [
+      "KEY",
+      "KEYS",
+      "TOKEN",
+      "TOKENS",
+      "SECRET",
+      "SECRETS",
+      "PASSWORD",
+      "PASSWD",
+      "PASS",
+      "PASSPHRASE",
+      "CREDENTIAL",
+      "CREDENTIALS",
+      "PRIVATE",
+      "AUTH",
+      "COOKIE",
+      "COOKIES",
+      "PAT"
+    ],
+    "forbidden_files": [
+      "signing.json",
+      "thornswood_ed25519",
+      "thornswood-box-token",
+      "*.pfx",
+      "*.p12",
+      "*private-key*.pem",
+      "*.private-key.pem",
+      "hosts.yml",
+      ".git-credentials"
+    ]
+  },
+  "notifications": {
+    "push_kinds": [
+      "decision",
+      "main-approval",
+      "box-change"
+    ],
+    "lock_screen_text": "Thornswood needs you",
+    "link": "/cards/{card_id}?rev={revision}"
+  },
+  "decisions": {
+    "answered_by": "EvilPatrick06",
+    "default_expiry_hours": 72
+  },
+  "toolsets": {
+    "never": [
+      "browser",
+      "code_execution",
+      "computer_use",
+      "connections",
+      "catalog",
+      "image_gen",
+      "video_gen",
+      "tts",
+      "web",
+      "search",
+      "x_search",
+      "discord",
+      "discord_admin",
+      "delegation"
+    ],
+    "workers_never": [
+      "cronjob"
+    ]
+  }
+}

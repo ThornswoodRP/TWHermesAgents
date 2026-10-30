@@ -1,0 +1,306 @@
+# The Bots' guard rails, as data. Every rule the code enforces reads its
+# numbers and names from here, so a change to a rule is a change to this file,
+# reviewed and merged by Patrick. RULES.md says where each rule comes from.
+
+version: 1
+
+owner: EvilPatrick06
+
+repos:
+  app: EvilPatrick06/Thornswood
+  fork: EvilPatrick06/skymp
+  ops: EvilPatrick06/Thornswood-Ops
+  hermes: EvilPatrick06/Thornswood-Hermes
+
+# Exactly six Bots. The ops file and the guide are skills, never Bots.
+# `app` names which GitHub App the git broker uses for that Bot's writes.
+bots:
+  bramble:
+    name: Bramble
+    role: router
+    app: bramble
+    claim_label: "claimed: Bramble"
+    rooms: [Thornswood Workbench]
+    opens_working_rooms: true
+    cron: true
+  rift:
+    name: Rift
+    role: worker
+    app: workers
+    claim_label: "claimed: Rift"
+    rooms: [Thornswood Workbench]
+  sprocket:
+    name: Sprocket
+    role: worker
+    app: workers
+    claim_label: "claimed: Sprocket"
+    rooms: [Thornswood Workbench]
+  echo:
+    name: Echo
+    role: worker
+    app: workers
+    claim_label: "claimed: Echo"
+    rooms: [Thornswood Workbench]
+  magpie:
+    name: Magpie
+    role: worker
+    app: workers
+    claim_label: "claimed: Magpie"
+    rooms: [Thornswood Workbench]
+  wisp:
+    name: Wisp
+    role: worker
+    app: workers
+    claim_label: "claimed: Wisp"
+    rooms: [Thornswood Workbench]
+    fork_branches: true
+
+# The two GitHub Apps (Patrick, 30 Oct). Only Bramble's may update main, and
+# only through a pull request. The workers' App has no Workflows permission,
+# so GitHub itself refuses a worker push that changes a workflow file.
+github_apps:
+  bramble:
+    workflows: true
+    may_merge: true
+  workers:
+    workflows: false
+    may_merge: false
+
+merge:
+  # The one check per repo that must be a success on the exact head. Skipped
+  # is not success. Thornswood's changes to "Launcher builds" by a one-line PR
+  # here at the flip (Patrick's decision 1). Read from each repo's PR builds.
+  required_check:
+    EvilPatrick06/Thornswood: "Launcher builds (VPS fallback)"
+    EvilPatrick06/Thornswood-Ops: "check"
+    EvilPatrick06/skymp: "build-pr"
+  method:
+    EvilPatrick06/Thornswood: squash
+    EvilPatrick06/Thornswood-Ops: squash
+    EvilPatrick06/skymp: merge
+  base:
+    EvilPatrick06/Thornswood: main
+    EvilPatrick06/Thornswood-Ops: main
+    EvilPatrick06/skymp: thornswood/engine-changes
+  # A PR touching any of these runs on the live box once merged, so Bramble
+  # merges it only after Patrick's yes on a card for that PR at its exact head.
+  patrick_paths:
+    - ".github/workflows/**"
+    - "scripts/vps/gate/**"
+    - "scripts/release/nexus-verbs.json"
+  # The scripts these verb lists name are Patrick paths too.
+  verb_lists:
+    - scripts/vps/gate/verbs.json
+    - scripts/release/nexus-verbs.json
+
+# What Bramble's release tooling may start. Nothing else, on main only.
+runs:
+  ref: main
+  repo: EvilPatrick06/Thornswood
+  workflows:
+    box-run.yml:
+      verbs: scripts/vps/gate/verbs.json
+    nexus-run.yml:
+      verbs: scripts/release/nexus-verbs.json
+    release.yml: {}
+    release-tag.yml: {}
+  # Never started by a Bot, whatever the request says.
+  refused_verbs: [Set-NexusKey]
+  # A verb that only runs with Patrick's decision record for that exact commit.
+  patrick_switches:
+    New-NexusRevision: [Publish]
+
+# Branches: a worker pushes only its own, named <bot>/<issue>-<what>.
+branches:
+  pattern: "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$"
+  # Bramble's App pushes the workflow change Magpie wrote to Magpie's branch.
+  bramble_may_push_for: [magpie]
+
+claims:
+  prefix: "claimed: "
+  # Never put on a new claim. Kept for history.
+  retired_labels:
+    - "claimed: Claude"
+    - "claimed: ChatGPT"
+    - "claimed: Codex"
+
+# Hands off (Patrick, 30 Oct). Their issues, PRs, branches and labels are
+# never touched by a Bot.
+hands_off:
+  people: [WiccanDjinn, Jhinswife]
+  lanes:
+    names: [Anvil, Herald, Waystone, Wyrd, Smeagle, Codex]
+    labels:
+      - "claimed: Anvil"
+      - "claimed: Herald"
+      - "claimed: Waystone"
+      - "claimed: Wyrd"
+      - "claimed: Smeagle"
+      - "claimed: Codex"
+    branch_prefixes: [anvil/, herald/, waystone/, wyrd/, smeagle/, codex/, grok/]
+
+# The model order with no extra spend. A route a Bot may not use is not in
+# its chain at all. Routes 2 and 4 stay out of every chain until the
+# admission proxy exists (06 section 6.3).
+routes:
+  - id: max
+    provider: anthropic
+    model: claude-opus-5-5
+    who: all
+    risk: any
+  - id: credits
+    provider: anthropic
+    via: admission-proxy
+    key_env: TW_CLAUDE_CREDITS_KEY
+    who: [bramble]
+    risk: low
+    needs: admission-proxy
+    # Read from Patrick's claude.ai Billing page, 30 Oct: $200 a month, new
+    # credit on the 21st (next 21 Nov). Nothing purchased, no auto-reload.
+    # The queue stops admitting new work below the margin, so a long turn
+    # never hits the hard stop halfway.
+    monthly_usd: 200
+    refresh_day: 21
+    stop_below_usd: 10
+  - id: chatgpt
+    provider: openai-codex
+    model: gpt-6.1-sol
+    who: all
+    risk: any
+  - id: qwen
+    provider: custom
+    via: admission-proxy
+    key_env: TW_QWEN_TOKEN
+    who: all
+    risk: low
+    needs: admission-proxy
+    needs_one: true
+
+# Providers no profile may name anywhere in its config: each bills by use.
+paid_providers:
+  - openrouter
+  - openai
+  - openai-api
+  - ai-gateway
+  - nous
+  - copilot
+  - zai
+  - kimi-coding
+  - minimax
+  - minimax-cn
+  - deepseek
+  - nvidia
+  - gmi
+  - upstage
+  - bedrock
+  - vertex
+  - gemini
+  - google
+  - xai
+
+# Secrets on the Oracle box, by name only. Values are never read.
+secrets:
+  # The one named exception (Patrick, 30 Oct), only in the gateway's own .env.
+  oracle_allowed:
+    - name: DISCORD_BOT_TOKEN
+      where: root
+  # Settings that sit beside it and hold no secret.
+  oracle_settings:
+    - DISCORD_ALLOWED_USERS
+    - DISCORD_HIDE_SLASH_COMMANDS
+    - DISCORD_COMMAND_SYNC_POLICY
+    - DISCORD_REQUIRE_MENTION
+    - DISCORD_HOME_CHANNEL
+    - DISCORD_HOME_CHANNEL_NAME
+  # The second named exception (Patrick, 30 Oct, report page): one Nexus key
+  # that only downloads a new collection revision's plugins for the game
+  # data checks. It is held by its own Linux user, never by Hermes, a broker a
+  # Bot can ask, or a sandbox, so any Nexus name in Hermes's files is refused.
+  # Not set yet: no real tokens on the VM before the Apps exist.
+  oracle_other_users:
+    - name: TW_GAMEDATA_NEXUS_KEY
+      user: tw-gamedata
+      use: download the collection's published revision files only
+  # Allowed by the plan once their route exists, held by the service user
+  # only. Not set yet: no real tokens on the VM before the Apps exist.
+  oracle_later:
+    - name: TW_CLAUDE_CREDITS_KEY
+      where: root
+    - name: TW_QWEN_TOKEN
+      where: root
+  # Set by Patrick's Hermes on 30 Oct for route 4, in its own file
+  # (/home/hermes/.config/thornswood/qwen.env, mode 600: QWEN_BASE_URL and
+  # QWEN_API_KEY). Only the admission proxy reads it; never a profile's .env.
+  qwen_env_file: /home/hermes/.config/thornswood/qwen.env
+  # Never on the Oracle box, by name pattern. ANTHROPIC_API_KEY would make
+  # Hermes spend the credits ahead of the subscription.
+  forbidden_names:
+    - "ANTHROPIC_API_KEY"
+    - "GH_TOKEN"
+    - "GITHUB_TOKEN"
+    - "GITHUB_APP_*"
+    - "*NEXUS*"        # only tw-gamedata holds one, outside Hermes's reach
+    - "DESK_KEY*"
+    - "*SIGNING*"
+    - "AZURE_*"
+    - "CLOUDFLARE_*"
+    - "CF_API_*"
+    - "*BOX_KEY*"
+    - "*BRIDGE_TOKEN*"
+    - "OPENAI_API_KEY"
+    - "OPENROUTER_API_KEY"
+    - "THORNSWOOD_NOTICE_*"
+    - "GOOGLE_*"
+    # Only Patrick instructs Hermes on Discord.
+    - "DISCORD_ALLOW_ALL_USERS"
+    - "DISCORD_ALLOW_BOTS"
+    - "DISCORD_ALLOWED_ROLES"
+  # A name not listed above is refused when it is shaped like a secret (a
+  # KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, PRIVATE, AUTH or COOKIE part).
+  # Hermes's own settings in the same files hold no secret and pass.
+  secret_name_parts: [KEY, KEYS, TOKEN, TOKENS, SECRET, SECRETS, PASSWORD, PASSWD, PASS, PASSPHRASE, CREDENTIAL, CREDENTIALS, PRIVATE, AUTH, COOKIE, COOKIES, PAT]
+  forbidden_files:
+    - signing.json
+    - thornswood_ed25519
+    - thornswood-box-token
+    - "*.pfx"
+    - "*.p12"
+    - "*private-key*.pem"
+    - "*.private-key.pem"
+    # A GitHub login in the Bots' user would put Patrick's own token, and his
+    # rate limit, in their reach. The Bots call GitHub only through tw-git,
+    # with the two Apps' installation tokens.
+    - hosts.yml
+    - .git-credentials
+
+notifications:
+  # Push only for a real decision, and only once per card revision.
+  push_kinds: [decision, main-approval, box-change]
+  lock_screen_text: "Thornswood needs you"
+  link: "/cards/{card_id}?rev={revision}"
+
+decisions:
+  answered_by: EvilPatrick06
+  # Every record is used once. Main, publish and cutover records also die
+  # when the store is restored from a backup.
+  default_expiry_hours: 72
+
+# Toolsets each Bot never has. The guard also refuses their tools by name.
+toolsets:
+  never:
+    - browser
+    - code_execution
+    - computer_use
+    - connections
+    - catalog
+    - image_gen
+    - video_gen
+    - tts
+    - web
+    - search
+    - x_search
+    - discord
+    - discord_admin
+    - delegation
+  workers_never:
+    - cronjob

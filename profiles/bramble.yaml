@@ -1,0 +1,98 @@
+# Bramble's Hermes config, as scripts/apply.py sets it in the existing
+# profile /home/hermes/.hermes/profiles/bramble/config.yaml. Generated from
+# thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
+# Every key not listed here stays as Hermes has it. `model` and
+# `fallback_providers` are replaced whole.
+#
+# Rooms: Thornswood Workbench, and the working rooms it opens.
+# Skills: thornswood-ops and thornswood-guide, already in the profile;
+# apply.py checks they are there.
+model:
+  provider: anthropic
+  default: claude-opus-5-5
+fallback_providers:
+- provider: openai-codex
+  model: gpt-6.1-sol
+timezone: America/Denver
+agent:
+  reasoning_effort: medium
+  service_tier: ''
+  disabled_toolsets:
+  - browser
+  - code_execution
+  - computer_use
+  - connections
+  - catalog
+  - image_gen
+  - video_gen
+  - tts
+  - web
+  - search
+  - x_search
+  - discord
+  - discord_admin
+  - delegation
+terminal:
+  backend: docker
+  cwd: /home/hermes/tw-work/bramble
+  docker_image: docker.io/nousresearch/hermes-sandbox:desktop
+  docker_mount_cwd_to_workspace: true
+  docker_network: false
+  docker_volumes: []
+  docker_forward_env: []
+  docker_env: {}
+  docker_extra_args: []
+  docker_shared_container_key: ''
+  container_cpu: 1
+  container_memory: 2048
+  container_disk: 0
+  container_persistent: true
+auxiliary:
+  free_only: true
+  openrouter_model: ''
+  title_generation:
+    model_upgrade_enabled: false
+  background_review:
+    enabled: false
+curator:
+  enabled: false
+skills:
+  write_approval: true
+  guard_agent_created: true
+  inline_shell: false
+  project_discovery: false
+approvals:
+  mode: manual
+  cron_mode: deny
+  unattended_mode: deny
+  single_query_mode: deny
+  deny:
+  - git push*
+  - '*git push *'
+  - gh pr merge*
+  - '*gh pr merge*'
+  - gh pr create*
+  - gh workflow run*
+  - '*gh workflow run*'
+  - gh api * -X *
+  - gh api * --method *
+  - gh label *
+  - gh issue edit*
+  - gh secret*
+  - gh variable*
+  - gh ruleset*
+  - gh auth login*
+  - gh auth token*
+  - '*cat *auth.json*'
+  - '*printenv*'
+  - '*/proc/*/environ*'
+  - sudo *
+plugins:
+  enabled:
+  - thornswood_guard
+  auto_apply: false
+  auto_update_check_hours: 0
+  hook_callback_timeout: 30
+hooks_auto_accept: false
+security:
+  redact_secrets: true

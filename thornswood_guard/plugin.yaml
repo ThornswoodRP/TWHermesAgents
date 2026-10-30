@@ -1,0 +1,7 @@
+name: thornswood_guard
+version: 1.0.0
+description: The Thornswood Bots' guard rails. Refuses tool calls a Bot may not make, before they run.
+author: Patrick
+provides_tools: []
+provides_hooks:
+  - pre_tool_call

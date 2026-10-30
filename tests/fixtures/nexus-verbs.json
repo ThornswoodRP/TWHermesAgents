@@ -1,0 +1,77 @@
+{
+  "issue": 2841,
+  "what": "Every Nexus script a session can run with the key it does not hold, and all it can run (scripts/release/Nexus-Run.ps1 reads this, through scripts/vps/gate/GateRules.ps1, the rules the deploy gate holds a line to). A verb is one script of main, run by .github/workflows/nexus-run.yml with only the parameters named here. A parameter's rule is 'switch' (no value), 'text' (the text rule below) or a pattern its value must match whole. 'fixed' goes on every run of that verb. 'lists' are parameters whose value is several, split on commas. 'out' is the parameter Nexus-Run sets to a folder of the run's own and sends back sealed. Three are Nexus-Run's own and never reach the script: Send-NexusFile's -PackRoot, -Pack and -PackName, which zip files of main into the archive it uploads. New-NexusRevision's -Archive is never given: Nexus-Run downloads each -FileId from Nexus, the archive that was uploaded as that file. Its -Add names a JSON file of main whose archives Nexus-Run downloads the same way. Anything a script takes from a file of the machine it runs on (-Archive of your own, -From, -Layout, -CollectionArchive, -Game) is One's, with the key file there.",
+  "text": "^[A-Za-z0-9][A-Za-z0-9 .,:;'()!?_+&/-]{0,399}$",
+  "verbs": {
+    "Set-NexusKey": {
+      "script": "scripts/release/Set-NexusKey.ps1",
+      "timeoutMinutes": 5,
+      "fixed": ["-Check", "-NoPause"],
+      "params": {}
+    },
+    "Send-NexusFile": {
+      "script": "scripts/release/Send-NexusFile.ps1",
+      "timeoutMinutes": 40,
+      "fixed": ["-NoPause"],
+      "params": {
+        "Mod": "^[0-9]{1,9}$",
+        "Game": "^[a-z0-9]{1,40}$",
+        "File": "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,99}$",
+        "Version": "^[0-9A-Za-z][0-9A-Za-z.-]{0,39}$",
+        "Name": "text",
+        "Category": "^(main|optional|miscellaneous)$",
+        "Description": "text",
+        "Changelog": "text",
+        "UpdateModVersion": "switch",
+        "KeepOldVersion": "switch",
+        "WaitSeconds": "^[0-9]{1,4}$",
+        "WhatIf": "switch",
+        "PackRoot": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,60}(/[A-Za-z0-9_][A-Za-z0-9_.-]{0,60}){0,7}$",
+        "Pack": "^[A-Za-z0-9_][A-Za-z0-9_. /-]{0,150}(,[A-Za-z0-9_][A-Za-z0-9_. /-]{0,150}){0,19}$",
+        "PackName": "^[A-Za-z0-9][A-Za-z0-9_.()+-]{0,80}\\.zip$"
+      }
+    },
+    "New-NexusRevision": {
+      "script": "scripts/release/New-NexusRevision.ps1",
+      "timeoutMinutes": 60,
+      "fixed": ["-NoPause"],
+      "lists": ["Mod", "FileId", "DropPatch"],
+      "params": {
+        "Mod": "^[0-9]{1,9}(,[0-9]{1,9}){0,9}$",
+        "FileId": "^[0-9]{1,12}(,[0-9]{1,12}){0,9}$",
+        "DropPatch": "^[0-9]{1,9}:[A-Za-z0-9_][A-Za-z0-9 _.'()+&/-]{0,159}(,[0-9]{1,9}:[A-Za-z0-9_][A-Za-z0-9 _.'()+&/-]{0,159}){0,9}$",
+        "Add": "^records/[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}(/[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}){0,3}\\.json$",
+        "BaseRevision": "^[0-9]{1,4}$",
+        "Slug": "^[a-z0-9]{1,16}$",
+        "Game": "^[a-z0-9]{1,40}$",
+        "Publish": "^[0-9]{1,4}$",
+        "WaitSeconds": "^[0-9]{1,4}$",
+        "WhatIf": "switch"
+      }
+    },
+    "Install-NexusRevision": {
+      "script": "scripts/release/Install-NexusRevision.ps1",
+      "timeoutMinutes": 150,
+      "fixed": ["-NoPause"],
+      "out": "-Record",
+      "params": {
+        "Revision": "^[0-9]{1,4}$",
+        "Slug": "^[a-z0-9]{1,16}$",
+        "GameDomain": "^[a-z0-9]{1,40}$"
+      }
+    },
+    "Set-NexusDescription": {
+      "script": "scripts/release/Set-NexusDescription.ps1",
+      "timeoutMinutes": 10,
+      "fixed": ["-NoPause"],
+      "lists": ["Mod"],
+      "params": {
+        "Mod": "^[0-9]{1,9}(,[0-9]{1,9}){0,9}$",
+        "Game": "^[a-z0-9]{1,40}$",
+        "AddLine": "text",
+        "AfterLine": "^[0-9]{1,3}$",
+        "WhatIf": "switch"
+      }
+    }
+  }
+}
