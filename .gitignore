@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# Nothing secret is ever written here. These names are kept out by habit too.
+.env
+.env.*
+auth.json
+*.pem
+signing.json
