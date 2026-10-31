@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Apply one merged version of Thornswood-Hermes to the six existing profiles.
+"""Apply one merged version of Thornswood-Hermes to the six existing profiles
+and to the gateway's own profile.
 
 Runs on the Oracle VM as the `hermes` user, from a checkout of the exact
 commit Patrick merged:
@@ -19,6 +20,12 @@ For each Bot it:
   5. installs the guard plugin into plugins/thornswood_guard;
   6. makes the Bot's working folder;
   7. loads the installed plugin and checks it refuses what it must.
+
+The gateway's own profile (the hermes user's default profile, which
+tw-hermes-gateway runs as) is not a Bot, but it holds the Discord connection
+and makes the gateway's own helper calls. It gets one route, the helpers on
+it, and the guard, which refuses every tool there; its .env is checked as
+before.
 """
 
 from __future__ import annotations
@@ -41,8 +48,9 @@ sys.path.insert(0, str(REPO))
 import yaml  # noqa: E402
 
 from thornswood_guard.policy import Policy  # noqa: E402
-from thornswood_guard.profile_config import SANDBOX_IMAGE, WORK_ROOT, build, merge_into  # noqa: E402
-from thornswood_guard.routes import check_config, proxy_ready_in  # noqa: E402
+from thornswood_guard.profile_config import (  # noqa: E402
+    GATEWAY_PROFILE, SANDBOX_IMAGE, WORK_ROOT, build, build_gateway, merge_into)
+from thornswood_guard.routes import check_config, check_gateway_config, proxy_ready_in  # noqa: E402
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
 SKILLS = ("thornswood-ops", "thornswood-guide")
@@ -118,6 +126,53 @@ def self_test(plugin_dir: Path, bot: str) -> list[str]:
     return problems
 
 
+def gateway_self_test(plugin_dir: Path) -> list[str]:
+    """In the gateway's own profile the installed guard refuses every tool."""
+    name = "_tw_selftest_gateway"
+    spec = importlib.util.spec_from_file_location(name, plugin_dir / "__init__.py",
+                                                  submodule_search_locations=[str(plugin_dir)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    ctx = FakeCtx(GATEWAY_PROFILE)
+    module.register(ctx)
+    hooks = ctx.hooks.get("pre_tool_call") or []
+    del sys.modules[name]
+    if len(hooks) != 1:
+        return [f"the gateway's own profile: the installed guard registered {len(hooks)} pre_tool_call hooks, not 1"]
+    return [f"the gateway's own profile: the installed guard let {tool} through"
+            for tool, args in (("terminal", {"command": "git status"}), ("read_file", {"path": "README.md"}),
+                               ("vision_analyze", {"image_url": "x.png"}))
+            if (hooks[0](tool_name=tool, args=args) or {}).get("action") != "block"]
+
+
+def install_guard(pdir: Path) -> None:
+    plugins = pdir / "plugins"
+    plugins.mkdir(exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=plugins, prefix=".thornswood_guard-"))
+    shutil.copytree(REPO / "thornswood_guard", staging / "pkg", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    target = plugins / "thornswood_guard"
+    old = plugins / f".thornswood_guard-old-{os.getpid()}"
+    if target.exists():
+        target.rename(old)
+    (staging / "pkg").rename(target)
+    shutil.rmtree(staging)
+    if old.exists():
+        shutil.rmtree(old)
+
+
+def write_config(pdir: Path, cfg_path: Path, merged: dict, commit: str, stamp: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=pdir, prefix=".config-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        yaml.safe_dump(merged, f, sort_keys=False, allow_unicode=True)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, cfg_path)
+    record = pdir / "local" / "thornswood-hermes"
+    record.mkdir(parents=True, exist_ok=True)
+    (record / "applied.json").write_text(json.dumps({"commit": commit, "applied_at": stamp}, indent=2) + "\n",
+                                         encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--expect", required=True, help="the full commit Patrick merged; this checkout must be exactly it")
@@ -164,6 +219,10 @@ def main() -> int:
         problems += check_env(policy, names, bot, later_allowed=later)
         problems += [f"{bot}: {p}" for p in check_config(policy, bot, merged, names | root_env)]
         plans[bot] = (pdir, cfg_path, existing or {}, merged)
+    gw_path = home / "config.yaml"
+    gw_existing = (yaml.safe_load(gw_path.read_text(encoding="utf-8")) if gw_path.exists() else {}) or {}
+    gw_merged = merge_into(gw_existing, build_gateway(policy))
+    problems += [f"the gateway's own profile: {p}" for p in check_gateway_config(policy, gw_merged, root_env)]
     problems += scan_files(policy, home)
 
     # Every Bot's terminal runs in Hermes's sandbox image under rootless podman.
@@ -176,6 +235,8 @@ def main() -> int:
     for bot, (_, _, existing, merged) in plans.items():
         changed = sorted(k for k in merged if existing.get(k) != merged.get(k))
         print(f"{bot}: config keys set: {', '.join(changed) or 'none, already current'}")
+    changed = sorted(k for k in gw_merged if gw_existing.get(k) != gw_merged.get(k))
+    print(f"the gateway's own profile: config keys set: {', '.join(changed) or 'none, already current'}")
 
     if problems:
         print("\nSTOP. Nothing was changed:")
@@ -193,46 +254,26 @@ def main() -> int:
             return 1
         print(f"Pulled {SANDBOX_IMAGE}.")
 
-    src = REPO / "thornswood_guard"
     stamp = datetime.now(timezone.utc).isoformat()
     for bot, (pdir, cfg_path, _, merged) in plans.items():
         work = Path(a.work_root) / bot
         work.mkdir(parents=True, exist_ok=True)
         os.chmod(work, 0o700)
-
-        plugins = pdir / "plugins"
-        plugins.mkdir(exist_ok=True)
-        staging = Path(tempfile.mkdtemp(dir=plugins, prefix=".thornswood_guard-"))
-        shutil.copytree(src, staging / "pkg", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        target = plugins / "thornswood_guard"
-        old = plugins / f".thornswood_guard-old-{os.getpid()}"
-        if target.exists():
-            target.rename(old)
-        (staging / "pkg").rename(target)
-        shutil.rmtree(staging)
-        if old.exists():
-            shutil.rmtree(old)
-
-        fd, tmp = tempfile.mkstemp(dir=pdir, prefix=".config-")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            yaml.safe_dump(merged, f, sort_keys=False, allow_unicode=True)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, cfg_path)
-
-        record = pdir / "local" / "thornswood-hermes"
-        record.mkdir(parents=True, exist_ok=True)
-        (record / "applied.json").write_text(json.dumps({"commit": a.expect, "applied_at": stamp}, indent=2) + "\n",
-                                             encoding="utf-8")
+        install_guard(pdir)
+        write_config(pdir, cfg_path, merged, a.expect, stamp)
+    install_guard(home)
+    write_config(home, gw_path, gw_merged, a.expect, stamp)
 
     failures = []
     for bot, (pdir, *_rest) in plans.items():
         failures += self_test(pdir / "plugins" / "thornswood_guard", bot)
+    failures += gateway_self_test(home / "plugins" / "thornswood_guard")
     if failures:
         print("\nThe guard was installed but its self-test failed. Treat every Bot as unguarded until this is fixed:")
         for f in failures:
             print(f"  - {f}")
         return 1
-    print(f"\nApplied {a.expect} to {', '.join(plans)}. The guard's self-test passed in every profile.")
+    print(f"\nApplied {a.expect} to {', '.join(plans)} and the gateway's own profile. The guard's self-test passed in every profile.")
     print("The gateway picks up the plugin and config on restart, from One: ssh -t thornswood-bots sudo systemctl restart tw-hermes-gateway")
     return 0
 

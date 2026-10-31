@@ -10,7 +10,7 @@ reviewer can read it; a test fails if the two ever differ.
 from __future__ import annotations
 
 from .policy import Policy
-from .routes import config_for
+from .routes import config_for, gateway_chain
 
 REPLACED_WHOLE = ("model", "fallback_providers")
 
@@ -132,3 +132,47 @@ def merge_into(existing: dict, ours: dict) -> dict:
         else:
             out[key] = merge_into(out[key], value)
     return out
+
+
+GATEWAY_PROFILE = "default"
+
+
+def build_gateway(policy: Policy) -> dict:
+    """The gateway's own profile: /home/hermes/.hermes/config.yaml, which
+    tw-hermes-gateway runs as. It is not a Bot, but it holds the Discord
+    connection and starts every helper the gateway makes before a turn reaches
+    a Bot, so it lives under the same rules (31 Oct: with no route and no
+    helper of its own, its vision helper walked to the Nous Portal). One route,
+    the Max login every Bot has first, with no fallback; the helpers on it;
+    nothing that bills; and the guard, which refuses every tool in a profile
+    that is not one of the six Bots."""
+    route = gateway_chain(policy)[0]
+    never = list(policy.data["toolsets"]["never"]) + list(policy.data["toolsets"]["workers_never"])
+    return {
+        "model": {"provider": route["provider"], "default": route["model"]},
+        "fallback_providers": [],
+        "agent": {"service_tier": "", "disabled_toolsets": never},
+        "auxiliary": {
+            "free_only": True,
+            "openrouter_model": "",
+            "vision": {"provider": route["provider"], "model": route["model"]},
+            "title_generation": {"model_upgrade_enabled": False},
+            "background_review": {"enabled": False},
+        },
+        "curator": {"enabled": False},
+        "approvals": {
+            "mode": "manual",
+            "cron_mode": "deny",
+            "unattended_mode": "deny",
+            "single_query_mode": "deny",
+            "deny": list(DENY_COMMANDS),
+        },
+        "plugins": {
+            "enabled": ["thornswood_guard"],
+            "auto_apply": False,
+            "auto_update_check_hours": 0,
+            "hook_callback_timeout": 30,
+        },
+        "hooks_auto_accept": False,
+        "security": {"redact_secrets": True},
+    }

@@ -98,12 +98,35 @@ def credits_open(policy: Policy, spent_this_cycle_usd: float) -> Verdict:
     return Verdict.yes(f"about ${left:.2f} left this cycle")
 
 
+def gateway_chain(policy: Policy) -> list[dict]:
+    """The gateway's own profile (the hermes user's default profile, which the
+    gateway runs as and which holds the Discord connection) is not a Bot. It
+    gets the first route every Bot shares, with no fallback: the Max login."""
+    for r in policy.data["routes"]:
+        if r["who"] == "all" and not r.get("needs") and r.get("risk") == "any":
+            return [r]
+    raise ValueError("no route every Bot shares; the gateway's own profile has nothing to use")
+
+
 def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) -> list[str]:
     """Every way this profile's config or .env could reach a route it may not
     use, or a paid one. Empty means clean."""
+    return _check(policy, policy.bot_name(bot), chain_for(policy, bot), config, env_names)
+
+
+def check_gateway_config(policy: Policy, config: dict, env_names: set[str]) -> list[str]:
+    """The same rules for the gateway's own profile, against its one route,
+    and the guard loaded there, which refuses every tool in a profile that is
+    not a Bot."""
+    problems = _check(policy, "the gateway's own profile", gateway_chain(policy), config, env_names)
+    if "thornswood_guard" not in ((config.get("plugins") or {}).get("enabled") or []):
+        problems.append("the guard plugin is not enabled in the gateway's own profile")
+    return problems
+
+
+def _check(policy: Policy, who: str, chain: list[dict], config: dict, env_names: set[str]) -> list[str]:
     problems = []
     paid = set(policy.data["paid_providers"])
-    chain = chain_for(policy, bot)
     allowed = {(r["provider"], r.get("model")) for r in chain}
     proxied = {(r["provider"], r.get("model"), proxy_url(policy, r)) for r in chain if r.get("via") == "admission-proxy"}
     token_env = policy.data["admission_proxy"]["token_env"]
@@ -114,7 +137,7 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
         model = {}
     pair = (model.get("provider"), model.get("default") or model.get("model"))
     if pair not in allowed:
-        problems.append(f"the main model {pair[0]}/{pair[1]} is not in {policy.bot_name(bot)}'s route list")
+        problems.append(f"the main model {pair[0]}/{pair[1]} is not in {who}'s route list")
     if model.get("base_url"):
         problems.append("the main model sets base_url; routes go to their own provider or the admission proxy")
     fallbacks = config.get("fallback_providers") or []
@@ -131,7 +154,7 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
             problems.append(f"fallback {i + 1} {fb.get('provider')}/{fb.get('model')} must go through the admission proxy")
         if fb.get("key_env") and not via_proxy:
             problems.append(f"fallback {i + 1} names key_env {fb.get('key_env')}; only the admission proxy's entries carry a key, the Bot's proxy token")
-    want = [(r["provider"], r["model"]) for r in chain_for(policy, bot)]
+    want = [(r["provider"], r["model"]) for r in chain]
     got = [pair] + [(fb.get("provider"), fb.get("model")) for fb in config.get("fallback_providers") or []]
     if got != want:
         problems.append(f"the route order is {got}, not {want}")
@@ -172,9 +195,9 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
             continue
         name = str(block.get("provider") or "").strip().lower()
         if name not in ("", "auto") and name not in route_providers:
-            problems.append(f"auxiliary.{task}.provider is {name}, not one of {policy.bot_name(bot)}'s routes")
+            problems.append(f"auxiliary.{task}.provider is {name}, not one of {who}'s routes")
         elif name not in ("", "auto") and block.get("model") and (name, block.get("model")) not in allowed:
-            problems.append(f"auxiliary.{task} asks {name} for {block.get('model')}, which is not one of {policy.bot_name(bot)}'s routes")
+            problems.append(f"auxiliary.{task} asks {name} for {block.get('model')}, which is not one of {who}'s routes")
     # Vision's "auto" walks OpenRouter, the Nous Portal and DeepInfra when the
     # main route does not answer, so it is pinned to the Bot's first route.
     vision = aux.get("vision") if isinstance(aux.get("vision"), dict) else {}

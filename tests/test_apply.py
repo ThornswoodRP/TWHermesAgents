@@ -113,6 +113,37 @@ class Apply(unittest.TestCase):
             self.assertTrue((home.parent / "tw-work" / bot).is_dir())
             self.assertIn(self.commit, (p / "local" / "thornswood-hermes" / "applied.json").read_text(encoding="utf-8"))
 
+    def test_the_gateways_own_profile_is_set_and_guarded(self):
+        # 31 Oct: the gateway runs as the hermes user's default profile, which
+        # had no route and no helpers of its own, so its vision helper walked
+        # to the Nous Portal. apply.py now sets it under the same rules.
+        home = self.home(env_root="DISCORD_BOT_TOKEN=canary\n")
+        (home / "config.yaml").write_text(
+            "model:\n  provider: auto\n  default: ''\nterminal:\n  backend: local\n_config_version: 51\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("the gateway's own profile: config keys set:", r.stdout)
+        cfg = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["model"], {"provider": "anthropic", "default": "claude-opus-5-5"})
+        self.assertEqual(cfg["fallback_providers"], [])
+        self.assertEqual(cfg["auxiliary"]["vision"], {"provider": "anthropic", "model": "claude-opus-5-5"})
+        self.assertEqual(cfg["plugins"]["enabled"], ["thornswood_guard"])
+        self.assertEqual(cfg["terminal"], {"backend": "local"})
+        self.assertEqual(cfg["_config_version"], 51)
+        self.assertTrue((home / "plugins" / "thornswood_guard" / "policy.json").is_file())
+        self.assertIn(self.commit, (home / "local" / "thornswood-hermes" / "applied.json").read_text(encoding="utf-8"))
+        self.assertEqual((home / ".env").read_text(encoding="utf-8"), "DISCORD_BOT_TOKEN=canary\n")
+
+    def test_a_paid_helper_in_the_gateways_own_profile_stops_everything(self):
+        home = self.home()
+        (home / "config.yaml").write_text("auxiliary:\n  compression:\n    provider: openrouter\n", encoding="utf-8")
+        before = (home / "profiles" / "rift" / "config.yaml").read_text(encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the gateway's own profile: auxiliary.compression.provider", r.stdout)
+        self.assertEqual(before, (home / "profiles" / "rift" / "config.yaml").read_text(encoding="utf-8"))
+        self.assertFalse((home / "plugins").exists())
+
     def test_applying_twice_changes_nothing_more(self):
         home = self.home()
         self.assertEqual(self.run_apply(home).returncode, 0)

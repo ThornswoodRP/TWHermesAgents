@@ -12,7 +12,9 @@ def rendered() -> dict[str, str]:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     p = policy()
-    return {bot: module.render(p, bot) for bot in p.bots}
+    out = {bot: module.render(p, bot) for bot in p.bots}
+    out["gateway"] = module.render_gateway(p)
+    return out
 
 
 def rendered_policy_json() -> str:

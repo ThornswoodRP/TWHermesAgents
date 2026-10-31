@@ -109,6 +109,23 @@ class Routes(unittest.TestCase):
         cfg["auxiliary"]["session_search"] = {"provider": "openai-codex", "model": "gpt-6.1-sol"}
         self.assertEqual(check_config(self.p, "rift", cfg, set()), [])
 
+    def test_the_gateways_own_profile_keeps_to_one_route(self):
+        from thornswood_guard.profile_config import build_gateway
+        from thornswood_guard.routes import check_gateway_config
+        cfg = build_gateway(self.p)
+        self.assertEqual(check_gateway_config(self.p, cfg, set()), [])
+        self.assertEqual(cfg["fallback_providers"], [])
+        bad = build_gateway(self.p)
+        bad["fallback_providers"] = [{"provider": "openai-codex", "model": "gpt-6.1-sol"}]
+        self.assertTrue(check_gateway_config(self.p, bad, set()))
+        bad = build_gateway(self.p)
+        bad["auxiliary"]["vision"] = {"provider": "nous", "model": ""}
+        self.assertTrue(any("not one of" in x for x in check_gateway_config(self.p, bad, set())))
+        bad = build_gateway(self.p)
+        bad["plugins"]["enabled"] = []
+        self.assertTrue(any("guard plugin" in x for x in check_gateway_config(self.p, bad, set())))
+        self.assertTrue(any("ANTHROPIC_API_KEY" in x for x in check_gateway_config(self.p, cfg, {"ANTHROPIC_API_KEY"})))
+
     def test_wrong_order_is_caught(self):
         cfg = build(self.p, "wisp")
         cfg["model"], cfg["fallback_providers"] = {"provider": "openai-codex", "default": "gpt-6.1-sol"}, [
