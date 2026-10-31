@@ -34,6 +34,10 @@ param(
     [string]$Remote = 'thornswood-gdrive:Thornswood-Hermes-Backups',
     [int]$Keep = 30,
     [int]$DriveKeepDays = 90,
+    # Windows' own tar (bsdtar). On One, Git's GNU tar comes first on PATH and
+    # reads C:\... as a host named C (31 Oct: "Cannot connect to C: resolve
+    # failed"), so the restore test names Windows' tar by its full path.
+    [string]$Tar = $(if ($IsWindows) { Join-Path $env:SystemRoot 'System32\tar.exe' } else { 'tar' }),
     [switch]$TestRestore,
     [switch]$MakeKey,
     [switch]$Register
@@ -66,8 +70,8 @@ if ($Register) {
     exit 0
 }
 
-foreach ($tool in 'sftp', 'age', 'rclone', 'tar') {
-    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { Fail "$tool is not installed on One"; exit 1 }
+foreach ($tool in 'sftp', 'age', 'rclone', $Tar) {
+    if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) { Fail "$tool is not installed on One"; exit 1 }
 }
 if (-not (Test-Path $SftpKey)) { Fail "no SFTP key at $SftpKey; run this with -MakeKey, then scripts/install-on-oracle.sh"; exit 1 }
 New-Item -ItemType Directory -Force -Path $Folder | Out-Null
@@ -154,7 +158,7 @@ if ($due -and $latest) {
             $plain = Join-Path $tmp 'backup.tar.gz'
             & age --decrypt -i $keys[0].FullName -o $plain $latest.FullName
             if ($LASTEXITCODE -ne 0) { throw "age could not decrypt $($latest.Name)" }
-            $names = @(& tar -tzf $plain)
+            $names = @(& $Tar -tzf $plain)
             if ($LASTEXITCODE -ne 0) { throw "$($latest.Name) decrypts but tar cannot read it" }
             foreach ($want in 'MANIFEST.json', 'srv/tw/policy/policy.db') {
                 if ($names -notcontains $want) { throw "$($latest.Name) does not hold $want" }

@@ -623,6 +623,26 @@ class OnePull(unittest.TestCase):
         self.assertIn("PASS pulled 0 new backup(s)", again.stdout)
         self.assertNotIn("decrypts and lists", again.stdout, "the restore test runs every 28 days, not every night")
 
+    def test_the_restore_test_uses_the_tar_it_was_given(self):
+        # 31 Oct: on One, Git's GNU tar came first on PATH and read C:\... as
+        # a host, so the restore test failed on a good backup. On Windows the
+        # script names Windows' own tar by its full path; -Tar says which.
+        text = (REPO / "scripts/one/Pull-HermesBackup.ps1").read_text(encoding="utf-8")
+        self.assertIn("Join-Path $env:SystemRoot 'System32\\tar.exe'", text)
+        self.assertIn("& $Tar -tzf $plain", text)
+        self.assertNotIn("& tar ", text)
+        r = self.pull("-Tar", str(self.t / "no-such-tar"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no-such-tar is not installed on One", r.stdout)
+        logged = self.t / "tar-calls.txt"
+        fake = self.bin / "logging-tar"
+        fake.write_text(f"#!/bin/sh\necho \"$@\" >> '{logged}'\nexec tar \"$@\"\n", encoding="utf-8")
+        fake.chmod(0o755)
+        r = self.pull("-Tar", str(fake))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("decrypts and lists", r.stdout)
+        self.assertIn("-tzf", logged.read_text(encoding="utf-8"))
+
     def test_a_file_that_is_not_age_is_not_kept(self):
         (self.vm / "hermes-20261101-033000.tar.gz.age").write_bytes(b"\x1f\x8bnot age")
         r = self.pull()
