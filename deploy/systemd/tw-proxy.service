@@ -1,0 +1,46 @@
+# tw-proxy: the admission proxy for routes 2 and 4, on loopback only
+# (06 section 6.3). It reads the real keys from proxy.env itself, so they are
+# never in its environment.
+[Unit]
+Description=Thornswood tw-proxy
+After=tw-policy.service network-online.target
+Wants=network-online.target
+Requires=tw-policy.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-proxy
+Group=tw-proxy
+SupplementaryGroups=tw-policy-clients
+Slice=tw-brokers.slice
+ExecStart=/opt/thornswood-hermes/bin/tw-serve proxy
+UnsetEnvironment=ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
+ReadOnlyPaths=/etc/thornswood/proxy.env /etc/thornswood/proxy-tokens.json
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0007
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

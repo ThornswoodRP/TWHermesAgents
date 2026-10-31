@@ -1,0 +1,15 @@
+# tw-policy's store, copied hourly with SQLite's backup API.
+[Unit]
+Description=Thornswood hourly store snapshot
+
+[Service]
+Type=oneshot
+Slice=tw-brokers.slice
+ExecStart=/opt/thornswood-hermes/bin/tw-backup snapshot
+ProtectSystem=strict
+# The store is open in WAL mode while tw-policy runs; a reader of it may need
+# to make its -shm file, so its folder is writable here (the copy only reads).
+ReadWritePaths=/srv/tw/snapshots /srv/tw/policy
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes

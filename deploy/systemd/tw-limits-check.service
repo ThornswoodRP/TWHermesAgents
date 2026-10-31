@@ -1,0 +1,16 @@
+# The limits check at every boot (08 section 2; attack test 16). The gateway
+# starts whatever it finds, so Patrick can be told; tw-policy admits no
+# sandbox job until one passes.
+[Unit]
+Description=Thornswood limits check
+After=local-fs.target swap.target user@1002.service
+Before=tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-hermes-gateway.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/thornswood-hermes/bin/tw-limits-check
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

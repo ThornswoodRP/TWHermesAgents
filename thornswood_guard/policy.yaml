@@ -154,6 +154,7 @@ routes:
     risk: any
   - id: credits
     provider: anthropic
+    model: claude-opus-5-5
     via: admission-proxy
     key_env: TW_CLAUDE_CREDITS_KEY
     who: [bramble]
@@ -166,6 +167,15 @@ routes:
     monthly_usd: 200
     refresh_day: 21
     stop_below_usd: 10
+    # The proxy's running estimate, per million tokens (Anthropic's API
+    # prices for claude-opus-5-5 as of 6 Oct 2026). A cache write with no
+    # TTL breakdown counts at the 1-hour price, so the estimate runs high.
+    price_usd_per_mtok:
+      input: 4.00
+      output: 20.00
+      cache_read: 0.20
+      cache_write_5m: 5.00
+      cache_write_1h: 8.00
   - id: chatgpt
     provider: openai-codex
     model: gpt-6.1-sol
@@ -175,6 +185,9 @@ routes:
     provider: custom
     via: admission-proxy
     key_env: TW_QWEN_TOKEN
+    # llama-server on One serves one model whatever this says; the name is
+    # what Hermes's custom provider sends.
+    model: qwen3.5-9b
     who: all
     risk: low
     needs: admission-proxy
@@ -225,21 +238,33 @@ secrets:
     - name: TW_GAMEDATA_NEXUS_KEY
       user: tw-gamedata
       use: download the collection's published revision files only
-  # Allowed by the plan once their route exists, held by the service user
-  # only. Not set yet: no real tokens on the VM before the Apps exist.
-  oracle_later:
+    # Phase 2: the real keys for routes 2 and 4 live only in
+    # /etc/thornswood/proxy.env, read by the admission proxy's own user.
+    # Hermes holds none of them; each Bot holds only its proxy token.
     - name: TW_CLAUDE_CREDITS_KEY
-      where: root
-    - name: TW_QWEN_TOKEN
-      where: root
+      user: tw-proxy
+      use: route 2, added by the admission proxy to Bramble's low-risk turns
+    - name: QWEN_API_KEY
+      user: tw-proxy
+      use: route 4, added by the admission proxy to low-risk Qwen packets
+  # Allowed by the plan once their route exists, held by the service user
+  # only. Each Bot's own admission-proxy token, in its profile's .env: it
+  # reaches only the loopback proxy, which checks the turn's ticket.
+  oracle_later:
+    - name: TW_PROXY_TOKEN
+      where: each_profile
   # Set by Patrick's Hermes on 30 Oct for route 4, in its own file
   # (/home/hermes/.config/thornswood/qwen.env, mode 600: QWEN_BASE_URL and
-  # QWEN_API_KEY). Only the admission proxy reads it; never a profile's .env.
+  # QWEN_API_KEY). The Phase 2 install moves it into proxy.env; after that
+  # nothing under the hermes user names a route's real key.
   qwen_env_file: /home/hermes/.config/thornswood/qwen.env
   # Never on the Oracle box, by name pattern. ANTHROPIC_API_KEY would make
   # Hermes spend the credits ahead of the subscription.
   forbidden_names:
     - "ANTHROPIC_API_KEY"
+    - "TW_CLAUDE_CREDITS_KEY"
+    - "QWEN_API_KEY"
+    - "TW_QWEN_TOKEN"
     - "GH_TOKEN"
     - "GITHUB_TOKEN"
     - "GITHUB_APP_*"
@@ -308,3 +333,217 @@ toolsets:
     - delegation
   workers_never:
     - cronjob
+
+# Phase 2: the brokers, the admission queue and proxy, the slices and the
+# backups (08 sections 2, 3, 4 and 7; 02 sections 7 and 8; 06 section 6).
+# The Bots never hold anything named here; each service runs as its own user.
+brokers:
+  # Patrick sets ready to true by a PR once the install and the canary
+  # attack tests pass on the VM: then every turn needs a ticket from the
+  # fleet queue and the Bots get the tw_git and tw_files tools. tier_b then
+  # takes the generic shell and file writes away, so work trees change only
+  # through tw_files (08 section 2).
+  ready: false
+  tier_b: false
+  # The code every service runs is a root-owned copy of the merged commit,
+  # never the hermes user's release folder, which hermes can write.
+  install_root: /opt/thornswood-hermes
+  users:
+    gateway: hermes
+    policy: tw-policy
+    files: tw-files
+    git: tw-git
+    proxy: tw-proxy
+    backup: tw-backup
+  # One execution user per worker Bot (Tier B). Bramble has none: it acts
+  # only through the brokers.
+  exec_users:
+    rift: tw-rift
+    sprocket: tw-sprocket
+    echo: tw-echo
+    magpie: tw-magpie
+    wisp: tw-wisp
+  # Who may connect to each socket, by Unix user, checked from the peer's
+  # credentials on every connection.
+  # The group is only who may connect; each op still checks the caller's
+  # user from SO_PEERCRED.
+  sockets:
+    policy:
+      path: /run/tw/policy/policy.sock
+      group: tw-policy-clients
+      clients: [hermes, tw-git, tw-files, tw-proxy, root]
+    git:
+      path: /run/tw/git/git.sock
+      group: tw-git-clients
+      clients: [hermes, root]
+    files:
+      path: /run/tw/files/files.sock
+      group: tw-files-clients
+      clients: [hermes, root]
+  state:
+    policy_db: /srv/tw/policy/policy.db
+    git_mirrors: /srv/tw/git
+    work: /srv/tw/work
+    spool: /srv/tw/spool
+    backups: /srv/tw/backups
+    snapshots: /srv/tw/snapshots
+  # Sizes per Bot tree (08 section 3).
+  files:
+    max_write_bytes: 2097152
+    max_patch_bytes: 1048576
+    max_changed_files: 2000
+    check_minutes: 10
+    # By group quota on tw-work-<bot>: every file in a Bot's tree has that
+    # group (setgid directories), whoever wrote it.
+    disk_quota_gb: {default: 10, wisp: 25}
+    work_group_prefix: tw-work-
+    # The keys a work tree's .git/config may hold. Anything else (a filter,
+    # a textconv, an fsmonitor, a pager, an ssh command) stops every git
+    # command in that tree until it is cleaned up.
+    git_config_keys:
+      - core.repositoryformatversion
+      - core.filemode
+      - core.bare
+      - core.logallrefupdates
+      - core.ignorecase
+      - core.precomposeunicode
+      - "remote.origin.url"
+      - "remote.origin.fetch"
+      - "branch.*.remote"
+      - "branch.*.merge"
+    # Who commits: the Bot by name, at an address that reaches nobody.
+    commit_email: "{bot}@bots.thornswood.invalid"
+    # What a check may run (03-LINUX_WORK_SPLIT.md; the public CLAUDE.md
+    # harness forms). One harness at a time; never Run-Gate.ps1, a launcher,
+    # an installer or an engine build.
+    check_commands:
+      - ["node", "tests/test-{name}.js"]
+      - ["pwsh", "-NoProfile", "-File", "tests/test-{name}.ps1"]
+      - ["python3", "tests/test-{name}.py"]
+      - ["pwsh", "scripts/dev/Check-Words.ps1"]
+    check_limits:
+      MemoryMax: 2G
+      CPUQuota: 100%
+      TasksMax: 256
+  # The two Apps' private keys, readable only by tw-git (mode 0400).
+  apps:
+    bramble:
+      app_id: 5547080
+      installation_id: 177016548
+      key_file: /etc/thornswood/apps/thornswood-bramble.pem
+    workers:
+      app_id: 5547094
+      installation_id: 177016745
+      key_file: /etc/thornswood/apps/thornswood-workers.pem
+
+# The admission proxy for routes 2 and 4 (06 section 6.3). A loopback
+# endpoint run by tw-proxy: it maps each Bot's proxy token to the Bot, asks
+# tw-policy whether that Bot's current turn may use the route, and only then
+# adds the real key. The credits key and the Qwen token live in its own file,
+# never in Hermes's home.
+admission_proxy:
+  listen: 127.0.0.1:8611
+  env_file: /etc/thornswood/proxy.env
+  # Each Bot's profile .env holds only its proxy token under this name.
+  token_env: TW_PROXY_TOKEN
+  tokens_file: /etc/thornswood/proxy-tokens.json
+  upstreams:
+    credits:
+      url: https://api.anthropic.com
+      key_env: TW_CLAUDE_CREDITS_KEY
+    qwen:
+      url_env: QWEN_BASE_URL
+      key_env: QWEN_API_KEY
+  max_request_bytes:
+    credits: 33554432
+    # About 131,072 tokens of Qwen context at four bytes a token.
+    qwen: 524288
+  qwen_max_tokens: 8192
+  # Each Qwen request holds the one Qwen lease until One's answer ends.
+  qwen_lease_seconds: 900
+  upstream_timeout_seconds: 900
+  # Routes 2 and 4 enter the Bots' chains only when Patrick sets this true by a
+  # PR here, after the proxy's attack tests passed on the VM (06 section 6.3).
+  ready: false
+
+# The fleet admission queue (08 section 7; 02 section 8.5). Pilot numbers;
+# the "after" numbers apply only after seven measured days, by a PR here.
+admission:
+  stage: pilot
+  model_turns: {pilot: 1, after: 2}
+  sandbox_jobs: {pilot: 0, after: 1}
+  mutating_ops: 1
+  room_round_turns: 6
+  queue_max_waiting: 100
+  queue_new_per_hour: 20
+  admit:
+    mem_available_gb: 3.0
+    sandbox_mem_available_gb: 4.0
+    swap_used_mb: 512
+    psi_memory_some_avg60: 10.0
+    load5: 1.6
+    srv_free_gb: 25
+    boot_free_gb: 10
+  drain:
+    mem_available_gb: 1.5
+    swap_used_gb: 2.0
+    psi_memory_full_avg10: 5.0
+    disk_free_gb: 15
+  # A capacity or quota wait is a parked task with its reason, never a failure.
+  route_backoff_seconds: {first: 60, max: 14400}
+
+# systemd slices and their hard caps (02 section 8.4). The VM is 4 OCPU and
+# 24 GB (built 30 Oct); these are the plan's caps, kept until the canary
+# measures Hermes's real size. A cap changes only with Patrick's approval.
+slices:
+  tw-hermes.slice:
+    MemoryHigh: 2560M
+    MemoryMax: 3G
+    CPUWeight: 200
+    CPUQuota: 150%
+    TasksMax: 512
+  tw-brokers.slice:
+    MemoryHigh: 400M
+    MemoryMax: 512M
+    CPUWeight: 100
+    CPUQuota: 50%
+    TasksMax: 128
+  tw-sandbox.slice:
+    MemoryHigh: 3584M
+    MemoryMax: 4G
+    CPUWeight: 50
+    CPUQuota: 100%
+    TasksMax: 1024
+  # Tier A: the hermes user's own manager runs the rootless podman containers,
+  # so its user slice (user-<uid of hermes>.slice) carries the sandbox caps too.
+  hermes-user.slice:
+    MemoryHigh: 3584M
+    MemoryMax: 4G
+    CPUQuota: 100%
+    TasksMax: 1024
+
+# Backups (02 section 7, OPEN item 7). Encrypted on the VM to Patrick's age
+# public key, pulled by One over SFTP as tw-backup, and uploaded by One to
+# Google Drive. Never in an archive: sign-ins, .env files, keys.
+backups:
+  age_recipient_file: /etc/thornswood/backup-recipient.txt
+  archive_keep_days: 14
+  snapshot_keep_hourly: 24
+  snapshot_keep_daily: 7
+  snapshot_cap_gb: 5
+  include:
+    - /home/hermes/.hermes
+    - /srv/tw/policy
+  exclude_names:
+    - auth.json
+    - .env
+    - "*.pem"
+    - "*.key"
+    - "*.pfx"
+    - "*.p12"
+    - credentials*
+    - hosts.yml
+    - .git-credentials
+    - "*.db-wal"
+    - "*.db-shm"
+  exclude_dirs: [cache, image_cache, audio_cache, document_cache, node_modules, hermes-agent, logs, checkpoints, tools, installs]

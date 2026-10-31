@@ -11,9 +11,25 @@ from __future__ import annotations
 from .policy import Policy, Verdict
 
 
-def chain_for(policy: Policy, bot: str, *, proxy_ready: bool = False) -> list[dict]:
+def proxy_ready_in(policy: Policy) -> bool:
+    return bool((policy.data.get("admission_proxy") or {}).get("ready"))
+
+
+def proxy_url(policy: Policy, route: dict) -> str:
+    """Where a route behind the admission proxy points: the loopback proxy,
+    under the route's own path. Anthropic's SDK adds /v1/messages; an
+    OpenAI-style provider adds /chat/completions."""
+    listen = policy.data["admission_proxy"]["listen"]
+    suffix = "" if route["provider"] == "anthropic" else "/v1"
+    return f"http://{listen}/{route['id']}{suffix}"
+
+
+def chain_for(policy: Policy, bot: str, *, proxy_ready: bool | None = None) -> list[dict]:
     """The routes a Bot may use, in order. Routes behind the admission proxy
-    are left out until the proxy exists and passes its tests."""
+    are left out until the proxy exists and passes its tests, which Patrick
+    says by setting admission_proxy.ready in the policy by a PR."""
+    if proxy_ready is None:
+        proxy_ready = proxy_ready_in(policy)
     out = []
     for r in policy.data["routes"]:
         who = r["who"]
@@ -25,13 +41,22 @@ def chain_for(policy: Policy, bot: str, *, proxy_ready: bool = False) -> list[di
     return out
 
 
-def config_for(policy: Policy, bot: str, *, proxy_ready: bool = False) -> dict:
+def _entry(policy: Policy, r: dict) -> dict:
+    e = {"provider": r["provider"], "model": r["model"]}
+    if r.get("via") == "admission-proxy":
+        # The Bot's own proxy token, never the real key: the proxy adds it.
+        e["base_url"] = proxy_url(policy, r)
+        e["key_env"] = policy.data["admission_proxy"]["token_env"]
+    return e
+
+
+def config_for(policy: Policy, bot: str, *, proxy_ready: bool | None = None) -> dict:
     """The model part of a Bot's Hermes config, built from its chain."""
     chain = chain_for(policy, bot, proxy_ready=proxy_ready)
     first, rest = chain[0], chain[1:]
     return {
         "model": {"provider": first["provider"], "default": first["model"]},
-        "fallback_providers": [{"provider": r["provider"], "model": r["model"]} for r in rest],
+        "fallback_providers": [_entry(policy, r) for r in rest],
     }
 
 
@@ -78,7 +103,10 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
     use, or a paid one. Empty means clean."""
     problems = []
     paid = set(policy.data["paid_providers"])
-    allowed = {(r["provider"], r.get("model")) for r in chain_for(policy, bot)}
+    chain = chain_for(policy, bot)
+    allowed = {(r["provider"], r.get("model")) for r in chain}
+    proxied = {(r["provider"], r.get("model"), proxy_url(policy, r)) for r in chain if r.get("via") == "admission-proxy"}
+    token_env = policy.data["admission_proxy"]["token_env"]
 
     model = config.get("model") or {}
     if isinstance(model, str):
@@ -89,9 +117,20 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
         problems.append(f"the main model {pair[0]}/{pair[1]} is not in {policy.bot_name(bot)}'s route list")
     if model.get("base_url"):
         problems.append("the main model sets base_url; routes go to their own provider or the admission proxy")
-    for i, fb in enumerate(config.get("fallback_providers") or []):
+    fallbacks = config.get("fallback_providers") or []
+    for i, fb in enumerate(fallbacks):
         if (fb.get("provider"), fb.get("model")) not in allowed:
             problems.append(f"fallback {i + 1} {fb.get('provider')}/{fb.get('model')} is not in the route list")
+        via_proxy = (fb.get("provider"), fb.get("model"), fb.get("base_url")) in proxied
+        if fb.get("base_url") and not via_proxy:
+            problems.append(f"fallback {i + 1} points at {fb.get('base_url')}; the only address a route may name is the admission proxy's for that route")
+        if via_proxy and fb.get("key_env") != token_env:
+            problems.append(f"fallback {i + 1} goes through the admission proxy with key_env {fb.get('key_env')!r}, not {token_env}")
+        expected = chain[i + 1] if i + 1 < len(chain) else None
+        if expected and expected.get("via") == "admission-proxy" and not via_proxy:
+            problems.append(f"fallback {i + 1} {fb.get('provider')}/{fb.get('model')} must go through the admission proxy")
+        if fb.get("key_env") and not via_proxy:
+            problems.append(f"fallback {i + 1} names key_env {fb.get('key_env')}; only the admission proxy's entries carry a key, the Bot's proxy token")
     want = [(r["provider"], r["model"]) for r in chain_for(policy, bot)]
     got = [pair] + [(fb.get("provider"), fb.get("model")) for fb in config.get("fallback_providers") or []]
     if got != want:
@@ -105,6 +144,10 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
                 here = f"{path}.{k}" if path else k
                 if k == "provider" and isinstance(v, str) and v in paid:
                     problems.append(f"{here} names {v}, a provider that bills by use")
+                proxied_entry = path.startswith("fallback_providers[") and path.count(".") == 0 and \
+                    (node.get("provider"), node.get("model"), node.get("base_url")) in proxied
+                if k == "base_url" and proxied_entry:
+                    continue
                 if k in ("api_key", "base_url") and isinstance(v, str) and v:
                     problems.append(f"{here} is set; keys never sit in config.yaml and no helper gets its own endpoint")
                 walk(v, here)

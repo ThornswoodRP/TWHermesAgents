@@ -45,7 +45,10 @@ def check_env(policy: Policy, names: set[str], where: str, *, later_allowed: boo
         if name_matches(name, s["forbidden_names"]):
             problems.append(f"{name} in the {where} .env is never allowed on the Oracle box")
         elif name in allowed:
-            if allowed[name] != where:
+            if allowed[name] == "each_profile":
+                if where == "root":
+                    problems.append(f"{name} sits in each Bot's own profile .env, never the gateway's")
+            elif allowed[name] != where:
                 problems.append(f"{name} may sit only in the gateway's own .env, not in the {where} .env")
         elif any(name == e["name"] for e in s["oracle_later"]):
             problems.append(f"{name} is set before its route exists; no real tokens go on the VM yet")

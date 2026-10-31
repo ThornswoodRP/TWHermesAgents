@@ -1,0 +1,35 @@
+# The Hermes gateway (six profiles and the room) as a system unit in
+# tw-hermes.slice, so its caps hold (08 section 2). It replaces the hermes
+# user's own hermes-gateway user unit; deploy/install.sh --move-gateway
+# fills ExecStart and Environment from that unit, so the gateway starts the
+# same way it does today.
+# Rootless podman (Tier A) needs newuidmap, so NoNewPrivileges is not set
+# here; the podman containers run in the hermes user's own slice, which
+# carries the sandbox caps (user-hermes.slice.conf).
+[Unit]
+Description=Hermes gateway for the six Thornswood Bots
+After=network-online.target user@@UID@.service tw-limits-check.service tw-policy.service tw-proxy.service
+Wants=network-online.target tw-policy.service tw-proxy.service
+Requires=user@@UID@.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+SupplementaryGroups=tw-policy-clients tw-git-clients tw-files-clients
+Slice=tw-hermes.slice
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus
+@ENVIRONMENT@
+WorkingDirectory=@WORKDIR@
+ExecStart=@EXECSTART@
+ProtectSystem=full
+PrivateTmp=no
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

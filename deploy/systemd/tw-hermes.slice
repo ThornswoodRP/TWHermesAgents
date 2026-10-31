@@ -1,0 +1,16 @@
+# the gateway (six profiles and the room) and hermes serve, as hermes.
+# Generated from thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
+# A limit changes only by a PR to the policy, never on the box.
+[Unit]
+Description=Thornswood: the gateway (six profiles and the room) and hermes serve, as hermes
+Before=slices.target
+
+[Slice]
+MemoryAccounting=yes
+CPUAccounting=yes
+TasksAccounting=yes
+MemoryHigh=2560M
+MemoryMax=3G
+CPUWeight=200
+CPUQuota=150%
+TasksMax=512

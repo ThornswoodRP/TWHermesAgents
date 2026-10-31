@@ -1,0 +1,9 @@
+[Unit]
+Description=Thornswood nightly backup, 3:30 AM Mountain
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 America/Denver
+Persistent=true
+
+[Install]
+WantedBy=timers.target

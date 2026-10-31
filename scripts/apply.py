@@ -42,7 +42,7 @@ import yaml  # noqa: E402
 
 from thornswood_guard.policy import Policy  # noqa: E402
 from thornswood_guard.profile_config import SANDBOX_IMAGE, WORK_ROOT, build, merge_into  # noqa: E402
-from thornswood_guard.routes import check_config  # noqa: E402
+from thornswood_guard.routes import check_config, proxy_ready_in  # noqa: E402
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
 SKILLS = ("thornswood-ops", "thornswood-guide")
@@ -141,7 +141,10 @@ def main() -> int:
     home = Path(a.hermes_home)
     profiles = home / "profiles"
     root_env = env_names(home / ".env")
-    problems += check_env(policy, root_env, "root")
+    # A Bot's proxy token sits in its profile only once the proxy is ready
+    # and the install made it.
+    later = proxy_ready_in(policy)
+    problems += check_env(policy, root_env, "root", later_allowed=later)
 
     plans = {}
     for bot in policy.bots:
@@ -158,7 +161,7 @@ def main() -> int:
         existing = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
         merged = merge_into(existing or {}, build(policy, bot))
         names = env_names(pdir / ".env")
-        problems += check_env(policy, names, bot)
+        problems += check_env(policy, names, bot, later_allowed=later)
         problems += [f"{bot}: {p}" for p in check_config(policy, bot, merged, names | root_env)]
         plans[bot] = (pdir, cfg_path, existing or {}, merged)
     problems += scan_files(policy, home)

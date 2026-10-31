@@ -1,0 +1,5 @@
+#!/usr/bin/python3 -I
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_brokers.limits_check import main  # noqa: E402
+sys.exit(main())

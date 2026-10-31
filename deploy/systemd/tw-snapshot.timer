@@ -1,0 +1,9 @@
+[Unit]
+Description=Thornswood hourly store snapshot
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

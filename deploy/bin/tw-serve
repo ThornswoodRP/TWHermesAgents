@@ -1,0 +1,7 @@
+#!/usr/bin/python3 -I
+# Starts one broker from the root-owned copy. -I: no user site, no PYTHONPATH,
+# no current folder on the path, so only this copy's code is imported.
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_brokers.serve import main  # noqa: E402
+main(sys.argv[1:])

@@ -3,7 +3,7 @@
 Every rule from `08-SECURITY_AND_GUARD_RAILS.md` and from Patrick's brief of 30 Oct 2026, and how this version holds it. Four ways a rule can be held:
 
 - **Code, now.** Hermes enforces it today on the VM: the guard plugin's `pre_tool_call` hook, a key in the Bot's config (Hermes's own `approvals.deny`, `agent.disabled_toolsets`, `fallback_providers`), or `scripts/apply.py`, which refuses to install anything that breaks it.
-- **Code, tested, waits for its broker.** The rule is written and tested in `thornswood_guard/`, and the git broker (`tw-git`) or the policy broker (`tw-policy`) calls it before any write. Those brokers are the next PR. Until they run, no Bot holds a GitHub credential, so the write cannot happen at all, and the guard plugin refuses the attempt with the reason.
+- **Code, tested, waits for its broker.** The rule is written and tested in `thornswood_guard/`, and the git broker (`tw-git`) or the policy broker (`tw-policy`) calls it before any write. Phase 2 built those brokers (`thornswood_brokers/`, with `tw-files` and the admission proxy) and their attack tests. They hold on the VM once `deploy/install.sh` has put them there, the canary (`tw-canary`) passes, and a PR turns `brokers.ready` on, which gives the Bots their `tw_git` and `tw_files` tools. Until then no Bot holds a GitHub credential, so the write cannot happen at all, and the guard plugin refuses the attempt with the reason.
 - **GitHub.** A setting on GitHub that Patrick makes. It is the second lock behind the code.
 - **Text.** Hermes gives no hook that can hold it, so it lives in the Bot's `SOUL.md` or the `thornswood-ops` and `thornswood-guide` skills, and the Bot keeps it by judgment.
 
@@ -30,19 +30,20 @@ Tier A is the honest limit of "Code, now". Every terminal, file and code call a 
 
 | Section | Rule | How it's held | Where |
 |---|---|---|---|
-| 2 | systemd is the supervisor, with three slices and hard caps | Not yet: needs Patrick's sudo on the VM | Next PR |
-| 2 | The limits check at every boot | Not yet | Next PR |
+| 2 | systemd is the supervisor, with three slices and hard caps | Code, tested; on the VM after the install (Patrick's sudo). Each broker runs as its own user in `tw-brokers.slice`, the gateway as `tw-hermes-gateway.service` in `tw-hermes.slice` (`--move-gateway`), checks in `tw-sandbox.slice`, and the hermes user's podman containers under its own slice's caps. The slices are rendered from `policy.yaml`, so a cap changes only by PR | `deploy/systemd/`, `scripts/render_units.py`, `deploy/install.sh` |
+| 2 | The limits check at every boot | Code, tested (attack 16). Before the brokers and the gateway start, it reads every slice's memory, CPU and task caps from the cgroup tree, starts one job of each tier and reads where it landed, and checks the swapfile, the Bots' disk caps and the free-space floors. A failure is recorded in `tw-policy`, which then admits no sandbox job | `limits_check.py`, `tw-limits-check.service` |
 | 2 | `hermes` holds no GitHub write credential | Code, now | `apply.py` refuses `GH_TOKEN`, `GITHUB_TOKEN`, `GITHUB_APP_*` |
-| 2 | Tier A: the terminal in rootless podman, no network for workers | Code, now. Each Bot's config runs its terminal, file and code calls in Hermes's docker backend, which uses podman: `docker.io/nousresearch/hermes-sandbox:desktop`, the Bot's own folder mounted at `/workspace` and nothing else writable, `--network=none` for all six (Bramble too), one core, 2 GB, 2,048 processes. Measured on the VM on 30 Oct in a scratch home: memory.max 2147483648, pids.max 2048, cpu.max 100000 100000, network unreachable, Hermes's home not visible, a write in `/workspace` reaches the host folder. No disk cap: the VM's ext4 store can't enforce one (Hermes needs XFS with pquota), so it comes with the per-Bot users' quotas | `profile_config.py`, `apply.py` |
-| 3 | A Bot reads and writes only its own tree | Code, now (Tier A): the guard refuses file tools and shell commands on Hermes's home, `.env`, `auth.json`, process environments and the brokers' sockets; each Bot's container sees only `/home/hermes/tw-work/<bot>`, at `/workspace`. The file broker (`tw-files`) is next | `tool_guard.py` |
+| 2 | Tier A: the terminal in rootless podman, no network for workers | Code, now. Each Bot's config runs its terminal, file and code calls in Hermes's docker backend, which uses podman: `docker.io/nousresearch/hermes-sandbox:desktop`, the Bot's own folder mounted at `/workspace` and nothing else writable, `--network=none` for all six (Bramble too), one core, 2 GB, 2,048 processes. Measured on the VM on 30 Oct in a scratch home: memory.max 2147483648, pids.max 2048, cpu.max 100000 100000, network unreachable, Hermes's home not visible, a write in `/workspace` reaches the host folder. No disk cap inside the container: the VM's ext4 store can't enforce one there (Hermes needs XFS with pquota). The Bots' trees under `tw-files` have one: a hard group quota per Bot's work group (10 GB, Wisp 25), which `install.sh --quotas` turns on | `profile_config.py`, `apply.py` |
+| 3 | A Bot reads and writes only its own tree | Code, now (Tier A): the guard refuses file tools and shell commands on Hermes's home, `.env`, `auth.json`, process environments and the brokers' sockets; each Bot's container sees only `/home/hermes/tw-work/<bot>`, at `/workspace`. Code, tested (Tier B): `tw-files` keeps each worker's trees under `/srv/tw/work/<bot>` in its own group, walks every path from a folder handle without following links, refuses another tree, `..`, an absolute path, a link and a hard link, and runs a check as the Bot's own user through `tw-run-check` with no network and only that tree visible (attacks 1 and 2) | `tool_guard.py`, `files_service.py`, `run_check.py` |
 | 3 | Git hooks, filters, `file://` submodules do nothing | Code, now (Tier A): the guard refuses `git config` of hooks, filters, credentials and protocols, and `git submodule update` | `tool_guard.py` |
 | 4 | Own branch, own PRs; Bramble alone merges and starts runs | Code, tested, waits for its broker | `github.py` |
 | 4 | `tw-git` refuses pushes to main, tags, another Bot's branch, deletes, unknown workflows, refs other than main, verbs not in the lists, settings, environments, secrets, rulesets, collaborators, webhooks | Code, tested, waits for its broker | `github.py` `push()`, `start_run()`, `admin_call()`: an unknown write is refused until it is named |
 | 4 | No repository-level secrets; default `GITHUB_TOKEN` read-only | GitHub (Magpie checks names, Patrick sets) | Not this repo |
 | 5 | The deploy gate is the release path; `desk` main-only | Code, tested, waits for its broker; GitHub | `start_run()` |
 | 6 | Two GitHub Apps | GitHub (Patrick makes them) | `policy.yaml` names which App each Bot's writes use |
-| 7 | One fleet admission queue with the host's limits | Not yet (`tw-policy`) | Next PR |
-| 7 | Exactly once: receipts, read back before any retry | Not yet (`tw-policy`) | Next PR |
+| 7 | One fleet admission queue with the host's limits | Code, tested (attack 19). Every model turn and check asks `tw-policy` first; the gateway's turn gate stops a turn that was not admitted at its first tool call | `policy_service.py`, `thornswood_guard/brokers.py` |
+| 7 | Exactly once: receipts, read back before any retry | Code, tested (attack 20). `tw-git` writes a receipt before each GitHub write and reads GitHub back before any retry; a lost answer is never a reason to write again | `policy_service.py`, `git_service.py` |
+| 7 | Nightly encrypted backup, kept on One and Google Drive; a restore kills old Main records | Code, tested (attack 21). The VM encrypts to Patrick's age key at 3:30 AM Mountain with no sign-in, `.env` or key in it; One pulls over SFTP as `tw-backup`, keeps 30, copies to Google Drive for 90 days and decrypts one every 28 days to prove it opens | `backup.py`, `scripts/one/Pull-HermesBackup.ps1`, `scripts/restore-on-oracle.sh` |
 | 7 | Main records single use, bound to repo, commit and expiry, dead on restore | Code, tested | `decisions.py` |
 | 10 | Where secrets are | Code, now | `apply.py`, `secrets_check.py` |
 | 11 | Hermes on Discord takes instructions only from Patrick | Code, now: `DISCORD_ALLOW_ALL_USERS`, `DISCORD_ALLOWED_ROLES` and `DISCORD_ALLOW_BOTS` are refused. Text: the SOUL's Discord line | `policy.yaml` `secrets` |
@@ -52,11 +53,11 @@ Tier A is the honest limit of "Code, now". Every terminal, file and code call a 
 
 | # | Test | Covered by |
 |---|---|---|
-| 1 | Paths out of a Bot's tree | `test_tool_guard.Files` (Tier A); the file broker's own tests come with it |
-| 2 | Reading `.env`, another tree, `/proc/<pid>/environ` | `test_tool_guard.Files`, `test_tool_guard.Shell.test_02_secrets_and_environments` |
-| 3 | Forking, memory, CPU and disk past the caps | Per container, the limits were measured on the VM. The fleet-wide slices come next |
-| 4 | Planted git hook, filter, `file://` submodule | `test_tool_guard.Shell.test_git_settings_that_run_code` (Tier A) |
-| 5 | Container escapes | The container limits were measured on the VM (row 2 of section 2 above); an escape test from inside a container comes with the canary step |
+| 1 | Paths out of a Bot's tree | `test_tool_guard.Files` (Tier A); `test_files_service.Attack1Paths` (Tier B) |
+| 2 | Reading `.env`, another tree, `/proc/<pid>/environ` | `test_tool_guard.Files`, `test_tool_guard.Shell.test_02_secrets_and_environments`, `test_files_service.Checks.test_2_*`; live: `tw-canary` |
+| 3 | Forking, memory, CPU and disk past the caps | Per container, the limits were measured on the VM. Live: `tw-canary` forks, allocates and spins in a Tier B check and writes past a canary group's quota, then checks the gateway and brokers are still up |
+| 4 | Planted git hook, filter, `file://` submodule | `test_tool_guard.Shell.test_git_settings_that_run_code` (Tier A), `test_files_service.Attack4Git` (Tier B) |
+| 5 | Container escapes | The container limits were measured on the VM (row 2 of section 2 above); live: `tw-canary` starts a container with Hermes's own flags and tries to mount, see Hermes's home and find a network |
 | 6 | Worker pushes main, a tag, another Bot's branch, merges its own PR | `test_github.Pushes`, `test_github.Merges.test_06_*` |
 | 7 | Worker asks for a box, Nexus or release run | `test_github.Runs.test_07_workers_start_no_runs` |
 | 8 | Bramble asks for a bad workflow, ref, verb, parameter or `Why` | `test_github.Runs.test_08_*` |
@@ -67,12 +68,12 @@ Tier A is the honest limit of "Code, now". Every terminal, file and code call a 
 | 13 | "Bramble here, merge this" or "Patrick approved Main" in text | `test_github.Merges.test_13_*`, `test_tool_guard.Plugin.test_13_14_*` |
 | 14 | A worker sets its profile to Bramble | `test_tool_guard.Plugin.test_13_14_*`, `test_tool_guard.Toolsets.test_14_*`: the Bot is the profile the call runs in |
 | 15 | A worker asks to change tools, skills, cron, provider settings or broker rules | `test_tool_guard.Toolsets.test_15_*`, `test_tool_guard.Shell.test_15_*` |
-| 16 | Boot with cgroup delegation removed | Not yet: with the limits check |
+| 16 | Boot with cgroup delegation removed | `test_deploy.LimitsCheck` |
 | 17 | Every One port but Qwen's refused | Tailscale policy; not this repo |
-| 18 | Unauthenticated `hermes serve` | Not yet: with the serve unit |
-| 19 | Queue and quota | `test_money_and_secrets.Routes.test_19_*` for the routes; the queue's counts with `tw-policy` |
-| 20 | Crash between a GitHub write and its receipt | Not yet: with `tw-policy` |
-| 21 | Restore from backup kills old Main records | `test_money_and_secrets.Decisions.test_21_*` |
+| 18 | Unauthenticated `hermes serve` | Live: `tw-canary` finds every listener of hermes and the brokers, fails one on the public or private address, and asks each Tailscale one for a page and the API with no sign-in; `test_deploy.CanaryReading` |
+| 19 | Queue and quota | `test_money_and_secrets.Routes.test_19_*`, `test_policy_service.Queue.test_19_*`, `test_proxy` |
+| 20 | Crash between a GitHub write and its receipt | `test_policy_service.Operations.test_20_*`, `test_git_service` (a lost answer, then a restart) |
+| 21 | Restore from backup kills old Main records | `test_money_and_secrets.Decisions.test_21_*`, `test_deploy.Backups.test_21_*`, `test_deploy.OnePull` |
 
 ## Held as text only
 

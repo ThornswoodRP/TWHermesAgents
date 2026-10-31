@@ -1,0 +1,6 @@
+#!/usr/bin/python3 -I
+# The one command tw-files may run as root (deploy/sudoers/tw-files).
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_brokers.run_check import main  # noqa: E402
+main(sys.argv[1:])

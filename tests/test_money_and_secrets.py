@@ -95,6 +95,46 @@ class Routes(unittest.TestCase):
         self.assertFalse(v.allowed)
         self.assertIn("day 21", v.reason)
 
+    def ready(self):
+        import copy
+        from thornswood_guard.policy import Policy
+        data = copy.deepcopy(self.p.data)
+        data["admission_proxy"]["ready"] = True
+        return Policy(data)
+
+    def test_proxy_routes_point_at_the_loopback_proxy_with_the_bots_token(self):
+        p = self.ready()
+        cfg = build(p, "bramble")
+        fb = cfg["fallback_providers"]
+        self.assertEqual(fb[0], {"provider": "anthropic", "model": "claude-opus-5-5",
+                                 "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+        self.assertEqual(fb[2]["base_url"], "http://127.0.0.1:8611/qwen/v1")
+        self.assertEqual(check_config(p, "bramble", cfg, set()), [])
+        self.assertEqual(check_config(p, "rift", build(p, "rift"), set()), [])
+
+    def test_a_proxy_route_cannot_skip_the_proxy_or_point_elsewhere(self):
+        p = self.ready()
+        for change in ({"base_url": None, "key_env": None}, {"base_url": "https://api.anthropic.com"},
+                       {"key_env": "TW_CLAUDE_CREDITS_KEY"}, {"base_url": "http://127.0.0.1:8611/qwen/v1"}):
+            with self.subTest(change=change):
+                cfg = build(p, "bramble")
+                for k, v in change.items():
+                    if v is None:
+                        cfg["fallback_providers"][0].pop(k, None)
+                    else:
+                        cfg["fallback_providers"][0][k] = v
+                self.assertTrue(check_config(p, "bramble", cfg, set()))
+        cfg = build(p, "rift")
+        cfg["fallback_providers"][0]["base_url"] = "http://127.0.0.1:8611/credits"
+        self.assertTrue(check_config(p, "rift", cfg, set()))
+
+    def test_before_the_proxy_is_ready_no_route_names_it(self):
+        cfg = build(self.p, "bramble")
+        self.assertNotIn("base_url", str(cfg))
+        cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
+                                             "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+        self.assertTrue(check_config(self.p, "bramble", cfg, set()))
+
     def test_anthropic_api_key_would_spend_the_credits_first(self):
         problems = check_config(self.p, "bramble", build(self.p, "bramble"), {"ANTHROPIC_API_KEY"})
         self.assertTrue(any("ANTHROPIC_API_KEY" in x for x in problems))
@@ -133,9 +173,19 @@ class Secrets(unittest.TestCase):
             self.assertTrue(check_env(self.p, {"TW_GAMEDATA_NEXUS_KEY"}, where), where)
 
     def test_no_real_tokens_before_their_route(self):
-        self.assertTrue(check_env(self.p, {"TW_CLAUDE_CREDITS_KEY"}, "root"))
-        self.assertEqual(check_env(self.p, {"TW_CLAUDE_CREDITS_KEY"}, "root", later_allowed=True), [])
-        self.assertTrue(check_env(self.p, {"TW_CLAUDE_CREDITS_KEY"}, "bramble", later_allowed=True))
+        self.assertTrue(check_env(self.p, {"TW_PROXY_TOKEN"}, "bramble"))
+        self.assertEqual(check_env(self.p, {"TW_PROXY_TOKEN"}, "bramble", later_allowed=True), [])
+        self.assertEqual(check_env(self.p, {"TW_PROXY_TOKEN"}, "wisp", later_allowed=True), [])
+        self.assertTrue(check_env(self.p, {"TW_PROXY_TOKEN"}, "root", later_allowed=True))
+
+    def test_the_routes_real_keys_never_sit_in_hermes_files(self):
+        # Only the admission proxy's own user holds them (proxy.env).
+        holders = {e["name"]: e["user"] for e in self.p.data["secrets"]["oracle_other_users"]}
+        self.assertEqual(holders["TW_CLAUDE_CREDITS_KEY"], "tw-proxy")
+        self.assertEqual(holders["QWEN_API_KEY"], "tw-proxy")
+        for name in ("TW_CLAUDE_CREDITS_KEY", "QWEN_API_KEY", "TW_QWEN_TOKEN"):
+            for where in ("root", "bramble", "rift"):
+                self.assertTrue(check_env(self.p, {name}, where, later_allowed=True), (name, where))
 
     def test_unknown_secret_shaped_names_are_refused(self):
         for name in ("SOME_NEW_KEY", "BOX_PASSWORD", "X_API_TOKEN", "MY_SECRET", "AWS_SESSION_TOKEN"):

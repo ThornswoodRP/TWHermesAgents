@@ -1,0 +1,47 @@
+# tw-policy: the fleet queue, the exactly-once receipts, Patrick's decisions,
+# route and credit state, leases and the Dev ledger (08 section 7).
+[Unit]
+Description=Thornswood tw-policy
+After=tw-limits-check.service
+Wants=tw-limits-check.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-policy
+Group=tw-policy
+SupplementaryGroups=tw-policy-clients
+Slice=tw-brokers.slice
+ExecStart=/opt/thornswood-hermes/bin/tw-serve policy
+RuntimeDirectory=tw/policy
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=no
+ReadWritePaths=/srv/tw/policy
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0007
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

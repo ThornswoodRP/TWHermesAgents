@@ -54,7 +54,10 @@ class Files(unittest.TestCase):
     def test_02_secret_files_and_hermes_home(self):
         paths = ["/home/hermes/.hermes/.env", "~/.hermes/auth.json", "/home/hermes/.hermes/profiles/bramble/config.yaml",
                  "/home/hermes/.hermes/profiles/rift/plugins/thornswood_guard/policy.yaml", "../.env",
-                 "/proc/1234/environ", "/srv/tw/hermes/.env", "/run/tw-git.sock"]
+                 "/proc/1234/environ", "/srv/tw/hermes/.env", "/run/tw-git.sock",
+                 "/run/tw/policy/policy.sock", "/run/tw/limits.json", "/etc/thornswood/proxy.env",
+                 "/etc/thornswood/apps/bramble.pem", "/srv/tw/policy/policy.db", "/srv/tw/backups/x.tar.gz.age",
+                 "/srv/tw/snapshots/policy-20261102-1200.db", "/srv/tw/spool/in/rift/x.bundle"]
         for tool in ("read_file", "write_file", "patch", "search_files"):
             for path in paths:
                 self.assertFalse(check_tool(self.p, "magpie", tool, {"path": path}).allowed, (tool, path))

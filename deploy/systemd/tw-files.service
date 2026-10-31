@@ -1,0 +1,49 @@
+# tw-files: the Bots' work trees (08 section 3). No network at all.
+# Checks run through the root helper (sudo), which NoNewPrivileges forbids:
+# the PR that moves admission past the pilot stage (sandbox_jobs above 0)
+# also lifts NoNewPrivileges here, with RestrictSUIDSGID kept for the rest.
+[Unit]
+Description=Thornswood tw-files
+After=tw-policy.service
+Requires=tw-policy.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-files
+Group=tw-files
+SupplementaryGroups=tw-policy-clients tw-files-clients tw-spool tw-work-bramble tw-work-rift tw-work-sprocket tw-work-echo tw-work-magpie tw-work-wisp
+Slice=tw-brokers.slice
+ExecStart=/opt/thornswood-hermes/bin/tw-serve files
+RuntimeDirectory=tw/files
+RuntimeDirectoryMode=0755
+ReadWritePaths=/srv/tw/work /srv/tw/spool/out
+ReadOnlyPaths=/srv/tw/spool/in
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0007
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

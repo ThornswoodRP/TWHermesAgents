@@ -1,0 +1,17 @@
+# The nightly encrypted archive, owned by tw-backup for One to pull.
+[Unit]
+Description=Thornswood nightly backup
+
+[Service]
+Type=oneshot
+Slice=tw-brokers.slice
+ExecStart=/opt/thornswood-hermes/bin/tw-backup archive
+ProtectSystem=strict
+# tw-policy's store and Hermes' own SQLite files are open in WAL mode while
+# they run; a reader may need to make a -shm file beside one, so their folders
+# are writable here. The backup only reads them, through SQLite's backup API.
+ReadWritePaths=/srv/tw/backups /srv/tw/policy /home/hermes/.hermes
+ReadOnlyPaths=/home/hermes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes

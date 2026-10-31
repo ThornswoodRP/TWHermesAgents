@@ -47,7 +47,7 @@ SECRET_PLACES = [
     (re.compile(r"(^|[\s/'\"=:])auth\.json\b"), "auth.json holds the model sign-ins"),
     (re.compile(r"(^|[\s/'\"=:])\.env(\s|$|['\";|&)])"), ".env files hold keys"),
     (re.compile(r"/proc/[^\s]*environ|\bprintenv\b|^\s*env\s*$|^\s*env\s+-0|\bexport\s+-p\b"), "a process environment can hold keys"),
-    (re.compile(r"/srv/tw/(hermes|policy|git)|/run/tw-|tw-git\.sock|tw-policy\.sock"), "the brokers' state and sockets are theirs alone"),
+    (re.compile(r"/srv/tw/(hermes|policy|git|spool|backups|snapshots)|/run/tw[/-]|/etc/thornswood|\b(policy|git|files)\.sock\b|tw-git\.sock|tw-policy\.sock"), "the brokers' state and sockets are theirs alone"),
     (re.compile(r"(^|\s)(sudo|su|doas|pkexec)\s"), "no Bot raises its privileges"),
     (re.compile(r"\b(systemctl|crontab|loginctl|journalctl)\b"), "services and timers are Patrick's"),
     (re.compile(r"(^|[\s;&|(])hermes\s"), "a Bot never changes Hermes, its own config, tools, skills or plugins"),
@@ -167,6 +167,9 @@ def check_tool(policy: Policy, bot: str, tool_name: str, args: dict) -> Verdict:
         if rx and rx.match(tool_name):
             return Verdict.no(f"{policy.bot_name(bot)} has no {toolset} tools")
     args = args or {}
+    if policy.data.get("brokers", {}).get("tier_b") and (
+            tool_name in SHELL_TOOLS or tool_name in FILE_WRITE_TOOLS or tool_name == "execute_code"):
+        return Verdict.no("work trees change only through tw_files, and checks run only through its run_check")
     if tool_name == "skill_manage":
         if any("thornswood" in s.lower() for s in _strings(args)):
             return Verdict.no("the thornswood-ops and thornswood-guide skills change only by a reviewed PR to their source, never by a Bot")

@@ -54,7 +54,26 @@ def register(ctx):
         ctx.register_hook("pre_tool_call", refuse_all)
         return
 
+    gate = None
+    try:
+        from . import brokers
+        gate = brokers.register(ctx, policy, bot)
+    except Exception as e:  # with the brokers on, a gate that fails to load refuses every tool
+        if policy.data["brokers"].get("ready"):
+            reason = f"the Thornswood turn gate could not load ({type(e).__name__}: {e}); every tool is refused until Patrick fixes it"
+            logger.error(reason)
+
+            def refuse_all(tool_name, args=None, **kwargs):
+                return {"action": "block", "message": reason}
+
+            ctx.register_hook("pre_tool_call", refuse_all)
+            return
+
     def before_tool(tool_name, args=None, **kwargs):
+        if gate is not None:
+            message = gate.before_tool(tool_name, **kwargs)
+            if message:
+                return {"action": "block", "message": message}
         verdict = check_tool(policy, bot, tool_name, args or {})
         if verdict.allowed:
             return None

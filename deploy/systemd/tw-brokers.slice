@@ -1,0 +1,16 @@
+# tw-policy, tw-files, tw-git and tw-proxy, each as its own user.
+# Generated from thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
+# A limit changes only by a PR to the policy, never on the box.
+[Unit]
+Description=Thornswood: tw-policy, tw-files, tw-git and tw-proxy, each as its own user
+Before=slices.target
+
+[Slice]
+MemoryAccounting=yes
+CPUAccounting=yes
+TasksAccounting=yes
+MemoryHigh=400M
+MemoryMax=512M
+CPUWeight=100
+CPUQuota=50%
+TasksMax=128
