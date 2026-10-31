@@ -64,6 +64,8 @@
     "python_gate": "plugin_api.py is imported only when the plugin is in plugins.enabled in config.yaml",
     "socket": "ctx.socket is a no-op on OAuth remotes, so the pane polls; broadcast_plugin_event only speeds it up",
     "who_is_calling": "on a signed-in hermes serve the route sees request.state.session (user_id, email, provider) or request.state.token_principal (an opaque service id); neither is Patrick by itself, so Desktop pairs once with the core",
+    "caller_subject": "the plugin names the Hermes sign-in as hermes_cli/web_server_sessions.py:93-104 does: a native grant's subject; a verified session through gateway.session_identity.authenticated_subject (:296); a token principal; with no sign-in gate, the serve's own session token as legacy-token-owner (web_server.py:292)",
+    "remote_desktop_half": "against a remote backend the desktop half is not copied from the remote plugins folder; it goes in desktop-plugins/<id>/plugin.js on the Desktop machine (desktop-plugin-sdk.md, One package, both SDKs, the note)",
     "source": "website/docs/developer-guide/desktop-plugin-sdk.md (A backend for your plugin; Calling it from the plugin; Security model); hermes_cli/dashboard_auth/base.py:10 Session, :25 TokenPrincipal; middleware.py:213; token_auth.py:84"
   },
   "kanban": {

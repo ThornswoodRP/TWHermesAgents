@@ -44,6 +44,7 @@ class Principal:
     device_id: str | None = None
     session_hash: str | None = None
     fresh: bool = False
+    device_kind: str | None = None   # phone or desktop, from the paired device
 
     @property
     def label(self) -> str:
@@ -140,12 +141,16 @@ class Auth:
                 write(d)
         return IssuedSession(token, csrf, expires.isoformat())
 
-    def authenticate(self, token: str | None, *, touch: bool = True) -> Principal:
+    def authenticate(self, token: str | None, *, touch: bool = True,
+                     hermes_principal: str | None = None) -> Principal:
+        """The session's principal. A Desktop device paired from a Hermes sign-in
+        answers only through that same sign-in."""
         if not token:
             raise CoreError(401, "signed_out", "sign in first")
         h = sha256_hex(token)
         row = self.s.db.execute(
-            "SELECT s.*, p.kind, p.disabled_at, d.revoked_at AS device_revoked FROM sessions s "
+            "SELECT s.*, p.kind, p.disabled_at, d.revoked_at AS device_revoked, d.kind AS device_kind, "
+            "d.hermes_principal FROM sessions s "
             "JOIN principals p ON p.id = s.principal_id LEFT JOIN devices d ON d.id = s.device_id "
             "WHERE s.id_hash = ?", (h,)).fetchone()
         now = self.s.clock()
@@ -155,12 +160,15 @@ class Auth:
             raise CoreError(401, "session_expired", "that session expired; sign in again")
         if row["kind"] != "patrick":
             raise CoreError(401, "signed_out", "only Patrick holds sessions")
+        if row["hermes_principal"] is not None and not hmac.compare_digest(
+                row["hermes_principal"], hermes_principal or ""):
+            raise CoreError(401, "wrong_hermes_sign_in", "this Desktop was paired through another Hermes sign-in")
         if touch:
             idle = min(now + SESSION_IDLE, parse(row["expires_at"]))
             with self.s.tx() as db:
                 db.execute("UPDATE sessions SET idle_expires_at = ? WHERE id_hash = ?", (idle.isoformat(), h))
         return Principal(row["principal_id"], row["workspace_id"], "patrick", None, row["device_id"], h,
-                         now < parse(row["fresh_until"]))
+                         now < parse(row["fresh_until"]), row["device_kind"])
 
     def check_csrf(self, principal: Principal, csrf: str | None) -> None:
         row = self.s.db.execute("SELECT csrf_hash FROM sessions WHERE id_hash = ?",
@@ -267,8 +275,25 @@ class Auth:
                          {"device_kind": device_kind, "label": label})
         return {"code": f"{code[:4]}-{code[4:]}", "expires_at": expires}
 
-    def redeem_pairing_code(self, workspace_id: str, code: str) -> tuple[str, IssuedSession]:
-        """The new device sends the code once. It gets its device id and a session."""
+    def operator_pairing_code(self, workspace_id: str, device_kind: str, label: str, *, by: str) -> dict:
+        """The first device's code, made on the VM by the operator over SSH (only
+        Patrick's key reaches it). Every later device is paired from a signed-in one."""
+        pid = self._patrick(workspace_id)
+        code = _code(8)
+        expires = (self.s.clock() + PAIRING_LIFETIME).isoformat()
+        with self.s.tx() as db:
+            pc = new_id("pc")
+            db.execute("INSERT INTO pairing_codes(id, workspace_id, principal_id, code_hash, device_kind, label, "
+                       "created_at, expires_at) VALUES(?,?,?,?,?,?,?,?)",
+                       (pc, workspace_id, pid, sha256_hex(code), device_kind, label, self.s.now(), expires))
+            self.s.event(db, workspace_id, "pairing.offered", pc, by,
+                         {"device_kind": device_kind, "label": label, "from": "operator"})
+        return {"code": f"{code[:4]}-{code[4:]}", "expires_at": expires}
+
+    def redeem_pairing_code(self, workspace_id: str, code: str, *,
+                            hermes_principal: str | None = None) -> tuple[str, IssuedSession]:
+        """The new device sends the code once. It gets its device id and a session.
+        A Desktop device must come through a Hermes sign-in, and is bound to it."""
         if self._locked(workspace_id, "pairing"):
             raise CoreError(429, "too_many_tries", "too many wrong codes; wait 15 minutes")
         h = sha256_hex(_norm(code))
@@ -277,12 +302,15 @@ class Auth:
             row = db.execute("SELECT * FROM pairing_codes WHERE code_hash = ? AND workspace_id = ?",
                              (h, workspace_id)).fetchone()
             ok = row and not row["used_at"] and not row["cancelled_at"] and now < parse(row["expires_at"])
+            if ok and row["device_kind"] == "desktop" and not hermes_principal:
+                raise CoreError(403, "no_hermes_sign_in", "a Desktop pairs only through a signed-in Hermes")
             if ok:
                 db.execute("UPDATE pairing_codes SET used_at = ? WHERE id = ?", (self.s.now(), row["id"]))
                 dev = new_id("dv")
-                db.execute("INSERT INTO devices(id, workspace_id, principal_id, kind, label, created_at) "
-                           "VALUES(?,?,?,?,?,?)", (dev, workspace_id, row["principal_id"], row["device_kind"],
-                                                   row["label"], self.s.now()))
+                db.execute("INSERT INTO devices(id, workspace_id, principal_id, kind, label, created_at, "
+                           "hermes_principal) VALUES(?,?,?,?,?,?,?)",
+                           (dev, workspace_id, row["principal_id"], row["device_kind"], row["label"], self.s.now(),
+                            hermes_principal if row["device_kind"] == "desktop" else None))
                 self.s.event(db, workspace_id, "device.paired", dev, "patrick",
                              {"kind": row["device_kind"], "label": row["label"]})
                 session = self.issue_session(workspace_id, method="pairing", device_id=dev, db=db)

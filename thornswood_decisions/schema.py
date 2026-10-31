@@ -324,4 +324,8 @@ CREATE TABLE backup_runs (
   at TEXT NOT NULL
 );
 """,
+    # 2: a Desktop device remembers which Hermes sign-in paired it (07 section 5.1)
+    """
+ALTER TABLE devices ADD COLUMN hermes_principal TEXT;
+""",
 ]

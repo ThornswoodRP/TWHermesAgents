@@ -140,13 +140,34 @@ class Pairing(unittest.TestCase):
 
     def test_pair_desktop_once(self):
         offer = self.a.new_pairing_code(self.w.patrick(fresh=True), "desktop", "Hermes Desktop on One")
-        dev, s = self.a.redeem_pairing_code(self.w.ws, offer["code"])
-        p = self.a.authenticate(s.token)
-        self.assertEqual(p.device_id, dev)
+        dev, s = self.a.redeem_pairing_code(self.w.ws, offer["code"], hermes_principal="nous:user-1")
+        p = self.a.authenticate(s.token, hermes_principal="nous:user-1")
+        self.assertEqual((p.device_id, p.device_kind), (dev, "desktop"))
         kind = self.w.store.db.execute("SELECT kind FROM devices WHERE id = ?", (dev,)).fetchone()[0]
         self.assertEqual(kind, "desktop")
         with self.assertRaises(CoreError):
             self.a.redeem_pairing_code(self.w.ws, offer["code"])
+
+    def test_a_desktop_needs_a_hermes_sign_in_and_keeps_to_it(self):
+        offer = self.a.new_pairing_code(self.w.patrick(fresh=True), "desktop", "d")
+        with self.assertRaises(CoreError) as e:
+            self.a.redeem_pairing_code(self.w.ws, offer["code"])
+        self.assertEqual(e.exception.reason, "no_hermes_sign_in")
+        dev, s = self.a.redeem_pairing_code(self.w.ws, offer["code"], hermes_principal="nous:user-1")
+        for other in (None, "", "nous:user-2"):
+            with self.assertRaises(CoreError) as e:
+                self.a.authenticate(s.token, hermes_principal=other)
+            self.assertEqual(e.exception.reason, "wrong_hermes_sign_in")
+
+    def test_a_phone_is_not_bound_to_a_hermes_sign_in(self):
+        offer = self.a.new_pairing_code(self.w.patrick(fresh=True), "phone", "p")
+        dev, s = self.a.redeem_pairing_code(self.w.ws, offer["code"], hermes_principal="ignored")
+        self.assertEqual(self.a.authenticate(s.token).device_kind, "phone")
+
+    def test_the_operator_makes_the_first_code(self):
+        offer = self.a.operator_pairing_code(self.w.ws, "desktop", "first Desktop", by="operator")
+        dev, s = self.a.redeem_pairing_code(self.w.ws, offer["code"], hermes_principal="token:svc")
+        self.assertTrue(self.a.authenticate(s.token, hermes_principal="token:svc").fresh)
 
     def test_a_code_expires(self):
         offer = self.a.new_pairing_code(self.w.patrick(fresh=True), "desktop", "d")
