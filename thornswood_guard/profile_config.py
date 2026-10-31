@@ -136,6 +136,15 @@ def merge_into(existing: dict, ours: dict) -> dict:
 
 GATEWAY_PROFILE = "default"
 
+# Toolsets whose availability check makes a helper call. The gateway warms the
+# tool list of its own profile when it starts, and the image and video tools'
+# check asks the vision helper for a client, then for "auto", which walks the
+# Nous Portal. The gateway's own profile holds no sign-in (it is not a Bot),
+# so the pinned helper finds none and the walk goes on (31 Oct, 3:04 PM: the
+# Nous count fell from 5 to 3). The guard already refuses every tool there;
+# these toolsets are off so nothing asks for a helper the profile cannot have.
+GATEWAY_HELPER_TOOLSETS = ["vision", "video"]
+
 
 def build_gateway(policy: Policy) -> dict:
     """The gateway's own profile: /home/hermes/.hermes/config.yaml, which
@@ -143,11 +152,14 @@ def build_gateway(policy: Policy) -> dict:
     connection and starts every helper the gateway makes before a turn reaches
     a Bot, so it lives under the same rules (31 Oct: with no route and no
     helper of its own, its vision helper walked to the Nous Portal). One route,
-    the Max login every Bot has first, with no fallback; the helpers on it;
-    nothing that bills; and the guard, which refuses every tool in a profile
-    that is not one of the six Bots."""
+    the Max login every Bot has first, with no fallback, and no sign-in for
+    it: with a main provider set, Hermes refuses to guess another login for a
+    text helper. The vision helper pinned to that route; the toolsets whose
+    check asks for a helper turned off; nothing that bills; and the guard,
+    which refuses every tool in a profile that is not one of the six Bots."""
     route = gateway_chain(policy)[0]
     never = list(policy.data["toolsets"]["never"]) + list(policy.data["toolsets"]["workers_never"])
+    never += [t for t in GATEWAY_HELPER_TOOLSETS if t not in never]
     return {
         "model": {"provider": route["provider"], "default": route["model"]},
         "fallback_providers": [],

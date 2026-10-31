@@ -29,6 +29,8 @@ agent:
   - discord_admin
   - delegation
   - cronjob
+  - vision
+  - video
 auxiliary:
   free_only: true
   openrouter_model: ''

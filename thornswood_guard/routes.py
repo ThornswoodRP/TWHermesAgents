@@ -116,11 +116,16 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
 
 def check_gateway_config(policy: Policy, config: dict, env_names: set[str]) -> list[str]:
     """The same rules for the gateway's own profile, against its one route,
-    and the guard loaded there, which refuses every tool in a profile that is
-    not a Bot."""
+    the guard loaded there, which refuses every tool in a profile that is not
+    a Bot, and the toolsets whose check asks for a helper turned off."""
     problems = _check(policy, "the gateway's own profile", gateway_chain(policy), config, env_names)
     if "thornswood_guard" not in ((config.get("plugins") or {}).get("enabled") or []):
         problems.append("the guard plugin is not enabled in the gateway's own profile")
+    from .profile_config import GATEWAY_HELPER_TOOLSETS
+    off = set((config.get("agent") or {}).get("disabled_toolsets") or [])
+    for toolset in GATEWAY_HELPER_TOOLSETS:
+        if toolset not in off:
+            problems.append(f"the {toolset} toolset is on in the gateway's own profile; its check asks for a helper the profile has no sign-in for, and Hermes then walks to the Nous Portal")
     return problems
 
 

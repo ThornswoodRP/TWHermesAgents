@@ -121,6 +121,16 @@ class Routes(unittest.TestCase):
         bad = build_gateway(self.p)
         bad["auxiliary"]["vision"] = {"provider": "nous", "model": ""}
         self.assertTrue(any("not one of" in x for x in check_gateway_config(self.p, bad, set())))
+        # 31 Oct, 3:04 PM: the image and video tools' check asked the pinned
+        # helper for a client the unsigned profile cannot have, then walked to
+        # the Nous Portal. Those toolsets are off there.
+        for toolset in ("vision", "video"):
+            self.assertIn(toolset, cfg["agent"]["disabled_toolsets"])
+            bad = build_gateway(self.p)
+            bad["agent"]["disabled_toolsets"] = [t for t in bad["agent"]["disabled_toolsets"] if t != toolset]
+            self.assertTrue(any(f"the {toolset} toolset is on" in x for x in check_gateway_config(self.p, bad, set())))
+        for bot in self.p.bots:
+            self.assertNotIn("vision", build(self.p, bot)["agent"]["disabled_toolsets"], bot)
         bad = build_gateway(self.p)
         bad["plugins"]["enabled"] = []
         self.assertTrue(any("guard plugin" in x for x in check_gateway_config(self.p, bad, set())))
