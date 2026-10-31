@@ -60,13 +60,43 @@ if ($MakeKey) {
 }
 
 if ($Register) {
+    # The task runs this script where it is now, every night: never from a
+    # folder that gets cleaned up (31 Oct: a clone in Hermes's scratch folder,
+    # which goes after a day without use).
+    $here = [System.IO.Path]::GetFullPath($PSCommandPath)
+    $passing = @([System.IO.Path]::GetTempPath()) + @(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'hermes' })
+    foreach ($root in $passing) {
+        $full = [System.IO.Path]::GetFullPath($root).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+        if ($here.StartsWith($full, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Fail "this copy is under $root, which gets cleaned up; clone Thornswood-Hermes to $(Join-Path $HOME 'Thornswood-Hermes') and run -Register from there"
+            exit 1
+        }
+    }
+    # Task names ignore case on Windows, so a name is only ours when the task
+    # runs this script. One that runs anything else is never replaced (31 Oct:
+    # -Force replaced the task for Patrick's own Hermes backup).
+    $name = 'Thornswood Bots Hermes Backup Pull'
+    $ours = { param($t) @($t.Actions | Where-Object { "$($_.Arguments)" -match 'Pull-HermesBackup\.ps1' }).Count -gt 0 }
+    $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($existing -and -not (& $ours $existing)) {
+        Fail "a task named '$($existing.TaskName)' already exists and runs something else; it is not replaced"
+        exit 1
+    }
+    # The name this script used before 31 Oct, when it is this script's.
+    $old = Get-ScheduledTask -TaskName 'Thornswood Hermes backup pull' -ErrorAction SilentlyContinue
+    if ($old -and $old.TaskName -ne $name -and (& $ours $old)) {
+        Unregister-ScheduledTask -TaskName $old.TaskName -Confirm:$false
+        Pass "removed this script's task under its old name, '$($old.TaskName)'"
+    }
     $pwsh = (Get-Command pwsh).Source
-    $action = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoProfile -File `"$PSCommandPath`""
+    $action = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoProfile -File `"$here`""
     $trigger = New-ScheduledTaskTrigger -Daily -At '4:30 AM'
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-    Register-ScheduledTask -TaskName 'Thornswood Hermes backup pull' -Action $action -Trigger $trigger `
-        -Settings $settings -Description 'Pulls the VM''s encrypted Hermes backups and copies them to Google Drive' -Force | Out-Null
-    Pass 'the nightly pull runs at 4:30 AM from Task Scheduler (Thornswood Hermes backup pull)'
+    $task = @{ TaskName = $name; Action = $action; Trigger = $trigger; Settings = $settings
+        Description = 'Pulls the Thornswood Bots'' encrypted Hermes backups from the VM and copies them to Google Drive' }
+    if ($existing) { Set-ScheduledTask -TaskName $existing.TaskName -Action $action -Trigger $trigger -Settings $settings | Out-Null }
+    else { Register-ScheduledTask @task | Out-Null }
+    Pass "the nightly pull runs at 4:30 AM from Task Scheduler ($name), from $here"
     exit 0
 }
 

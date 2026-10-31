@@ -343,7 +343,9 @@ brokers:
   # fleet queue and the Bots get the tw_git and tw_files tools. tier_b then
   # takes the generic shell and file writes away, so work trees change only
   # through tw_files (08 section 2).
-  ready: false
+  # On 31 Oct the install at f0d45bbf held on the VM: the limits check was
+  # ok, and tw-canary printed ten PASS lines (attacks 2, 3, 5 and 18).
+  ready: true
   tier_b: false
   # The code every service runs is a root-owned copy of the merged commit,
   # never the hermes user's release folder, which hermes can write.

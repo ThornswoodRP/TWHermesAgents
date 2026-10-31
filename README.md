@@ -92,7 +92,7 @@ It runs the whole suite on One and on the VM at that exact commit, then sets the
 - `tw-files`: each worker's trees under `/srv/tw/work/<bot>`, and its checks through `tw-run-check` as the Bot's own user with no network.
 - The admission proxy (`127.0.0.1:8611`): routes 2 and 4 with the real keys, which only it can read.
 
-The gateway reaches them only through their sockets; the `tw_git` and `tw_files` tools and the turn gate stay off until `brokers.ready` is true in the policy. Routes 2 and 4 stay out of every chain until `admission_proxy.ready` is true.
+The gateway reaches them only through their sockets. `brokers.ready` is on since 31 Oct, after the install held and the canary passed: every Bot turn needs a ticket from the fleet queue (`tw-policy`), and the Bots have the `tw_git` and `tw_files` tools. Routes 2 and 4 stay out of every chain until `admission_proxy.ready` is true.
 
 **Install**, after Patrick merges, from One's clone (sudo on the VM asks for its password if it needs one):
 
@@ -132,7 +132,7 @@ It decrypts on One, stops the gateway and the brokers, puts the files back (refu
 
 ## What this version does not do yet
 
-- The brokers hold only once installed, the canary passes and a PR turns `brokers.ready` on. Until then no Bot holds a GitHub credential, so every GitHub write is impossible, and the guard says why.
+- The brokers hold once installed, the canary passes and `brokers.ready` is on (31 Oct). No Bot holds a GitHub credential: every GitHub write goes through `tw-git`, which checks it again, and the guard refuses any other way with the reason.
 - Tier B checks: `sandbox_jobs` is 0 in the pilot stage, and `tw-files` keeps `NoNewPrivileges` until the PR that moves past the pilot lifts it for `tw-run-check`.
 - A disk cap inside a Tier A container: the VM's ext4 store can't enforce one in podman. The Bots' broker trees have theirs (group quotas).
 - Routes 2 and 4 enter the chains only when a PR sets `admission_proxy.ready`, after the install has made each Bot's proxy token.

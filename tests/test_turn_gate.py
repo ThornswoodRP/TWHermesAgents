@@ -136,7 +136,7 @@ class Tools(unittest.TestCase):
 
     def test_nothing_is_registered_before_the_brokers_are_ready(self):
         ctx = Ctx("rift")
-        self.assertIsNone(brokers.register(ctx, policy(), "rift", ask=lambda *a: None))
+        self.assertIsNone(brokers.register(ctx, ready_policy(ready=False), "rift", ask=lambda *a: None))
         self.assertEqual(ctx.hooks, {})
         self.assertEqual(ctx.tools, {})
 

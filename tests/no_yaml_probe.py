@@ -33,6 +33,9 @@ class Ctx:
     def register_hook(self, name, fn):
         self.hooks[name] = fn
 
+    def register_tool(self, *args, **kwargs):
+        pass
+
     def register_system_prompt_section(self, *args, **kwargs):
         pass
 

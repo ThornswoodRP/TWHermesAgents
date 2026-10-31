@@ -83,12 +83,18 @@ def image_present(podman: list[str]) -> tuple[bool | None, str]:
 
 
 class FakeCtx:
+    """What the guard calls on Hermes's plugin context (hermes_cli/plugins.py)."""
+
     def __init__(self, profile_name: str):
         self.profile_name = profile_name
         self.hooks: dict[str, list] = {}
+        self.tools: dict[str, str] = {}
 
     def register_hook(self, name, fn):
         self.hooks.setdefault(name, []).append(fn)
+
+    def register_tool(self, name, toolset, schema, handler, **kwargs):
+        self.tools[name] = toolset
 
     def register_system_prompt_section(self, *a, **k):
         pass
@@ -120,9 +126,29 @@ def self_test(plugin_dir: Path, bot: str) -> list[str]:
     for tool, args in must_refuse:
         if not (hook(tool_name=tool, args=args) or {}).get("action") == "block":
             problems.append(f"{bot}: the installed guard let {tool} {args} through")
-    if hook(tool_name="terminal", args={"command": "git status"}) is not None:
+    # The rules themselves, from the installed copy, apart from the turn gate.
+    rules = sys.modules[f"{name}.tool_guard"]
+    installed_policy = sys.modules[f"{name}.policy"].Policy.load()
+    for tool, args in must_refuse:
+        if rules.check_tool(installed_policy, bot, tool, args).allowed:
+            problems.append(f"{bot}: the installed rules allow {tool} {args}")
+    if not rules.check_tool(installed_policy, bot, "terminal", {"command": "git status"}).allowed:
+        problems.append(f"{bot}: the installed rules refuse git status")
+    out = hook(tool_name="terminal", args={"command": "git status"})
+    if installed_policy.data["brokers"].get("ready"):
+        # With the brokers on, a turn the fleet queue never admitted has every
+        # tool refused, and the Bot has its two broker tools.
+        if not (out or {}).get("action") == "block" or "ticket" not in (out or {}).get("message", ""):
+            problems.append(f"{bot}: with the brokers on, a tool call with no ticket from the fleet queue was not refused ({out})")
+        if sorted(ctx.tools) != ["tw_files", "tw_git"]:
+            problems.append(f"{bot}: the installed guard registered the tools {sorted(ctx.tools)}, not tw_git and tw_files")
+        for want in ("pre_llm_call", "on_session_end", "agent_loop_stopped"):
+            if len(ctx.hooks.get(want) or []) != 1:
+                problems.append(f"{bot}: the turn gate's {want} hook is not registered once")
+    elif out is not None:
         problems.append(f"{bot}: the installed guard refused git status")
-    del sys.modules[name]
+    for k in [k for k in sys.modules if k == name or k.startswith(name + ".")]:
+        del sys.modules[k]
     return problems
 
 

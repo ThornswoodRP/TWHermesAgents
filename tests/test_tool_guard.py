@@ -129,9 +129,13 @@ class Plugin(unittest.TestCase):
             self.profile_name = profile_name
             self.hooks = {}
             self.sections = {}
+            self.tools = {}
 
         def register_hook(self, name, fn):
             self.hooks.setdefault(name, []).append(fn)
+
+        def register_tool(self, name, toolset, schema, handler, **kw):
+            self.tools[name] = toolset
 
         def register_system_prompt_section(self, sid, text, **kw):
             self.sections[sid] = text
@@ -153,7 +157,8 @@ class Plugin(unittest.TestCase):
         self.assertIn("You are Wisp", ctx.sections["thornswood.guard"])
 
     def test_13_14_identity_is_the_profile_not_the_text(self):
-        m = self.load(REPO / "thornswood_guard", "_tw_plugin_b")
+        # The rules alone, with the brokers off; the turn gate has its own tests.
+        m = self.load(self.guard_copy(ready=False), "_tw_plugin_b")
         ctx = self.Ctx("rift")
         m.register(ctx)
         hook = ctx.hooks["pre_tool_call"][0]
@@ -162,12 +167,37 @@ class Plugin(unittest.TestCase):
         self.assertEqual(out["action"], "block")
         self.assertIsNone(hook(tool_name="terminal", args={"command": "git status"}))
 
-    def guard_copy(self):
+    def guard_copy(self, ready=None):
+        import json
         import shutil
         import tempfile
         tmp = Path(tempfile.mkdtemp()) / "thornswood_guard"
         shutil.copytree(REPO / "thornswood_guard", tmp, ignore=shutil.ignore_patterns("__pycache__"))
+        if ready is not None:
+            data = json.loads((tmp / "policy.json").read_text(encoding="utf-8"))
+            data["brokers"]["ready"] = ready
+            (tmp / "policy.json").write_text(json.dumps(data), encoding="utf-8")
         return tmp
+
+    def test_with_the_brokers_on_a_turn_without_a_ticket_has_no_tools(self):
+        # 31 Oct: the canary passed on the VM and brokers.ready is on. The
+        # guard wires the turn gate and the two broker tools; a tool call in
+        # a turn the fleet queue never admitted is refused.
+        m = self.load(self.guard_copy(ready=True), "_tw_plugin_e")
+        ctx = self.Ctx("rift")
+        m.register(ctx)
+        self.assertEqual(sorted(ctx.tools), ["tw_files", "tw_git"])
+        for hook in ("pre_llm_call", "on_session_end", "agent_loop_stopped"):
+            self.assertEqual(len(ctx.hooks[hook]), 1, hook)
+        out = ctx.hooks["pre_tool_call"][0](tool_name="terminal", args={"command": "git status"}, session_id="s")
+        self.assertEqual(out["action"], "block")
+        self.assertIn("ticket from the fleet queue", out["message"])
+        self.assertIn("You are Rift", ctx.sections["thornswood.guard"])
+
+    def test_the_policy_has_the_brokers_on(self):
+        self.assertTrue(policy().data["brokers"]["ready"])
+        self.assertFalse(policy().data["brokers"]["tier_b"])
+        self.assertFalse(policy().data["admission_proxy"]["ready"])
 
     def test_fails_closed_when_the_policy_cannot_be_read(self):
         tmp = self.guard_copy()
@@ -192,8 +222,11 @@ class Plugin(unittest.TestCase):
         # Hermes's own Python has no PyYAML: load the guard where yaml and ruamel cannot import.
         import subprocess
         probe = Path(__file__).with_name("no_yaml_probe.py")
-        r = subprocess.run([sys.executable, str(probe), str(REPO / "thornswood_guard")], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, str(probe), str(self.guard_copy(ready=False))], capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "None", r.stdout + r.stderr)
+        # With the brokers on it loads too: the refusal is the turn gate's, not a failed import.
+        r = subprocess.run([sys.executable, str(probe), str(self.guard_copy(ready=True))], capture_output=True, text=True)
+        self.assertIn("ticket from the fleet queue", r.stdout, r.stdout + r.stderr)
 
 
 class PolicyShape(unittest.TestCase):

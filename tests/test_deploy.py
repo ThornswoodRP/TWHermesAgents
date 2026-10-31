@@ -643,6 +643,28 @@ class OnePull(unittest.TestCase):
         self.assertIn("decrypts and lists", r.stdout)
         self.assertIn("-tzf", logged.read_text(encoding="utf-8"))
 
+    def test_register_refuses_a_folder_that_gets_cleaned_up(self):
+        # 31 Oct: the task was registered from a clone in Hermes's scratch
+        # folder, which goes after a day without use.
+        import shutil
+        copy = Path(tempfile.mkdtemp()) / "Pull-HermesBackup.ps1"
+        shutil.copy(REPO / "scripts/one/Pull-HermesBackup.ps1", copy)
+        r = subprocess.run(["pwsh", "-NoProfile", "-File", str(copy), "-Folder", str(self.one),
+                            "-KeyFolder", str(self.keys), "-Register"],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("which gets cleaned up", r.stdout)
+
+    def test_register_never_replaces_a_task_it_does_not_own(self):
+        # 31 Oct: task names ignore case on Windows, and -Force replaced the
+        # task for Patrick's own Hermes backup, "Thornswood Hermes Backup Pull".
+        text = (REPO / "scripts/one/Pull-HermesBackup.ps1").read_text(encoding="utf-8")
+        self.assertNotRegex(text, r"Register-ScheduledTask[^\n]*-Force")
+        self.assertIn("$name = 'Thornswood Bots Hermes Backup Pull'", text)
+        self.assertIn("runs something else; it is not replaced", text)
+        self.assertNotEqual("thornswood bots hermes backup pull", "thornswood hermes backup pull")
+        self.assertNotEqual("thornswood bots hermes backup pull", "thornswood patrick hermes backup pull")
+
     def test_a_file_that_is_not_age_is_not_kept(self):
         (self.vm / "hermes-20261101-033000.tar.gz.age").write_bytes(b"\x1f\x8bnot age")
         r = self.pull()

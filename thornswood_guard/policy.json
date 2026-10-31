@@ -377,7 +377,7 @@
     ]
   },
   "brokers": {
-    "ready": false,
+    "ready": true,
     "tier_b": false,
     "install_root": "/opt/thornswood-hermes",
     "users": {
