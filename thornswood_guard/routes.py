@@ -164,6 +164,22 @@ def check_config(policy: Policy, bot: str, config: dict, env_names: set[str]) ->
         problems.append("auxiliary.free_only must be true, so no helper call reaches a paid OpenRouter lane")
     if aux.get("openrouter_model"):
         problems.append("auxiliary.openrouter_model is set")
+    # A helper names "auto" (the Bot's own main route) or one of the Bot's
+    # routes, never a login the Bot was not given.
+    route_providers = {r["provider"] for r in chain}
+    for task, block in aux.items():
+        if not isinstance(block, dict):
+            continue
+        name = str(block.get("provider") or "").strip().lower()
+        if name not in ("", "auto") and name not in route_providers:
+            problems.append(f"auxiliary.{task}.provider is {name}, not one of {policy.bot_name(bot)}'s routes")
+        elif name not in ("", "auto") and block.get("model") and (name, block.get("model")) not in allowed:
+            problems.append(f"auxiliary.{task} asks {name} for {block.get('model')}, which is not one of {policy.bot_name(bot)}'s routes")
+    # Vision's "auto" walks OpenRouter, the Nous Portal and DeepInfra when the
+    # main route does not answer, so it is pinned to the Bot's first route.
+    vision = aux.get("vision") if isinstance(aux.get("vision"), dict) else {}
+    if (vision.get("provider"), vision.get("model")) != pair:
+        problems.append(f"auxiliary.vision is {vision.get('provider') or 'auto'}/{vision.get('model') or 'auto'}, not pinned to the main route {pair[0]}/{pair[1]}")
 
     if "ANTHROPIC_API_KEY" in env_names:
         problems.append("ANTHROPIC_API_KEY is set; Hermes would spend the credits ahead of the subscription")

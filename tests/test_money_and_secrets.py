@@ -81,6 +81,34 @@ class Routes(unittest.TestCase):
         cfg["agent"]["service_tier"] = "fast"
         self.assertTrue(check_config(self.p, "echo", cfg, set()))
 
+    def test_helpers_stay_on_the_bots_own_routes(self):
+        # 31 Oct: the gateway logged "Nous Portal not configured" from the
+        # vision helper's auto list. Every Bot's vision helper is pinned to its
+        # first route, and no helper may name a login the Bot was not given.
+        for bot in ("bramble", "rift", "sprocket", "echo", "magpie", "wisp"):
+            cfg = build(self.p, bot)
+            vision = cfg["auxiliary"]["vision"]
+            self.assertEqual((vision["provider"], vision["model"]),
+                             (cfg["model"]["provider"], cfg["model"]["default"]), bot)
+            self.assertNotIn("base_url", vision, bot)
+            self.assertEqual(check_config(self.p, bot, cfg, set()), [], bot)
+        for provider in ("nous", "deepinfra", "gemini"):
+            cfg = build(self.p, "rift")
+            cfg["auxiliary"]["compression"] = {"provider": provider}
+            self.assertTrue(any("not one of" in x for x in check_config(self.p, "rift", cfg, set())), provider)
+        cfg = build(self.p, "rift")
+        cfg["auxiliary"]["vision"] = {"provider": "auto", "model": ""}
+        self.assertTrue(any("not pinned" in x for x in check_config(self.p, "rift", cfg, set())))
+        cfg = build(self.p, "rift")
+        cfg["auxiliary"]["vision"]["model"] = "claude-haiku-9"
+        self.assertTrue(check_config(self.p, "rift", cfg, set()))
+        cfg = build(self.p, "rift")
+        cfg["auxiliary"]["vision"]["base_url"] = "https://example.invalid/v1"
+        self.assertTrue(any("auxiliary.vision.base_url is set" in x for x in check_config(self.p, "rift", cfg, set())))
+        cfg = build(self.p, "rift")
+        cfg["auxiliary"]["session_search"] = {"provider": "openai-codex", "model": "gpt-6.1-sol"}
+        self.assertEqual(check_config(self.p, "rift", cfg, set()), [])
+
     def test_wrong_order_is_caught(self):
         cfg = build(self.p, "wisp")
         cfg["model"], cfg["fallback_providers"] = {"provider": "openai-codex", "default": "gpt-6.1-sol"}, [

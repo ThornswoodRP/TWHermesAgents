@@ -3,7 +3,10 @@
 # sandbox job until one passes.
 [Unit]
 Description=Thornswood limits check
-After=local-fs.target swap.target user@1002.service
+# A slice has a cgroup only once it is started; the check reads the slices'
+# caps there, so it starts them first (31 Oct, run 2: nothing had started them).
+Wants=tw-hermes.slice tw-brokers.slice tw-sandbox.slice
+After=local-fs.target swap.target user@1002.service tw-hermes.slice tw-brokers.slice tw-sandbox.slice
 Before=tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-hermes-gateway.service
 
 [Service]

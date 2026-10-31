@@ -181,7 +181,10 @@ mv /etc/sudoers.d/tw-files.new /etc/sudoers.d/tw-files
 
 # 7b. Disk caps: a hard group quota on each Bot's work group.
 srv_mnt="$(findmnt -n -o TARGET --target /srv/tw)"
-quotas_on() { quotaon -p -g "$srv_mnt" 2>/dev/null | grep -q "is on"; }
+# quotaon -p exits non-zero when quotas are on, so under pipefail a pipe into
+# grep read "on" as "off" (31 Oct, run 2). Its words are the answer, not its
+# exit status.
+quotas_on() { local out; out="$(quotaon -p -g "$srv_mnt" 2>&1 || true)"; [[ "$out" == *" is on"* ]]; }
 if [[ -n "$quotas" ]] && ! quotas_on; then
   fstype="$(findmnt -n -o FSTYPE --target /srv/tw)"
   [[ "$fstype" == ext4 ]] || stop "/srv/tw is on $fstype; --quotas handles ext4 only."
@@ -210,6 +213,27 @@ if quotas_on; then
   ok "each Bot's work group has its disk cap on $srv_mnt"
 else
   echo "SKIP disk caps: group quotas are not on for $srv_mnt; run this again with --quotas"
+fi
+
+# 7c. Swap: the 4 GB swapfile the host plan names (02 section 8.5), made when
+# the box has no swap at all. The limits check fails without it.
+if [[ -z "$(swapon --show --noheadings)" ]]; then
+  [[ ! -e /swapfile ]] || stop "/swapfile exists but is not in use; look at it before anything replaces it."
+  boot_floor="$(pol admission.admit.boot_free_gb)"
+  free_gb="$(df --output=avail -BG / | tail -1 | tr -dc 0-9)"
+  (( free_gb >= boot_floor + 4 )) || stop "only ${free_gb} GB free on /; a 4 GB swapfile would take it under the ${boot_floor} GB floor."
+  fallocate -l 4G /swapfile
+  chmod 0600 /swapfile
+  mkswap -q /swapfile
+  swapon /swapfile
+  if ! awk '$1 !~ /^#/ && $1 == "/swapfile"' /etc/fstab | grep -q .; then
+    { cat /etc/fstab; printf '/swapfile\tnone\tswap\tsw\t0\t0\n'; } > /etc/fstab.tw-new
+    findmnt --verify --tab-file /etc/fstab.tw-new >/dev/null 2>&1 || { rm -f /etc/fstab.tw-new; stop "the new /etc/fstab does not verify; /swapfile is on until the next boot only."; }
+    cp -p /etc/fstab "/etc/fstab.before-tw-swap.$(date -u +%Y%m%d%H%M%S)"
+    mv /etc/fstab.tw-new /etc/fstab
+    systemctl daemon-reload
+  fi
+  ok "a 4 GB swapfile is on, and in /etc/fstab for every boot"
 fi
 
 # 8. Units and slices.

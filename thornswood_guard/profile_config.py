@@ -81,9 +81,19 @@ def build(policy: Policy, bot: str) -> dict:
             "container_disk": 0,
             "container_persistent": True,
         },
+        # The helper models. Text helpers ("auto") already take the Bot's own
+        # main route, and Hermes refuses to guess another login once a main
+        # provider is set. Vision is the one helper whose "auto" walks a fixed
+        # list after the main route (OpenRouter, the Nous Portal, DeepInfra),
+        # which is where the gateway's "Nous Portal not configured" lines came
+        # from (31 Oct). It is pinned to the Bot's own first route, so a helper
+        # call never looks past the Bot's routes. It names no endpoint or key
+        # of its own (check_config refuses one), so it signs in the way the
+        # main route does.
         "auxiliary": {
             "free_only": True,
             "openrouter_model": "",
+            "vision": {"provider": cfg["model"]["provider"], "model": cfg["model"]["default"]},
             "title_generation": {"model_upgrade_enabled": False},
             "background_review": {"enabled": False},
         },

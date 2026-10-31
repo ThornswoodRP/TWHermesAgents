@@ -65,7 +65,7 @@ def slice_path(name: str) -> str:
 def slice_problems(cg: Path, name: str, want: dict) -> list[str]:
     d = cg / slice_path(name)
     if not d.is_dir():
-        return [f"{name} is not in the cgroup tree; its unit is not loaded"]
+        return [f"{name} has no cgroup: nothing started it (tw-limits-check.service starts the Thornswood slices)"]
     out = []
     checks = [("memory.max", "MemoryMax", to_bytes), ("memory.high", "MemoryHigh", to_bytes),
               ("pids.max", "TasksMax", int)]

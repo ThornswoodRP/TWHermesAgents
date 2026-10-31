@@ -233,7 +233,7 @@ def main() -> int:
             print(f"  - {f}")
         return 1
     print(f"\nApplied {a.expect} to {', '.join(plans)}. The guard's self-test passed in every profile.")
-    print("A running gateway picks up the plugin and config on restart: hermes gateway restart")
+    print("The gateway picks up the plugin and config on restart, from One: ssh -t thornswood-bots sudo systemctl restart tw-hermes-gateway")
     return 0
 
 

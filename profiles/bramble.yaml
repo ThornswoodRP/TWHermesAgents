@@ -50,6 +50,9 @@ terminal:
 auxiliary:
   free_only: true
   openrouter_model: ''
+  vision:
+    provider: anthropic
+    model: claude-opus-5-5
   title_generation:
     model_upgrade_enabled: false
   background_review:

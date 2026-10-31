@@ -125,6 +125,31 @@ class Units(unittest.TestCase):
         for name in [f"tw-{r}.service" for r in BROKERS] + ["tw-hermes-gateway.service"]:
             self.assertIn(name, before)
 
+    def test_the_limits_check_starts_the_slices_it_reads(self):
+        # 31 Oct, run 2: the check ran before anything was in the slices, so
+        # none had a cgroup yet and all three were reported missing.
+        u = unit("tw-limits-check.service")
+        slices = [s for s in policy().data["slices"] if s != "hermes-user.slice"]
+        for s in slices:
+            self.assertIn(s, u["Wants"][0].split())
+            self.assertIn(s, u["After"][0].split())
+
+    def test_quotas_on_reads_the_words_not_the_exit_status(self):
+        # 31 Oct, run 2: quotaon -p exits 1 when quotas are on, and a pipe into
+        # grep under pipefail read that as off.
+        line = next(l for l in (REPO / "deploy" / "install.sh").read_text().splitlines()
+                    if l.startswith("quotas_on()"))
+        fake = Path(tempfile.mkdtemp())
+        for words, code, want in (("group quota on / (/dev/sda1) is on", 1, "ON"),
+                                  ("group quota on / (/dev/sda1) is off", 0, "OFF"),
+                                  ("quotaon: Cannot find mountpoint", 2, "OFF")):
+            (fake / "quotaon").write_text(f"#!/bin/sh\necho '{words}'\nexit {code}\n")
+            (fake / "quotaon").chmod(0o755)
+            r = subprocess.run(["bash", "-c", f"set -euo pipefail; srv_mnt=/; {line}\n"
+                                "if quotas_on; then echo ON; else echo OFF; fi"],
+                               capture_output=True, text=True, env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"})
+            self.assertEqual(r.stdout.strip(), want, (words, r.stderr))
+
     def test_the_backup_runs_at_half_past_three_mountain(self):
         self.assertEqual(unit("tw-backup.timer")["OnCalendar"], ["*-*-* 03:30:00 America/Denver"])
         self.assertEqual(unit("tw-snapshot.timer")["OnCalendar"], ["hourly"])
@@ -261,7 +286,8 @@ class LimitsCheck(unittest.TestCase):
 
     def test_16_a_slice_that_is_not_loaded_is_found(self):
         shutil.rmtree(self.root / "sys/fs/cgroup/tw.slice/tw-brokers.slice")
-        self.assertIn("tw-brokers.slice is not in the cgroup tree; its unit is not loaded", self.check())
+        self.assertIn("tw-brokers.slice has no cgroup: nothing started it (tw-limits-check.service starts the Thornswood slices)",
+                      self.check())
 
     def test_16_a_job_that_lands_outside_its_slice_is_found(self):
         got = "\n".join(self.check(FakeRun(sandbox="0::/system.slice/run-u7.service",
