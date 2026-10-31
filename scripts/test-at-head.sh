@@ -24,6 +24,19 @@ if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
   echo "STOP: give the full 40-character commit, not '$commit'."; exit 1
 fi
 
+# The Python on One that runs the suite. One has more than one: Hermes's own
+# runtime (3.14 on 31 Oct) is first on PATH there and has no PyYAML, so a bare
+# `python` failed the suite on One for a reason that had nothing to do with
+# the commit. Name the right one in TWH_ONE_PYTHON; the run stops before any
+# status is set if the Python it would use can't load PyYAML.
+one_py="${TWH_ONE_PYTHON:-python}"
+if ! one_py_is="$("$one_py" -c 'import sys, yaml; print(sys.executable, sys.version.split()[0])' 2>&1)"; then
+  echo "STOP: '$one_py' can't run the suite on One: ${one_py_is##*$'\n'}"
+  echo "Set TWH_ONE_PYTHON to the One Python that has PyYAML (README, Running the tests). No status was set."
+  exit 1
+fi
+echo "One runs the suite with $one_py_is."
+
 git -C "$here" fetch --quiet origin
 git -C "$here" cat-file -e "$commit^{commit}"
 
@@ -47,7 +60,7 @@ status() {
 
 # One
 git -C "$here" worktree add --quiet --detach "$scratch/tree" "$commit"
-one_out="$(cd "$scratch/tree" && python -m unittest discover -s tests 2>&1)" && one_ok=1 || one_ok=0
+one_out="$(cd "$scratch/tree" && "$one_py" -m unittest discover -s tests 2>&1)" && one_ok=1 || one_ok=0
 one_ran="$(grep -oE '^Ran [0-9]+ tests' <<<"$one_out" | tail -1)"
 
 # The VM

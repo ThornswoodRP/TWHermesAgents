@@ -67,6 +67,8 @@ This repo's Actions minutes are held at $0, so GitHub's own runners never start 
 scripts/test-at-head.sh <the PR's full head commit>
 ```
 
+On One, set `TWH_ONE_PYTHON` to the Python that has PyYAML: Hermes's own runtime is first on One's PATH and has none, so a bare `python` there can't load the suite. The script stops before setting any status when the Python it would use can't import PyYAML.
+
 It runs the whole suite on One and on the VM at that exact commit, then sets the commit status **Guard rail tests (One and VM)**: success only when both pass, with both counts, failure otherwise. A commit status costs nothing.
 
 **Merge rule here:** Patrick merges a PR only when **Guard rail tests (One and VM)** is a success on the PR's exact head. A new push needs a new run. A failure is fixed at its cause, never re-run to get a pass.
