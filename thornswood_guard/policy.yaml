@@ -122,6 +122,12 @@ branches:
 
 claims:
   prefix: "claimed: "
+  # The six Bot claim labels (each Bot's claim_label above) share one colour
+  # (04 section 6.1). Bramble makes them, and only them, with tw_git
+  # claim_labels. The colour is the one the claim labels already share on
+  # GitHub ("claimed: Claude" and the Grok lanes', read 31 Oct).
+  label_color: "5319e7"
+  label_description: "Claimed by {name}, a Thornswood Hermes Bot"
   # Never put on a new claim. Kept for history.
   retired_labels:
     - "claimed: Claude"

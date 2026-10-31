@@ -166,7 +166,7 @@ class TurnGate:
                 pass
 
 
-GIT_OPS = ["base", "push", "open_pr", "edit_pr", "comment", "label", "merge", "start_run", "read", "ledger_event"]
+GIT_OPS = ["base", "push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "start_run", "read", "ledger_event"]
 FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
              "remove", "run_check"]
 
@@ -175,7 +175,8 @@ TW_GIT_SCHEMA = {
     "description": (
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
         "guard rails before the write. Ops: base (get the base branch for a new tree), push (push your branch from "
-        "the bundle tw_files made), open_pr, edit_pr, comment, label (add or remove), merge (Bramble only), "
+        "the bundle tw_files made), open_pr, edit_pr, comment, label (add or remove), claim_labels (Bramble only: "
+        "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only), "
         "start_run (Bramble only), read (a GET inside one repo), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {

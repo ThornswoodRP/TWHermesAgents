@@ -410,6 +410,58 @@ class GitService:
 
         return self._guarded_write(bot, task, f"label-{action}", repo, f"issue/{number}/{label}", "", write=write, read_back=read_back)
 
+    def _repo_label(self, repo: str, name: str) -> dict | None:
+        try:
+            raw = self.gh.get("bramble", repo, f"/repos/{repo}/labels/{quote(name)}")
+        except GitHubError as e:
+            if e.status == 404:
+                return None
+            raise
+        return {"name": raw["name"], "color": str(raw.get("color") or "").lower(),
+                "description": raw.get("description") or ""}
+
+    def claim_labels(self, caller: str, args: dict) -> dict:
+        """The six Bot claim labels in one repo, exactly as the policy names
+        them (Phase 3, 04 section 6.1): made when missing, set back to the
+        policy's colour and description when they differ, then read back from
+        GitHub. Bramble only, through Bramble's App. Nothing the model sends
+        names a label, a colour or a description, and no other label is made,
+        changed or deleted."""
+        bot, repo, task = self._bot(args), self._repo(args), self._task(args)
+        if not self.policy.is_router(bot):
+            raise Refused("only Bramble makes the claim labels")
+        claims = self.policy.data["claims"]
+        held = []
+        for owner in self.policy.bots:
+            name = self.policy.bots[owner]["claim_label"]
+            want = {"name": name, "color": str(claims["label_color"]).lower(),
+                    "description": claims["label_description"].format(name=self.policy.bot_name(owner))}
+            have = self._repo_label(repo, name)
+            if have != want:
+                def write(have=have, want=want, name=name):
+                    if have is None:
+                        r = self.gh.call("bramble", repo, WRITE["issues"], "POST", f"/repos/{repo}/labels", want)
+                        ok = r.status == 201
+                    else:
+                        r = self.gh.call("bramble", repo, WRITE["issues"], "PATCH", f"/repos/{repo}/labels/{quote(name)}",
+                                         {"new_name": name, "color": want["color"], "description": want["description"]})
+                        ok = r.status == 200
+                    if not ok:
+                        raise GitHubError(r.status, str(r.body))
+                    return {"status": r.status}
+
+                def read_back(want=want, name=name):
+                    got = self._repo_label(repo, name)
+                    return got if got == want else None
+
+                # The target names the state it changes from, so a label that
+                # drifts again later is a new operation, not "already done".
+                was = hashlib.sha256(json.dumps(have, sort_keys=True).encode()).hexdigest()[:12]
+                self._guarded_write(bot, task, "claim-label", repo, f"label/{name}/from/{was}", "",
+                                    write=write, read_back=read_back)
+            held.append(self._repo_label(repo, name))
+        return {"repo": repo, "labels": held}
+
     def merge(self, caller: str, args: dict) -> dict:
         bot, repo, task = self._bot(args), self._repo(args), self._task(args)
         if not self.policy.is_router(bot):
@@ -513,5 +565,5 @@ class GitService:
 
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
-        names = ("base", "push", "open_pr", "edit_pr", "comment", "label", "merge", "start_run", "read", "refused", "ledger_event")
+        names = ("base", "push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "start_run", "read", "refused", "ledger_event")
         return {n: (getattr(self, n), {gw}) for n in names}

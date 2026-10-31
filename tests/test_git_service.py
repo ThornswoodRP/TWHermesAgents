@@ -368,6 +368,90 @@ class PullRequestsAndIssues(unittest.TestCase):
             w.git.ledger_event("hermes", {"bot": "rift", "repo": APP, "issue": 1, "event": "merged"})
 
 
+OPS = "EvilPatrick06/Thornswood-Ops"
+BRAMBLE_INSTALLATION = "177016548"
+SIX = ["claimed: Bramble", "claimed: Rift", "claimed: Sprocket", "claimed: Echo", "claimed: Magpie", "claimed: Wisp"]
+
+
+class ClaimLabels(unittest.TestCase):
+    """Phase 3: Bramble makes the six Bot claim labels and reads them back
+    (04 section 6.1)."""
+
+    def make(self, w, bot="bramble", repo=APP, **extra):
+        return w.git.claim_labels("hermes", {"bot": bot, "repo": repo, "task": "phase-3-labels", **extra})
+
+    def test_bramble_makes_the_six_with_one_colour_and_reads_them_back(self):
+        w = World()
+        out = self.make(w)
+        self.assertEqual([l["name"] for l in out["labels"]], SIX)
+        self.assertEqual({l["color"] for l in out["labels"]}, {"5319e7"})
+        self.assertEqual(out["labels"][1]["description"], "Claimed by Rift, a Thornswood Hermes Bot")
+        self.assertEqual(len(w.fake.writes("POST", "/labels")), 6)
+        # Every label write went through Bramble's App.
+        label_tokens = [t for t in w.fake.tokens if t["permissions"].get("issues") == "write"]
+        self.assertTrue(label_tokens)
+        self.assertEqual({t["installation"] for t in label_tokens}, {BRAMBLE_INSTALLATION})
+
+    def test_a_second_run_writes_nothing(self):
+        w = World()
+        self.make(w)
+        before = len(w.fake.writes())
+        again = self.make(w)
+        self.assertEqual(len(w.fake.writes()), before)
+        self.assertEqual([l["name"] for l in again["labels"]], SIX)
+
+    def test_a_label_that_drifted_is_set_back(self):
+        w = World()
+        self.make(w)
+        w.fake.repo_labels[(APP, "claimed: echo")].update(color="ffffff", description="someone's")
+        out = self.make(w)
+        echo = next(l for l in out["labels"] if l["name"] == "claimed: Echo")
+        self.assertEqual((echo["color"], echo["description"]), ("5319e7", "Claimed by Echo, a Thornswood Hermes Bot"))
+        self.assertEqual(len(w.fake.writes("PATCH", "/labels/")), 1)
+        # A second drift of the same label is a new operation, not "already done".
+        w.fake.repo_labels[(APP, "claimed: echo")].update(color="000000")
+        self.make(w)
+        self.assertEqual(w.fake.repo_labels[(APP, "claimed: echo")]["color"], "5319e7")
+
+    def test_only_bramble_and_only_the_bots_repos(self):
+        w = World()
+        for bot in ("rift", "sprocket", "echo", "magpie", "wisp"):
+            with self.subTest(bot=bot), self.assertRaises(Refused):
+                self.make(w, bot=bot)
+        with self.assertRaises(Refused):
+            self.make(w, repo=HERMES)
+        with self.assertRaises(Refused):
+            self.make(w, repo="someone/else")
+        self.assertEqual(w.fake.writes(), [])
+
+    def test_nothing_the_model_sends_names_a_label_or_colour(self):
+        w = World()
+        out = self.make(w, label="claimed: Claude", color="ff0000", name="claimed: Anvil")
+        self.assertEqual([l["name"] for l in out["labels"]], SIX)
+        self.assertNotIn((APP, "claimed: claude"), w.fake.repo_labels)
+        self.assertNotIn((APP, "claimed: anvil"), w.fake.repo_labels)
+
+    def test_other_labels_are_never_touched(self):
+        w = World()
+        w.fake.repo_labels[(APP, "claimed: claude")] = {"name": "claimed: Claude", "color": "5319e7", "description": "old"}
+        self.make(w)
+        self.assertEqual(w.fake.repo_labels[(APP, "claimed: claude")]["description"], "old")
+        self.assertFalse([c for c in w.fake.writes() if "claimed%3A%20Claude" in c[1]])
+
+    def test_a_lost_answer_is_read_back_not_written_twice(self):
+        w = World()
+        w.fake.lose_answer.add(f"POST /repos/{APP}/labels")
+        with self.assertRaises(Refused):
+            self.make(w)
+        out = self.make(w)
+        self.assertEqual([l["name"] for l in out["labels"]], SIX)
+        self.assertEqual(len(w.fake.writes("POST", "/labels")), 6)
+
+    def test_the_tool_offers_every_op_the_broker_has(self):
+        from thornswood_guard.brokers import GIT_OPS
+        self.assertEqual(sorted(GIT_OPS + ["refused"]), sorted(World().git.ops()))
+
+
 class Runs(unittest.TestCase):
     def test_a_worker_starts_no_run(self):
         w = World()

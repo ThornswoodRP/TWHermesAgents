@@ -41,6 +41,7 @@ class FakeGitHub:
         self.comments: dict[tuple[str, int], list[dict]] = {}
         self.contents: dict[tuple[str, str, str], bytes] = {}
         self.runs: list[dict] = []
+        self.repo_labels: dict[tuple[str, str], dict] = {}   # (repo, lower-case name) -> label
         self.calls: list[tuple[str, str, dict | None]] = []
         self.tokens: list[dict] = []
         self.lose_answer: set[str] = set()   # "METHOD path" whose answer is lost after the write
@@ -198,6 +199,23 @@ class FakeGitHub:
                 name = urllib.parse.unquote(rest[3])
                 issue["labels"] = [x for x in issue["labels"] if x["name"] != name]
                 return Response(200, issue["labels"], {})
+        if rest[0] == "labels":
+            if len(rest) == 1 and method == "POST":
+                k = (repo, body["name"].lower())
+                if k in self.repo_labels:
+                    return Response(422, {"message": "Validation Failed", "errors": [{"code": "already_exists"}]}, {})
+                self.repo_labels[k] = {"name": body["name"], "color": body["color"], "description": body.get("description")}
+                return Response(201, self.repo_labels[k], {})
+            k = (repo, urllib.parse.unquote(rest[1]).lower())
+            label = self.repo_labels.get(k)
+            if label is None:
+                return Response(404, {"message": "Not Found"}, {})
+            if method == "GET":
+                return Response(200, dict(label), {})
+            if method == "PATCH":
+                label.update({"name": body.get("new_name", label["name"]), "color": body.get("color", label["color"]),
+                              "description": body.get("description", label["description"])})
+                return Response(200, dict(label), {})
         if rest[0] == "actions" and rest[1] == "workflows":
             wf = urllib.parse.unquote(rest[2])
             if rest[3] == "dispatches":
