@@ -111,9 +111,15 @@ install -d -m 0700 -o tw-git -g tw-git /srv/tw/git
 install -d -m 2750 -o tw-git -g tw-spool /srv/tw/spool/in
 install -d -m 2750 -o tw-files -g tw-spool /srv/tw/spool/out
 for b in $bots; do install -d -m 2770 -o tw-files -g "tw-work-$b" "/srv/tw/work/$b"; done
+# tw-files never makes a Bot's own folder: its group and setgid bit are what
+# keep every tree under it the Bot's (31 Oct: a listing showed no wisp folder).
+for b in $bots; do
+  got="$(stat -c '%U:%G %a' "/srv/tw/work/$b")"
+  [[ "$got" == "tw-files:tw-work-$b 2770" ]] || stop "/srv/tw/work/$b is $got, not tw-files:tw-work-$b 2770."
+done
 install -d -m 0755 -o root -g root /srv/tw/backups
 install -d -m 0700 -o root -g root /srv/tw/snapshots
-ok "folders under /srv/tw"
+ok "folders under /srv/tw, with one tw-files:tw-work-<bot> 2770 folder for each of $bots"
 
 # 3. The Apps' keys: tw-git's alone.
 install -d -m 0750 -o root -g tw-git /etc/thornswood/apps

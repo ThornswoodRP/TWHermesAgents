@@ -184,6 +184,16 @@ class Units(unittest.TestCase):
         self.assertIn("tw-policy-clients tw-git-clients tw-files-clients", step)
         self.assertLess(text.index("usermod -a -G tw-policy-clients"), text.index("# 9b."))
 
+    def test_the_install_makes_and_proves_every_bots_folder(self):
+        # 31 Oct: a listing of /srv/tw/work showed no wisp folder, and the
+        # file broker no longer makes a Bot's own folder.
+        text = (REPO / "deploy" / "install.sh").read_text()
+        bots = re.search(r'^bots="([^"]+)"', text, re.M).group(1).split()
+        self.assertEqual(sorted(bots), sorted(policy().bots))
+        make = text.index('install -d -m 2770 -o tw-files -g "tw-work-$b" "/srv/tw/work/$b"')
+        prove = text.index('[[ "$got" == "tw-files:tw-work-$b 2770" ]] || stop')
+        self.assertLess(make, prove)
+
     def test_the_backup_runs_at_half_past_three_mountain(self):
         self.assertEqual(unit("tw-backup.timer")["OnCalendar"], ["*-*-* 03:30:00 America/Denver"])
         self.assertEqual(unit("tw-snapshot.timer")["OnCalendar"], ["hourly"])

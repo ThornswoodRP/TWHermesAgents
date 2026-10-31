@@ -41,7 +41,13 @@ from .wire import Refused
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,60}")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 OUT_CAP = 200_000
-DIR_MODE = 0o2770
+# No setgid bit in the mode: tw-files runs with RestrictSUIDSGID=yes, whose
+# filter refuses a mkdir that asks for one with EPERM, before it even looks
+# whether the folder is there (31 Oct, Rift's first checkout). The install
+# makes each Bot's folder tw-files:tw-work-<bot> 2770, and Linux gives every
+# folder made under a setgid folder the same group and the setgid bit, so the
+# trees keep the Bot's group without asking.
+DIR_MODE = 0o770
 FILE_MODE = 0o660
 
 
@@ -388,7 +394,12 @@ class FilesService:
         with self._lock(bot):
             if os.path.lexists(tree):
                 raise Refused(f"the tree for task {args.get('task')} already exists")
-            self._dir_fd(self.work, [bot, tree.parent.name, tree.name], create=True)
+            # The Bot's own folder is the install's (its group and setgid bit
+            # are what keep the tree the Bot's); the broker never makes it.
+            if not os.path.lexists(self.work / bot):
+                raise Refused(f"{self.work / bot} is missing; the install makes each Bot's folder")
+            os.close(self._dir_fd(self.work, [bot]))
+            os.close(self._dir_fd(self.work / bot, [tree.parent.name, tree.name], create=True))
             r = subprocess.run(["git", "init", "-q", "-b", base, str(tree)], capture_output=True, text=True, env=_git_env(tree))
             if r.returncode != 0:
                 raise Refused(f"git init failed: {r.stderr.strip()[-300:]}")

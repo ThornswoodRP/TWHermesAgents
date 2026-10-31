@@ -16,12 +16,15 @@ if not _sys.platform.startswith("linux"):
     raise _unittest.SkipTest("the brokers run only on the Oracle VM; their tests run there")
 
 import copy
+import errno
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fake_github import FakeGitHub, git
 from helpers import policy
@@ -47,6 +50,10 @@ class World:
         self.policy = policy_service(data=data) if data else policy_service()
         self.work = self.root / "work"
         self.work.mkdir()
+        # As the install makes them: one setgid folder per Bot.
+        for bot in self.p.bots:
+            (self.work / bot).mkdir()
+            (self.work / bot).chmod(0o2770)
         self.spool = self.root / "spool"
         self.files = FilesService(self.p, self.ask("tw-files"), work=self.work, spool=self.spool, runner=runner,
                                   check_helper=["helper"])
@@ -200,6 +207,89 @@ class Work(unittest.TestCase):
         w.files.remove("hermes", w.a())
         self.assertFalse(w.tree().exists())
         self.assertTrue(w.canary.exists())
+
+
+REPO = Path(__file__).resolve().parent.parent
+SUID_SGID = stat.S_ISUID | stat.S_ISGID
+
+
+def restrict_suid_sgid():
+    """What RestrictSUIDSGID=yes does to tw-files: its seccomp filter refuses
+    with EPERM any mkdir, open with O_CREAT or chmod that asks for a setuid or
+    setgid bit, before the kernel looks whether the file is there."""
+    real_mkdir, real_open, real_chmod, real_fchmod = os.mkdir, os.open, os.chmod, os.fchmod
+
+    def refuse(mode):
+        if mode & SUID_SGID:
+            raise PermissionError(errno.EPERM, "Operation not permitted (RestrictSUIDSGID)")
+
+    def mkdir(path, mode=0o777, *a, **kw):
+        refuse(mode)
+        return real_mkdir(path, mode, *a, **kw)
+
+    def open_(path, flags, mode=0o777, *a, **kw):
+        if flags & os.O_CREAT:
+            refuse(mode)
+        return real_open(path, flags, mode, *a, **kw)
+
+    def chmod(path, mode, *a, **kw):
+        refuse(mode)
+        return real_chmod(path, mode, *a, **kw)
+
+    def fchmod(fd, mode):
+        refuse(mode)
+        return real_fchmod(fd, mode)
+
+    return mock.patch.multiple(os, mkdir=mkdir, open=open_, chmod=chmod, fchmod=fchmod)
+
+
+class UnderTheServiceSandbox(unittest.TestCase):
+    """31 Oct: Rift's first checkout failed with EPERM on its own folder,
+    because the broker asked mkdir for the setgid bit under RestrictSUIDSGID."""
+
+    def test_tw_files_runs_with_restrict_suid_sgid(self):
+        lines = (REPO / "deploy" / "systemd" / "tw-files.service").read_text().splitlines()
+        self.assertIn("RestrictSUIDSGID=yes", lines)
+
+    def test_the_stand_in_refuses_what_the_filter_refuses(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "rift").mkdir()
+        with restrict_suid_sgid():
+            with self.assertRaises(PermissionError):
+                os.mkdir(d / "rift", 0o2770)
+            with self.assertRaises(FileExistsError):
+                os.mkdir(d / "rift", 0o770)
+
+    def test_a_task_from_checkout_to_bundle_under_the_sandbox(self):
+        w = World()
+        with restrict_suid_sgid():
+            w.checkout(bot="rift", task="0-smoke-check")
+            a = w.a(bot="rift", task="0-smoke-check")
+            w.files.write("hermes", dict(a, path="deep/new/folder/a.txt", content="a\n"))
+            w.files.edit("hermes", dict(a, path="README.md", old="Thornswood", new="Thornswood!"))
+            self.assertTrue(w.files.status("hermes", a)["status"].startswith("## rift/0-smoke-check"))
+            w.files.commit("hermes", dict(a, message="smoke"))
+            w.files.bundle("hermes", a)
+            self.assertEqual([t["task"] for t in w.files.trees("hermes", {"bot": "rift"})["trees"]], ["0-smoke-check"])
+            w.files.remove("hermes", a)
+
+    def test_new_folders_keep_the_bots_group_and_setgid_bit(self):
+        w = World()
+        w.checkout(bot="rift", task="0-smoke-check")
+        w.files.write("hermes", w.a(bot="rift", task="0-smoke-check", path="deep/a.txt", content="a\n"))
+        top = os.stat(w.work / "rift")
+        for d in (w.work / "rift" / "Thornswood", w.tree("rift", "0-smoke-check"), w.tree("rift", "0-smoke-check") / "deep"):
+            st = os.stat(d)
+            self.assertTrue(st.st_mode & stat.S_ISGID, d)
+            self.assertEqual(st.st_gid, top.st_gid, d)
+
+    def test_the_broker_never_makes_a_bots_own_folder(self):
+        w = World()
+        (w.work / "wisp").rmdir()
+        with self.assertRaises(Refused) as e:
+            w.checkout(bot="wisp", task="1-engine")
+        self.assertIn("the install makes", str(e.exception))
+        self.assertFalse((w.work / "wisp").exists())
 
 
 class Attack1Paths(unittest.TestCase):
