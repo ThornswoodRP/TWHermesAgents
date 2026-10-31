@@ -150,6 +150,39 @@ class Units(unittest.TestCase):
                                capture_output=True, text=True, env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"})
             self.assertEqual(r.stdout.strip(), want, (words, r.stderr))
 
+    def test_stale_procs_counts_only_hermes_processes_without_the_groups(self):
+        # 31 Oct: Rift's first Workbench turn was refused at the broker socket
+        # by hermes processes that started before usermod gave the groups.
+        text = (REPO / "deploy" / "install.sh").read_text()
+        fn = re.search(r"^stale_procs\(\) \{\n.*?^\}\n", text, re.S | re.M).group(0)
+        proc = Path(tempfile.mkdtemp())
+
+        def p(pid, uid, groups, ns="user:[4026531837]"):
+            d = proc / str(pid)
+            (d / "ns").mkdir(parents=True)
+            (d / "status").write_text(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGroups:\t{groups}\n")
+            (d / "ns" / "user").symlink_to(ns)
+
+        p(1, 0, "")
+        p(200, 1001, "1001 2001 2002 2003")             # started after usermod
+        p(201, 1001, "1001")                            # Desktop over ssh, before usermod
+        p(202, 1001, "1001 2001 2002")                  # one group short
+        p(203, 1001, "", ns="user:[4026532999]")        # inside a rootless container
+        p(204, 1002, "1002")                            # another user
+        r = subprocess.run(["bash", "-c", f"set -euo pipefail\n{fn}stale_procs {proc} 1001 2001 2002 2003"],
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "2"), r.stderr)
+
+    def test_the_install_ends_stale_hermes_sessions_and_brings_the_gateway_back(self):
+        text = (REPO / "deploy" / "install.sh").read_text()
+        step = text[text.index("# 9b."):text.index("# 10.")]
+        order = ["stale_procs /proc", "loginctl terminate-user hermes", 'systemctl start "user@$hermes_uid.service"',
+                 "systemctl restart tw-hermes-gateway.service", "systemctl is-active --quiet tw-hermes-gateway.service"]
+        at = [step.index(s) for s in order]
+        self.assertEqual(at, sorted(at))
+        self.assertIn("tw-policy-clients tw-git-clients tw-files-clients", step)
+        self.assertLess(text.index("usermod -a -G tw-policy-clients"), text.index("# 9b."))
+
     def test_the_backup_runs_at_half_past_three_mountain(self):
         self.assertEqual(unit("tw-backup.timer")["OnCalendar"], ["*-*-* 03:30:00 America/Denver"])
         self.assertEqual(unit("tw-snapshot.timer")["OnCalendar"], ["hourly"])

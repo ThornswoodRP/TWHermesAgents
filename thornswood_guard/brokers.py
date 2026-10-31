@@ -167,7 +167,7 @@ class TurnGate:
 
 
 GIT_OPS = ["base", "push", "open_pr", "edit_pr", "comment", "label", "merge", "start_run", "read", "ledger_event"]
-FILES_OPS = ["checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
+FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
              "remove", "run_check"]
 
 TW_GIT_SCHEMA = {
@@ -203,7 +203,7 @@ TW_FILES_SCHEMA = {
     "name": "tw_files",
     "description": (
         "Your work trees, through the file broker: one tree per task under your own name, nothing outside it. "
-        "Ops: checkout (a new tree on your branch from the base bundle tw_git gave you), read, write, edit (replace "
+        "Ops: trees (your trees: each one's repo, task name and branch; needs no repo or task), checkout (a new tree on your branch from the base bundle tw_git gave you), read, write, edit (replace "
         "text found exactly once), delete, list, status, diff, search, commit, bundle (your branch, for tw_git push), "
         "remove (after the PR merged or closed), run_check (one test harness). Paths are inside the tree; links "
         "are never followed and .git is never a path."),
@@ -219,7 +219,7 @@ TW_FILES_SCHEMA = {
             "pattern": {"type": "string"}, "message": {"type": "string"},
             "command": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["op", "repo", "task"],
+        "required": ["op"],
         "additionalProperties": False,
     },
 }

@@ -152,6 +152,47 @@ class Work(unittest.TestCase):
             with self.subTest(task=task), self.assertRaises(Refused):
                 w.files.read("hermes", w.a(task=task, path="README.md"))
 
+    def test_trees_lists_only_the_bots_own_trees(self):
+        # 31 Oct: Rift was asked for git status, and status takes a task name
+        # Rift had no way to find.
+        w = World()
+        self.assertEqual(w.files.trees("hermes", {"bot": "sprocket"}), {"trees": []})
+        w.checkout()
+        w.checkout(task="3600-second")
+        w.checkout(bot="rift", task="12-load-order")
+        mine = w.files.trees("hermes", {"bot": "sprocket"})["trees"]
+        self.assertEqual(mine, [
+            {"repo": APP, "task": "3561-path-fence", "branch": "sprocket/3561-path-fence"},
+            {"repo": APP, "task": "3600-second", "branch": "sprocket/3600-second"},
+        ])
+        self.assertEqual([t["task"] for t in w.files.trees("hermes", {"bot": "rift"})["trees"]], ["12-load-order"])
+        st = w.files.status("hermes", w.a(task=mine[0]["task"]))["status"]
+        self.assertTrue(st.startswith("## sprocket/3561-path-fence"), st)
+
+    def test_trees_never_follows_a_link_and_names_a_stopped_tree(self):
+        w = World()
+        w.checkout()
+        os.symlink(w.outside, w.work / "sprocket" / "Thornswood" / "9-out")
+        with open(w.tree() / ".git" / "config", "a") as f:
+            f.write('[core]\n\tfsmonitor = true\n')
+        got = w.files.trees("hermes", {"bot": "sprocket"})["trees"]
+        self.assertEqual([t["task"] for t in got], ["3561-path-fence"])
+        self.assertIsNone(got[0]["branch"])
+        self.assertIn("core.fsmonitor", got[0]["stopped"])
+        with self.assertRaises(Refused):
+            w.files.trees("hermes", {"bot": "nobody"})
+
+    def test_the_tool_offers_every_op_the_broker_has(self):
+        from thornswood_guard.brokers import FILES_OPS, TW_FILES_SCHEMA
+        self.assertEqual(sorted(FILES_OPS), sorted(World().files.ops()))
+        self.assertEqual(TW_FILES_SCHEMA["parameters"]["required"], ["op"])
+
+    def test_a_status_without_a_task_points_at_trees(self):
+        w = World()
+        with self.assertRaises(Refused) as e:
+            w.files.status("hermes", {"bot": "rift", "repo": APP})
+        self.assertIn("trees", str(e.exception))
+
     def test_a_removed_tree_is_gone(self):
         w = World()
         w.checkout()

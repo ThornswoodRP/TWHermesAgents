@@ -81,7 +81,7 @@ class FilesService:
     def _task(self, args: dict) -> str:
         task = str(args.get("task") or "")
         if not TASK.fullmatch(task):
-            raise Refused("a task's tree is named like <issue>-<what>, lower case")
+            raise Refused("a task's tree is named like <issue>-<what>, lower case; the trees op lists yours")
         return task
 
     def _tree(self, args: dict, *, must_exist: bool = True) -> tuple[str, str, Path]:
@@ -292,6 +292,47 @@ class FilesService:
                 os.close(dfd)
         return {"entries": sorted(out, key=lambda x: x["name"])}
 
+    def trees(self, caller: str, args: dict) -> dict:
+        """The Bot's own trees, so it can find a task's name before it asks
+        for anything in one (31 Oct: Rift was asked for git status and had no
+        way to learn its task names). Only this Bot's folder is read, links
+        are never followed, and a tree the git ops would stop says why."""
+        bot = self._bot(args)
+        repos = self.policy.data["repos"]
+        names = [repos["app"], repos["ops"]] + ([repos["fork"]] if self.policy.bots[bot].get("fork_branches") else [])
+        out = []
+        with self._lock(bot):
+            try:
+                bfd = self._dir_fd(self.work, [bot])
+            except Refused:
+                return {"trees": []}
+            try:
+                for repo in names:
+                    try:
+                        rfd = os.open(self._repo_dir(bot, repo), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=bfd)
+                    except OSError:
+                        continue
+                    try:
+                        with os.scandir(rfd) as it:
+                            entries = sorted(e.name for e in it
+                                             if TASK.fullmatch(e.name) and stat.S_ISDIR(e.stat(follow_symlinks=False).st_mode))
+                    finally:
+                        os.close(rfd)
+                    for task in entries:
+                        tree = self.work / bot / self._repo_dir(bot, repo) / task
+                        entry = {"repo": repo, "task": task, "branch": None}
+                        try:
+                            r = self._git(tree, "symbolic-ref", "--short", "-q", "HEAD", check=False)
+                            entry["branch"] = r.stdout.strip() or None
+                        except Refused as e:
+                            entry["stopped"] = str(e)
+                        out.append(entry)
+                        if len(out) >= 200:
+                            return {"trees": out, "cut": True}
+            finally:
+                os.close(bfd)
+        return {"trees": out}
+
     # Git in the tree
 
     def _git_ok(self, tree: Path) -> Path:
@@ -473,7 +514,7 @@ class FilesService:
 
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
-        names = ("read", "write", "edit", "delete", "list", "checkout", "status", "diff", "search", "commit",
+        names = ("trees", "read", "write", "edit", "delete", "list", "checkout", "status", "diff", "search", "commit",
                  "bundle", "remove", "run_check")
         return {n: (getattr(self, n), {gw}) for n in names}
 

@@ -45,6 +45,25 @@ ok() { echo "PASS $*"; }
 [[ "$(git -C "$here" rev-parse HEAD)" == "$commit" ]] || stop "$here is not at $commit."
 [[ -z "$(git -C "$here" status --porcelain)" ]] || stop "$here has changes; only the merged commit is installed."
 
+# How many of a user's processes, in the host's user namespace, lack any of
+# the given group ids. A process keeps the groups it started with: one that
+# began before usermod added the broker groups cannot open their sockets
+# (31 Oct: Rift's first turn in the Workbench was refused, "permission denied
+# on its socket", from a hermes session that started at 1:47 PM).
+#   stale_procs <proc root> <uid> <gid> [<gid>...]
+stale_procs() {
+  local proc="$1" uid="$2"; shift 2
+  local host_ns d n=0 groups g
+  host_ns="$(readlink "$proc/1/ns/user" 2>/dev/null || true)"
+  for d in "$proc"/[0-9]*; do
+    [[ "$(awk '/^Uid:/{print $2}' "$d/status" 2>/dev/null)" == "$uid" ]] || continue
+    [[ "$(readlink "$d/ns/user" 2>/dev/null || true)" == "$host_ns" ]] || continue
+    groups=" $(awk '/^Groups:/{$1=""; print}' "$d/status" 2>/dev/null) "
+    for g in "$@"; do [[ "$groups" == *" $g "* ]] || { n=$((n + 1)); break; }; done
+  done
+  echo "$n"
+}
+
 pol() { python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d
 for k in sys.argv[2].split("."): v=v[k]
 print(json.dumps(v) if isinstance(v,(dict,list,bool)) else v)' "$here/thornswood_guard/policy.json" "$1"; }
@@ -273,6 +292,34 @@ PY
   systemctl is-active --quiet tw-hermes-gateway.service || stop "tw-hermes-gateway did not stay up: journalctl -u tw-hermes-gateway -n 50"
   ok "the gateway runs as tw-hermes-gateway.service in tw-hermes.slice"
 fi
+
+# 9b. The hermes user's own processes take the broker groups only when they
+# start. Any still running from before usermod (a Hermes Desktop session over
+# ssh, the user's systemd) cannot reach the sockets, so the hermes user's
+# sessions are ended and the gateway is started again here, by the install,
+# not by hand afterwards. Ending them also stops tw-hermes-gateway, which runs
+# as hermes and needs user@UID.service (31 Oct: a hand-run terminate-user left
+# it failed).
+client_gids=($(for g in tw-policy-clients tw-git-clients tw-files-clients; do getent group "$g" | cut -d: -f3; done))
+stale="$(stale_procs /proc "$hermes_uid" "${client_gids[@]}")"
+if (( stale > 0 )); then
+  gateway_was="$(systemctl is-enabled tw-hermes-gateway.service 2>/dev/null || true)"
+  echo "$stale hermes processes started before hermes joined the broker groups; ending the hermes user's sessions (Hermes Desktop reconnects)."
+  loginctl terminate-user hermes || true
+  for _ in $(seq 1 30); do
+    pgrep -u "$hermes_uid" >/dev/null || break
+    sleep 1
+  done
+  systemctl start "user@$hermes_uid.service"
+  if [[ "$gateway_was" == enabled ]]; then
+    systemctl restart tw-hermes-gateway.service
+    sleep 5
+    systemctl is-active --quiet tw-hermes-gateway.service || stop "tw-hermes-gateway did not come back after the sessions ended: journalctl -u tw-hermes-gateway -n 50"
+  fi
+  stale="$(stale_procs /proc "$hermes_uid" "${client_gids[@]}")"
+  (( stale == 0 )) || stop "$stale hermes processes still lack the broker groups; look at: ps -u hermes -o pid,lstart,cmd"
+fi
+ok "every hermes process has the broker groups$( [[ "$(systemctl is-enabled tw-hermes-gateway.service 2>/dev/null || true)" == enabled ]] && echo ", and tw-hermes-gateway is $(systemctl is-active tw-hermes-gateway.service || true)")"
 
 # 10. What holds now.
 echo "--- limits check"
