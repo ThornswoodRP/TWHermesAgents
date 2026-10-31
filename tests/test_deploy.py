@@ -157,10 +157,10 @@ class Units(unittest.TestCase):
         fn = re.search(r"^stale_procs\(\) \{\n.*?^\}\n", text, re.S | re.M).group(0)
         proc = Path(tempfile.mkdtemp())
 
-        def p(pid, uid, groups, ns="user:[4026531837]"):
+        def p(pid, uid, groups, ns="user:[4026531837]", name="hermes"):
             d = proc / str(pid)
             (d / "ns").mkdir(parents=True)
-            (d / "status").write_text(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGroups:\t{groups}\n")
+            (d / "status").write_text(f"Name:\t{name}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGroups:\t{groups}\n")
             (d / "ns" / "user").symlink_to(ns)
 
         p(1, 0, "")
@@ -169,6 +169,7 @@ class Units(unittest.TestCase):
         p(202, 1001, "1001 2001 2002")                  # one group short
         p(203, 1001, "", ns="user:[4026532999]")        # inside a rootless container
         p(204, 1002, "1002")                            # another user
+        p(205, 1001, "", name="(sd-pam)")               # PAM's helper, which drops every group itself
         r = subprocess.run(["bash", "-c", f"set -euo pipefail\n{fn}stale_procs {proc} 1001 2001 2002 2003"],
                            capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "2"), r.stderr)

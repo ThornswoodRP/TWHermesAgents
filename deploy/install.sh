@@ -50,6 +50,10 @@ ok() { echo "PASS $*"; }
 # began before usermod added the broker groups cannot open their sockets
 # (31 Oct: Rift's first turn in the Workbench was refused, "permission denied
 # on its socket", from a hermes session that started at 1:47 PM).
+# (sd-pam) is left out: systemd forks it beside every user manager only to
+# close the PAM session at logout, and it drops all its supplementary groups
+# on purpose, so it never has them and never opens a socket (31 Oct, the
+# first install with this check stopped on it).
 #   stale_procs <proc root> <uid> <gid> [<gid>...]
 stale_procs() {
   local proc="$1" uid="$2"; shift 2
@@ -58,6 +62,7 @@ stale_procs() {
   for d in "$proc"/[0-9]*; do
     [[ "$(awk '/^Uid:/{print $2}' "$d/status" 2>/dev/null)" == "$uid" ]] || continue
     [[ "$(readlink "$d/ns/user" 2>/dev/null || true)" == "$host_ns" ]] || continue
+    [[ "$(awk -F'\t' '/^Name:/{print $2}' "$d/status" 2>/dev/null)" == "(sd-pam)" ]] && continue
     groups=" $(awk '/^Groups:/{$1=""; print}' "$d/status" 2>/dev/null) "
     for g in "$@"; do [[ "$groups" == *" $g "* ]] || { n=$((n + 1)); break; }; done
   done
