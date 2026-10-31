@@ -157,11 +157,19 @@ class GitHubRules:
             if not yes.allowed:
                 return Verdict.no(f"PR {pr.number} changes what runs on the live box ({', '.join(gated[:5])}); {yes.reason}")
             return Verdict.yes(f"green on {sha[:12]} and {yes.reason}")
-        return Verdict.yes(f"{p.required_check(pr.repo)} is a success on {sha[:12]}")
+        return Verdict.yes(f"green on {sha[:12]}: {', '.join(p.required_checks(pr.repo))}")
 
     def check_green(self, pr: PullRequest, checks: list[CheckRun]) -> Verdict:
-        name = self.policy.required_check(pr.repo)
-        runs =[c for c in checks if c.name == name and c.head_sha == pr.head_sha]
+        """Every required check of the repo is a success on the exact head."""
+        for name in self.policy.required_checks(pr.repo):
+            verdict = self._one_check_green(pr, checks, name)
+            if not verdict.allowed:
+                return verdict
+        return Verdict.yes()
+
+    @staticmethod
+    def _one_check_green(pr: PullRequest, checks: list[CheckRun], name: str) -> Verdict:
+        runs = [c for c in checks if c.name == name and c.head_sha == pr.head_sha]
         if not runs:
             return Verdict.no(f"'{name}' has not run on {pr.head_sha[:12]}; green on an old head is not green")
         latest = runs[-1]

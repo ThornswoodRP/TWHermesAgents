@@ -145,8 +145,34 @@ class Merges(unittest.TestCase):
     def test_green_on_an_old_head_is_not_green(self):
         self.assertFalse(self.merge(checks=green(sha=OTHER)).allowed)
 
-    def test_the_other_launcher_job_does_not_count(self):
-        self.assertFalse(self.merge(checks=green(name="Launcher builds")).allowed)
+    def test_both_required_checks_are_green(self):
+        v = self.merge()
+        self.assertTrue(v.allowed, v.reason)
+        self.assertIn("Launcher builds", v.reason)
+        self.assertIn("Build check result", v.reason)
+
+    def test_the_build_alone_is_not_enough(self):
+        v = self.merge(checks=green(name="Launcher builds"))
+        self.assertFalse(v.allowed)
+        self.assertIn("Build check result", v.reason)
+
+    def test_the_result_alone_is_not_enough(self):
+        v = self.merge(checks=green(name="Build check result"))
+        self.assertFalse(v.allowed)
+        self.assertIn("Launcher builds", v.reason)
+
+    def test_one_of_the_two_red_or_skipped_refuses(self):
+        for bad in ("failure", "skipped", "cancelled"):
+            checks = green(name="Launcher builds") + green(name="Build check result", conclusion=bad)
+            self.assertFalse(self.merge(checks=checks).allowed, bad)
+            checks = green(name="Launcher builds", conclusion=bad) + green(name="Build check result")
+            self.assertFalse(self.merge(checks=checks).allowed, bad)
+
+    def test_the_retired_vps_fallback_job_does_not_count(self):
+        # Gone from PR builds since #5119; it was the old required check.
+        self.assertFalse(self.merge(checks=green(name="Launcher builds (VPS fallback)")).allowed)
+        checks = green(name="Launcher builds (VPS fallback)") + green(name="Launcher builds")
+        self.assertFalse(self.merge(checks=checks).allowed)
 
     def test_the_latest_run_counts(self):
         checks = green(conclusion="success") + green(conclusion="failure")

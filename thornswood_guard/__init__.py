@@ -28,7 +28,8 @@ def _prompt_section(policy, bot: str) -> str:
         "No Bot holds a GitHub credential. GitHub writes go through the git broker, which checks the guard rails again.",
     ]
     if policy.is_router(bot):
-        lines.append(f"You alone merge, and only when '{policy.required_check('EvilPatrick06/Thornswood')}' is a success on the exact head.")
+        names = " and ".join(f"'{n}'" for n in policy.required_checks("EvilPatrick06/Thornswood"))
+        lines.append(f"You alone merge, and only when {names} each succeeded on the exact head.")
     else:
         lines.append("You never merge, start a release, deploy or Nexus run, or change a workflow file through your own App.")
     return "\n".join(lines)

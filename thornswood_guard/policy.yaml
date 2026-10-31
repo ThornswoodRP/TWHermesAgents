@@ -67,13 +67,17 @@ github_apps:
     may_merge: false
 
 merge:
-  # The one check per repo that must be a success on the exact head. Skipped
-  # is not success. Thornswood's changes to "Launcher builds" by a one-line PR
-  # here at the flip (Patrick's decision 1). Read from each repo's PR builds.
-  required_check:
-    EvilPatrick06/Thornswood: "Launcher builds (VPS fallback)"
-    EvilPatrick06/Thornswood-Ops: "check"
-    EvilPatrick06/skymp: "build-pr"
+  # The checks per repo that must each be a success on the exact head.
+  # Skipped is not success. Read from each repo's PR builds.
+  # Thornswood: since #5119 (31 Oct) every PR builds only on GitHub's runners
+  # (build-pr.yml): "Launcher builds", then "Build check result", which passes
+  # only when that build passed and is the one check main's ruleset requires.
+  # The old "Launcher builds (VPS fallback)" job is gone from PR builds, so
+  # naming it refused every merge.
+  required_checks:
+    EvilPatrick06/Thornswood: ["Launcher builds", "Build check result"]
+    EvilPatrick06/Thornswood-Ops: ["check"]
+    EvilPatrick06/skymp: ["build-pr"]
   method:
     EvilPatrick06/Thornswood: squash
     EvilPatrick06/Thornswood-Ops: squash

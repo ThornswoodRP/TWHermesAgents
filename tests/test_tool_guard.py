@@ -206,11 +206,22 @@ class PolicyShape(unittest.TestCase):
         with self.assertRaises(Exception):
             Policy(data)
 
-    def test_every_repo_names_its_one_check(self):
+    def test_every_repo_names_its_checks(self):
         data = copy.deepcopy(policy().data)
-        del data["merge"]["required_check"]["EvilPatrick06/skymp"]
+        del data["merge"]["required_checks"]["EvilPatrick06/skymp"]
         with self.assertRaises(Exception):
             Policy(data)
+
+    def test_required_checks_are_a_list_of_names(self):
+        for bad in ("Launcher builds", [], [""], ["Launcher builds", "Launcher builds"], None):
+            data = copy.deepcopy(policy().data)
+            data["merge"]["required_checks"]["EvilPatrick06/Thornswood"] = bad
+            with self.assertRaises(Exception, msg=repr(bad)):
+                Policy(data)
+
+    def test_thornswood_needs_the_build_and_its_result(self):
+        self.assertEqual(policy().required_checks("EvilPatrick06/Thornswood"),
+                         ["Launcher builds", "Build check result"])
 
     def test_names(self):
         p = policy()

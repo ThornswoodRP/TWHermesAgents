@@ -63,10 +63,13 @@ class Policy:
         for bot, v in bots.items():
             if v.get("claim_label") != f"claimed: {v.get('name')}":
                 raise PolicyError(f"{bot}'s claim label must be 'claimed: {v.get('name')}'")
-        checks = self.data.get("merge", {}).get("required_check") or {}
+        checks = self.data.get("merge", {}).get("required_checks") or {}
         for repo in self.data.get("merge", {}).get("base", {}):
-            if not isinstance(checks.get(repo), str) or not checks[repo]:
-                raise PolicyError(f"the merge rule names no required check for {repo}")
+            names = checks.get(repo)
+            if (not isinstance(names, list) or not names
+                    or not all(isinstance(n, str) and n for n in names)
+                    or len(set(names)) != len(names)):
+                raise PolicyError(f"the merge rule names no required checks for {repo}")
 
     # Bots
 
@@ -112,8 +115,8 @@ class Policy:
             return True
         return any(glob_match(path, pat) for pat in self.data["merge"]["patrick_paths"])
 
-    def required_check(self, repo: str) -> str:
-        return self.data["merge"]["required_check"][repo]
+    def required_checks(self, repo: str) -> list[str]:
+        return list(self.data["merge"]["required_checks"][repo])
 
 
 def glob_match(path: str, pattern: str) -> bool:

@@ -19,7 +19,8 @@ FIXTURES = Path(__file__).with_name("fixtures")
 APP = "EvilPatrick06/Thornswood"
 HEAD = "a" * 40
 OTHER = "b" * 40
-CHECK = "Launcher builds (VPS fallback)"
+# Thornswood's required checks on a pull request since #5119 (31 Oct).
+CHECKS = ("Launcher builds", "Build check result")
 
 
 def policy() -> Policy:
@@ -51,8 +52,11 @@ def pr(**kw) -> PullRequest:
     return PullRequest(**base)
 
 
-def green(sha: str = HEAD, name: str = CHECK, conclusion: str = "success", status: str = "completed") -> list[CheckRun]:
-    return [CheckRun(name=name, head_sha=sha, status=status, conclusion=conclusion)]
+def green(sha: str = HEAD, name: str | None = None, conclusion: str = "success",
+          status: str = "completed") -> list[CheckRun]:
+    """One run of the named check, or of each of Thornswood's required checks."""
+    names = [name] if name else list(CHECKS)
+    return [CheckRun(name=n, head_sha=sha, status=status, conclusion=conclusion) for n in names]
 
 
 def issue(**kw) -> Issue:

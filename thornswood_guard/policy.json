@@ -77,10 +77,17 @@
     }
   },
   "merge": {
-    "required_check": {
-      "EvilPatrick06/Thornswood": "Launcher builds (VPS fallback)",
-      "EvilPatrick06/Thornswood-Ops": "check",
-      "EvilPatrick06/skymp": "build-pr"
+    "required_checks": {
+      "EvilPatrick06/Thornswood": [
+        "Launcher builds",
+        "Build check result"
+      ],
+      "EvilPatrick06/Thornswood-Ops": [
+        "check"
+      ],
+      "EvilPatrick06/skymp": [
+        "build-pr"
+      ]
     },
     "method": {
       "EvilPatrick06/Thornswood": "squash",
