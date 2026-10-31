@@ -1,0 +1,74 @@
+{
+  "about": "What the decision core relies on in Hermes, read from the pinned Hermes source, not guessed (07 section 11.2, step 0). Each fact names the file and line it was read from at the pinned commit. scripts/check-hermes-contract.py checks the VM against this file and changes nothing.",
+  "version": 1,
+  "hermes": {
+    "version": "0.22.5",
+    "tag": "v0.22.5",
+    "commit": "bf0203a794a07aac3ff764972ab9087baa4e4f4e",
+    "upstream": "https://github.com/NousResearch/hermes-agent",
+    "read_on": "2026-10-31",
+    "how_read": "The tag v0.22.5 (also rc.3-v0.22.5) points at this commit in the upstream repository. It is the same commit the 29 Oct source audit used (07 section 1, `bf0203a7`). The VM's install is said to be v0.22.5 stable (02 'Built on 30 Oct'); the check script confirms the commit there."
+  },
+  "profiles": {
+    "id_pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+    "id_pattern_source": "hermes_constants.py:395 PROFILE_ID_RE",
+    "home": "~/.hermes/profiles/<id>/",
+    "ids": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"]
+  },
+  "room": {
+    "name": "Thornswood Workbench",
+    "members": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"],
+    "store": "~/.hermes/shared-state.db, table hosted_rooms (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, revision, created_at, updated_at, disbanded_at)",
+    "store_source": "gateway/hosted_rooms.py:88 (schema), :404 default_db_path (profile gateways resolve to the root shared-state.db)",
+    "protocol_version": 2,
+    "protocol_version_source": "gateway/hosted_rooms.py:23",
+    "transport": "JSON-RPC methods groups.* on the gateway's native connection (the one Desktop uses through hermes serve); not on the api_server platform",
+    "methods_source": "tui_gateway/contracts/groups_bot_relay.py, handlers tui_gateway/methods_groups.py",
+    "send": {
+      "method": "groups.send",
+      "params": {"room_id": "string", "event_id": "client retry key, optional", "payload": {"text": "string", "thread_id": "optional"}},
+      "result": "{event: RoomEvent, client_event_id, accepted, driver_started}",
+      "idempotency": "the gateway maps event_id to user:<sha256 of the key>, so the same key is the same event",
+      "only_kind": "message.user; the actor is set by the gateway, never by the caller",
+      "source": "tui_gateway/contracts/groups_bot_relay.py:246, methods_groups.py:381, hosted_rooms.py:250 user_event_id, hosted_room_discussion.py:61 _USER_PAYLOAD_FIELDS"
+    },
+    "read": {
+      "method": "groups.log",
+      "params": {"room_id": "string", "since_seq": "int cursor", "limit": "at most 500"},
+      "result": "{events: [RoomEvent], cursor, latest_seq, has_more, authority: {gateway_id, epoch}}",
+      "event": "{room_id, seq, event_id, kind, actor: {kind, id}, authority_epoch, payload, created_at}",
+      "source": "tui_gateway/contracts/groups_bot_relay.py:38 RoomEvent, :275 GroupsLogParams; hosted_rooms.py:33 MAX_LOG_LIMIT"
+    },
+    "driver": "groups.capabilities answers driver:true only when the room driver can run turns; the core requires it before it shows the room as live",
+    "driver_source": "tui_gateway/methods_groups.py:238"
+  },
+  "bot_chat": {
+    "title": "Bot Chat",
+    "title_source": "tools/bot_mode_probe.py:31 BOT_CHAT_TITLE",
+    "one_per_profile": "Bot Mode keeps one canonical, hidden session titled 'Bot Chat' per profile; a title is unique, so a second create collides. Look it up before creating.",
+    "transport": "the api_server platform (loopback HTTP, default port 8642), per profile under /p/<profile>/, Authorization: Bearer <API_SERVER_KEY>",
+    "transport_source": "gateway/platforms/api_server.py:81-103 (routes), :1124 and :1487 (the key), :4474-4478 (the /p/<profile>/ mirror)",
+    "find": "GET /p/<profile>/api/sessions?limit=200&title=Bot%20Chat&include_hidden=1, then the row whose title is exactly 'Bot Chat'",
+    "find_source": "hermes_cli/subcommands/peer.py:99 _find_bot_chat",
+    "create_if_missing": "POST /p/<profile>/api/sessions with exactly {title: 'Bot Chat', source}; any other field is refused (bot_chat_parameters_unsupported)",
+    "create_source": "hermes_cli/subcommands/peer.py:118 _ensure_bot_chat; gateway/platforms/api_server_bot_chat.py:26 and :34",
+    "send": "POST /p/<profile>/v1/runs with {input, session_id} and an Idempotency-Key header (1 to 255 characters); the same key replays the same run",
+    "send_source": "hermes_cli/subcommands/peer.py:312 _peer_run and :324",
+    "status": "GET /p/<profile>/v1/runs/<run_id> and /v1/runs/<run_id>/events",
+    "history": "GET /p/<profile>/api/sessions/<id>/messages",
+    "uncertain": "A timeout after the run was accepted means the message is already in the Bot Chat: never resend it. The core marks it effect.uncertain and reads the run back first (peer.py:355-366)."
+  },
+  "desktop_plugin": {
+    "layout": "~/.hermes/plugins/thornswood-decisions/ with dashboard/manifest.json {name, api: plugin_api.py}, dashboard/plugin_api.py (a FastAPI router), desktop/plugin.js",
+    "routes": "/api/plugins/thornswood-decisions/<path> on hermes serve; ctx.rest('/path') from the pane, profile-aware, refuses '..'",
+    "python_gate": "plugin_api.py is imported only when the plugin is in plugins.enabled in config.yaml",
+    "socket": "ctx.socket is a no-op on OAuth remotes, so the pane polls; broadcast_plugin_event only speeds it up",
+    "who_is_calling": "on a signed-in hermes serve the route sees request.state.session (user_id, email, provider) or request.state.token_principal (an opaque service id); neither is Patrick by itself, so Desktop pairs once with the core",
+    "source": "website/docs/developer-guide/desktop-plugin-sdk.md (A backend for your plugin; Calling it from the plugin; Security model); hermes_cli/dashboard_auth/base.py:10 Session, :25 TokenPrincipal; middleware.py:213; token_auth.py:84"
+  },
+  "kanban": {
+    "read": "GET /api/plugins/kanban/board and /api/plugins/kanban/tasks/<task_id> on hermes serve",
+    "source": "plugins/kanban/dashboard/plugin_api.py:359 and :379",
+    "use": "read only, for the Work view, shown with a 'stale as of' time"
+  }
+}
