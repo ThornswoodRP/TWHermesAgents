@@ -2,7 +2,8 @@
 
 Each migration runs once, in order, inside one transaction, and records its
 number in `meta.schema_version`. A store newer than this code refuses to
-open. Rows that are history (artifact revisions, responses, events, effect
+open, so each migration from 6 on also has its way back in DOWNS, for the VM's
+follower to put the release before it back (see store.downgrade). Rows that are history (artifact revisions, responses, events, effect
 receipts) cannot be changed or deleted: triggers abort the statement.
 """
 
@@ -461,3 +462,17 @@ ALTER TABLE push_subscriptions ADD COLUMN endpoint_sha256 TEXT
   CHECK (endpoint_sha256 IS NULL OR length(endpoint_sha256) = 64);
 """,
 ]
+
+
+# The way back from each migration from 6 on: what must still be empty for the
+# step back to lose nothing (a query that counts it, and what it is), the
+# statements that undo the migration, and what the operator must know after it
+# (or ""). store.downgrade runs them, newest first, only when every count is 0.
+# Migrations 1 to 5 were never put back.
+DOWNS: dict[int, tuple[list[tuple[str, str]], str, str]] = {
+    6: ([("SELECT count(*) FROM push_subscriptions WHERE endpoint_sha256 IS NOT NULL",
+          "phone alerts that keep their address's SHA-256")],
+        """
+ALTER TABLE push_subscriptions DROP COLUMN endpoint_sha256;
+""", ""),
+}

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
-from .schema import FLAGS, MIGRATIONS
+from .schema import DOWNS, FLAGS, MIGRATIONS
 
 GENESIS = "0" * 64
 
@@ -83,7 +83,8 @@ def migrate(con: sqlite3.Connection) -> int:
     have = schema_version(con)
     if have > len(MIGRATIONS):
         raise CoreError(500, "store_too_new",
-                        f"the store is at schema {have}; this code knows only {len(MIGRATIONS)}")
+                        f"the store is at schema {have}; this code knows only {len(MIGRATIONS)}. "
+                        f"The newer release can put it back: tw-decide downgrade --to {len(MIGRATIONS)}")
     for n in range(have + 1, len(MIGRATIONS) + 1):
         con.execute("BEGIN IMMEDIATE")
         try:
@@ -97,6 +98,41 @@ def migrate(con: sqlite3.Connection) -> int:
             con.execute("ROLLBACK")
             raise
     return len(MIGRATIONS)
+
+
+def downgrade(con: sqlite3.Connection, to: int) -> dict:
+    """Undo the migrations above `to`, newest first, in one transaction, only if that loses nothing.
+
+    For the VM's follower: when a release fails after its migrations ran, the
+    release before it cannot open the store. Run from the failed release (which
+    knows the way back), with every tw-decide unit stopped, before the older
+    release is put back. Each step back first counts what only the newer schema
+    can hold; if any count is above 0 nothing changes and it refuses, and the
+    store stays on the newer release (fix forward).
+    """
+    have = schema_version(con)
+    if not isinstance(to, int) or isinstance(to, bool) or to < 1 or to > have:
+        raise CoreError(400, "bad_schema", f"the store is at schema {have}; --to is a schema from 1 to {have}")
+    steps = list(range(have, to, -1))
+    missing = [n for n in steps if n not in DOWNS]
+    if missing:
+        raise CoreError(409, "no_way_back", f"schema {missing[0]} has no way back; fix forward")
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        written = [f"schema {n}: {count} {what}" for n in steps for sql, what in DOWNS[n][0]
+                   for count in [con.execute(sql).fetchone()[0]] if count]
+        if written:
+            raise CoreError(409, "store_written",
+                            "the store holds what the older schema cannot (" + "; ".join(written) + "); fix forward")
+        for n in steps:
+            for stmt in _statements(DOWNS[n][1]):
+                con.execute(stmt)
+        con.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(to),))
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    return {"from": have, "to": to, "after": [DOWNS[n][2] for n in steps if DOWNS[n][2]]}
 
 
 def _statements(script: str) -> Iterator[str]:

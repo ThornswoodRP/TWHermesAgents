@@ -17,6 +17,9 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   selfcheck   a whole passkey ceremony and one sealed, encrypted push, with the installed libraries
   backup      make a consistent copy
   verify      check the event chain
+  schema      the store's schema and the newest this code knows
+  downgrade   put the store back to an older schema (--to), only if that loses nothing; for the
+              follower, from the failed release, with every tw-decide unit stopped
 
 Patrick reaches this only over SSH with his own key. No route of the API
 reaches any of it.
@@ -36,8 +39,8 @@ from .api import DEFAULT_PORT, Api, make_server
 from .core import DecisionCore
 from .feeds import TOKENS as FEED_NAMES
 from .feeds import Feeds
-from .schema import FLAGS
-from .store import CoreError, Store
+from .schema import FLAGS, MIGRATIONS
+from .store import CoreError, Store, connect, downgrade, schema_version
 
 OPERATOR = "operator"
 
@@ -193,6 +196,32 @@ def cmd_verify(store: Store, args) -> dict:
     return {"ok": ok, "events": why}
 
 
+def _existing(path: str):
+    if not Path(path).is_file():
+        raise CoreError(404, "no_store", f"there is no store at {path}")
+    return connect(Path(path))
+
+
+def cmd_schema(args) -> dict:
+    con = _existing(args.db)
+    try:
+        return {"store": schema_version(con), "code": len(MIGRATIONS)}
+    finally:
+        con.close()
+
+
+def cmd_downgrade(args) -> dict:
+    con = _existing(args.db)
+    try:
+        return downgrade(con, args.to)
+    finally:
+        con.close()
+
+
+# These two open the store without migrating it.
+RAW = {"schema": cmd_schema, "downgrade": cmd_downgrade}
+
+
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="thornswood_decisions.cli", description=__doc__.splitlines()[0])
     ap.add_argument("--db", required=True, help="the core's SQLite store")
@@ -230,6 +259,9 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("backup")
     p.add_argument("--dest", required=True)
     sub.add_parser("verify")
+    sub.add_parser("schema")
+    p = sub.add_parser("downgrade")
+    p.add_argument("--to", type=int, required=True, help="the schema the older release knows (its schema command's code)")
     return ap
 
 
@@ -241,6 +273,14 @@ COMMANDS = {"init": cmd_init, "bind-room": cmd_bind_room, "pair": cmd_pair, "fla
 
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv)
+    if args.cmd in RAW:
+        try:
+            out = RAW[args.cmd](args)
+        except CoreError as exc:
+            print(f"STOP {exc.reason}: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(out, indent=2))
+        return 0
     store = Store(Path(args.db))
     try:
         out = COMMANDS[args.cmd](store, args)
