@@ -346,6 +346,31 @@ const base = `http://localhost:${port}`
   await step('the install hint goes away for this visit when told not now', async () => {
     if (await page.locator('#install').isVisible()) throw new Error('still shown')
   })
+  // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
+  // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
+  // Each signed-in view gets one in every kind of text it shows, at Pixel widths and with larger text.
+  const LONG = 'https://github.com/ThornswoodRP/Thornswood-Hermes/pull/44/commits/2e308db923bf40880adae89d38fedb307c18aa46'
+  for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3]]) {
+    await page.setViewportSize({ width, height: 860 })
+    for (const view of ['/m/bots', '/m/rooms', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',
+      '/m/hermes/one', '/m/hermes/one/s_plan', '/m/bots/bramble', '/m/room']) {
+      await page.goto(base + view)
+      await page.locator('#view').filter({ hasNotText: 'Loading...' }).waitFor({ timeout: 5000 })
+      await page.waitForTimeout(300)
+      await step(`a long link or id never widens ${view} (${width} wide, text at ${zoom * 100}%)`, async () => {
+        const got = await page.evaluate(([long, zoom]) => {
+          document.documentElement.style.zoom = String(zoom)
+          for (const e of document.querySelectorAll('#view strong, #view h2, #view td, #view th, #view p, #view pre, ' +
+            '#view .msg .text, #view .what, #view .quiet, #view summary, #view li')) e.append(' ' + long)
+          const tabs = [...document.querySelectorAll('.tabs a')].map(a => a.getBoundingClientRect().right)
+          return { page: document.documentElement.scrollWidth, screen: document.documentElement.clientWidth, tabs }
+        }, [LONG, zoom])
+        if (got.page > got.screen) throw new Error(`the page is ${got.page} wide on a ${got.screen} screen`)
+        if (Math.max(...got.tabs) > got.screen + 1) throw new Error('a tab ends at ' + Math.max(...got.tabs))
+      })
+    }
+  }
+  await page.setViewportSize({ width: 412, height: 860 })
   const sw = await page.evaluate(async () => { const r = await Promise.race([navigator.serviceWorker.ready, new Promise(ok => setTimeout(() => ok(null), 5000))]); return r ? r.scope : null })
   if (!sw) failed++
   console.log(sw ? 'PASS the service worker is registered for ' + sw : 'FAIL no service worker')
