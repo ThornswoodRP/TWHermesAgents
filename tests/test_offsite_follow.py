@@ -14,6 +14,7 @@ if not _sys.platform.startswith("linux"):
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -122,6 +123,34 @@ class Copy(unittest.TestCase):
         # Only names the backups have are ever copied or deleted.
         self.assertEqual([c[c.index("--include") + 1] for c in self.calls],
                          ["hermes-*.tar.gz.age", "hermes-*.tar.gz.age", "thornswood-*.zip.enc", "thornswood-*.zip.enc"])
+
+    def test_a_drive_folder_no_copy_has_made_yet_is_not_a_failure(self):
+        # 1 Nov on the VM: the box had sent nothing yet, so the copy made no
+        # Drive folder and rclone delete said exit 3, directory not found.
+        (self.t / "rclone.conf").write_text("x")
+        (self.t / "backups" / "hermes-20261101-093000.tar.gz.age").write_bytes(b"a")
+
+        def run(args, **kw):
+            self.calls.append(args)
+            missing = args[1] == "delete" and args[2].endswith("Thornswood-Box-Backups")
+            return subprocess.CompletedProcess(args, 3 if missing else 0, "", "directory not found" if missing else "")
+
+        lines, problems = offsite.copy(self.p, run=run)
+        self.assertFalse([p for p in problems if "rclone" in p], problems)
+        self.assertIn("PASS nothing of the box's is on Drive in thornswood-gdrive:Thornswood-Box-Backups yet, "
+                      "so nothing there is older than 30 days", lines)
+        # The box's missing nightly is still a failure of its own.
+        self.assertEqual(problems, [f"the box's backups: there is none in {self.t / 'boxbackups'}"])
+
+    def test_any_other_rclone_delete_failure_still_fails(self):
+        (self.t / "rclone.conf").write_text("x")
+
+        def run(args, **kw):
+            self.calls.append(args)
+            return subprocess.CompletedProcess(args, 1 if args[1] == "delete" else 0, "", "")
+
+        lines, problems = offsite.copy(self.p, run=run)
+        self.assertEqual(len([p for p in problems if "could not delete" in p]), 2, problems)
 
     def test_no_sign_in_yet_is_a_failure_that_says_so(self):
         (self.t / "backups" / "hermes-20261101-093000.tar.gz.age").write_bytes(b"a")
@@ -367,6 +396,90 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(policy().data["follow_main"]["decide_env"], "/etc/thornswood/tw-decide.env")
         self.assertIn("envfile=/etc/thornswood/tw-decide.env",
                       (REPO / "deploy" / "decisions" / "install.sh").read_text())
+
+
+    # 1 Nov on the VM: git refused the root-owned release to hermes as
+    # "dubious ownership", so the apply and its put-back both stopped.
+    def test_hermes_gets_a_bundle_and_never_the_root_owned_release(self):
+        vm = FakeVM(NEW)
+        canaries = []
+
+        def run(args, **kw):
+            if args[0].endswith("tw-canary"):
+                canaries.append(1)
+                if len(canaries) == 1:
+                    return subprocess.CompletedProcess(args, 1, "FAIL attack 3", "")
+            return vm(args, **kw)
+
+        f = self.follower(vm)
+        f.run_ = run
+        self.assertEqual(f.follow(), 1)
+        applies = vm.ran("runuser")
+        self.assertEqual(len(applies), 2, "the apply and the put-back's apply")
+        for commit, script in zip((NEW, OLD), applies):
+            self.assertNotIn(str(f.opt), script, "hermes never runs git in a folder under /opt")
+            bundle = f"{f.mirror.parent}/apply-"
+            self.assertIn(f"fetch --quiet '{bundle}", script)
+            self.assertIn(f"/{commit}.bundle' '+refs/remotes/origin/main:refs/remotes/origin/main'", script)
+            made = [c for c in vm.calls if "bundle" in c and "create" in c and f"releases/{commit}" in " ".join(c)]
+            self.assertEqual(len(made), 1, f"root bundles {commit[:4]} from its own release")
+            named = [c for c in vm.calls if "update-ref" in c and f"releases/{commit}" in " ".join(c)]
+            self.assertEqual(named[0][-2:], ["refs/remotes/origin/main", commit])
+        self.assertEqual(list(f.mirror.parent.glob("apply-*")), [], "the bundles go once applied")
+        self.assertEqual(json.loads(f.state_file.read_text())["put_back"], f"put back {OLD}")
+
+
+@unittest.skipUnless(os.geteuid() == 0 and shutil.which("runuser"), "needs root, to hand the release to another user as the VM does")
+class ApplyAsAnotherUser(unittest.TestCase):
+    """The real git, a release root owns and a hermes that is not root: the
+    apply, then the put-back's apply of the earlier release."""
+
+    def setUp(self):
+        self.user = "nobody"
+        self.root = Path(tempfile.mkdtemp())
+        os.chmod(self.root, 0o755)
+        self.f = follow_main.Follower(policy(), root=self.root, say=lambda s: None)
+        self.f.r = {**self.f.r, "hermes_user": self.user}
+        rel = self.root / "src"
+        g = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(rel)]
+        subprocess.run(["git", "init", "-q", str(rel)], check=True)
+        (rel / "scripts").mkdir()
+        self.commits = []
+        for n in (1, 2):
+            (rel / "scripts" / "apply.py").write_text(f"import sys; print('apply {n}', sys.argv[1:])\n")
+            subprocess.run([*g, "add", "-A"], check=True)
+            subprocess.run([*g, "commit", "-q", "-m", str(n)], check=True)
+            self.commits.append(subprocess.run([*g, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip())
+        for c in self.commits:
+            dest = self.f.opt / "releases" / c
+            subprocess.run(["git", "clone", "-q", "--no-checkout", str(rel), str(dest)], check=True)
+            subprocess.run(["git", "-C", str(dest), "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", c], check=True)
+        for d in (self.f.opt, self.f.opt.parent, self.f.opt.parent.parent):
+            os.chmod(d, 0o755)
+        home = self.f.hermes_releases.parent
+        home.mkdir(parents=True)
+        for d in (home.parent, home.parent.parent):
+            os.chmod(d, 0o755)
+        shutil.chown(home, self.user)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_the_apply_and_the_put_back_both_work_as_hermes(self):
+        new, old = self.commits[1], self.commits[0]
+        for c in (new, old):
+            self.f.apply(self.f.opt / "releases" / c, c)
+            mine = self.f.hermes_releases / c
+            self.assertEqual(mine.stat().st_uid, pwd_uid(self.user))
+            head = subprocess.run(["git", "-c", f"safe.directory={mine}", "-C", str(mine), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(head, c)
+            self.assertEqual(os.readlink(self.f.hermes_releases.parent / "current"), str(mine))
+
+
+def pwd_uid(name: str) -> int:
+    import pwd
+    return pwd.getpwnam(name).pw_uid
 
 
 if __name__ == "__main__":

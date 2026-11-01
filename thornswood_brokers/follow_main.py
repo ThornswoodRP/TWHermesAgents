@@ -172,21 +172,39 @@ class Follower:
         self.sh("install", ["bash", str(core), commit])
 
     def apply(self, dest: Path, commit: str) -> None:
+        # hermes never runs git against the root-owned release: git refuses a
+        # repository another user owns ("dubious ownership"), and a -c
+        # safe.directory does not reach the upload-pack a local fetch starts,
+        # because git clears GIT_CONFIG_PARAMETERS for it (1 Nov on the VM:
+        # the apply and its put-back both stopped there). Root bundles the
+        # commit, as send-to-oracle.sh did, and hermes fetches from that file.
         user = self.r["hermes_user"]
         hdest = self.hermes_releases / commit
-        script = (
-            "set -euo pipefail\n"
-            f"dest='{hdest}'\n"
-            f"mkdir -p '{self.hermes_releases}'\n"
-            "[[ -d \"$dest/.git\" ]] || git init --quiet \"$dest\"\n"
-            f"git -c safe.directory='*' -C \"$dest\" fetch --quiet '{dest}' '+{commit}:refs/remotes/origin/main'\n"
-            f"git -C \"$dest\" -c advice.detachedHead=false checkout --quiet --force --detach '{commit}'\n"
-            "cd \"$dest\"\n"
-            f"python3 scripts/apply.py --expect '{commit}' --check\n"
-            f"python3 scripts/apply.py --expect '{commit}'\n"
-            f"ln -sfn \"$dest\" '{self.hermes_releases.parent / 'current'}'\n"
-        )
-        self.sh("apply", ["runuser", "-u", user, "--", "bash", "-c", script])
+        self.mirror.parent.mkdir(parents=True, exist_ok=True)
+        hand = Path(tempfile.mkdtemp(prefix="apply-", dir=str(self.mirror.parent)))
+        try:
+            os.chmod(hand, 0o755)
+            bundle = hand / f"{commit}.bundle"
+            # A bundle carries refs, not bare commits: name this one first, in
+            # the release root owns, so it is this commit and nothing else.
+            self.sh("apply", self.git("-C", str(dest), "update-ref", "refs/remotes/origin/main", commit))
+            self.sh("apply", self.git("-C", str(dest), "bundle", "create", "--quiet", str(bundle), "refs/remotes/origin/main"))
+            self.sh("apply", ["chmod", "0644", str(bundle)])
+            script = (
+                "set -euo pipefail\n"
+                f"dest='{hdest}'\n"
+                f"mkdir -p '{self.hermes_releases}'\n"
+                "[[ -d \"$dest/.git\" ]] || git init --quiet \"$dest\"\n"
+                f"git -C \"$dest\" fetch --quiet '{bundle}' '+refs/remotes/origin/main:refs/remotes/origin/main'\n"
+                f"git -C \"$dest\" -c advice.detachedHead=false checkout --quiet --force --detach '{commit}'\n"
+                "cd \"$dest\"\n"
+                f"python3 scripts/apply.py --expect '{commit}' --check\n"
+                f"python3 scripts/apply.py --expect '{commit}'\n"
+                f"ln -sfn \"$dest\" '{self.hermes_releases.parent / 'current'}'\n"
+            )
+            self.sh("apply", ["runuser", "-u", user, "--", "bash", "-c", script])
+        finally:
+            shutil.rmtree(hand, ignore_errors=True)
 
     def restart(self) -> None:
         # The installed release's own tw-reload-bots (thornswood_brokers/reload.py),

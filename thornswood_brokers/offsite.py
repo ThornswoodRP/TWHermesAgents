@@ -50,6 +50,10 @@ BOX_NAME = re.compile(r"^thornswood-(\d{8})-(\d{6})\.zip\.enc$")
 MARK = re.compile(r"^([0-9a-f]{64}) ([0-9]{1,12})\s*$")
 
 
+# rclone's exit code for "directory not found" (rclone docs, Exit code).
+RCLONE_DIR_NOT_FOUND = 3
+
+
 def rules(policy: Policy) -> dict:
     return policy.data["backups"]["offsite"]
 
@@ -166,7 +170,12 @@ def copy(policy: Policy, *, run: Callable[..., subprocess.CompletedProcess] = su
             else:
                 d = run(["rclone", "delete", dest, "--include", glob, "--min-age", f"{keep}d", "--quiet", *conf],
                         capture_output=True, text=True)
-                if d.returncode != 0:
+                if d.returncode == RCLONE_DIR_NOT_FOUND:
+                    # The folder is made by the first copy that has a file in it. Until
+                    # then there is nothing on Drive to keep or to delete (1 Nov: the
+                    # box's folder, before the box's first drop).
+                    lines.append(f"PASS nothing of {label} is on Drive in {dest} yet, so nothing there is older than {keep} days")
+                elif d.returncode != 0:
                     problems.append(f"rclone could not delete {label} Drive copies older than {keep} days (exit {d.returncode})")
                 else:
                     lines.append(f"PASS {label} backups are on Drive in {dest}, kept {keep} days")
