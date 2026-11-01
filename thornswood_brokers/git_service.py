@@ -45,6 +45,15 @@ WRITE = {
 }
 READ = {"contents": "read", "pull_requests": "read", "issues": "read", "actions": "read", "checks": "read", "metadata": "read"}
 CHECKS_APP = "github-actions"
+QUEUE_STATE = """query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    mergeQueue(branch: $branch) { id }
+    pullRequest(number: $number) { id headRefOid isInMergeQueue merged }
+  }
+}"""
+ENQUEUE = """mutation($pr: ID!, $head: GitObjectID!) {
+  enqueuePullRequest(input: {pullRequestId: $pr, expectedHeadOid: $head}) { mergeQueueEntry { id position } }
+}"""
 WORKFLOW_DIR = ".github/workflows/"
 
 
@@ -193,6 +202,17 @@ class GitService:
         runs = [r for r in runs if ((r.get("app") or {}).get("slug") == CHECKS_APP)]
         runs.sort(key=lambda r: r["id"])
         return [CheckRun(name=r["name"], head_sha=r["head_sha"], status=r["status"], conclusion=r.get("conclusion")) for r in runs]
+
+    def _queue_state(self, repo: str, number: int, base: str) -> dict:
+        """The base branch's merge queue (None when it has none), and the PR's
+        node id, head and whether it is in the queue, from GraphQL."""
+        owner, name = repo.split("/", 1)
+        data = self.gh.graphql("bramble", repo, READ, QUEUE_STATE,
+                               {"owner": owner, "name": name, "number": int(number), "branch": base})
+        r = data.get("repository") or {}
+        p = r.get("pullRequest") or {}
+        return {"queue": (r.get("mergeQueue") or {}).get("id"), "id": p.get("id"), "head": p.get("headRefOid"),
+                "queued": bool(p.get("isInMergeQueue")), "merged": bool(p.get("merged"))}
 
     def _verb_lists(self, repo: str, ref: str) -> dict[str, dict]:
         out = {}
@@ -469,11 +489,16 @@ class GitService:
         number, sha = int(args.get("number")), str(args.get("sha") or "")
         method = str(args.get("method") or self.policy.data["merge"]["method"][repo])
         pr = self._pr(repo, number)
+        queue = None  # the base branch's merge queue, read once the merge is allowed
 
         def read_back():
             raw = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{number}")
             if raw.get("merged") and raw.get("head", {}).get("sha") == sha:
                 return {"merged": True, "merge_commit_sha": raw.get("merge_commit_sha")}
+            if queue is not None:
+                now = self._queue_state(repo, number, pr.base_ref)
+                if now["head"] == sha and now["queued"]:
+                    return {"queued": True}
             return None
 
         if pr.merged:
@@ -492,7 +517,19 @@ class GitService:
         self._check(self.rules.merge(bot, pr, sha, method, checks, base_verb_lists=main_lists,
                                      decision_id=decision_id, card_revision=revision))
 
+        # With a merge queue on the base branch (the redesign's part 5), GitHub
+        # refuses a direct merge: the PR joins the queue at this exact head,
+        # and the queue merges it once its own checks pass (method is the
+        # queue's). Read each time, so the rule can come and go in either
+        # order with this code.
+        state = self._queue_state(repo, number, pr.base_ref)
+        queue = state["queue"]
+
         def write():
+            if queue is not None:
+                data = self.gh.graphql("bramble", repo, WRITE["merge"], ENQUEUE,
+                                       {"pr": state["id"], "head": sha})
+                return {"queued": bool((data.get("enqueuePullRequest") or {}).get("mergeQueueEntry"))}
             r = self.gh.call("bramble", repo, WRITE["merge"], "PUT", f"/repos/{repo}/pulls/{number}/merge",
                              {"sha": sha, "merge_method": method})
             if r.status != 200:
@@ -500,6 +537,8 @@ class GitService:
             return {"merged": True}
 
         out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back)
+        if (out.get("receipt") or {}).get("queued"):
+            out["queued"] = True
         if decision_id and not out.get("reconciled"):
             self.ask("decision_use", {"id": decision_id})
         return out

@@ -111,6 +111,7 @@
     ]
   },
   "runs": {
+    "main_without_patrick": true,
     "ref": "main",
     "repo": "ThornswoodRP/Thornswood",
     "workflows": {

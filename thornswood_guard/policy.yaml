@@ -107,6 +107,14 @@ merge:
 
 # What Bramble's release tooling may start. Nothing else, on main only.
 runs:
+  # Main releases without a yes for each one (Patrick, 31 Oct 19:13:56Z:
+  # "temporarily allow main releases without asking me"; again 1 Nov 01:19Z,
+  # main releases unlimited for now; and 1 Nov 8:06 PM, no yes for each step
+  # of agreed work). Bramble starts a main run on the exact commit of main
+  # like a dev one. Publishing a collection revision still needs his record,
+  # and so does every merge that changes what runs on the box. Patrick sets
+  # this false by a PR here to need his word for each main release again.
+  main_without_patrick: true
   ref: main
   repo: ThornswoodRP/Thornswood
   workflows:

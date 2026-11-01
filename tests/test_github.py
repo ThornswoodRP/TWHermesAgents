@@ -299,6 +299,9 @@ class Claims(unittest.TestCase):
 class Runs(unittest.TestCase):
     def setUp(self):
         self.p = policy()
+        # The main gate itself, as it is when Patrick wants his word for each
+        # main release; MainWithoutAYes below tests the shipped setting.
+        self.p.data["runs"]["main_without_patrick"] = False
         self.s = store(self.p)
         self.r = rules(self.p, self.s)
         self.lists = verb_lists()
@@ -390,6 +393,50 @@ class Runs(unittest.TestCase):
 
     def test_run_needs_the_full_commit(self):
         self.assertFalse(self.run_(commit="main").allowed)
+
+
+
+class MainWithoutAYes(unittest.TestCase):
+    """Patrick, 31 Oct and 1 Nov: main releases go out without his yes for
+    each one, for now. What still needs him stays as it was."""
+
+    def setUp(self):
+        self.p = policy()
+        self.s = store(self.p)
+        self.r = rules(self.p, self.s)
+        self.lists = verb_lists()
+
+    def run_(self, bot="bramble", workflow="release.yml", line="", channel="main", **kw):
+        return self.r.start_run(bot, APP, workflow, "main", {"line": line}, self.lists, commit=HEAD,
+                                channel=channel, **kw)
+
+    def test_the_shipped_policy_allows_main_without_a_record(self):
+        self.assertIs(self.p.data["runs"]["main_without_patrick"], True)
+        v = self.run_()
+        self.assertTrue(v.allowed, v.reason)
+        self.assertIn("without a yes for each", v.reason)
+
+    def test_only_bramble_and_only_the_listed_runs_still(self):
+        self.assertFalse(self.run_(bot="sprocket").allowed)
+        self.assertFalse(self.run_(workflow="harnesses.yml").allowed)
+        self.assertFalse(self.r.start_run("bramble", APP, "release.yml", "main", {"line": ""}, self.lists,
+                                          commit="main", channel="main").allowed)
+
+    def test_publishing_a_revision_still_needs_patrick(self):
+        line = "New-NexusRevision -Mod 1 -FileId 2 -Publish 5"
+        v = self.run_(workflow="nexus-run.yml", line=line)
+        self.assertFalse(v.allowed)
+        self.assertIn("needs Patrick's word", v.reason)
+
+    def test_a_secret_verb_is_still_never_run(self):
+        self.assertFalse(self.run_(workflow="nexus-run.yml", line="Set-NexusKey").allowed)
+
+    def test_a_box_path_merge_still_needs_patrick(self):
+        from helpers import green, pr
+        v = self.r.merge("bramble", pr(files=[".github/workflows/build-pr.yml"]), HEAD, "squash", green(),
+                         base_verb_lists=list(self.lists.values()))
+        self.assertFalse(v.allowed)
+        self.assertIn("live box", v.reason)
 
 
 class Settings(unittest.TestCase):

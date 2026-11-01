@@ -46,6 +46,8 @@ class FakeGitHub:
         self.tokens: list[dict] = []
         self.lose_answer: set[str] = set()   # "METHOD path" whose answer is lost after the write
         self.refuse: dict[str, tuple[int, str]] = {}
+        self.merge_queues: set[tuple[str, str]] = set()   # (repo, branch) with a merge queue
+        self.queued: list[tuple[str, int, str]] = []       # (repo, number, head) put in a queue
         self._next_id = 1000
 
     # Repositories on disk
@@ -120,11 +122,41 @@ class FakeGitHub:
             self.tokens.append({"installation": path.split("/")[3], **body})
             return Response(201, {"token": f"tok-{len(self.tokens)}", "expires_at": "x"}, {})
         assert headers["Authorization"].startswith("token tok-"), headers
-        resp = self._route(method, path, query, body)
+        resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
         if key in self.lose_answer:
             self.lose_answer.discard(key)
             raise Lost(f"connection reset after {key}")
         return resp
+
+    def _graphql(self, body) -> Response:
+        """The two GraphQL shapes tw-git sends: the queue state and the enqueue."""
+        q, v = body["query"], body["variables"]
+        if "enqueuePullRequest" in q:
+            repo, number = v["pr"].split("#")
+            pr = self.prs[(repo, int(number))]
+            if not any(r == repo and b == pr["base"]["ref"] for r, b in self.merge_queues):
+                return Response(200, {"errors": [{"message": "Pull request's base branch has no merge queue"}]}, {})
+            if pr["head"]["sha"] != v["head"]:
+                return Response(200, {"errors": [{"message": "Expected head oid does not match"}]}, {})
+            if pr.get("in_queue") or pr["merged"]:
+                return Response(200, {"errors": [{"message": "Pull request is already queued or merged"}]}, {})
+            pr["in_queue"] = True
+            self.queued.append((repo, int(number), v["head"]))
+            if "enqueue" in self.lose_answer:
+                self.lose_answer.discard("enqueue")
+                raise Lost("connection reset after the enqueue")
+            return Response(200, {"data": {"enqueuePullRequest": {"mergeQueueEntry": {"id": "MQE", "position": 1}}}}, {})
+        repo = f"{v['owner']}/{v['name']}"
+        pr = self.prs.get((repo, v["number"]))
+        return Response(200, {"data": {"repository": {
+            "mergeQueue": {"id": f"MQ:{repo}"} if (repo, v["branch"]) in self.merge_queues else None,
+            "pullRequest": None if pr is None else {"id": f"{repo}#{v['number']}", "headRefOid": pr["head"]["sha"],
+                                                    "isInMergeQueue": bool(pr.get("in_queue")), "merged": pr["merged"]}}}}, {})
+
+    def land_queue(self, repo: str, number: int) -> None:
+        """The queue's own checks passed: GitHub merges the PR."""
+        pr = self.prs[(repo, number)]
+        pr.update(in_queue=False, merged=True, state="closed", merge_commit_sha="d" * 40)
 
     def _route(self, method, path, query, body) -> Response:
         parts = path.strip("/").split("/")

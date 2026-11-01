@@ -144,6 +144,18 @@ class GitHub:
                 return out
             page += 1
 
+    def graphql(self, app: str, repo: str, permissions: dict, query: str, variables: dict) -> dict:
+        """One GraphQL call with a token for this repo only. An answer with
+        errors is GitHub saying no, the same as a 4xx."""
+        r = self.call(app, repo, permissions, "POST", "/graphql", {"query": query, "variables": variables})
+        if r.status != 200:
+            raise GitHubError(r.status, _message(r.body), r.body)
+        body = r.body if isinstance(r.body, dict) else {}
+        if body.get("errors"):
+            msgs = "; ".join(str(e.get("message") or e) for e in body["errors"] if isinstance(e, dict)) or str(body["errors"])
+            raise GitHubError(422, msgs, body)
+        return body.get("data") or {}
+
     def git_auth_header(self, app: str, repo: str, permissions: dict) -> str:
         tok = self.token(app, repo, permissions)
         return "Authorization: Basic " + base64.b64encode(f"x-access-token:{tok}".encode()).decode()

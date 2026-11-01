@@ -245,7 +245,7 @@ class GitHubRules:
             return Verdict.no(f"runs start on {runs['ref']} only, not {ref}")
         if not SHA.fullmatch(commit or ""):
             return Verdict.no("a run names the exact commit of main it is for")
-        needs_patrick = channel == "main"
+        needs_patrick = channel == "main" and not runs.get("main_without_patrick")
         spec = runs["workflows"][workflow]
         if spec.get("verbs"):
             listing = verb_lists.get(spec["verbs"])
@@ -272,6 +272,9 @@ class GitHubRules:
             if not yes.allowed:
                 return Verdict.no(f"this run needs Patrick's word for {commit[:12]}: {yes.reason}")
             return Verdict.yes(f"{yes.reason}; GitHub's Main environment still waits for Patrick")
+        if channel == "main":
+            return Verdict.yes(f"{workflow} for main at {commit[:12]}: Patrick allows main releases without "
+                               f"a yes for each (policy.yaml runs.main_without_patrick)")
         return Verdict.yes(f"{workflow} on main at {commit[:12]}")
 
     # Things no Bot does

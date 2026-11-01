@@ -311,6 +311,79 @@ class Merge(unittest.TestCase):
         self.assertIn("already merged", str(e.exception))
 
 
+
+class MergeQueue(unittest.TestCase):
+    """The redesign's part 5: with a merge queue on main, GitHub refuses a
+    direct merge, so Bramble's merge puts the PR in the queue at the exact
+    green head, and the queue merges it."""
+
+    def queue(self) -> tuple[World, str]:
+        w = World()
+        sha = w.green_pr()
+        w.fake.merge_queues.add((APP, "main"))
+        return w, sha
+
+    def test_with_a_queue_the_green_head_joins_it_and_nothing_merges_directly(self):
+        w, sha = self.queue()
+        out = w.merge(sha=sha)
+        self.assertTrue(out["done"])
+        self.assertTrue(out["queued"])
+        self.assertEqual(out["receipt"], {"queued": True})
+        self.assertEqual(w.fake.queued, [(APP, 42, sha)])
+        self.assertEqual(w.fake.writes("PUT"), [], "no direct merge")
+        self.assertFalse(w.fake.prs[(APP, 42)]["merged"])
+        # The enqueue went with Bramble's App and a merge token.
+        merge_tokens = [t for t in w.fake.tokens if t["permissions"].get("pull_requests") == "write"]
+        self.assertEqual([t["installation"] for t in merge_tokens], ["177392923"])
+        # The queue's own checks pass and GitHub merges it; asking again is
+        # refused (the same task's op is done), and nothing is queued twice.
+        w.fake.land_queue(APP, 42)
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha)
+        self.assertIn("already", str(e.exception))
+        with self.assertRaises(Refused) as e:
+            w.git.merge("hermes", {"bot": "bramble", "repo": APP, "task": "another-task", "number": 42, "sha": sha})
+        self.assertIn("already merged", str(e.exception))
+        self.assertEqual(len(w.fake.queued), 1)
+
+    def test_without_a_queue_the_merge_is_direct_as_before(self):
+        w = World()
+        sha = w.green_pr()
+        out = w.merge(sha=sha)
+        self.assertNotIn("queued", out)
+        self.assertEqual(w.fake.writes("PUT", "/merge")[0][2], {"sha": sha, "merge_method": "squash"})
+        self.assertEqual(w.fake.queued, [])
+
+    def test_a_lost_enqueue_answer_is_read_back_not_queued_twice(self):
+        w, sha = self.queue()
+        w.fake.lose_answer.add("enqueue")
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha)
+        self.assertIn("read back", str(e.exception))
+        w2 = w.restart()
+        out = w2.merge(sha=sha)
+        self.assertTrue(out["reconciled"])
+        self.assertEqual(out["receipt"], {"queued": True})
+        self.assertEqual(len(w2.fake.queued), 1)
+
+    def test_every_rule_still_comes_first(self):
+        w, sha = self.queue()
+        w.fake.add_check(APP, sha, "Launcher builds", conclusion="failure")
+        with self.assertRaises(Refused):
+            w.merge(sha=sha)
+        with self.assertRaises(Refused):
+            w.merge(bot="sprocket", sha=sha)
+        self.assertEqual(w.fake.queued, [])
+
+    def test_github_saying_no_to_the_enqueue_is_a_refusal(self):
+        w, sha = self.queue()
+        w.fake.prs[(APP, 42)]["in_queue"] = True   # someone else queued it
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha)
+        self.assertIn("already queued", str(e.exception))
+        self.assertEqual(w.fake.queued, [])
+
+
 class PullRequestsAndIssues(unittest.TestCase):
     def test_a_worker_opens_a_pr_from_its_own_branch_once(self):
         w = World()
