@@ -202,6 +202,18 @@ Checked here: `tests/test_decisions_history.py`:
 
 The browser check covers the picker search, a long chat paged back to its first message, a gone chat, and ids that do not open on the other gateway.
 
+## The chat layout and Markdown (redesign step 1)
+
+Plan Part 11, build step 1, after Patrick approved the redone mock-up (answer A on q-hermes-app-mockup-2, 1 Nov). App only: no route, table or connector changes.
+
+- **Bubbles.** In a chat with Hermes, One, a Bot or a room, Patrick's messages are gold bubbles on the right and everyone else's are on the left, with the sender's name once per run and a day line (Today, Yesterday, then the date) when the day changes. Under each bubble: the time, and for what Patrick sent from the phone, how it went (Waiting to send, Not sent and the reason).
+- **Markdown.** Paragraphs keep their line breaks; bold, italic, struck text, inline code, fenced code blocks with their language and a Copy button, lists (nested too), quotes, headings, rules and tables are drawn. Every node is made by `app.js` and filled with text: nothing in a message is read as HTML, no image is drawn from a message, and a link becomes a link only for an `http` or `https` address, opening in a new tab with no referrer. An underscore inside a name (`a_snake_name`) stays as it is. Copy falls back to selecting the code where the clipboard is refused.
+- **The foot of a chat.** The message box grows with what is typed, up to six lines, and stays above the tabs; the round gold button sends. Enter makes a new line. The box keeps its draft, and the draft's idempotency key, while the chat redraws.
+- **Where a chat is scrolled.** Opening a chat, or sending, goes to the newest message. When the chat redraws while Patrick reads further up, it keeps his place and a "N new messages" button above the box takes him down. Older messages keeps the message he was looking at on screen.
+- **The bar on top.** Back (to that gateway's chats, the Thornswood Bots list or the rooms), the chat's name, and where it lives.
+
+Checked here: `tests/test_decisions_phone_browser.py` draws a Markdown message with a `javascript:` link and raw HTML in it and checks each piece, that only the `https` link is a link, that nothing of the HTML is drawn, that Copy copies or selects, that a chat opens on its newest message, that Older messages keeps the place, and that at 412 pixels wide nothing scrolls sideways and the box ends above the tabs.
+
 ## The pinned contract (step 0)
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:

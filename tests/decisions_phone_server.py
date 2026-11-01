@@ -49,7 +49,8 @@ own.claim(w.ws, "one", to, 0, True)
 own.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "chats": [
     {"id": "s_plan", "title": "Plan the week", "last_at": "2026-11-01T17:30:00+00:00", "preview": "three things"},
     {"id": "s_long", "title": "A long chat", "last_at": "2026-11-01T16:00:00+00:00", "preview": "message 119"},
-    {"id": "s_old", "title": "", "last_at": "2026-10-30T17:30:00+00:00", "preview": "older"}],
+    {"id": "s_old", "title": "", "last_at": "2026-10-30T17:30:00+00:00", "preview": "older"},
+    {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"}],
     "open": [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
                                            {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]})
 # The pages: s_plan and s_long are in the scratch state.db, s_old is not (gone from Hermes).
@@ -70,6 +71,16 @@ con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('
             (epoch("2026-11-01T17:29:00+00:00"),))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_plan', 'assistant', '<b>three</b> things', ?)",
             (epoch("2026-11-01T17:30:00+00:00"),))
+# Markdown as Hermes writes it, with things that must stay text: a script link and raw HTML.
+MD = ("**Bold** and *italic* and `code`, with a_snake_name kept.\n"
+      "- one\n- two\n  1. nested\n\n"
+      "[safe link](https://example.com/x) and [bad](javascript:alert(1)) and <img src=x onerror=alert(1)>\n\n"
+      "```python\nprint(\"hi\")\n```\n\n"
+      "| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted")
+con.execute("INSERT INTO sessions VALUES('s_md', 'cli', 'Markdown check', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-31T11:00:00+00:00"), epoch("2026-10-31T12:00:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_md', 'assistant', ?, ?)",
+            (MD, epoch("2026-10-31T12:00:00+00:00")))
 for i in range(120):
     con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_long', ?, ?, ?)",
                 ("user" if i % 2 == 0 else "assistant", f"message {i}", epoch("2026-11-01T10:00:00+00:00") + i))

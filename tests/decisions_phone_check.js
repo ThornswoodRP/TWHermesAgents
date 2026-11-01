@@ -216,7 +216,7 @@ const base = `http://localhost:${port}`
     if (!page.url().endsWith('/m/hermes/one/s_plan')) throw new Error('url ' + page.url())
     await page.getByText(/^You can send until .+ started from the phone or has \/yolo on\.$/).waitFor({ timeout: 3000 })
   })
-  await page.getByLabel('Send to One').fill('Add the backup check.')
+  await page.getByLabel('Message to One').fill('Add the backup check.')
   await page.getByRole('button', { name: 'Send to One' }).click()
   await step('a message to One waits for its connector', async () => {
     await page.getByText('Add the backup check.').waitFor({ timeout: 5000 })
@@ -236,8 +236,18 @@ const base = `http://localhost:${port}`
     await page.getByText('message 119', { exact: true }).waitFor({ timeout: 15000 })
     if (await page.getByText('message 69', { exact: true }).count()) throw new Error('more than the newest page')
   })
+  const inView = text => page.getByText(text, { exact: true }).evaluate(n => {
+    const r = n.getBoundingClientRect()
+    return r.top >= 0 && r.bottom <= innerHeight
+  })
+  await step('a chat opens on its newest message', async () => {
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+  })
   await page.getByRole('button', { name: 'Older messages' }).click()
   await page.getByText('message 20', { exact: true }).waitFor({ timeout: 15000 })
+  await step('older messages keep the place: the message that was first stays on screen', async () => {
+    if (!(await inView('message 70'))) throw new Error('message 70 is not on screen')
+  })
   await page.getByRole('button', { name: 'Older messages' }).click()
   await step('older messages page back to the first, in order, with no gaps or repeats', async () => {
     await page.getByText('message 0', { exact: true }).waitFor({ timeout: 15000 })
@@ -254,6 +264,42 @@ const base = `http://localhost:${port}`
   await page.goto(base + '/m/hermes/one/s_never')
   await step('a chat One never listed does not open', () =>
     page.getByText('One has not listed this chat, so it does not open here.').waitFor({ timeout: 5000 }))
+  await page.goto(base + '/m/hermes/one/s_md')
+  await step("Markdown is drawn: bold, italic, code, lists, a link, a code block, a table and a quote", async () => {
+    const msg = page.locator('#view .msg[data-mid]').first()
+    await msg.locator('strong', { hasText: 'Bold' }).waitFor({ timeout: 15000 })
+    if (await msg.locator('em').textContent() !== 'italic') throw new Error('italic')
+    if (await msg.locator('p code').textContent() !== 'code') throw new Error('inline code')
+    if (!(await msg.textContent()).includes('a_snake_name kept')) throw new Error('an underscore name was changed')
+    if (JSON.stringify(await msg.locator('ul > li').evaluateAll(n => n.map(li => li.firstChild.textContent))) !== '["one","two"]') throw new Error('the list')
+    if (await msg.locator('ul > li ol > li').textContent() !== 'nested') throw new Error('the nested list')
+    const safe = msg.locator('a', { hasText: 'safe link' })
+    if (await safe.getAttribute('href') !== 'https://example.com/x') throw new Error('the link')
+    if (await safe.getAttribute('target') !== '_blank' || !/noopener/.test(await safe.getAttribute('rel'))) throw new Error('the link opens in place')
+    if (await msg.locator('a').count() !== 1) throw new Error('a link that is not http or https')
+    if (await msg.locator('img').count()) throw new Error('HTML in a message was drawn')
+    if (!(await msg.textContent()).includes('[bad](javascript:alert(1)) and <img src=x onerror=alert(1)>')) throw new Error('the unsafe text is not shown as text')
+    if (await msg.locator('.md-code pre').textContent() !== 'print("hi")') throw new Error('the code block')
+    if (await msg.locator('.md-code-bar span').textContent() !== 'python') throw new Error('the code block language')
+    if (JSON.stringify(await msg.locator('th').allTextContents()) !== '["a","b"]') throw new Error('the table head')
+    if (JSON.stringify(await msg.locator('td').allTextContents()) !== '["1","2"]') throw new Error('the table row')
+    if (await msg.locator('blockquote').textContent() !== 'quoted') throw new Error('the quote')
+  })
+  await step('Copy on a code block copies it, or selects it where the clipboard is refused', async () => {
+    const copy = page.locator('#view .md-code .copy')
+    await copy.click()
+    await page.waitForFunction(() => /^(Copied|Selected)$/.test(document.querySelector('#view .md-code .copy').textContent), null, { timeout: 3000 })
+  })
+  await step('a chat fits the phone: no sideways scroll, and the box sits above the tabs', async () => {
+    const m = await page.evaluate(() => ({
+      wide: document.documentElement.scrollWidth - innerWidth,
+      dock: document.querySelector('#view .dock').getBoundingClientRect().bottom,
+      tabs: document.getElementById('tabs').getBoundingClientRect().top
+    }))
+    if (m.wide > 0) throw new Error('sideways scroll of ' + m.wide)
+    if (m.dock > m.tabs + 0.5) throw new Error(`the box ends at ${m.dock}, under the tabs at ${m.tabs}`)
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-markdown.png' })
   await page.goto(base + '/m/hermes/me/s_plan')
   await step("One's chat id does not open on Hermes", () =>
     page.getByText('Hermes has not listed this chat, so it does not open here.').waitFor({ timeout: 5000 }))

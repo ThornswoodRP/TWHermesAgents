@@ -584,6 +584,309 @@ function offLine(v) {
   return el('p', { class: 'warn', 'data-state': v.state }, stateWords(v)[1])
 }
 
+// ── the chat layout and Markdown (redesign step 1, plan Part 11) ──────────
+//
+// Messages are bubbles: Patrick's on the right in gold, everyone else's on the
+// left, with the sender's name once per run and a day line when the day
+// changes. Hermes and the Bots write Markdown, so it is drawn: paragraphs,
+// bold, italic, struck text, inline code, code blocks with Copy, lists,
+// quotes, headings, rules, tables and links. Every node is made here and
+// filled with text; nothing in a message is ever read as HTML, so a message
+// cannot run script or load anything (the page's CSP allows images from this
+// origin only, and no image is drawn from a message). A link opens only an
+// http or https address, in a new tab, with no referrer.
+
+const INLINE = new RegExp([
+  '`([^`\\n]+)`',                                                // 1 code
+  '\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)',              // 2 text, 3 address
+  '(https?:\\/\\/[^\\s<>()]*[^\\s<>().,;:!?\'"\\]])',             // 4 a bare address
+  '\\*\\*(?=\\S)([^\\n]+?)(?<=\\S)\\*\\*',                        // 5 bold
+  '(?<!\\w)__(?=\\S)([^\\n]+?)(?<=\\S)__(?!\\w)',                 // 6 bold
+  '~~(?=\\S)([^\\n]+?)(?<=\\S)~~',                                // 7 struck
+  '(?<![\\w*])\\*(?=[^\\s*])([^*\\n]+?)(?<=\\S)\\*(?![\\w*])',    // 8 italic
+  '(?<!\\w)_(?=[^\\s_])([^_\\n]+?)(?<=\\S)_(?!\\w)'               // 9 italic, never inside a_name
+].join('|'), 'g')
+
+function link(text, href) {
+  return el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, text)
+}
+
+function inlineMd(text) {
+  const out = []
+  let last = 0
+  for (const m of text.matchAll(INLINE)) {
+    if (m.index > last) out.push(text.slice(last, m.index))
+    if (m[1] !== undefined) out.push(el('code', {}, m[1]))
+    else if (m[2] !== undefined) out.push(link(m[2], m[3]))
+    else if (m[4] !== undefined) out.push(link(m[4], m[4]))
+    else if (m[5] !== undefined || m[6] !== undefined) out.push(el('strong', {}, inlineMd(m[5] ?? m[6])))
+    else if (m[7] !== undefined) out.push(el('s', {}, inlineMd(m[7])))
+    else out.push(el('em', {}, inlineMd(m[8] ?? m[9])))
+    last = m.index + m[0].length
+  }
+  if (last < text.length) out.push(text.slice(last))
+  return out
+}
+
+const FENCE = /^ {0,3}(`{3,}|~{3,})\s*([\w+#.-]*)/
+const HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/
+const RULE = /^ {0,3}([-*_])( *\1){2,} *$/
+const QUOTE = /^ {0,3}>/
+const ITEM = /^( *)([-*+]|\d{1,9}[.)])\s+(.*)$/
+const TABLE_RULE = /^ *\|? *:?-{3,}:? *(\| *:?-{3,}:? *)*\|? *$/
+
+function isTable(lines, i) {
+  return lines[i].includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') && TABLE_RULE.test(lines[i + 1])
+}
+
+function startsBlock(lines, i) {
+  const line = lines[i]
+  return FENCE.test(line) || HEADING.test(line) || RULE.test(line) || QUOTE.test(line) || ITEM.test(line) || isTable(lines, i)
+}
+
+function cells(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+}
+
+function codeBlock(code, lang) {
+  const pre = el('pre', {}, el('code', {}, code))
+  const button = el('button', { type: 'button', class: 'copy', onclick: async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+      button.textContent = 'Copied'
+    } catch (e) {
+      // Some views refuse the clipboard: the code is selected for the phone's own Copy.
+      const range = document.createRange()
+      range.selectNodeContents(pre)
+      const sel = getSelection()
+      sel.removeAllRanges()
+      sel.addRange(range)
+      button.textContent = 'Selected'
+    }
+  } }, 'Copy')
+  return el('div', { class: 'md-code' }, el('div', { class: 'md-code-bar' }, el('span', {}, lang || 'code'), button), pre)
+}
+
+function indentOf(line) { return line.match(/^ */)[0].length }
+
+function listMd(lines, i, out) {
+  const first = lines[i].match(ITEM)
+  const base = first[1].length
+  const ordered = /\d/.test(first[2])
+  const start = ordered ? parseInt(first[2], 10) : 1
+  const list = el(ordered ? 'ol' : 'ul', start !== 1 ? { start: String(start) } : {})
+  let li = null, body = [], inner = 0
+  const flush = () => { if (li) { li.append(...blocksMd(body)); list.append(li) } }
+  while (i < lines.length) {
+    const line = lines[i]
+    const m = line.match(ITEM)
+    if (m && m[1].length === base && /\d/.test(m[2]) === ordered) {
+      flush()
+      li = el('li')
+      body = [m[3]]
+      inner = m[1].length + m[2].length + 1
+      i++
+      continue
+    }
+    if (!line.trim()) {
+      // A blank line ends the list, unless what follows is still under it.
+      const next = lines[i + 1]
+      const nm = next === undefined ? null : next.match(ITEM)
+      if (next !== undefined && (indentOf(next) > base || (nm && nm[1].length === base && /\d/.test(nm[2]) === ordered))) {
+        body.push('')
+        i++
+        continue
+      }
+      break
+    }
+    if (indentOf(line) > base) { body.push(line.slice(Math.min(indentOf(line), inner))); i++; continue }
+    if (!startsBlock(lines, i)) { body.push(line.trim()); i++; continue }
+    break
+  }
+  flush()
+  out.push(list)
+  return i
+}
+
+function blocksMd(lines) {
+  const out = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    if (!line.trim()) { i++; continue }
+    const fence = line.match(FENCE)
+    if (fence) {
+      const close = new RegExp('^ {0,3}\\' + fence[1][0] + '{' + fence[1].length + ',}\\s*$')
+      const code = []
+      i++
+      while (i < lines.length && !close.test(lines[i])) code.push(lines[i++])
+      i++
+      out.push(codeBlock(code.join('\n'), fence[2]))
+      continue
+    }
+    const head = line.match(HEADING)
+    if (head) { out.push(el('p', { class: 'md-h' }, inlineMd(head[2]))); i++; continue }
+    if (RULE.test(line)) { out.push(el('hr')); i++; continue }
+    if (QUOTE.test(line)) {
+      const quoted = []
+      while (i < lines.length && QUOTE.test(lines[i])) quoted.push(lines[i++].replace(/^ {0,3}> ?/, ''))
+      out.push(el('blockquote', {}, blocksMd(quoted)))
+      continue
+    }
+    if (isTable(lines, i)) {
+      const top = cells(line)
+      const rows = []
+      i += 2
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) rows.push(cells(lines[i++]))
+      out.push(el('div', { class: 'md-table' }, el('table', {},
+        el('thead', {}, el('tr', {}, top.map(c => el('th', {}, inlineMd(c))))),
+        el('tbody', {}, rows.map(r => el('tr', {}, top.map((_, k) => el('td', {}, inlineMd(r[k] || '')))))))))
+      continue
+    }
+    if (ITEM.test(line)) { i = listMd(lines, i, out); continue }
+    // A paragraph keeps its line breaks, the way a chat message is written.
+    const para = [line.trim()]
+    i++
+    while (i < lines.length && lines[i].trim() && !startsBlock(lines, i)) para.push(lines[i++].trim())
+    out.push(el('p', {}, para.map((l, k) => k ? [el('br'), inlineMd(l)] : inlineMd(l))))
+  }
+  return out
+}
+
+function markdown(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').replace(/\t/g, '    ').split('\n')
+  return el('div', { class: 'text md' }, blocksMd(lines))
+}
+
+function clock(iso) {
+  const d = new Date(iso)
+  return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function dayWords(d) {
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+  if (d.toDateString() === today.toDateString()) return 'Today'
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric',
+    year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' })
+}
+
+// Each item: { mine, who, at, text, mid, status, note, warn }.
+function bubbles(items) {
+  const out = []
+  let day = null, last = null
+  for (const m of items) {
+    const d = new Date(m.at)
+    if (!isNaN(d) && d.toDateString() !== day) {
+      day = d.toDateString()
+      last = null
+      out.push(el('div', { class: 'day' }, dayWords(d)))
+    }
+    const by = m.mine ? null : m.who
+    const attrs = { class: 'msg ' + (m.mine ? 'mine' : 'theirs') }
+    if (m.mid !== undefined && m.mid !== null) attrs['data-mid'] = String(m.mid)
+    if (m.status) attrs['data-status'] = m.status
+    out.push(el('div', attrs,
+      !m.mine && (last === null || by !== last.by) ? el('div', { class: 'who' }, m.who) : null,
+      el('div', { class: 'bub' }, markdown(m.text)),
+      el('div', { class: 'meta' + (m.warn ? ' warn' : '') }, [clock(m.at), m.note].filter(Boolean).join(' · '))))
+    last = { by }
+  }
+  return out
+}
+
+function svgIcon(path) {
+  const ns = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(ns, 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('width', '20')
+  svg.setAttribute('height', '20')
+  svg.setAttribute('aria-hidden', 'true')
+  const p = document.createElementNS(ns, 'path')
+  p.setAttribute('d', path)
+  p.setAttribute('fill', 'currentColor')
+  svg.append(p)
+  return svg
+}
+
+// The bar on top of a chat: back, then the chat's name and where it lives.
+function chatBar(back, backLabel, title, under) {
+  return el('div', { class: 'chatbar' },
+    el('button', { class: 'back', type: 'button', 'aria-label': backLabel, onclick: back },
+      svgIcon('M15.4 4.6 14 3.2 5.2 12l8.8 8.8 1.4-1.4L8 12z')),
+    el('div', { class: 'title' }, el('strong', {}, title), el('span', {}, under)))
+}
+
+// The box at the foot of a chat. It grows with what is typed, up to six
+// lines, and keeps its draft (and the draft's idempotency key) while the
+// chat redraws. Enter is a new line; the button sends.
+function chatComposer(key, label, buttonLabel, send, status, gw) {
+  const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
+  const box = el('textarea', { rows: '1', 'aria-label': label, placeholder: label, enterkeyhint: 'enter' })
+  box.value = draft.text
+  const fit = () => { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight + 2, 160) + 'px' }
+  box.addEventListener('input', () => {
+    if (box.value !== draft.text) { draft.text = box.value; draft.key = newKey() }
+    fit()
+  })
+  requestAnimationFrame(fit)
+  const button = el('button', { class: 'send', type: 'button', 'aria-label': buttonLabel, onclick: async () => {
+    const text = box.value.trim()
+    if (!text) { status.textContent = 'Type a message first.'; return }
+    status.textContent = 'Sending...'
+    button.disabled = true
+    const s = await send(text, draft.key)
+    button.disabled = false
+    if (s.status === 200) { drafts[key] = null; chatPlace.toEnd = true; return route() }
+    if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
+    const d = s.body.detail || {}
+    status.textContent = s.status === 0
+      ? 'Could not reach the core. Sending again sends the same message, never a second one.'
+      : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
+  } }, svgIcon('M3.4 20.4 21 12 3.4 3.6 3.4 10.1 15 12 3.4 13.9z'))
+  return el('div', { class: 'composer' }, box, button)
+}
+
+// Where a chat is scrolled. Opening a chat, or sending, goes to the newest
+// message. A redraw while Patrick reads further up keeps his place and says
+// how many came in below. Older messages keep the one he was looking at.
+const chatPlace = { key: null, seen: null, toEnd: false, keep: null }
+
+function nearEnd() {
+  return innerHeight + scrollY >= document.documentElement.scrollHeight - 120
+}
+
+function showChat(key, top, list, dock, items) {
+  const opening = chatPlace.key !== key
+  const wasNearEnd = !opening && nearEnd()
+  const mids = items.map(m => String(m.mid))
+  let fresh = 0
+  if (!opening && !wasNearEnd && !chatPlace.toEnd && chatPlace.seen !== null) {
+    const at = mids.lastIndexOf(chatPlace.seen)
+    fresh = at === -1 ? 0 : mids.length - 1 - at
+  }
+  const toEnd = opening || wasNearEnd || chatPlace.toEnd
+  const keep = chatPlace.keep
+  const row = fresh ? el('button', { class: 'newrow', type: 'button', onclick: () => {
+    row.remove()
+    chatPlace.seen = mids[mids.length - 1] ?? null
+    scrollTo({ top: document.documentElement.scrollHeight })
+  } }, fresh === 1 ? '1 new message' : `${fresh} new messages`) : null
+  show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), el('div', { class: 'dock' }, row, dock)))
+  chatPlace.key = key
+  chatPlace.toEnd = false
+  chatPlace.keep = null
+  if (toEnd) chatPlace.seen = mids[mids.length - 1] ?? null
+  if (keep) {
+    const n = document.querySelector(`#view .msg[data-mid="${CSS.escape(keep)}"]`)
+    if (n) n.scrollIntoView({ block: 'start' })
+  } else if (toEnd) {
+    scrollTo({ top: document.documentElement.scrollHeight })
+  }
+}
+
 // ── full history of his own chats (step 2, plan Part 4) ────────────────────
 //
 // A page comes from Hermes itself: the core asks that gateway's connector, which
@@ -680,24 +983,24 @@ async function gatewayView(gw) {
   if (seqNow === viewSeq) show(parts)
 }
 
+// What Hermes holds of one of his own chats: notes to show above it, its
+// messages as bubbles, and the Older messages button when there are more.
 function historyPart(gw, sid, t, name) {
-  const box = el('div', { class: 'history' })
-  if (t.error) { box.append(el('p', { class: 'warn' }, t.error)); return box }
+  if (t.error) return { notes: [el('p', { class: 'warn' }, t.error)], items: [], gone: false }
   if (!t.newest) {
-    box.append(el('p', { class: 'quiet' }, `Asking ${name} for this chat. It shows here within half a minute.`))
-    return box
+    return { notes: [el('p', { class: 'quiet' }, `Asking ${name} for this chat. It shows here within half a minute.`)], items: [], gone: false }
   }
   if (t.newest.gone) {
-    box.append(el('p', { class: 'warn' }, `This chat is gone from ${name}. Nothing sent here would reach it.`))
-    return box
+    return { notes: [el('p', { class: 'warn' }, `This chat is gone from ${name}. Nothing sent here would reach it.`)], items: [], gone: true }
   }
   const seen = new Set()
   const msgs = t.older.concat(t.newest.messages).filter(m => !seen.has(m.mid) && seen.add(m.mid))
   const olderMore = t.older.length ? t.olderMore : t.newest.more
-  if (t.note) box.append(el('p', { class: 'receipt', role: 'status' }, t.note))
-  if (olderMore) {
+  const notes = []
+  if (t.note) notes.push(el('p', { class: 'receipt', role: 'status' }, t.note))
+  if (olderMore && msgs.length) {
     const olderNote = el('p', { class: 'warn', role: 'status' })
-    box.append(el('button', { class: 'secondary', type: 'button', onclick: async () => {
+    notes.push(el('button', { class: 'secondary older', type: 'button', onclick: async () => {
       olderNote.textContent = `Asking ${name}...`
       const p = await ownPage(`/own/${gw}/chats/${encodeURIComponent(sid)}/messages?before=${msgs[0].mid}`)
       if (p.status !== 200 || p.body.pending) {
@@ -706,13 +1009,21 @@ function historyPart(gw, sid, t, name) {
       }
       t.older = p.body.messages.concat(t.older)
       t.olderMore = p.body.more
+      chatPlace.keep = String(msgs[0].mid)
       route()
     } }, 'Older messages'), olderNote)
   }
-  box.append(...(msgs.length ? msgs.map(m => el('div', { class: 'msg', 'data-mid': String(m.mid) },
-    el('div', { class: 'who' }, m.role === 'user' ? 'Patrick' : 'Hermes', el('span', { class: 'quiet' }, '  ' + when(m.at))),
-    el('div', { class: 'text' }, m.text))) : [el('p', { class: 'quiet' }, 'Nothing here yet.')]))
-  return box
+  const items = msgs.map(m => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid }))
+  if (!items.length) notes.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
+  return { notes, items, gone: false }
+}
+
+// What Patrick sent from the phone, until the chat itself shows it.
+function pendingItems(mine, readAt) {
+  return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
+    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status,
+      note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''),
+      warn: m.status === 'dead' || m.status === 'uncertain' }))
 }
 
 async function ownChatView(gw, sid) {
@@ -728,31 +1039,26 @@ async function ownChatView(gw, sid) {
   function render() {
     // The phone's copy of what Patrick sent gives way to Hermes's copy once Hermes holds it.
     const readAt = t.newest && t.newest.read_at ? new Date(t.newest.read_at) : (v.as_of ? new Date(v.as_of) : null)
-    const mine = v.mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
-      .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
-        el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
-        el('div', { class: 'text' }, m.text),
-        el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
-          STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''))))
-    const parts = [
-      el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/hermes/' + gw) }, 'All chats on ' + name),
-      el('h2', {}, v.chat.title || 'Untitled chat'),
-      el('p', { class: 'quiet' }, `On ${name}. A chat is never an answer to a card.`),
-      historyPart(gw, sid, t, name),
-      mine,
+    const h = historyPart(gw, sid, t, name)
+    const items = h.items.concat(pendingItems(v.mine, readAt))
+    const top = [
+      chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, v.chat.title || 'Untitled chat',
+        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`),
+      h.notes,
       offLine(v)
     ]
-    const gone = t.newest && t.newest.gone
-    if (v.can_send && v.online && !gone && !t.error) {
-      parts.push(signInPart(v, status, true))
+    const dock = []
+    if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
-        parts.push(composer(`own:${gw}:${sid}`, 'Send to ' + name,
+        dock.push(signInPart(v, status, true), chatComposer(`own:${gw}:${sid}`, 'Message to ' + name, 'Send to ' + name,
           (text, k) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k }), status, gw), status)
+      } else {
+        dock.push(signInPart(v, status, true), status)
       }
     } else if (!v.can_send) {
-      parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
+      dock.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
     }
-    if (seqNow === viewSeq) show(parts)
+    if (seqNow === viewSeq) showChat('own:' + key, top, bubbles(items), dock, items)
   }
   render()
   const p = await ownPage(`/own/${gw}/chats/${encodeURIComponent(sid)}/messages`)
@@ -803,75 +1109,51 @@ async function chatView(target, tab) {
   const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false, note: '', error: null })
   const idOf = m => room ? m.seq : m.mid
   const status = el('p', { class: 'warn', role: 'status' })
-  function historyNodes() {
+  function history() {
     if (!t.newest || t.newest.gone) {
       // Before the first page, or a Bot with no Bot Chat yet: what the feed last sent.
-      return v.history.length ? v.history.map(m => el('div', { class: 'msg' },
-        el('div', { class: 'who' }, m.who, el('span', { class: 'quiet' }, '  ' + when(m.at))),
-        el('div', { class: 'text' }, m.text))) : [el('p', { class: 'quiet' }, 'Nothing here yet.')]
+      return { notes: [], items: v.history.map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at, text: m.text, mid: 'feed' + k })), keyed: false }
     }
     const seen = new Set()
-    const items = t.older.concat(room ? t.newest.events : t.newest.messages).filter(m => !seen.has(idOf(m)) && seen.add(idOf(m)))
+    const raw = t.older.concat(room ? t.newest.events : t.newest.messages).filter(m => !seen.has(idOf(m)) && seen.add(idOf(m)))
     const olderMore = t.older.length ? t.olderMore : t.newest.more
-    const olderNote = el('p', { class: 'warn', role: 'status' })
-    const out = []
-    if (olderMore && items.length) {
-      out.push(el('button', { class: 'secondary', type: 'button', onclick: async () => {
+    const notes = []
+    if (olderMore && raw.length) {
+      const olderNote = el('p', { class: 'warn', role: 'status' })
+      notes.push(el('button', { class: 'secondary older', type: 'button', onclick: async () => {
         olderNote.textContent = 'Asking for older messages...'
-        const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages?before=${idOf(items[0])}`)
+        const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages?before=${idOf(raw[0])}`)
         if (p.status !== 200 || p.body.pending) {
           olderNote.textContent = p.status === 200 ? 'No answer yet. Try again in a moment.' : said(p.body)
           return
         }
         t.older = (room ? p.body.events : p.body.messages).concat(t.older)
         t.olderMore = p.body.more
+        chatPlace.keep = String(idOf(raw[0]))
         route()
       } }, 'Older messages'), olderNote)
     }
-    out.push(...(items.length ? items.map(m => el('div', { class: 'msg', 'data-mid': String(idOf(m)) },
-      el('div', { class: 'who' }, room ? (m.actor || 'someone') : (m.role === 'user' ? 'Patrick' : name),
-        el('span', { class: 'quiet' }, '  ' + when(m.at))),
-      el('div', { class: 'text' }, m.text))) : [el('p', { class: 'quiet' }, 'Nothing here yet.')]))
-    return out
+    const items = raw.map(m => room
+      ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq }
+      : { mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid })
+    return { notes, items, keyed: true }
   }
   function render() {
     const readAt = v.as_of ? new Date(v.as_of) : null
-    // My own messages, until the chat above shows them.
-    const mine = v.mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
-      .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
-        el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
-        el('div', { class: 'text' }, m.text),
-        el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
-          STATE[m.status] + (m.status === 'dead' && m.reason ? ': ' + m.reason : ''))))
-    const parts = [
-      el('p', { class: 'quiet' }, room
-        ? `${name}, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
-        : `Your Bot Chat with ${name}, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
-      historyNodes(),
-      mine
+    const h = history()
+    const items = h.items.concat(pendingItems(v.mine, readAt))
+    const top = [
+      chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, room
+        ? `A room, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
+        : `Your Bot Chat, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+      h.notes
     ]
-    if (v.can_send) {
-      const draft = drafts[target] || (drafts[target] = { text: '', key: newKey() })
-      const box = el('textarea', { rows: '3', 'aria-label': 'Message to ' + name, placeholder: 'Message ' + name })
-      box.value = draft.text
-      box.addEventListener('input', () => {
-        if (box.value !== draft.text) { draft.text = box.value; draft.key = newKey() }
-      })
-      parts.push(box, el('button', { class: 'primary', type: 'button', onclick: async () => {
-        const text = box.value.trim()
-        if (!text) return
-        status.textContent = 'Sending...'
-        const s = await call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: draft.key })
-        if (s.status === 200) { drafts[target] = null; return route() }
-        if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
-        status.textContent = s.status === 0
-          ? 'Could not reach the core. Sending again sends the same message, never a second one.'
-          : said(s.body)
-      } }, 'Send to ' + name), status)
-    } else {
-      parts.push(el('p', { class: 'quiet' }, said({ error: 'chat_write_off' })))
-    }
-    if (seqNow === viewSeq) show(parts)
+    if (!items.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
+    const dock = v.can_send
+      ? [chatComposer(target, 'Message to ' + name, 'Send to ' + name,
+          (text, k) => call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: k }), status), status]
+      : [el('p', { class: 'quiet' }, said({ error: 'chat_write_off' }))]
+    if (seqNow === viewSeq) showChat(key, top, bubbles(items), dock, items)
   }
   render()
   const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages`)
