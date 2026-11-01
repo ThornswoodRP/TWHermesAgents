@@ -51,6 +51,7 @@ class Migrations(unittest.TestCase):
         4: "7d599a7b92702912c989d590afdfb21235025cf7fda9f24dcc091fc11027c95c",
         5: "d36394b9f9ba7c25fc560c05a7834d52955de09312aed15256602e6a05ce1406",
         6: "720327f6d99e5e74175c44b603b525df3cdae7ae67c1a6aa56778e8d882c9b63",
+        7: "3f7658050982a903a9df24690b2f1c2a4d4759c525f86af3b5d7855c222175e0",
     }
 
     def test_merged_migrations_never_change(self):

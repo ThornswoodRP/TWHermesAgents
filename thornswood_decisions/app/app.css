@@ -71,3 +71,4 @@ h2.section { text-transform: uppercase; letter-spacing: .12em; font-size: 12px; 
 pre.artifact { background: var(--raised); }
 .install { background: var(--raised); }
 a:focus-visible, button:focus-visible { outline: 2px solid var(--accent-hot); outline-offset: 2px; }
+.row .rec.off { color: var(--warn); border-color: var(--warn); }

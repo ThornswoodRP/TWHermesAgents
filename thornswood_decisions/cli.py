@@ -12,7 +12,9 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   flag        turn one flag on or off
   test-card   open a test card as Bramble, in a test workspace only
   serve       answer the API on 127.0.0.1
-  feed-token  print a new token for a feed (work, room, bots), the connector or the push worker (replaces the old one)
+  feed-token  print a new token for a feed (work, room, bots), the connector, the push worker
+              or an own-Hermes connector (own-me, own-one) (replaces the old one)
+  token-known whether the token on stdin is the core's for that name (the install checks its files with it)
   push-reset  forget the push worker's keys and every phone's alerts, when the worker's keys are lost
   selfcheck   a whole passkey ceremony and one sealed, encrypted push, with the installed libraries
   backup      make a consistent copy
@@ -121,6 +123,16 @@ def cmd_feed_token(store: Store, args) -> None:
     ws, _ = _workspace(store, args.workspace)
     # Only the token goes to stdout, so the install can hand it straight to the feed's file.
     print(Feeds(store).new_token(ws, args.name, by=OPERATOR))
+
+
+def cmd_token_known(store: Store, args) -> dict:
+    """Whether the token on stdin is the one the core keeps for that name (the install's check, after a downgrade)."""
+    ws, _ = _workspace(store, args.workspace)
+    try:
+        Feeds(store).check_token(ws, args.name, sys.stdin.read().strip() or None)
+    except CoreError:
+        return {"known": False}
+    return {"known": True}
 
 
 def cmd_selfcheck(store: Store, args) -> dict:
@@ -253,6 +265,9 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("feed-token")
     p.add_argument("--workspace", required=True)
     p.add_argument("--name", choices=FEED_NAMES, required=True)
+    p = sub.add_parser("token-known")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--name", choices=FEED_NAMES, required=True)
     p = sub.add_parser("push-reset")
     p.add_argument("--workspace", required=True)
     sub.add_parser("selfcheck")
@@ -267,6 +282,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"init": cmd_init, "bind-room": cmd_bind_room, "pair": cmd_pair, "flag": cmd_flag,
             "test-card": cmd_test_card, "serve": cmd_serve, "feed-token": cmd_feed_token, "selfcheck": cmd_selfcheck,
+            "token-known": cmd_token_known,
             "push-reset": cmd_push_reset,
             "backup": cmd_backup, "verify": cmd_verify}
 

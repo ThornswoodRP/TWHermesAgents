@@ -6,7 +6,8 @@ It prints one JSON line (a phone pairing code and three card ids, the second
 high risk, the third left for the alert checks) and serves until killed. Test data only: no real workspace, no Bot,
 no deploy; nothing takes the chat messages it queues, and the push worker's
 keys are throwaway ones said straight to the core, with no worker and no push
-service.
+service. One's own-Hermes connector is stood in for by one call to the core,
+and nothing takes the messages sent to it.
 """
 import json
 import sys
@@ -37,6 +38,17 @@ from thornswood_decisions import push_worker, webpush
 from thornswood_decisions.push import Push
 tp = f.new_token(w.ws, "push", by="t")
 Push(w.store).hello(w.ws, tp, webpush.vapid_public(webpush.new_vapid_key()), push_worker.seal_public(X25519PrivateKey.generate()))
+# Patrick's own Hermes: One heard from with its gateway running and two chats; my-hermes never heard from.
+from thornswood_decisions.own import OwnChat
+w.store.set_flag(w.ws, "own_chat_write", True, by="t")
+own = OwnChat(w.store)
+to = f.new_token(w.ws, "own-one", by="t"); f.new_token(w.ws, "own-me", by="t")
+own.claim(w.ws, "one", to, 0, True)
+own.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "chats": [
+    {"id": "s_plan", "title": "Plan the week", "last_at": "2026-11-01T17:30:00+00:00", "preview": "three things"},
+    {"id": "s_old", "title": "", "last_at": "2026-10-30T17:30:00+00:00", "preview": "older"}],
+    "open": [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
+                                           {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]})
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
 srv = make_server(api, "127.0.0.1", port)

@@ -3,7 +3,8 @@
 It listens on 127.0.0.1 only. Tailscale Serve puts the phone in front of it
 (step 3); Hermes Desktop reaches it through the thornswood-decisions plugin's
 backend, which runs in Patrick's Hermes on the same VM. The feeds and the
-connector, on the same VM, each carry a token that does only their one job.
+connector, on the same VM, each carry a token that does only their one job,
+and so does each own-Hermes connector (my-hermes on the VM, his Hermes on One).
 
 Two ways to carry a session, never both:
 - a cookie (the phone): every write needs the exact Origin of the app and the
@@ -33,6 +34,7 @@ from .auth import Principal
 from .chat import Chat
 from .core import DecisionCore
 from .feeds import MAX_FEED_BYTES, Feeds
+from .own import OwnChat
 from .passkey import Passkeys
 from .push import Push
 from .store import CoreError, Store, now_utc
@@ -57,7 +59,8 @@ APP_FILES = {
 # and room are the tabs' first names (before Decisions, Board and Rooms), kept
 # so an old alert or home screen link still opens.
 APP_VIEWS = re.compile(r"^(|decisions|board|rooms|bots|bramble|settings|needs-you|work|room|"
-                       r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64})$")
+                       r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64}|"
+                       r"hermes/(?:me|one)|hermes/(?:me|one)/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
            "font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 # The service worker's own policy: it fetches only this origin, to keep the shell,
@@ -65,7 +68,10 @@ APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'se
 SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 # Data the phone reads only while mobile_read is on. Signing in, adding a
 # passkey and signing out work with it off, so the phone can be set up first.
-APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push")}
+APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
+            ("GET", "own"), ("POST", "own")}
+# What an own-Hermes connector (own_connector.py) posts, with its own token.
+OWN_CONNECTOR = ("claim", "result", "feed")
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -191,6 +197,17 @@ class Api:
             return self._pair(core, headers, data, extra)
         if method not in ("GET", "POST"):
             raise CoreError(405, "method", "GET or POST only")
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] in OWN_CONNECTOR:
+            if "cookie" in headers or headers.get("origin") is not None:
+                raise CoreError(403, "not_a_feed", "an own-Hermes connector runs beside that Hermes, not in a browser")
+            token, own = _bearer(headers.get("authorization", "")), OwnChat(core.s)
+            if route[2] == "feed":
+                return 200, own.feed(self.ws, route[1], token, data)
+            if route[2] == "claim":
+                return 200, own.claim(self.ws, route[1], token, data.get("limit", 3), data.get("ready", False),
+                                      str(data.get("why", "")))
+            return 200, own.result(self.ws, route[1], token, str(data.get("id", "")), str(data.get("outcome", "")),
+                                   str(data.get("ref", "")), str(data.get("reason", "")), data.get("session_id"))
         if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector", "push-worker"):
             if "cookie" in headers or headers.get("origin") is not None:
                 raise CoreError(403, "not_a_feed", "a feed, the connector or the push worker comes from the VM, "
@@ -272,6 +289,15 @@ class Api:
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1])
             return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"))
+        if method == "GET" and route == ["own"]:
+            return 200, OwnChat(core.s).summary(p)
+        if method == "GET" and len(route) == 2 and route[0] == "own":
+            return 200, OwnChat(core.s).chats(p, route[1])
+        if method == "GET" and len(route) == 3 and route[0] == "own":
+            return 200, OwnChat(core.s).view(p, route[1], route[2])
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
+            return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
+                                             data.get("text"), data.get("idempotency_key"))
         if method == "POST" and route == ["csrf"]:
             if "cookie" not in headers:
                 raise CoreError(400, "not_the_app", "only the app's cookie session asks for a new CSRF token")
@@ -345,7 +371,8 @@ class Api:
 
 
 def body_limit(path: str) -> int:
-    return MAX_FEED_BYTES if path.startswith(PREFIX + "/feeds/") else MAX_REQUEST_BYTES
+    feed = path.startswith(PREFIX + "/feeds/") or (path.startswith(PREFIX + "/own/") and path.endswith("/feed"))
+    return MAX_FEED_BYTES if feed else MAX_REQUEST_BYTES
 
 
 def _refusal(status: int, reason: str, message: str, detail: dict | None = None) -> tuple[int, dict, bytes]:

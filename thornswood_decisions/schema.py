@@ -9,7 +9,14 @@ receipts) cannot be changed or deleted: triggers abort the statement.
 
 from __future__ import annotations
 
-FLAGS = ("decision_write", "mobile_read", "mobile_chat_write", "push_send", "connector_effects")
+# The flags migration 1 made. Frozen: migration 1's text, and so its pinned
+# hash, is built from this tuple. A later flag is added by a migration.
+FLAGS_1 = ("decision_write", "mobile_read", "mobile_chat_write", "push_send", "connector_effects")
+# own_chat_write (migration 7): Patrick's chat with his own Hermes, my-hermes on
+# the VM and his Hermes on One, from the phone.
+FLAGS = FLAGS_1 + ("own_chat_write",)
+# Patrick's own Hermes: the gateways the phone reaches beside the Bots' own.
+OWN_GATEWAYS = ("me", "one")
 
 # Card kinds (07 section 5). "main" is step 6, which waits for phase 7.
 KINDS = ("question", "change", "review", "todo", "board_review", "weekly_review", "main")
@@ -43,7 +50,7 @@ CREATE TABLE workspaces (
 
 CREATE TABLE flags (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-  name TEXT NOT NULL CHECK (name IN {_in(FLAGS)}),
+  name TEXT NOT NULL CHECK (name IN {_in(FLAGS_1)}),
   enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
   changed_at TEXT NOT NULL,
   changed_by TEXT NOT NULL,
@@ -461,6 +468,85 @@ CREATE TABLE push_consent (
 ALTER TABLE push_subscriptions ADD COLUMN endpoint_sha256 TEXT
   CHECK (endpoint_sha256 IS NULL OR length(endpoint_sha256) = 64);
 """,
+    # 7: chat with Patrick's own Hermes (Patrick, 1 Nov): my-hermes on the VM
+    # ("me") and his Hermes on One ("one"). A flag of its own, off in every
+    # workspace; a token for each gateway's connector ("own-me", "own-one"),
+    # which also sends that Hermes's chat list ("me", "one"); his messages to
+    # them in a table of their own, so the Bots' connector can never lease one;
+    # and when each gateway's connector was last heard from, whether that
+    # Hermes's gateway was running then, and the chats the phone asked to read. A message with no session_id starts a new chat,
+    # and the id Hermes gave that chat comes back as made_session_id. SQLite
+    # cannot change a CHECK, so three tables are rebuilt with their rows kept.
+    """
+CREATE TABLE flags_7 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('decision_write', 'mobile_read', 'mobile_chat_write', 'push_send',
+                                     'connector_effects', 'own_chat_write')),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  changed_at TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO flags_7 SELECT workspace_id, name, enabled, changed_at, changed_by FROM flags;
+DROP TABLE flags;
+ALTER TABLE flags_7 RENAME TO flags;
+INSERT INTO flags(workspace_id, name, enabled, changed_at, changed_by)
+  SELECT id, 'own_chat_write', 0, created_at, 'migration 7' FROM workspaces;
+
+CREATE TABLE feed_sources_7 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room', 'bots', 'connector', 'push', 'own-me', 'own-one')),
+  token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO feed_sources_7 SELECT workspace_id, name, token_hash, created_at FROM feed_sources;
+DROP TABLE feed_sources;
+ALTER TABLE feed_sources_7 RENAME TO feed_sources;
+
+CREATE TABLE feed_snapshots_7 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room', 'bots', 'me', 'one')),
+  body TEXT NOT NULL,
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  source_time TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO feed_snapshots_7 SELECT workspace_id, name, body, sha256, source_time, received_at FROM feed_snapshots;
+DROP TABLE feed_snapshots;
+ALTER TABLE feed_snapshots_7 RENAME TO feed_snapshots;
+
+CREATE TABLE own_messages (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT CHECK (session_id IS NULL OR length(session_id) BETWEEN 1 AND 128),
+  made_session_id TEXT CHECK (made_session_id IS NULL OR length(made_session_id) BETWEEN 1 AND 128),
+  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 8000),
+  send_key TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'sent', 'uncertain', 'cancelled', 'dead', 'quarantined')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT,
+  CHECK (made_session_id IS NULL OR session_id IS NULL)
+);
+CREATE INDEX own_messages_by_gateway ON own_messages(workspace_id, gateway, status, created_at);
+
+CREATE TABLE own_gateways (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  last_seen TEXT NOT NULL,
+  ready INTEGER NOT NULL DEFAULT 0 CHECK (ready IN (0, 1)),
+  why TEXT CHECK (why IS NULL OR length(why) <= 200),
+  wanted_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (workspace_id, gateway)
+);
+""",
 ]
 
 
@@ -475,4 +561,51 @@ DOWNS: dict[int, tuple[list[tuple[str, str]], str, str]] = {
         """
 ALTER TABLE push_subscriptions DROP COLUMN endpoint_sha256;
 """, ""),
+    7: ([("SELECT count(*) FROM own_messages", "messages to Patrick's own Hermes"),
+         ("SELECT count(*) FROM flags WHERE name = 'own_chat_write' AND enabled = 1",
+          "workspaces with own_chat_write on")],
+        f"""
+DROP TABLE own_gateways;
+DROP TABLE own_messages;
+
+CREATE TABLE flags_6 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN {_in(FLAGS_1)}),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  changed_at TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO flags_6 SELECT workspace_id, name, enabled, changed_at, changed_by FROM flags
+  WHERE name <> 'own_chat_write';
+DROP TABLE flags;
+ALTER TABLE flags_6 RENAME TO flags;
+
+CREATE TABLE feed_sources_6 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room', 'bots', 'connector', 'push')),
+  token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO feed_sources_6 SELECT workspace_id, name, token_hash, created_at FROM feed_sources
+  WHERE name NOT IN ('own-me', 'own-one');
+DROP TABLE feed_sources;
+ALTER TABLE feed_sources_6 RENAME TO feed_sources;
+
+CREATE TABLE feed_snapshots_6 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room', 'bots')),
+  body TEXT NOT NULL,
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  source_time TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO feed_snapshots_6 SELECT workspace_id, name, body, sha256, source_time, received_at FROM feed_snapshots
+  WHERE name IN ('work', 'room', 'bots');
+DROP TABLE feed_snapshots;
+ALTER TABLE feed_snapshots_6 RENAME TO feed_snapshots;
+""", "The tokens of the connectors for Patrick's own Hermes are gone with schema 7. The next install of a newer "
+         "release makes my-hermes's again by itself; on One, run scripts\\one\\Install-OwnConnector.ps1 -NewToken."),
 }

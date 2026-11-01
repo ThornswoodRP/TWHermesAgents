@@ -1,6 +1,9 @@
 // The Hermes phone app (07 sections 4, 5 and 8; step 3 read only, step 4
 // answers and chat, step 5 alerts). Its tabs: Bramble, Bots, Rooms, Board and
 // Decisions (first named Room, Work and Needs you; those paths still open).
+// The Bots tab holds the three gateways Desktop's picker shows (Patrick, 1 Nov):
+// thornswood-bots with its Bots, and his own Hermes, my-hermes on the VM and
+// his Hermes on One, each with its own chats.
 //
 // Plain script, no framework, no inline code (the page's CSP allows only this
 // file). Everything shown from the core is set with textContent, never as
@@ -61,6 +64,10 @@ const SAID = {
   sign_in_again: 'This needs a fresh sign-in with your passkey.',
   decision_write_off: 'Answering is off for now. The report page is still where you answer.',
   chat_write_off: 'Chat from the phone is off for now.',
+  own_chat_off: 'Chat with your own Hermes from the phone is off for now.',
+  passkey_needed: 'A message to your own Hermes runs with full power, so it needs a passkey sign-in from the last 30 minutes.',
+  one_off: 'One is off',
+  no_gateway: 'There is no such gateway.',
   stale_revision: 'This card changed since you opened it. Read it again before you answer.',
   already_answered: 'This card was already answered.',
   expired: 'This card ran out. Bramble opens a new one if it still matters.',
@@ -361,17 +368,159 @@ const STATE = {
 }
 let drafts = {}
 
+// Patrick's own Hermes: the gateway's name as Desktop's picker shows it.
+const GATEWAY = { me: 'my-hermes', one: 'One (This device)' }
+
+function gatewayLine(g) {
+  if (g.online) return el('span', { class: 'rec' }, 'On')
+  return el('span', { class: 'rec off' }, g.gateway === 'one' ? 'One is off' : 'Off')
+}
+
 async function botsView() {
   setTab('bots')
-  const r = await call('GET', '/chat')
+  const [r, own] = await Promise.all([call('GET', '/chat'), call('GET', '/own')])
   if (refused(r)) return
   const others = r.body.bots.filter(b => b.bot !== 'bramble')
+  // In the order Desktop's picker shows them: This device (One), my-hermes, then thornswood-bots.
+  const gateways = own.status === 200 ? ['one', 'me'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
   show(
+    gateways.map(g => el('button', { class: 'row', type: 'button', onclick: () => go('/m/hermes/' + g.gateway) },
+      el('strong', {}, GATEWAY[g.gateway] || g.name), gatewayLine(g),
+      g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null,
+      el('div', { class: 'quiet' }, g.last ? `${g.last.title || 'Untitled chat'}: ${g.last.preview.slice(0, 100)}`
+        : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')))),
+    el('h2', { class: 'section' }, 'thornswood-bots'),
     el('p', { class: 'quiet' }, `Each Bot's own Bot Chat, as of ${when(r.body.as_of) || 'nothing yet'}.`),
     others.map(b => el('button', { class: 'row', type: 'button', onclick: () => go('/m/bots/' + b.bot) },
       el('strong', {}, NAMES[b.bot] || b.bot),
       b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null,
       el('div', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.'))))
+}
+
+// Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
+// (Patrick, 1 Nov). This says until when, or offers that sign-in. A new chat is
+// made with full power; Hermes keeps a chat's own approval setting for good, so
+// in a chat started elsewhere a step that needs an approval is refused unless
+// that chat has /yolo on.
+function signInPart(v, status, existing) {
+  if (v.sign_in_until) {
+    const until = new Date(v.sign_in_until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    return el('p', { class: 'quiet' }, existing
+      ? `You can send until ${until}, 30 minutes after your passkey sign-in. A step that needs an approval runs only if this chat was started from the phone or has /yolo on.`
+      : `Full power until ${until}, 30 minutes after your passkey sign-in.`)
+  }
+  return el('div', { class: 'card' },
+    el('p', { class: 'quiet' }, said({ error: 'passkey_needed' })),
+    el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      const s = await passkeySignIn()
+      if (s.status === 200) return route()
+      status.textContent = said(s.body)
+    } }, 'Sign in with your passkey'))
+}
+
+function composer(key, label, send, status) {
+  const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
+  const box = el('textarea', { rows: '3', 'aria-label': label, placeholder: label })
+  box.value = draft.text
+  box.addEventListener('input', () => {
+    if (box.value !== draft.text) { draft.text = box.value; draft.key = newKey() }
+  })
+  const button = el('button', { class: 'primary', type: 'button', onclick: async () => {
+    const text = box.value.trim()
+    if (!text) return
+    status.textContent = 'Sending...'
+    const s = await send(text, draft.key)
+    if (s.status === 200) { drafts[key] = null; return route() }
+    if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
+    status.textContent = s.status === 0
+      ? 'Could not reach the core. Sending again sends the same message, never a second one.'
+      : said(s.body) + (s.body.detail && s.body.detail.why ? ` (${s.body.detail.why})` : '')
+  } }, label)
+  return [box, button]
+}
+
+function offLine(v) {
+  if (v.online) return null
+  return el('p', { class: 'warn' }, (v.gateway === 'one' ? 'One is off' : 'my-hermes is not answering') +
+    (v.off_why ? `: ${v.off_why}.` : '.'))
+}
+
+async function gatewayView(gw) {
+  setTab('bots')
+  const r = await call('GET', '/own/' + gw)
+  if (refused(r)) return
+  const v = r.body
+  const name = GATEWAY[gw]
+  const status = el('p', { class: 'warn', role: 'status' })
+  const parts = [
+    el('h2', {}, name),
+    el('p', { class: 'quiet' }, `Your chats, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+    offLine(v)
+  ]
+  if (v.can_send && v.online) {
+    parts.push(signInPart(v, status))
+    if (v.sign_in_until) {
+      parts.push(el('p', { class: 'quiet' }, 'A new chat has full power on every turn. Hermes names it.'),
+        composer('new:' + gw, 'Start a new chat',
+          (text, key) => call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key }), status), status)
+    }
+  } else if (!v.can_send) {
+    parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
+  }
+  if (v.starting.length) {
+    parts.push(el('h2', { class: 'section' }, 'Starting'), v.starting.map(m => el('div', { class: 'msg mine', 'data-status': m.status },
+      el('div', { class: 'text' }, m.text),
+      el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
+        STATE[m.status] + (m.reason ? ': ' + m.reason : '')),
+      m.made_session_id ? el('button', { class: 'secondary', type: 'button',
+        onclick: () => go(`/m/hermes/${gw}/${m.made_session_id}`) }, 'Open it') : null)))
+  }
+  parts.push(el('h2', { class: 'section' }, 'Chats'),
+    v.chats.length ? v.chats.map(c => el('button', { class: 'row', type: 'button',
+      onclick: () => go(`/m/hermes/${gw}/${c.id}`) },
+      el('strong', {}, c.title || 'Untitled chat'),
+      el('span', { class: 'quiet' }, '  ' + when(c.last_at)),
+      el('div', { class: 'quiet' }, c.preview.slice(0, 120))))
+      : el('p', { class: 'quiet' }, 'No chats yet.'))
+  show(parts)
+}
+
+async function ownChatView(gw, sid) {
+  setTab('bots')
+  const r = await call('GET', `/own/${gw}/${encodeURIComponent(sid)}`)
+  if (refused(r)) return
+  const v = r.body
+  const name = GATEWAY[gw]
+  const asOf = v.as_of ? new Date(v.as_of) : null
+  const status = el('p', { class: 'warn', role: 'status' })
+  const history = v.history.map(m => el('div', { class: 'msg' },
+    el('div', { class: 'who' }, m.who, el('span', { class: 'quiet' }, '  ' + when(m.at))),
+    el('div', { class: 'text' }, m.text)))
+  const mine = v.mine.filter(m => m.status !== 'sent' || !asOf || new Date(m.updated_at) > asOf)
+    .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
+      el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
+      el('div', { class: 'text' }, m.text),
+      el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
+        STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''))))
+  const parts = [
+    el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/hermes/' + gw) }, 'All chats on ' + name),
+    el('h2', {}, v.chat.title || 'Untitled chat'),
+    el('p', { class: 'quiet' }, `On ${name}, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+    v.loaded ? (history.length ? history : el('p', { class: 'quiet' }, 'Nothing here yet.'))
+      : el('p', { class: 'quiet' }, `Asking ${name} for this chat. It shows here within half a minute.`),
+    mine,
+    offLine(v)
+  ]
+  if (v.can_send && v.online) {
+    parts.push(signInPart(v, status, true))
+    if (v.sign_in_until) {
+      parts.push(composer(`own:${gw}:${sid}`, 'Send to ' + name,
+        (text, key) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: key }), status), status)
+    }
+  } else if (!v.can_send) {
+    parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
+  }
+  show(parts)
 }
 
 async function roomsView() {
@@ -706,6 +855,8 @@ async function route() {
   if (path === 'rooms') return roomsView()
   if (path === 'bramble') return chatView('bramble', 'bramble')
   if (path === 'bots') return botsView()
+  const own = path.match(/^hermes\/(me|one)(?:\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127}))?$/)
+  if (own) return own[2] ? ownChatView(own[1], own[2]) : gatewayView(own[1])
   if (path === 'settings') return settingsView()
   return decisionsView()
 }
@@ -715,7 +866,7 @@ async function poll() {
   const path = location.pathname
   // A chat view reads itself again, unless something is being typed.
   const box = document.querySelector('textarea')
-  if (/^\/m\/(bramble$|room$|rooms\/|bots\/)/.test(path)) {
+  if (/^\/m\/(bramble$|room$|rooms\/|bots\/|hermes\/)/.test(path)) {
     if (!box || (!box.value && document.activeElement !== box)) route()
     return
   }

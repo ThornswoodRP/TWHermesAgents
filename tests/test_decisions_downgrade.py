@@ -12,6 +12,7 @@ deploy, a merge or a Ship.
 from __future__ import annotations
 
 import io
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -22,7 +23,7 @@ from unittest import mock
 from decisions_helpers import World
 
 from thornswood_decisions import cli, store as store_mod
-from thornswood_decisions.schema import DOWNS, MIGRATIONS
+from thornswood_decisions.schema import DOWNS, FLAGS_1, MIGRATIONS
 from thornswood_decisions.store import CoreError, Store, _statements, connect, downgrade, schema_version
 
 FIRST_WITH_A_WAY_BACK = 6
@@ -45,10 +46,12 @@ def shape(path: Path) -> list[tuple]:
     """Every table, index and trigger, as SQLite keeps them."""
     con = sqlite3.connect(path)
     try:
-        return con.execute("SELECT type, name, tbl_name, sql FROM sqlite_master "
+        rows = con.execute("SELECT type, name, tbl_name, sql FROM sqlite_master "
                            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").fetchall()
     finally:
         con.close()
+    # A table rebuilt and renamed is kept as CREATE TABLE "name"; the same table either way.
+    return [(t, n, tb, re.sub(r'^CREATE TABLE "([a-z_0-9]+)"', r"CREATE TABLE \1", q or "")) for t, n, tb, q in rows]
 
 
 def run(*argv: str) -> tuple[int, str, str]:
@@ -89,7 +92,7 @@ class PuttingBack(unittest.TestCase):
 
     def test_the_older_code_opens_the_store_again_with_every_row_kept(self):
         self.subscribe(None)
-        tables = ("workspaces", "principals", "devices", "events", "flags", "push_subscriptions")
+        tables = ("workspaces", "principals", "devices", "events", "push_subscriptions")
         before = {t: self.w.store.db.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tables}
         self.w.close()
         code, out, err = run("--db", str(self.w.path), "downgrade", "--to", str(self.newest - 1))
@@ -100,6 +103,8 @@ class PuttingBack(unittest.TestCase):
         self.addCleanup(older.close)
         self.assertEqual({t: older.db.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tables}, before)
         self.assertTrue(older.verify_events()[0])
+        # The flags the older schema knows, each as it was; own_chat_write (off) goes with schema 7.
+        self.assertEqual({r[0] for r in older.db.execute("SELECT name FROM flags")}, set(FLAGS_1))
 
     def test_the_newer_release_takes_it_forward_again(self):
         self.w.close()
@@ -123,6 +128,47 @@ class PuttingBack(unittest.TestCase):
         self.assertEqual(schema_version(con), self.newest)
 
 
+class ThePutBackFromOwnChat(unittest.TestCase):
+    """Schema 7 (chat with Patrick's own Hermes) goes back only while nothing was sent to it."""
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+
+    def test_a_message_to_his_own_hermes_keeps_schema_7(self):
+        self.w.store.db.execute(
+            "INSERT INTO own_messages(id, workspace_id, gateway, text, send_key, principal_id, status, created_at, "
+            "updated_at) VALUES('om1', ?, 'me', 'hello', 'k1', ?, 'queued', 'now', 'now')", (self.w.ws, self.w.patrick_id))
+        self.w.close()
+        code, _, err = run("--db", str(self.w.path), "downgrade", "--to", "6")
+        self.assertEqual(code, 1)
+        self.assertIn("schema 7: 1 messages to Patrick's own Hermes", err)
+
+    def test_own_chat_write_on_keeps_schema_7(self):
+        self.w.store.set_flag(self.w.ws, "own_chat_write", True, by="tests")
+        self.w.close()
+        code, _, err = run("--db", str(self.w.path), "downgrade", "--to", "6")
+        self.assertEqual(code, 1)
+        self.assertIn("schema 7: 1 workspaces with own_chat_write on", err)
+
+    def test_the_tokens_go_and_it_says_how_they_come_back(self):
+        from thornswood_decisions.feeds import Feeds
+        tok = Feeds(self.w.store).new_token(self.w.ws, "own-me", by="tests")
+        Feeds(self.w.store).new_token(self.w.ws, "work", by="tests")
+        self.w.close()
+        code, out, err = run("--db", str(self.w.path), "downgrade", "--to", "6")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Install-OwnConnector.ps1 -NewToken", out)
+        con = connect(self.w.path)
+        self.addCleanup(con.close)
+        self.assertEqual([r[0] for r in con.execute("SELECT name FROM feed_sources")], ["work"])
+        con.close()
+        with mock.patch("sys.stdin", io.StringIO(tok + "\n")):
+            code, out, _ = run("--db", str(self.w.path), "token-known", "--workspace", "test", "--name", "own-me")
+        self.assertEqual(code, 0)
+        self.assertIn('"known": false', out)
+
+
 class TheCommands(unittest.TestCase):
     def test_schema_says_both_numbers_without_migrating(self):
         path = at_schema(5)
@@ -133,6 +179,17 @@ class TheCommands(unittest.TestCase):
         con = connect(path)
         self.addCleanup(con.close)
         self.assertEqual(schema_version(con), 5)
+
+    def test_token_known_says_whether_the_core_keeps_that_token(self):
+        from thornswood_decisions.feeds import Feeds
+        w = World()
+        self.addCleanup(w.close)
+        tok = Feeds(w.store).new_token(w.ws, "own-me", by="tests")
+        for given, want in ((tok, "true"), ("not-it", "false"), ("", "false")):
+            with self.subTest(given=given), mock.patch("sys.stdin", io.StringIO(given + "\n")):
+                code, out, _ = run("--db", str(w.path), "token-known", "--workspace", "test", "--name", "own-me")
+                self.assertEqual(code, 0)
+                self.assertIn(f'"known": {want}', out)
 
     def test_no_store_is_made_by_asking(self):
         path = Path(tempfile.mkdtemp()) / "core.db"

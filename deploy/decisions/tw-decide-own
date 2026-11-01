@@ -1,0 +1,8 @@
+#!/usr/bin/python3 -I
+# Carries Patrick's chat from the phone into his own Hermes on the VM
+# (my-hermes), as the patrick-hermes user, from the root-owned copy. -I: only
+# this copy's code runs. own_connector.py is one file with the standard library
+# only (the same file runs on One); the readiness check it starts runs with that
+# Hermes's own Python.
+import runpy
+runpy.run_path("/opt/thornswood-hermes/current/thornswood_decisions/own_connector.py", run_name="__main__")

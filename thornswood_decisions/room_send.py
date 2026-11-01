@@ -5,7 +5,10 @@ command starts), as the Bots' `hermes` user, so it can use Hermes's client the
 way Desktop does (contracts.json "room"):
 
     <hermes python> -I room_send.py < {"op": "send", "room_id", "event_id", "text"}
-    <hermes python> -I room_send.py < {"op": "ready", "profile": "<bot or empty>"}
+    <hermes python> -I room_send.py < {"op": "ready", "profile": "<bot or empty>", "name": "<optional>"}
+
+own_connector.py asks it the same readiness question for Patrick's own Hermes
+(profile empty, as that Hermes's own user), naming that gateway in `name`.
 
 It finds the gateway that is already running and never starts one
 (`discover_gateway_endpoint`, "preserving uncertainty instead of spawning").
@@ -71,7 +74,8 @@ def main() -> int:
         return 2
     endpoint, state = _found(profile)
     if endpoint is None:
-        print(json.dumps({"sent": False, "ready": False, "reason": f"the Bots' gateway is {state}"}))
+        name = req.get("name") if isinstance(req.get("name"), str) else "the Bots' gateway"
+        print(json.dumps({"sent": False, "ready": False, "reason": f"{name[:40]} is {state}"}))
         return 0
     if op == "ready":
         print(json.dumps({"ready": True}))

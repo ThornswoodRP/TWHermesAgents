@@ -24,6 +24,10 @@
 # /srv/tw/push (0700, tw-push's only), puts the push worker's core token there,
 # and, once --origin is known, starts the push worker, which makes its own VAPID
 # and seal keys there the first time and sends nothing while push_send is off.
+# Chat with Patrick's own Hermes (1 Nov): when the patrick-hermes user is there,
+# it makes my-hermes's connector token once, straight into that user's
+# ~/.config/thornswood/own-me.token (0600), and starts tw-decide-own as that
+# user, which does nothing and copies nothing while own_chat_write is off.
 # It changes no flag and makes no pairing code.
 set -euo pipefail
 umask 022
@@ -121,11 +125,11 @@ ok "venv at $venv, requirements $want"
 
 # 4. The launchers and units, from this copy.
 install -d -m 0755 "$opt/bin"
-for f in tw-decide tw-decide-feed tw-decide-connector tw-decide-push; do
+for f in tw-decide tw-decide-feed tw-decide-connector tw-decide-push tw-decide-own; do
   install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
 done
 for u in tw-decide.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service \
-         tw-decide-push.service; do
+         tw-decide-push.service tw-decide-own.service; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
 # The connector finds the gateway's control socket where the gateway's own unit puts it.
@@ -233,4 +237,40 @@ if [[ -n "$origin" ]]; then
   ok "the push worker runs (it sends nothing while push_send is off)"
 else
   echo "The push worker waits for --origin."
+fi
+
+# 12. Patrick's own Hermes on the VM (my-hermes): the connector that carries his
+# chat from the phone into it, as patrick-hermes, never as the Bots' user. Its
+# token goes straight into that user's own file (0600). While own_chat_write is
+# off it asks the core every half minute and copies nothing. Only Patrick
+# changes own_chat_write.
+own=patrick-hermes
+if id "$own" >/dev/null 2>&1; then
+  [[ "$own" != hermes ]] || stop "my-hermes's connector never runs as the Bots' user."
+  own_bin="$(runuser -l "$own" -c 'command -v hermes' 2>/dev/null || true)"
+  [[ "$own_bin" == /* && -x "$own_bin" ]] || stop "the $own user's login shell does not find the hermes command."
+  head -n1 "$own_bin" | grep -q '^#!/' || stop "$own_bin does not name its Python on its first line."
+  oh="$(getent passwd "$own" | cut -d: -f6)"
+  tok="$oh/.config/thornswood/own-me.token"
+  # A file whose token the core no longer keeps (a downgrade past schema 7 forgets it) is made again.
+  if ! runuser -u "$own" -- test -s "$tok" \
+     || ! runuser -u "$own" -- cat "$tok" | run token-known --workspace thornswood --name own-me | grep -q '"known": true'; then
+    runuser -u "$own" -- sh -c 'umask 077; mkdir -p "$(dirname "$1")"' _ "$tok"
+    run feed-token --workspace thornswood --name own-me | runuser -u "$own" -- sh -c 'umask 077; cat > "$1"' _ "$tok"
+    ok "token for my-hermes's connector made"
+  else
+    ok "token for my-hermes's connector already there"
+  fi
+  install -d -m 0755 /etc/systemd/system/tw-decide-own.service.d
+  printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\nEnvironment=TW_OWN_HERMES_BIN=%s\n' \
+    "$(id -u "$own")" "$own_bin" > /etc/systemd/system/tw-decide-own.service.d/runtime.conf
+  chmod 0644 /etc/systemd/system/tw-decide-own.service.d/runtime.conf
+  systemctl daemon-reload
+  systemctl enable --quiet tw-decide-own.service
+  systemctl restart tw-decide-own.service
+  sleep 2
+  systemctl is-active --quiet tw-decide-own.service || stop "my-hermes's connector did not start: journalctl -u tw-decide-own -n 20"
+  ok "my-hermes's connector runs (it waits while own_chat_write is off)"
+else
+  echo "my-hermes's connector waits for the $own user."
 fi

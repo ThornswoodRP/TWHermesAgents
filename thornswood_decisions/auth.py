@@ -45,6 +45,8 @@ class Principal:
     session_hash: str | None = None
     fresh: bool = False
     device_kind: str | None = None   # phone or desktop, from the paired device
+    method: str | None = None        # how this session was signed in: passkey, pairing or recovery_code
+    signed_in_at: str | None = None  # when it was
 
     @property
     def label(self) -> str:
@@ -168,7 +170,7 @@ class Auth:
             with self.s.tx() as db:
                 db.execute("UPDATE sessions SET idle_expires_at = ? WHERE id_hash = ?", (idle.isoformat(), h))
         return Principal(row["principal_id"], row["workspace_id"], "patrick", None, row["device_id"], h,
-                         now < parse(row["fresh_until"]), row["device_kind"])
+                         now < parse(row["fresh_until"]), row["device_kind"], row["method"], row["created_at"])
 
     def check_csrf(self, principal: Principal, csrf: str | None) -> None:
         row = self.s.db.execute("SELECT csrf_hash FROM sessions WHERE id_hash = ?",

@@ -2,7 +2,9 @@ const { chromium } = require('playwright')
 // The phone app in headless Chromium with a virtual passkey (Chrome's WebAuthn
 // testing API): pairing, a deep link, adding a passkey, signing in with it,
 // answering a card (it leaves Decisions for Answered), a high-risk card's own
-// check screen, the Bot Chats, the Rooms list and a room (as text), the Board,
+// check screen, the Bot Chats, the three gateways on the Bots tab and a chat with
+// Patrick's own Hermes on One (as text, a new chat, my-hermes off), the Rooms
+// list and a room (as text), the Board,
 // the install hint, the service worker, and alerts: a "no" kept, a push shown
 // as the one quiet line with its card's tag (delivered by DevTools, with no
 // push service), the alert of an answered card taken off, the alert of an
@@ -98,6 +100,48 @@ const base = `http://localhost:${port}`
   await step("Rift's chat opens on its own deep link", async () => {
     await page.getByLabel('Message to Rift').waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/bots/rift')) throw new Error('url ' + page.url())
+  })
+  await page.getByRole('link', { name: 'Bots' }).click()
+  await step('the Bots tab has the three gateways, as Desktop picks them', async () => {
+    const rows = await page.locator('#view > button.row strong').allTextContents()
+    if (JSON.stringify(rows.slice(0, 2)) !== JSON.stringify(['One (This device)', 'my-hermes'])) throw new Error(JSON.stringify(rows))
+    await page.getByRole('heading', { name: 'thornswood-bots' }).waitFor({ timeout: 3000 })
+    await page.getByText('Plan the week: three things').waitFor({ timeout: 3000 })
+    await page.getByText('Its chats show here once it is turned on.').waitFor({ timeout: 3000 })
+  })
+  await page.getByText('One (This device)', { exact: true }).click()
+  await step("One's chats, with full power for 30 minutes after the passkey", async () => {
+    await page.getByText('Plan the week', { exact: true }).waitFor({ timeout: 5000 })
+    await page.getByText('Untitled chat', { exact: true }).waitFor({ timeout: 3000 })
+    await page.getByText(/^Full power until .+, 30 minutes after your passkey sign-in\.$/).waitFor({ timeout: 3000 })
+    if (!page.url().endsWith('/m/hermes/one')) throw new Error('url ' + page.url())
+  })
+  await page.getByLabel('Start a new chat').fill('Start a list for the weekend.')
+  await page.getByRole('button', { name: 'Start a new chat' }).click()
+  await step('a new chat waits under Starting', async () => {
+    await page.getByRole('heading', { name: 'Starting' }).waitFor({ timeout: 5000 })
+    await page.getByText('Start a list for the weekend.').waitFor({ timeout: 3000 })
+    await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
+  })
+  await page.getByText('Plan the week', { exact: true }).click()
+  await step('a chat on One, as text, on its own deep link', async () => {
+    await page.getByText('<b>three</b> things').waitFor({ timeout: 5000 })
+    if (!page.url().endsWith('/m/hermes/one/s_plan')) throw new Error('url ' + page.url())
+    await page.getByText(/^You can send until .+ started from the phone or has \/yolo on\.$/).waitFor({ timeout: 3000 })
+  })
+  await page.getByLabel('Send to One (This device)').fill('Add the backup check.')
+  await page.getByRole('button', { name: 'Send to One (This device)' }).click()
+  await step('a message to One waits for its connector', async () => {
+    await page.getByText('Add the backup check.').waitFor({ timeout: 5000 })
+    await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-own-chat.png', fullPage: true })
+  await page.goto(base + '/m/hermes/one/s_old')
+  await step('a chat the feed does not carry yet is asked for', () => page.getByText('Asking One (This device) for this chat. It shows here within half a minute.').waitFor({ timeout: 5000 }))
+  await page.goto(base + '/m/hermes/me')
+  await step('my-hermes, never heard from, says so and offers no send', async () => {
+    await page.getByText("my-hermes is not answering: its connector has never been heard from.").waitFor({ timeout: 5000 })
+    if (await page.getByLabel('Start a new chat').count()) throw new Error('a composer while it is off')
   })
   await page.getByRole('link', { name: 'Board' }).click()
   await step('the Board, as text', () => page.getByText('Fix the <b>launcher</b> log').waitFor({ timeout: 5000 }))

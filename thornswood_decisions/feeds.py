@@ -26,7 +26,7 @@ import secrets
 from .store import CoreError, Store, canonical, parse, sha256_hex
 
 NAMES = ("work", "room", "bots")
-TOKENS = NAMES + ("connector", "push")
+TOKENS = NAMES + ("connector", "push", "own-me", "own-one")
 MAX_FEED_BYTES = 512 * 1024
 MAX_TASKS = 500
 MAX_EVENTS = 200
