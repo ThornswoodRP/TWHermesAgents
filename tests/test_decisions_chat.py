@@ -220,6 +220,99 @@ class ConnectorSide(unittest.TestCase):
         self.assertEqual(s.db.execute("SELECT status FROM chat_messages").fetchone()[0], "quarantined")
 
 
+class Rooms(unittest.TestCase):
+    """The Rooms list: every bound room, each its own chat (Patrick, 1 Nov)."""
+    SECOND = "00000000-0000-4000-8000-000000000002"
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+        seat(self.w)
+        self.w.core.bind_room(self.w.ws, self.SECOND, "Second test room", by="tests")
+        flags(self.w, "mobile_chat_write")
+        self.chat = Chat(self.w.store)
+        self.f = Feeds(self.w.store)
+        self.room_tok = self.f.new_token(self.w.ws, "room", by="tests")
+
+    def put(self, body):
+        return self.f.put(self.w.ws, "room", self.room_tok, body)
+
+    def test_the_list_has_each_room_in_the_order_bound(self):
+        self.put({"source_time": "2026-11-01T18:00:00+00:00", "rooms": [
+            {"room_id": ROOM, "events": [{"seq": 1, "event_id": "e1", "kind": "message.member", "actor": "Bramble",
+                                          "text": "morning", "at": "2026-11-01T17:00:00+00:00"}]},
+            {"room_id": self.SECOND, "events": []}]})
+        self.chat.send(self.w.patrick(), self.SECOND, "hi second", "key-00000100")
+        s = self.chat.summary(self.w.patrick())
+        self.assertEqual([(r["room_id"], r["name"]) for r in s["rooms"]],
+                         [(ROOM, "Thornswood Workbench"), (self.SECOND, "Second test room")])
+        self.assertEqual(s["rooms"][0]["last"], {"who": "Bramble", "text": "morning", "at": "2026-11-01T17:00:00+00:00"})
+        self.assertEqual((s["rooms"][1]["last"], s["rooms"][1]["unsettled"]), (None, 1))
+        self.assertEqual(s["rooms_as_of"], "2026-11-01T18:00:00+00:00")
+
+    def test_each_room_is_its_own_chat(self):
+        self.put({"source_time": "2026-11-01T18:00:00+00:00", "rooms": [
+            {"room_id": ROOM, "events": [{"seq": 1, "event_id": "e1", "kind": "message.member", "actor": "Rift",
+                                          "text": "in the bench", "at": "2026-11-01T17:00:00+00:00"}]},
+            {"room_id": self.SECOND, "events": [{"seq": 4, "event_id": "e4", "kind": "message.user", "actor": "Patrick",
+                                                 "text": "in the second", "at": "2026-11-01T17:02:00+00:00"}]}]})
+        a, b = self.chat.view(self.w.patrick(), ROOM), self.chat.view(self.w.patrick(), self.SECOND)
+        self.assertEqual(([h["text"] for h in a["history"]], a["kind"], a["name"]),
+                         (["in the bench"], "room", "Thornswood Workbench"))
+        self.assertEqual(([h["text"] for h in b["history"]], b["name"]), (["in the second"], "Second test room"))
+        self.assertEqual(self.chat.view(self.w.patrick(), "room")["target"], ROOM, "room is the first room's first name")
+        self.chat.send(self.w.patrick(), "room", "old name", "key-00000101")
+        self.chat.send(self.w.patrick(), self.SECOND, "new room", "key-00000102")
+        self.assertEqual([m["text"] for m in self.chat.view(self.w.patrick(), ROOM)["mine"]], ["old name"])
+        self.assertEqual([m["text"] for m in self.chat.view(self.w.patrick(), self.SECOND)["mine"]], ["new room"])
+
+    def test_the_connector_sends_each_to_its_own_room(self):
+        flags(self.w, "connector_effects")
+        tok = self.f.new_token(self.w.ws, "connector", by="tests")
+        self.chat.send(self.w.patrick(), ROOM, "to the bench", "key-00000103")
+        self.chat.send(self.w.patrick(), self.SECOND, "to the second", "key-00000104")
+        items = {i["text"]: i for i in self.chat.claim(self.w.ws, tok)["items"]}
+        self.assertEqual((items["to the bench"]["target"], items["to the bench"]["room_id"]), ("room", ROOM))
+        self.assertEqual((items["to the second"]["target"], items["to the second"]["room_id"]), ("room", self.SECOND))
+
+    def test_a_room_message_settles_from_its_own_room_only(self):
+        flags(self.w, "connector_effects")
+        tok = self.f.new_token(self.w.ws, "connector", by="tests")
+        mid = self.chat.send(self.w.patrick(), self.SECOND, "is it there", "key-00000105")["message_id"]
+        item = self.chat.claim(self.w.ws, tok)["items"][0]
+        self.chat.result(self.w.ws, tok, item["id"], "uncertain", reason="no answer")
+        seen = {"seq": 9, "event_id": room_event_id(item["send_key"]), "kind": "message.user", "actor": "Patrick",
+                "text": "is it there", "at": "2026-11-01T18:00:00+00:00"}
+        self.put({"source_time": "2026-11-01T18:01:00+00:00", "rooms": [{"room_id": ROOM, "events": [seen]}]})
+        status = lambda: self.w.store.db.execute("SELECT status FROM chat_messages WHERE id = ?", (mid,)).fetchone()[0]
+        self.assertEqual(status(), "uncertain", "seen in another room settles nothing")
+        self.put({"source_time": "2026-11-01T18:02:00+00:00", "rooms": [{"room_id": self.SECOND, "events": [seen]}]})
+        self.assertEqual(status(), "sent")
+
+    def test_the_feed_takes_both_shapes_and_only_bound_rooms(self):
+        self.put({"source_time": "2026-11-01T18:00:00+00:00", "room_id": ROOM, "events": []})
+        self.assertEqual(self.f.get(self.w.ws, "room")["room"]["rooms"], [{"room_id": ROOM, "events": []}])
+        for bad in ({"source_time": "2026-11-01T18:00:00+00:00", "rooms": [{"room_id": "elsewhere", "events": []}]},
+                    {"source_time": "2026-11-01T18:00:00+00:00", "room_id": "elsewhere", "events": []}):
+            with self.assertRaises(CoreError) as e:
+                self.put(bad)
+            self.assertEqual(e.exception.reason, "not_the_room")
+        for bad in ({"source_time": "2026-11-01T18:00:00+00:00", "rooms": []},
+                    {"source_time": "2026-11-01T18:00:00+00:00", "rooms": [{"room_id": ROOM, "events": []}] * 2},
+                    {"source_time": "2026-11-01T18:00:00+00:00", "rooms": [{"room_id": ROOM, "events": "x"}]}):
+            with self.assertRaises(CoreError) as e:
+                self.put(bad)
+            self.assertEqual(e.exception.reason, "bad_feed")
+
+    def test_a_room_id_is_what_a_path_can_carry(self):
+        for bad in ("", "../x", "a b", "x" * 65, None):
+            with self.assertRaises(CoreError) as e:
+                self.w.core.bind_room(self.w.ws, bad, "Bad", by="tests")
+            self.assertEqual(e.exception.reason, "bad_room")
+        with self.assertRaises(CoreError):
+            self.w.core.bind_room(self.w.ws, "fine-id", "   ", by="tests")
+
+
 class Api(unittest.TestCase):
     def test_phone_chats_with_csrf_and_origin_and_the_connector_never_from_a_browser(self):
         s = Served(self)

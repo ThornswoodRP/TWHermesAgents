@@ -451,4 +451,13 @@ CREATE TABLE push_consent (
   at TEXT NOT NULL
 );
 """,
+    # 6: a subscription keeps the SHA-256 of its endpoint, never the endpoint
+    # itself, which stays sealed to the push worker. The app compares it with
+    # the browser's own subscription each time it opens: installing the app
+    # can give the browser a new one, and the one the core has then answers 410
+    # (Patrick's phone test, 1 Nov).
+    """
+ALTER TABLE push_subscriptions ADD COLUMN endpoint_sha256 TEXT
+  CHECK (endpoint_sha256 IS NULL OR length(endpoint_sha256) = 64);
+""",
 ]

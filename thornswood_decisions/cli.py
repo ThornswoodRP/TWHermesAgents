@@ -6,7 +6,8 @@
 checkout, `python3 -m thornswood_decisions.cli` does the same.)
 
   init        make the workspace (every flag off), Patrick, and the six Bots' principals
-  bind-room   bind the workspace to the Workbench room id the contract check printed
+  bind-room   bind the workspace to a room: the Workbench room id the contract check printed, or
+              another room with --name (the app lists each bound room under Rooms)
   pair        print a one-time code for the first device (10 minutes)
   flag        turn one flag on or off
   test-card   open a test card as Bramble, in a test workspace only
@@ -63,7 +64,7 @@ def cmd_init(store: Store, args) -> dict:
 
 def cmd_bind_room(store: Store, args) -> dict:
     ws, _ = _workspace(store, args.workspace)
-    name = contracts.load()["room"]["name"]
+    name = args.name or contracts.load()["room"]["name"]
     DecisionCore(store).bind_room(ws, args.room_id, name, by=OPERATOR)
     return {"bound": args.room_id, "name": name}
 
@@ -202,6 +203,7 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("bind-room")
     p.add_argument("--workspace", required=True)
     p.add_argument("--room-id", required=True)
+    p.add_argument("--name", help="the room's name in the app; the Workbench room's own name if left out")
     p = sub.add_parser("pair")
     p.add_argument("--workspace", required=True)
     p.add_argument("--kind", choices=("desktop", "phone"), required=True)

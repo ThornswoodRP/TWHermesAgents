@@ -1,8 +1,10 @@
-"""The phone's Work, Room and Bot Chat views: read-only snapshots the Bots' Hermes sends in.
+"""The phone's Board, Rooms and Bot Chat views: read-only snapshots the Bots' Hermes sends in.
 
-Hermes keeps the Kanban and the Workbench room; the core keeps no copy of
-either beyond the latest snapshot of each, shown with the time it was read
-("as of"). The snapshot comes from `feed_reader.py`, which runs as the Bots'
+Hermes keeps the Kanban and the rooms; the core keeps no copy of either beyond
+the latest snapshot of each, shown with the time it was read ("as of"). The
+room feed carries every bound room at once, `{source_time, rooms: [{room_id,
+events}]}`; the first shape, one room as `{source_time, room_id, events}`, is
+still taken and kept as a list of one. The snapshot comes from `feed_reader.py`, which runs as the Bots'
 `hermes` user with a feed token. That token can do one thing: replace one
 snapshot. It cannot read a card, answer, or reach anything else, and what it
 sends is shown as text, never as markup. Because any Bot could read that token,
@@ -28,6 +30,7 @@ TOKENS = NAMES + ("connector", "push")
 MAX_FEED_BYTES = 512 * 1024
 MAX_TASKS = 500
 MAX_EVENTS = 200
+MAX_ROOMS = 8
 MAX_BOT_MESSAGES = 40
 TASK_FIELDS = {"id": 64, "title": 200, "assignee": 64, "status": 32, "updated_at": 40}
 EVENT_FIELDS = {"event_id": 128, "kind": 32, "actor": 80, "text": 2000, "at": 40}
@@ -84,17 +87,35 @@ def clean(name: str, body: dict) -> dict:
             out["bots"].append({"bot": _text(b.get("bot"), 64), "session_id": _text(b.get("session_id"), 128),
                                 "messages": kept})
     else:
-        events = body.get("events")
-        if not isinstance(events, list) or len(events) > MAX_EVENTS:
-            raise CoreError(400, "bad_feed", f"events is a list of at most {MAX_EVENTS}")
-        out["room_id"] = _text(body.get("room_id"), 64)
-        out["events"] = []
-        for e in events:
-            seq = e.get("seq") if isinstance(e, dict) else None
-            if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
-                raise CoreError(400, "bad_feed", "each event has its room seq")
-            out["events"].append({"seq": seq, **{k: _text(e.get(k), n) for k, n in EVENT_FIELDS.items()}})
+        rooms = body.get("rooms") if "rooms" in body else [{"room_id": body.get("room_id"), "events": body.get("events")}]
+        if not isinstance(rooms, list) or not 1 <= len(rooms) <= MAX_ROOMS:
+            raise CoreError(400, "bad_feed", f"rooms is a list of 1 to {MAX_ROOMS}")
+        out["rooms"] = [_room(r) for r in rooms]
+        ids = [r["room_id"] for r in out["rooms"]]
+        if len(set(ids)) != len(ids):
+            raise CoreError(400, "bad_feed", "the feed names a room twice")
     return out
+
+
+def _room(r) -> dict:
+    events = r.get("events") if isinstance(r, dict) else None
+    if not isinstance(events, list) or len(events) > MAX_EVENTS:
+        raise CoreError(400, "bad_feed", f"each room's events is a list of at most {MAX_EVENTS}")
+    kept = []
+    for e in events:
+        seq = e.get("seq") if isinstance(e, dict) else None
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+            raise CoreError(400, "bad_feed", "each event has its room seq")
+        kept.append({"seq": seq, **{k: _text(e.get(k), n) for k, n in EVENT_FIELDS.items()}})
+    return {"room_id": _text(r.get("room_id"), 64), "events": kept}
+
+
+def room_events(body: dict | None, room_id: str) -> list[dict]:
+    """One room's events from a stored room snapshot, of either shape."""
+    if not body:
+        return []
+    rooms = body.get("rooms") if "rooms" in body else [body]
+    return next((r.get("events", []) for r in rooms if r.get("room_id") == room_id), [])
 
 
 class Feeds:
@@ -127,7 +148,7 @@ class Feeds:
         if name == "room":
             bound = self.s.db.execute("SELECT room_id FROM room_bindings WHERE workspace_id = ?",
                                       (workspace_id,)).fetchall()
-            if snap["room_id"] not in {r[0] for r in bound}:
+            if not {r["room_id"] for r in snap["rooms"]} <= {r[0] for r in bound}:
                 raise CoreError(409, "not_the_room", "the feed names a room this workspace is not bound to")
         if name == "bots":
             bound = {r[0] for r in self.s.db.execute("SELECT bot FROM bot_bindings WHERE workspace_id = ?",
@@ -141,7 +162,8 @@ class Feeds:
             if name == "room":
                 # What the room shows settles any of Patrick's room messages whose send was unclear.
                 from .chat import settle_from_room
-                settle_from_room(self.s, db, workspace_id, snap["events"])
+                for r in snap["rooms"]:
+                    settle_from_room(self.s, db, workspace_id, r["room_id"], r["events"])
             db.execute("INSERT INTO feed_snapshots(workspace_id, name, body, sha256, source_time, received_at) "
                        "VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id, name) DO UPDATE SET body = excluded.body, "
                        "sha256 = excluded.sha256, source_time = excluded.source_time, "

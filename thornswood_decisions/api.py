@@ -51,9 +51,11 @@ APP_FILES = {
     "icon-192.png": "image/png",
     "icon-512.png": "image/png",
 }
-# The app's own views, each a deep link that loads the shell.
-APP_VIEWS = re.compile(r"^(|needs-you|work|room|bots|bramble|settings|decisions/[A-Za-z0-9_-]{1,64}|"
-                       r"bots/[a-z0-9][a-z0-9_-]{0,63})$")
+# The app's own views, each a deep link that loads the shell. needs-you, work
+# and room are the tabs' first names (before Decisions, Board and Rooms), kept
+# so an old alert or home screen link still opens.
+APP_VIEWS = re.compile(r"^(|decisions|board|rooms|bots|bramble|settings|needs-you|work|room|"
+                       r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64})$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
            "manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 # The service worker's own policy: it fetches only this origin, to keep the shell,
@@ -219,7 +221,7 @@ class Api:
             return 200, {"kind": p.kind, "device_id": p.device_id, "device_kind": p.device_kind,
                          "fresh": p.fresh, "workspace": self.workspace}
         if method == "GET" and route == ["cards"]:
-            return 200, {"cards": core.needs_you(p), "seq": self._seq(core)}
+            return 200, {"cards": core.needs_you(p), "answered": core.answered(p), "seq": self._seq(core)}
         if method == "GET" and len(route) == 2 and route[0] == "cards":
             return 200, core.get_card(p, route[1])
         if method == "GET" and len(route) == 3 and route[0] == "cards" and route[2] == "artifact":

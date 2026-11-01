@@ -1,4 +1,9 @@
-"""Patrick's chat with the six Bots and the Workbench room, from the phone (07 step 4).
+"""Patrick's chat with the six Bots and the rooms, from the phone (07 step 4).
+
+A room is one of the group chats this workspace is bound to (`bind-room`):
+Thornswood Workbench now, and any later one. Its chat target is its room id;
+"room" is the first name for the first room bound, kept so nothing written
+before the Rooms list stops working.
 
 The phone writes a message here; the core keeps it in `chat_messages`, queued,
 in the same commit as its command record, so a retry with the same key gets the
@@ -31,15 +36,15 @@ from datetime import timedelta
 
 from .auth import Principal
 from .core import DecisionCore
-from .feeds import Feeds
+from .feeds import Feeds, room_events
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
 MAX_TEXT = 8000
 LEASE = timedelta(minutes=20)
-ROOM = "room"
+ROOM = "room"  # the first room bound, by its first name
 OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
 MINE = 50
-MAX_CLAIM = 7  # the six Bots and the room
+MAX_CLAIM = 7  # the six Bots and the rooms, at most this many at once
 
 
 def room_event_id(send_key: str) -> str:
@@ -47,11 +52,20 @@ def room_event_id(send_key: str) -> str:
     return "user:" + sha256_hex(send_key.strip())
 
 
-def settle_from_room(store: Store, db, workspace_id: str, events: list[dict]) -> int:
+def room_targets(db, workspace_id: str, room_id: str) -> tuple[str, ...]:
+    """The chat targets a room's messages were kept under: its id, and "room" too for the first room bound."""
+    first = db.execute("SELECT room_id FROM room_bindings WHERE workspace_id = ? ORDER BY bound_at, rowid LIMIT 1",
+                       (workspace_id,)).fetchone()
+    return (room_id, ROOM) if first and first[0] == room_id else (room_id,)
+
+
+def settle_from_room(store: Store, db, workspace_id: str, room_id: str, events: list[dict]) -> int:
     """Inside the room feed's commit: a room message the room shows was sent, whatever the connector said."""
     seen = {e.get("event_id") for e in events}
-    rows = db.execute("SELECT id, send_key FROM chat_messages WHERE workspace_id = ? AND target = ? "
-                      "AND status IN ('leased', 'uncertain', 'dead')", (workspace_id, ROOM)).fetchall()
+    targets = room_targets(db, workspace_id, room_id)
+    rows = db.execute(f"SELECT id, send_key FROM chat_messages WHERE workspace_id = ? "
+                      f"AND target IN ({','.join('?' * len(targets))}) "
+                      "AND status IN ('leased', 'uncertain', 'dead')", (workspace_id, *targets)).fetchall()
     n = 0
     for r in rows:
         if room_event_id(r["send_key"]) in seen:
@@ -75,15 +89,21 @@ class Chat:
                                                  (workspace_id,)).fetchall()}
         return [b for b in order if b in bound]
 
+    def rooms(self, workspace_id: str) -> list[dict]:
+        """The rooms this workspace is bound to, in the order they were bound."""
+        rows = self.s.db.execute("SELECT room_id, name FROM room_bindings WHERE workspace_id = ? "
+                                 "ORDER BY bound_at, rowid", (workspace_id,)).fetchall()
+        return [{"room_id": r["room_id"], "name": r["name"]} for r in rows]
+
     def room_id(self, workspace_id: str) -> str | None:
-        row = self.s.db.execute("SELECT room_id FROM room_bindings WHERE workspace_id = ? ORDER BY bound_at "
-                                "LIMIT 1", (workspace_id,)).fetchone()
-        return row[0] if row else None
+        rooms = self.rooms(workspace_id)
+        return rooms[0]["room_id"] if rooms else None
 
     def _target(self, workspace_id: str, target: str) -> str:
-        if target == ROOM and self.room_id(workspace_id):
-            return target
-        if target in self.bots(workspace_id):
+        rooms = [r["room_id"] for r in self.rooms(workspace_id)]
+        if target == ROOM and rooms:
+            return rooms[0]
+        if target in rooms or target in self.bots(workspace_id):
             return target
         raise CoreError(404, "no_chat", "there is no such chat")
 
@@ -127,41 +147,69 @@ class Chat:
                        (p.workspace_id, p.id, idempotency_key, "chat.send", body_sha, canonical(receipt), now))
         return receipt
 
+    def _targets(self, workspace_id: str, target: str) -> tuple[str, ...]:
+        if target in {r["room_id"] for r in self.rooms(workspace_id)}:
+            return room_targets(self.s.db, workspace_id, target)
+        return (target,)
+
     def _mine(self, workspace_id: str, target: str) -> list[dict]:
+        targets = self._targets(workspace_id, target)
         rows = self.s.db.execute("SELECT id, text, status, reason, created_at, updated_at FROM chat_messages "
-                                 "WHERE workspace_id = ? AND target = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                                 (workspace_id, target, MINE)).fetchall()
+                                 f"WHERE workspace_id = ? AND target IN ({','.join('?' * len(targets))}) "
+                                 "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                                 (workspace_id, *targets, MINE)).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    def _unsettled(self, workspace_id: str, target: str) -> int:
+        targets = self._targets(workspace_id, target)
+        return self.s.db.execute("SELECT count(*) FROM chat_messages WHERE workspace_id = ? "
+                                 f"AND target IN ({','.join('?' * len(targets))}) "
+                                 "AND status IN ('queued', 'leased', 'uncertain')",
+                                 (workspace_id, *targets)).fetchone()[0]
+
+    @staticmethod
+    def _room_history(events: list[dict]) -> list[dict]:
+        return [{"who": e["actor"] or "someone", "role": "user" if e["kind"] == "message.user" else "member",
+                 "text": e["text"], "at": e["at"]} for e in events]
 
     def view(self, p: Principal, target: str) -> dict:
         self._patrick(p)
         target = self._target(p.workspace_id, target)
         feeds = Feeds(self.s)
-        if target == ROOM:
+        rooms = {r["room_id"]: r["name"] for r in self.rooms(p.workspace_id)}
+        if target in rooms:
             snap = feeds.get(p.workspace_id, "room")
-            history = [{"who": e["actor"] or "someone", "role": "user" if e["kind"] == "message.user" else "member",
-                        "text": e["text"], "at": e["at"]} for e in (snap["room"] or {}).get("events", [])]
+            history = self._room_history(room_events(snap["room"], target))
+            kind, name = "room", rooms[target]
         else:
             snap = feeds.get(p.workspace_id, "bots")
             chat = next((b for b in (snap["bots"] or {}).get("bots", []) if b["bot"] == target), None)
             history = [{"who": "Patrick" if m["role"] == "user" else target.capitalize(), "role": m["role"],
                         "text": m["text"], "at": m["at"]} for m in (chat or {}).get("messages", [])]
-        return {"target": target, "as_of": snap["as_of"], "history": history, "mine": self._mine(p.workspace_id, target),
-                "can_send": self.s.flag(p.workspace_id, "mobile_chat_write")}
+            kind, name = "bot", target.capitalize()
+        return {"target": target, "kind": kind, "name": name, "as_of": snap["as_of"], "history": history,
+                "mine": self._mine(p.workspace_id, target), "can_send": self.s.flag(p.workspace_id, "mobile_chat_write")}
 
     def summary(self, p: Principal) -> dict:
         self._patrick(p)
-        snap = Feeds(self.s).get(p.workspace_id, "bots")
+        feeds = Feeds(self.s)
+        snap = feeds.get(p.workspace_id, "bots")
         chats = {b["bot"]: b for b in (snap["bots"] or {}).get("bots", [])}
         out = []
         for bot in self.bots(p.workspace_id):
             msgs = chats.get(bot, {}).get("messages", [])
-            last = msgs[-1] if msgs else None
-            open_ = self.s.db.execute("SELECT count(*) FROM chat_messages WHERE workspace_id = ? AND target = ? "
-                                      "AND status IN ('queued', 'leased', 'uncertain')",
-                                      (p.workspace_id, bot)).fetchone()[0]
-            out.append({"bot": bot, "last": last, "unsettled": open_})
-        return {"as_of": snap["as_of"], "bots": out, "room": self.room_id(p.workspace_id) is not None}
+            out.append({"bot": bot, "last": msgs[-1] if msgs else None,
+                        "unsettled": self._unsettled(p.workspace_id, bot)})
+        room_snap = feeds.get(p.workspace_id, "room")
+        rooms = []
+        for r in self.rooms(p.workspace_id):
+            events = room_events(room_snap["room"], r["room_id"])
+            last = events[-1] if events else None
+            rooms.append({"room_id": r["room_id"], "name": r["name"],
+                          "last": {"who": last["actor"] or "someone", "text": last["text"], "at": last["at"]}
+                          if last else None, "unsettled": self._unsettled(p.workspace_id, r["room_id"])})
+        return {"as_of": snap["as_of"], "bots": out, "rooms_as_of": room_snap["as_of"], "rooms": rooms,
+                "room": bool(rooms)}
 
     # ── the connector's side ──────────────────────────────────────────────
 
@@ -172,7 +220,8 @@ class Chat:
         Feeds(self.s).check_token(workspace_id, "connector", token)
         if not self.s.flag(workspace_id, "connector_effects"):
             raise CoreError(423, "connector_effects_off", "the connector does nothing while connector_effects is off")
-        room_id = self.room_id(workspace_id)
+        rooms = {r["room_id"] for r in self.rooms(workspace_id)}
+        first = self.room_id(workspace_id)
         items = []
         with self.s.tx() as db:
             self._lapse(db, workspace_id)
@@ -203,8 +252,11 @@ class Chat:
                                "attempts = attempts + 1, updated_at = ? WHERE id = ?", (until, now, w["id"]))
                     item = {"id": w["id"], "kind": "decision.answered", "target": w["target"],
                             "text": self._told_text(db, w["id"]), "send_key": f"tw-told.{w['id']}"}
+                # The connector sends to a room by its id; to it every room is "room".
                 if item["target"] == ROOM:
-                    item["room_id"] = room_id
+                    item["room_id"] = first
+                elif item["target"] in rooms:
+                    item["room_id"], item["target"] = item["target"], ROOM
                 item["lease_until"] = until
                 self.s.event(db, workspace_id, "connector.leased", w["id"], "connector", {"target": w["target"]})
                 items.append(item)

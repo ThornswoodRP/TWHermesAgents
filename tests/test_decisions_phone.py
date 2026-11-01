@@ -27,8 +27,8 @@ from thornswood_decisions.passkey import Passkeys
 from thornswood_decisions.schema import MIGRATIONS
 from thornswood_decisions.store import CoreError
 
-ORIGIN = "https://thornswood-bots.example.ts.net"
-RP_ID = "thornswood-bots.example.ts.net"
+ORIGIN = "https://hermes.example.ts.net"
+RP_ID = "hermes.example.ts.net"
 ROOM = "54b3ad46-3419-4adb-b60d-c79cb347fcee"
 BOTS = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
 
@@ -50,6 +50,7 @@ class Migrations(unittest.TestCase):
         3: "8a79c74a0938504cd8e43e758be0dbbe607cd53ca3e7bae273424c55ad3632da",
         4: "7d599a7b92702912c989d590afdfb21235025cf7fda9f24dcc091fc11027c95c",
         5: "d36394b9f9ba7c25fc560c05a7834d52955de09312aed15256602e6a05ce1406",
+        6: "720327f6d99e5e74175c44b603b525df3cdae7ae67c1a6aa56778e8d882c9b63",
     }
 
     def test_merged_migrations_never_change(self):
@@ -175,7 +176,7 @@ class PasskeyWithoutLibraryOrOrigin(unittest.TestCase):
     def test_no_https_origin_means_no_passkeys(self):
         w = World()
         self.addCleanup(w.close)
-        for origin in (None, "http://thornswood-bots.example.ts.net"):
+        for origin in (None, "http://hermes.example.ts.net"):
             with self.assertRaises(CoreError) as cm:
                 Passkeys(w.store, origin).sign_in_options(w.ws)
             self.assertEqual(cm.exception.reason, "no_origin")
@@ -254,7 +255,9 @@ class AppFiles(unittest.TestCase):
         return resp.status, dict(resp.getheaders()), resp.read()
 
     def test_the_shell_and_its_deep_links(self):
-        for path in ("/m/", "/m/needs-you", "/m/work", "/m/decisions/dec_abc-123"):
+        # Decisions, Board and Rooms, and the tabs' first names, which old links still use.
+        for path in ("/m/", "/m/decisions", "/m/board", "/m/rooms", "/m/rooms/00000000-0000-4000-8000-000000000001",
+                     "/m/needs-you", "/m/work", "/m/room", "/m/decisions/dec_abc-123"):
             status, headers, body = self.raw("GET", path)
             self.assertEqual(status, 200, path)
             self.assertIn(b'<script src="/m/app.js" defer>', body)
@@ -341,7 +344,7 @@ class FeedsIn(unittest.TestCase):
         d = self.s.desktop()
         status, _, body = self.s.call("GET", "/room", headers={"Authorization": f"Bearer {d['token']}",
                                                                "X-TW-Hermes-Principal": "hermes-subject:patrick"})
-        self.assertEqual((status, body["room"]["events"][0]["text"]), (200, "hi"))
+        self.assertEqual((status, body["room"]["rooms"][0]["events"][0]["text"]), (200, "hi"))
 
 
 class FeedReader(unittest.TestCase):
@@ -376,6 +379,9 @@ class FeedReader(unittest.TestCase):
         self.assertNotIn("body", work["tasks"][0])
         room = feed_reader.room_snapshot(self.dir / "shared-state.db", ROOM, now)
         self.assertEqual([(e["seq"], e["actor"], e["text"]) for e in room["events"]], [(1, "Bramble", "Starting #12")])
+        both = feed_reader.rooms_snapshot(self.dir / "shared-state.db", [ROOM, "other"], now)
+        self.assertEqual([(r["room_id"], [e["text"] for e in r["events"]]) for r in both["rooms"]],
+                         [(ROOM, ["Starting #12"]), ("other", ["elsewhere"])])
 
     def test_it_never_writes_to_hermes(self):
         before = {p.name: p.read_bytes() for p in self.dir.iterdir()}
@@ -402,7 +408,7 @@ class FeedReader(unittest.TestCase):
             code = feed_reader.main(["--room", ROOM, "--hermes-home", str(self.dir), "--tokens", str(tokens),
                                      "--core", f"http://127.0.0.1:{s.port}/api/v1"])
         self.assertEqual(code, 0, out)
-        self.assertEqual(Feeds(s.w.store).get(s.w.ws, "room")["room"]["events"][0]["text"], "Starting #12")
+        self.assertEqual(Feeds(s.w.store).get(s.w.ws, "room")["room"]["rooms"][0]["events"][0]["text"], "Starting #12")
 
     @unittest.skipIf(os.name == "nt", "file modes are POSIX")
     def test_a_token_others_can_read_is_refused(self):

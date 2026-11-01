@@ -9,6 +9,12 @@ answer or token. A tap opens the card; nothing a notification does answers it.
   subscription is sealed to the push worker's key before it is stored
   (`webpush.seal`), and its endpoint must be a browser push service.
 - A "no" is kept (`push_consent`), so the app never asks again in a loop.
+- The core keeps the SHA-256 of each endpoint, never the endpoint, and tells
+  the phone which one it has. Each time the app opens it compares that with
+  the browser's own subscription and sends the browser's when they differ.
+  A subscription the push service retired (404 or 410) or the operator's key
+  reset took is "lapsed": the phone still said yes, so the app renews it by
+  itself. One Patrick turned off, a "no", or a revoked device is never renewed.
 - A push row is written by the card's own commit (`core.py`). The worker leases
   it only while `push_send` is on, and the lease re-checks, right then, that
   the card is still pending at that attention revision and that a live phone
@@ -26,7 +32,7 @@ from datetime import timedelta
 
 from .auth import Principal
 from .feeds import Feeds
-from .store import CoreError, Store, canonical, new_id, parse
+from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 from .webpush import push_host_ok, seal, unb64u
 
 LEASE = timedelta(minutes=2)
@@ -35,6 +41,8 @@ MIN_RETRY = 60
 MAX_RETRY = 3600
 MAX_CLAIM = 20
 TTL = 24 * 3600
+# Retired with these, a subscription lapsed: Patrick did not turn it off.
+LAPSED = ("the push service answered 404", "the push service answered 410", "push keys reset")
 
 
 def payload(row) -> dict:
@@ -90,11 +98,17 @@ class Push:
     def state(self, p: Principal) -> dict:
         self._phone(p)
         keys = self._keys(p.workspace_id)
-        sub = self.s.db.execute("SELECT 1 FROM push_subscriptions WHERE device_id = ? AND revoked_at IS NULL",
-                                (p.device_id,)).fetchone()
+        last = self.s.db.execute("SELECT revoked_at, retired_reason, endpoint_sha256 FROM push_subscriptions "
+                                 "WHERE device_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                                 (p.device_id,)).fetchone()
         consent = self.s.db.execute("SELECT state FROM push_consent WHERE device_id = ?", (p.device_id,)).fetchone()
-        return {"vapid_public": keys["vapid_public"] if keys else None, "subscribed": sub is not None,
-                "consent": consent["state"] if consent else None, "sending": self.s.flag(p.workspace_id, "push_send")}
+        consent = consent["state"] if consent else None
+        live = last is not None and last["revoked_at"] is None
+        lapsed = (last is not None and not live and consent == "granted" and last["retired_reason"] in LAPSED)
+        return {"vapid_public": keys["vapid_public"] if keys else None, "subscribed": live,
+                "endpoint_sha256": last["endpoint_sha256"] if live else None,
+                "lapsed": lapsed, "lapsed_endpoint_sha256": last["endpoint_sha256"] if lapsed else None,
+                "consent": consent, "sending": self.s.flag(p.workspace_id, "push_send")}
 
     def subscribe(self, p: Principal, subscription) -> dict:
         self._phone(p)
@@ -120,8 +134,9 @@ class Push:
             now = self.s.now()
             db.execute("UPDATE push_subscriptions SET revoked_at = ?, retired_reason = 'replaced' "
                        "WHERE device_id = ? AND revoked_at IS NULL", (now, p.device_id))
-            db.execute("INSERT INTO push_subscriptions(id, workspace_id, principal_id, device_id, sealed, created_at) "
-                       "VALUES(?,?,?,?,?,?)", (sid, p.workspace_id, p.id, p.device_id, sealed, now))
+            db.execute("INSERT INTO push_subscriptions(id, workspace_id, principal_id, device_id, sealed, "
+                       "endpoint_sha256, created_at) VALUES(?,?,?,?,?,?,?)",
+                       (sid, p.workspace_id, p.id, p.device_id, sealed, sha256_hex(endpoint), now))
             self._consent(db, p, "granted")
             self.s.event(db, p.workspace_id, "push.subscribed", sid, "patrick", {"device": p.device_id})
         return {"subscribed": True}

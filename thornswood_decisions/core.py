@@ -15,17 +15,19 @@ response), the Bot told (a confirmed connector receipt), the work done
 from __future__ import annotations
 
 import json
+import re
 from datetime import timedelta
 from typing import Callable, Iterable
 
 from .auth import Auth, Principal
 from .schema import KINDS
-from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
+from .store import CoreError, Store, canonical, iso, new_id, parse, sha256_hex
 
 DEFAULT_EXPIRY = timedelta(days=3)
 MAX_BODY_BYTES = 256 * 1024
 MAX_OPTIONS = 6
 LIVE = ("draft", "pending")
+ROOM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def pushes(kind: str, urgent: bool) -> bool:
@@ -47,6 +49,12 @@ class DecisionCore:
     # ── setup, run on the VM by the operator ──────────────────────────────
 
     def bind_room(self, workspace_id: str, room_id: str, name: str, *, by: str) -> None:
+        # The app opens a room at /m/rooms/<room id>, so the id is kept to what a path can carry.
+        if not isinstance(room_id, str) or not ROOM_ID.match(room_id):
+            raise CoreError(400, "bad_room", "a room id is 1 to 64 letters, digits, '-' or '_'")
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
+            raise CoreError(400, "bad_room", "a room's name is 1 to 80 characters")
+        name = name.strip()
         with self.s.tx() as db:
             db.execute("INSERT INTO room_bindings(workspace_id, room_id, name, bound_at) VALUES(?,?,?,?) "
                        "ON CONFLICT(workspace_id, room_id) DO UPDATE SET name = excluded.name",
@@ -304,6 +312,20 @@ class DecisionCore:
         rows = self.s.db.execute("SELECT * FROM decisions WHERE workspace_id = ? AND status = 'pending' "
                                  "ORDER BY created_at", (p.workspace_id,)).fetchall()
         return [self._card(self.s.db, r) for r in rows]
+
+    def answered(self, p: Principal, *, hours: int = 24, limit: int = 10) -> list[dict]:
+        """The cards Patrick answered in the last day, newest first: the app's "Answered" list under Decisions."""
+        if p.kind not in ("patrick", "bramble"):
+            raise CoreError(403, "not_patrick", "only Patrick and Bramble read the answered list")
+        since = iso(self.s.clock() - timedelta(hours=hours))
+        rows = self.s.db.execute(
+            "SELECT d.id, d.title, d.risk, r.option_key, r.answered_at, o.label FROM decisions d "
+            "JOIN responses r ON r.decision_id = d.id "
+            "LEFT JOIN decision_options o ON o.decision_id = d.id AND o.revision = r.revision AND o.key = r.option_key "
+            "WHERE d.workspace_id = ? AND d.status = 'resolved' AND r.answered_at >= ? "
+            "ORDER BY r.answered_at DESC, r.rowid DESC LIMIT ?", (p.workspace_id, since, limit)).fetchall()
+        return [{"id": r["id"], "title": r["title"], "risk": r["risk"], "answered_at": r["answered_at"],
+                 "option": r["label"] or r["option_key"]} for r in rows]
 
     def artifact(self, p: Principal, decision_id: str, revision: int | None = None) -> dict:
         row = self._row(self.s.db, decision_id, p.workspace_id)

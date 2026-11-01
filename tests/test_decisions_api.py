@@ -25,7 +25,7 @@ from thornswood_decisions import cli
 from thornswood_decisions.api import Api, make_server
 from thornswood_decisions.store import CoreError, Store
 
-ORIGIN = "https://thornswood-bots.example.ts.net"
+ORIGIN = "https://hermes.example.ts.net"
 HERMES = "hermes-subject:patrick"
 
 
@@ -227,6 +227,22 @@ class Phone(unittest.TestCase):
         self.assertEqual((status, body["option_key"]), (200, "a"))
         self.assertEqual(body["device_id"], s.w.store.db.execute("SELECT id FROM devices WHERE kind = 'phone'").fetchone()[0])
 
+    def test_an_answered_card_leaves_the_list_for_answered(self):
+        # Patrick, 1 Nov: an answered card kept showing. It leaves Decisions and
+        # shows under Answered for a day, with what he chose.
+        s = Served(self)
+        s.w.store.set_flag(s.w.ws, "mobile_read", True, by="tests")
+        cookie, paired = s.phone()
+        card, other = s.w.card(title="First"), s.w.card(title="Second", source_key="second")
+        h = {"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": paired["csrf"]}
+        s.call("POST", f"/cards/{card['id']}/answer", headers=h, body=answer_body(card))
+        status, _, body = s.call("GET", "/cards", headers={"Cookie": cookie})
+        self.assertEqual([c["id"] for c in body["cards"]], [other["id"]])
+        self.assertEqual([(c["id"], c["title"], c["option"]) for c in body["answered"]],
+                         [(card["id"], "First", card["options"][0]["label"])])
+        s.w.clock.advance(seconds=25 * 3600)
+        self.assertEqual(s.w.core.answered(s.w.patrick()), [], "a day later it is gone from Answered")
+
     def test_a_cookie_write_needs_the_exact_origin(self):
         s = Served(self)
         s.w.store.set_flag(s.w.ws, "mobile_read", True, by="tests")
@@ -341,6 +357,9 @@ class Operator(unittest.TestCase):
         code, _, _ = self.run_cli("--db", self.db, "bind-room", "--workspace", "thornswood",
                                   "--room-id", "54b3ad46-3419-4adb-b60d-c79cb347fcee")
         self.assertEqual(code, 0)
+        code, out, _ = self.run_cli("--db", self.db, "bind-room", "--workspace", "thornswood",
+                                    "--room-id", "00000000-0000-4000-8000-000000000001", "--name", "Test room")
+        self.assertEqual((code, json.loads(out)["name"]), (0, "Test room"))
         code, out, _ = self.run_cli("--db", self.db, "pair", "--workspace", "thornswood",
                                     "--kind", "desktop", "--label", "One")
         self.assertEqual(code, 0)

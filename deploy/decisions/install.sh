@@ -9,7 +9,7 @@
 #
 # --room is the Workbench room id check-hermes-contract.py printed. --origin is
 # the phone app's exact address once Tailscale Serve gives the VM one, like
-# https://thornswood-bots.<tailnet>.ts.net. Both are kept in
+# https://hermes.<tailnet>.ts.net. Both are kept in
 # /etc/thornswood/tw-decide.env (no secrets there) and stay until given again.
 #
 # Idempotent. It makes the tw-decide user and /srv/tw/decide (0700, tw-decide's
@@ -58,7 +58,7 @@ if [[ -n "$room" && ! "$room" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
   stop "the room id is the one check-hermes-contract.py printed, like 54b3ad46-3419-4adb-b60d-c79cb347fcee."
 fi
 if [[ -n "$origin" && ! "$origin" =~ ^https://[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$ ]]; then
-  stop "the origin is the VM's Tailscale address, like https://thornswood-bots.tail1234.ts.net, with no path."
+  stop "the origin is the VM's Tailscale address, like https://hermes.tail1234.ts.net, with no path."
 fi
 for tool in python3 systemd-run runuser; do command -v "$tool" >/dev/null || stop "$tool is not installed on the VM."; done
 # The venv needs Ubuntu's python3-venv, which the VM's image leaves out. Put it in

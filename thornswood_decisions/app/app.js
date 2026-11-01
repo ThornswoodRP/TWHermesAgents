@@ -1,5 +1,6 @@
-// The Thornswood phone app (07 sections 4, 5 and 8; step 3 read only, step 4
-// answers and chat, step 5 alerts).
+// The Hermes phone app (07 sections 4, 5 and 8; step 3 read only, step 4
+// answers and chat, step 5 alerts). Its tabs: Bramble, Bots, Rooms, Board and
+// Decisions (first named Room, Work and Needs you; those paths still open).
 //
 // Plain script, no framework, no inline code (the page's CSP allows only this
 // file). Everything shown from the core is set with textContent, never as
@@ -19,6 +20,10 @@ let csrf = null
 let seq = 0
 let pollTimer = null
 let answering = false
+let flash = ''        // one line the Decisions list shows once, after an answer
+let alertsNote = ''   // what the last alerts check did, shown in Settings
+let alertsChecked = 0
+let installPrompt = null
 
 // ── small helpers ─────────────────────────────────────────────────────────
 
@@ -212,28 +217,40 @@ function refused(r) {
   return false
 }
 
-async function needsYou() {
-  setTab('needs-you')
+async function decisionsView() {
+  setTab('decisions')
   const r = await call('GET', '/cards')
   if (refused(r)) return
   seq = r.body.seq
   badge(r.body.cards.length)
-  tidyAlerts(new Set(r.body.cards.map(c => c.id)))
-  if (!r.body.cards.length) return show(el('p', { class: 'quiet' }, 'Nothing needs you right now.'))
-  show(r.body.cards.map(c => el('button', { class: 'row', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
-    el('strong', {}, c.title),
-    el('div', { class: 'quiet' }, `${c.kind}${c.risk === 'high' ? ', high risk' : ''}, answer by ${when(c.expires_at)}`))))
+  // Every alert of a card that no longer needs Patrick goes off the phone.
+  toWorker({ pending: r.body.cards.map(c => c.id) })
+  const note = flash
+  flash = ''
+  const answered = r.body.answered || []
+  show(
+    note ? el('p', { class: 'receipt', role: 'status' }, note) : null,
+    r.body.cards.length
+      ? r.body.cards.map(c => el('button', { class: 'row', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
+        el('strong', {}, c.title),
+        el('div', { class: 'quiet' }, `${c.kind}${c.risk === 'high' ? ', high risk' : ''}, answer by ${when(c.expires_at)}`)))
+      : el('p', { class: 'quiet' }, 'Nothing needs you right now.'),
+    answered.length ? el('h2', { class: 'section' }, 'Answered') : null,
+    answered.map(c => el('button', { class: 'row done', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
+      el('strong', {}, c.title),
+      el('div', { class: 'quiet' }, `You chose ${c.option}, ${when(c.answered_at)}`))))
 }
 
 async function cardView(id, note) {
-  setTab('needs-you')
+  setTab('decisions')
   const r = await call('GET', '/cards/' + encodeURIComponent(id))
   if (refused(r)) return
   const c = r.body
+  // An opened card's alert has done its work.
+  toWorker({ close: c.id })
   const a = await call('GET', '/cards/' + encodeURIComponent(id) + '/artifact')
   const status = el('p', { class: 'warn', role: 'status' }, note || '')
   const pending = c.status === 'pending'
-  if (!pending) tidyAlerts(new Set(), c.id)
   const parts = [
     el('h2', {}, c.title),
     el('p', { class: 'quiet' }, `${c.kind}, revision ${c.revision}, ${c.status}${c.risk === 'high' ? ', high risk' : ''}`),
@@ -255,7 +272,7 @@ async function cardView(id, note) {
       'This card was replaced. Open the new one'))
   }
   parts.push(status)
-  parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/needs-you') }, 'Back'))
+  parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/decisions') }, 'Back'))
   show(el('div', { class: 'card' }, parts))
 }
 
@@ -284,7 +301,7 @@ async function answer(c, o, status) {
   answering = false
   if (r.status === 200) {
     sessionStorage.removeItem(name)
-    return cardView(c.id, '')
+    return answered(c, o)
   }
   if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
   if (r.status === 403 && r.body.error === 'sign_in_again') {
@@ -301,7 +318,7 @@ async function answer(c, o, status) {
     // The save may or may not have happened. Read the card back before offering anything.
     status.textContent = 'Checking outcome...'
     const back = await call('GET', '/cards/' + encodeURIComponent(c.id))
-    if (back.status === 200 && back.body.receipt) { sessionStorage.removeItem(name); return cardView(c.id, '') }
+    if (back.status === 200 && back.body.receipt) { sessionStorage.removeItem(name); return answered(c, o) }
     return cardView(c.id, back.status === 200
       ? 'Not saved yet. Choosing again sends the same answer, never a second one.'
       : 'Could not reach the core to check. Nothing is shown as answered until it says so.')
@@ -310,8 +327,17 @@ async function answer(c, o, status) {
   return cardView(c.id, said(r.body))
 }
 
-async function workView() {
-  setTab('work')
+// An answered card leaves Decisions at once: its alert closes, and the list
+// says what was chosen and keeps the card under Answered for a day.
+function answered(c, o) {
+  toWorker({ close: c.id })
+  flash = `Answered "${c.title}": ${o.label}. It is under Answered below.`
+  history.replaceState(null, '', '/m/decisions')
+  return route()
+}
+
+async function boardView() {
+  setTab('board')
   const r = await call('GET', '/work')
   if (refused(r)) return
   if (!r.body.work) return show(el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
@@ -324,8 +350,7 @@ async function workView() {
       : el('p', { class: 'quiet' }, 'No open tasks.'))
 }
 
-const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp',
-  room: 'the Workbench room' }
+const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
 const STATE = {
   queued: 'Waiting to send',
   leased: 'Sending',
@@ -349,12 +374,27 @@ async function botsView() {
       el('div', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.'))))
 }
 
+async function roomsView() {
+  setTab('rooms')
+  const r = await call('GET', '/chat')
+  if (refused(r)) return
+  const rooms = r.body.rooms || []
+  show(
+    el('p', { class: 'quiet' }, `Each group chat, as of ${when(r.body.rooms_as_of) || 'nothing yet'}.`),
+    rooms.length ? rooms.map(m => el('button', { class: 'row', type: 'button', onclick: () => go('/m/rooms/' + m.room_id) },
+      el('strong', {}, m.name),
+      m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
+      el('div', { class: 'quiet' }, m.last ? `${m.last.who}: ${m.last.text.slice(0, 120)}` : 'No messages yet.')))
+      : el('p', { class: 'quiet' }, 'No rooms yet.'))
+}
+
 async function chatView(target, tab) {
   setTab(tab)
   const r = await call('GET', '/chat/' + encodeURIComponent(target))
   if (refused(r)) return
   const v = r.body
-  const name = NAMES[target] || target
+  const room = v.kind === 'room'
+  const name = room ? v.name : (NAMES[target] || target)
   const asOf = v.as_of ? new Date(v.as_of) : null
   const history = v.history.map(m => el('div', { class: 'msg' },
     el('div', { class: 'who' }, m.who, el('span', { class: 'quiet' }, '  ' + when(m.at))),
@@ -368,8 +408,8 @@ async function chatView(target, tab) {
         STATE[m.status] + (m.status === 'dead' && m.reason ? ': ' + m.reason : ''))))
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
-    el('p', { class: 'quiet' }, target === 'room'
-      ? `The Workbench room as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
+    el('p', { class: 'quiet' }, room
+      ? `${name}, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
       : `Your Bot Chat with ${name}, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
     history.length ? history : el('p', { class: 'quiet' }, 'Nothing here yet.'),
     mine
@@ -386,7 +426,7 @@ async function chatView(target, tab) {
       if (!text) return
       status.textContent = 'Sending...'
       const s = await call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: draft.key })
-      if (s.status === 200) { drafts[target] = null; return chatView(target, tab) }
+      if (s.status === 200) { drafts[target] = null; return route() }
       if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
       status.textContent = s.status === 0
         ? 'Could not reach the core. Sending again sends the same message, never a second one.'
@@ -401,23 +441,107 @@ async function chatView(target, tab) {
 // ── alerts (step 5) ───────────────────────────────────────────────────────
 //
 // Asked for only on a deliberate tap. A "no" is told to the core, which keeps
-// it, and the app never asks again by itself. An alert of a card that no
-// longer needs Patrick is taken off the phone when the app next sees it.
+// it, and the app never asks again by itself.
+//
+// The service worker shows the alerts, so it is the one that takes them off:
+// the app tells it which cards still need Patrick each time it reads the list,
+// and which card was just opened or answered.
+//
+// Each time the app opens, it checks that the browser's subscription is the
+// one the core has (by the SHA-256 of its endpoint; the core never shows the
+// endpoint). Installing the app can give the browser a new subscription, and
+// the old one then answers 410 (Patrick's phone test, 1 Nov). alertsPlan says
+// what to do, and only ever goes on with a yes Patrick already gave: never
+// after he turned alerts off, said no, or the phone's permission went.
 
 function alertsSupported() {
   return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
 }
 
-async function tidyAlerts(pending, only) {
-  if (!alertsSupported()) return
+async function toWorker(msg) {
+  if (!('serviceWorker' in navigator)) return
   try {
     const reg = await navigator.serviceWorker.getRegistration('/m/')
-    if (!reg) return
-    for (const n of await reg.getNotifications()) {
-      const m = /^decision:(.+)$/.exec(n.tag || '')
-      if (m && !pending.has(m[1]) && (!only || m[1] === only)) n.close()
+    const worker = reg && (reg.active || reg.waiting || reg.installing)
+    if (worker) worker.postMessage(msg)
+  } catch (err) { /* no worker yet, so no alert of this app is showing */ }
+}
+
+// state: GET /push. browser: { hash, keyOk } of the browser's own subscription
+// (hash null when it has none; keyOk false when it was made with another key).
+// 'none': nothing to do. 'send': give the core the browser's subscription.
+// 'renew': make the browser a new subscription, then give the core that.
+function alertsPlan(state, browser, permission) {
+  if (permission !== 'granted' || !state || state.consent !== 'granted' || !state.vapid_public) return 'none'
+  if (!state.subscribed && !state.lapsed) return 'none'
+  if (!browser.hash || !browser.keyOk) return 'renew'
+  if (state.subscribed) return browser.hash === state.endpoint_sha256 ? 'none' : 'send'
+  return browser.hash === state.lapsed_endpoint_sha256 ? 'renew' : 'send'
+}
+
+async function endpointHash(sub) {
+  if (!sub || !sub.endpoint) return null
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sub.endpoint))
+  return Array.from(new Uint8Array(d), b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function madeWith(sub, vapidPublic) {
+  const k = sub && sub.options && sub.options.applicationServerKey
+  return !k || toB64url(k) === vapidPublic
+}
+
+async function checkAlerts() {
+  if (!alertsSupported() || Notification.permission !== 'granted') return
+  if (Date.now() - alertsChecked < 10 * 60 * 1000) return
+  alertsChecked = Date.now()
+  const r = await call('GET', '/push')
+  if (r.status !== 200) return
+  const s = r.body
+  let reg, sub
+  try {
+    reg = await navigator.serviceWorker.ready
+    sub = await reg.pushManager.getSubscription()
+  } catch (err) { return }
+  const plan = alertsPlan(s, { hash: await endpointHash(sub), keyOk: madeWith(sub, s.vapid_public) }, Notification.permission)
+  if (plan === 'none') return
+  try {
+    if (plan === 'renew') {
+      if (sub) await sub.unsubscribe()
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64url(s.vapid_public) })
     }
-  } catch (err) { /* the phone keeps the alert; tapping it opens the answered card */ }
+  } catch (err) {
+    alertsNote = 'Alerts stopped reaching this phone and it could not renew them. Tap Turn on alerts.'
+    return
+  }
+  const done = await call('POST', '/push/subscribe', { subscription: sub.toJSON() })
+  alertsNote = done.status === 200 ? `Alerts were renewed for this phone at ${when(new Date().toISOString())}.` : said(done.body)
+}
+
+// ── installing the app ────────────────────────────────────────────────────
+//
+// Chrome keeps its install under the three-dot menu, so the app says where it
+// is, or offers its own button when Chrome hands it the prompt.
+
+function installed() {
+  return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
+}
+
+function installBar() {
+  const bar = document.getElementById('install')
+  if (installed() || sessionStorage.getItem('tw-install-later')) { bar.hidden = true; return }
+  const later = el('button', { class: 'icon', type: 'button', 'aria-label': 'Not now', onclick: () => {
+    sessionStorage.setItem('tw-install-later', '1')
+    installBar()
+  } }, '\u00d7')
+  bar.replaceChildren(installPrompt
+    ? el('button', { class: 'primary', type: 'button', onclick: async () => {
+      const prompt = installPrompt
+      installPrompt = null
+      try { await prompt.prompt() } catch (err) { /* Chrome said no; the menu way still works */ }
+      installBar()
+    } }, 'Install the app')
+    : el('p', {}, 'To install the app: Chrome\'s \u22ee menu, then Add to home screen, then Install.'), later)
+  bar.hidden = false
 }
 
 async function alertsPart(status) {
@@ -429,6 +553,11 @@ async function alertsPart(status) {
   const r = await call('GET', '/push')
   if (r.status !== 200) { part.append(el('p', { class: 'quiet' }, said(r.body))); return part }
   const s = r.body
+  if (alertsNote) part.append(el('p', { class: 'quiet' }, alertsNote))
+  if (!installed()) {
+    part.append(el('p', { class: 'quiet' }, 'Install the app first, then turn alerts on from the installed app, ' +
+      'so they go to the app and not to this browser tab.'))
+  }
   if (s.subscribed) {
     part.append(el('p', {}, 'Alerts are on for this phone.'))
     if (!s.sending) part.append(el('p', { class: 'quiet' }, 'The core is not sending alerts yet, so none will come.'))
@@ -481,6 +610,7 @@ async function alertsPart(status) {
       status.textContent = said(done.body)
       return
     }
+    alertsNote = ''
     settingsView('Alerts are on.')
   } }, 'Turn on alerts'))
   return part
@@ -560,17 +690,24 @@ async function route() {
   }
   document.getElementById('tabs').hidden = false
   document.getElementById('settings').hidden = false
-  const path = location.pathname.replace(/^\/m\/?/, '').replace(/\/$/, '')
+  checkAlerts()
+  let path = location.pathname.replace(/^\/m\/?/, '').replace(/\/$/, '')
+  // The tabs' first names, from an old alert or home screen link.
+  const FIRST = { 'needs-you': 'decisions', work: 'board' }
+  if (FIRST[path]) { path = FIRST[path]; history.replaceState(null, '', '/m/' + path) }
   const card = path.match(/^decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card) return cardView(card[1])
-  if (path === 'work') return workView()
+  if (path === 'board') return boardView()
   const bot = path.match(/^bots\/([a-z0-9][a-z0-9_-]{0,63})$/)
   if (bot) return chatView(bot[1], 'bots')
-  if (path === 'room') return chatView('room', 'room')
+  const room = path.match(/^rooms\/([A-Za-z0-9_-]{1,64})$/)
+  if (room) return chatView(room[1], 'rooms')
+  if (path === 'room') return chatView('room', 'rooms')
+  if (path === 'rooms') return roomsView()
   if (path === 'bramble') return chatView('bramble', 'bramble')
   if (path === 'bots') return botsView()
   if (path === 'settings') return settingsView()
-  return needsYou()
+  return decisionsView()
 }
 
 async function poll() {
@@ -578,7 +715,7 @@ async function poll() {
   const path = location.pathname
   // A chat view reads itself again, unless something is being typed.
   const box = document.querySelector('textarea')
-  if (/^\/m\/(bramble|room|bots\/)/.test(path)) {
+  if (/^\/m\/(bramble$|room$|rooms\/|bots\/)/.test(path)) {
     if (!box || (!box.value && document.activeElement !== box)) route()
     return
   }
@@ -587,7 +724,10 @@ async function poll() {
   seq = r.body.seq
   const card = path.match(/^\/m\/decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card && r.body.changed.includes(card[1]) && !document.querySelector('[data-confirm]')) return route()
-  if (path.endsWith('/needs-you') || path === '/m/') route()
+  if (/^\/m\/(decisions)?$/.test(path)) return route()
+  // Elsewhere, the badge still follows the list.
+  const list = await call('GET', '/cards')
+  if (list.status === 200) badge(list.body.cards.length)
 }
 
 document.addEventListener('click', event => {
@@ -596,14 +736,23 @@ document.addEventListener('click', event => {
 })
 document.getElementById('settings').addEventListener('click', () => go('/m/settings'))
 window.addEventListener('popstate', route)
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') poll() })
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { poll(); if (csrf) checkAlerts() }
+})
+window.addEventListener('beforeinstallprompt', event => {
+  event.preventDefault()
+  installPrompt = event
+  installBar()
+})
+window.addEventListener('appinstalled', () => { installPrompt = null; installBar() })
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(() => {})
   // A tapped alert, with the app already open: the worker says which card.
   navigator.serviceWorker.addEventListener('message', event => {
     const p = event.data && event.data.go
-    if (typeof p === 'string' && /^\/m\/(decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/.test(p)) go(p)
+    if (typeof p === 'string' && /^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/.test(p)) go(p)
   })
 }
 pollTimer = setInterval(poll, POLL_MS)
+installBar()
 route()

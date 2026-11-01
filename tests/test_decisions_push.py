@@ -13,6 +13,7 @@ workspace; nothing reaches a real push service.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import stat
@@ -137,10 +138,10 @@ class Rfc8291(unittest.TestCase):
 class Vapid(unittest.TestCase):
     def test_the_header_verifies_and_names_the_push_service(self):
         key = webpush.new_vapid_key()
-        h = webpush.vapid_header(FCM, key, "https://thornswood-bots.example.ts.net", now=1_800_000_000)
+        h = webpush.vapid_header(FCM, key, "https://hermes.example.ts.net", now=1_800_000_000)
         claims = verify_vapid(h, FCM)
         self.assertEqual(claims, {"aud": "https://fcm.googleapis.com", "exp": 1_800_000_000 + 12 * 3600,
-                                  "sub": "https://thornswood-bots.example.ts.net"})
+                                  "sub": "https://hermes.example.ts.net"})
         self.assertTrue(h.endswith(", k=" + webpush.vapid_public(key)))
         self.assertEqual(len(webpush.vapid_public(key)), 87)
 
@@ -388,6 +389,47 @@ class Outbox(unittest.TestCase):
                 self.assertEqual(self.push.result(self.w.ws, self.token, it["id"],
                                                   [{"subscription_id": sid, "status": code}])["status"], "dead")
                 self.assertFalse(self.push.state(self.p)["subscribed"])
+
+    def test_the_core_keeps_only_the_endpoints_hash_and_says_it(self):
+        self.subscribed()
+        row = self.w.store.db.execute("SELECT endpoint_sha256, sealed FROM push_subscriptions").fetchone()
+        self.assertEqual(row["endpoint_sha256"], hashlib.sha256(FCM.encode()).hexdigest())
+        self.assertNotIn(FCM.encode(), bytes(row["sealed"]))
+        st = self.push.state(self.p)
+        self.assertEqual((st["subscribed"], st["endpoint_sha256"], st["lapsed"]),
+                         (True, hashlib.sha256(FCM.encode()).hexdigest(), False))
+        self.assertNotIn(FCM, json.dumps(st))
+
+    def test_a_subscription_the_push_service_retired_has_lapsed(self):
+        # Patrick's phone test, 1 Nov: alerts were turned on in the Chrome tab, the
+        # installed app got a subscription of its own, and the tab's answered 410.
+        for code in (404, 410):
+            with self.subTest(code=code):
+                self.setUp()
+                it, sid = self.leased()
+                self.push.result(self.w.ws, self.token, it["id"], [{"subscription_id": sid, "status": code}])
+                st = self.push.state(self.p)
+                self.assertEqual((st["subscribed"], st["lapsed"], st["consent"]), (False, True, "granted"))
+                self.assertEqual(st["lapsed_endpoint_sha256"], hashlib.sha256(FCM.encode()).hexdigest())
+                self.push.subscribe(self.p, Browser(FCM + "-new").subscription())
+                st = self.push.state(self.p)
+                self.assertEqual((st["subscribed"], st["lapsed"], st["lapsed_endpoint_sha256"]), (True, False, None))
+
+    def test_only_a_retired_subscription_lapses_never_one_patrick_turned_off(self):
+        self.subscribed()
+        self.push.unsubscribe(self.p)
+        self.assertEqual({k: self.push.state(self.p)[k] for k in ("subscribed", "lapsed")},
+                         {"subscribed": False, "lapsed": False})
+        self.push.subscribe(self.p, Browser().subscription())
+        self.push.denied(self.p)
+        self.assertEqual({k: self.push.state(self.p)[k] for k in ("subscribed", "lapsed", "consent")},
+                         {"subscribed": False, "lapsed": False, "consent": "denied"})
+
+    def test_a_key_reset_lapses_the_subscription(self):
+        self.subscribed()
+        self.push.reset_keys(self.w.ws, by="tests")
+        st = self.push.state(self.p)
+        self.assertEqual((st["subscribed"], st["lapsed"], st["vapid_public"]), (False, True, None))
 
     def test_retry_after_is_waited_out(self):
         it, sid = self.leased()

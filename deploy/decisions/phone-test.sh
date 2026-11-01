@@ -21,7 +21,9 @@
 # :8443, so its passkeys and push name the same VM.
 #
 #   start  puts the two units in place, makes the store and the push worker's
-#          token the first time, turns the three flags on in phone-test, starts
+#          token the first time, turns the three flags on in phone-test, binds
+#          two test rooms (names only: no room is behind them and chat stays
+#          off, so the Rooms list shows them and nothing is ever sent), starts
 #          both, checks the core answers on loopback only, and serves it on 8443
 #   pair   prints a one-time code for the phone, good for 10 minutes
 #   card   opens one test card as Bramble (high: a high-risk one, which needs a
@@ -88,6 +90,11 @@ case "$action" in
       run flag --workspace "$ws" "$flag" on >/dev/null || stop "$flag would not go on in $ws."
     done
     ok "test workspace $ws: mobile_read, decision_write and push_send on; chat and connector_effects off"
+    run bind-room --workspace "$ws" --room-id 00000000-0000-4000-8000-000000000001 --name "Test room" >/dev/null \
+      || stop "the test room would not bind in $ws."
+    run bind-room --workspace "$ws" --room-id 00000000-0000-4000-8000-000000000002 --name "Second test room" >/dev/null \
+      || stop "the second test room would not bind in $ws."
+    ok "two test rooms bound in $ws; they show under Rooms, and nothing is sent to them"
     if ! runuser -u tw-push -- test -s "$pushdir/core.token"; then
       run feed-token --workspace "$ws" --name push | runuser -u tw-push -- sh -c 'umask 077; cat > "$1"' _ "$pushdir/core.token"
     fi

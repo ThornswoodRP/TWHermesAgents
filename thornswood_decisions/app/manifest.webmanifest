@@ -1,9 +1,9 @@
 {
-  "name": "Thornswood",
-  "short_name": "Thornswood",
-  "description": "Thornswood's decision cards, the Bots' work and the Workbench room.",
+  "name": "Hermes",
+  "short_name": "Hermes",
+  "description": "Thornswood's decision cards, the Bots' board, their chats and the rooms.",
   "id": "/m/",
-  "start_url": "/m/needs-you",
+  "start_url": "/m/decisions",
   "scope": "/m/",
   "display": "standalone",
   "background_color": "#1f3b2d",

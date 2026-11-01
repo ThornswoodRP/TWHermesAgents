@@ -1,6 +1,6 @@
 // The thornswood-decisions pane for Hermes Desktop (07 section 5, step 2).
 //
-// It shows the decision core's Needs you cards and sends Patrick's answers.
+// It shows the decision core's Decisions (the cards waiting on Patrick) and sends Patrick's answers.
 // Every call goes through this plugin's backend (dashboard/plugin_api.py) on
 // his Hermes on the VM, which forwards it to the core on loopback. The pane
 // holds one thing: the session the core gave this Desktop when it was paired,
@@ -329,7 +329,7 @@ function Pane({ store }) {
       jsxs('div', {
         className: 'flex items-center justify-between px-3 py-2',
         children: [
-          text('text-sm font-medium', 'Needs you'),
+          text('text-sm font-medium', 'Decisions'),
           jsx(Button, { variant: 'ghost', size: 'xs', onClick: () => store.signOut(), children: 'Sign out' })
         ]
       }),

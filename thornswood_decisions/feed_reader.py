@@ -1,9 +1,9 @@
-"""Reads the Bots' Kanban, the Workbench room and the six Bot Chats, and sends the core a snapshot of each.
+"""Reads the Bots' Kanban, the rooms and the six Bot Chats, and sends the core a snapshot of each.
 
 Runs on the VM as the Bots' `hermes` user, once a minute from
 tw-decide-feed.timer:
 
-    python3 -I -m thornswood_decisions.feed_reader --room <room id>
+    python3 -I -m thornswood_decisions.feed_reader --room <room id> [--room <another room id>]
 
 It opens Hermes's own stores read-only (`kanban.db` and `shared-state.db`
 under ~/.hermes, and each Bot's `profiles/<id>/state.db`; the tables named in
@@ -58,12 +58,12 @@ def work_snapshot(kanban_db: Path, now: datetime) -> dict:
          "updated_at": _iso(r["completed_at"] or r["started_at"] or r["created_at"])} for r in rows]}
 
 
-def room_snapshot(state_db: Path, room_id: str, now: datetime) -> dict:
+def room_snapshot(state_db: Path, room_id: str, now: datetime, limit: int = 200) -> dict:
     con = _ro(state_db)
     try:
         rows = con.execute("SELECT seq, event_id, kind, actor_json, payload_json, created_at FROM hosted_room_events "
-                           "WHERE room_id = ? AND kind IN (?, ?) ORDER BY seq DESC LIMIT 200",
-                           (room_id, *ROOM_KINDS)).fetchall()
+                           "WHERE room_id = ? AND kind IN (?, ?) ORDER BY seq DESC LIMIT ?",
+                           (room_id, *ROOM_KINDS, limit)).fetchall()
     finally:
         con.close()
     events = []
@@ -78,6 +78,14 @@ def room_snapshot(state_db: Path, room_id: str, now: datetime) -> dict:
         events.append({"seq": int(r["seq"]), "event_id": str(r["event_id"]), "kind": r["kind"], "actor": str(name),
                        "text": text if isinstance(text, str) else "", "at": _iso(r["created_at"])})
     return {"source_time": now.isoformat(), "room_id": room_id, "events": events}
+
+
+def rooms_snapshot(state_db: Path, room_ids: list[str], now: datetime) -> dict:
+    """Every room in one snapshot; with several, fewer of each one's last events, so the feed stays small."""
+    limit = max(25, 200 // max(1, len(room_ids)))
+    rooms = [room_snapshot(state_db, r, now, limit) for r in room_ids]
+    return {"source_time": now.isoformat(),
+            "rooms": [{"room_id": r["room_id"], "events": r["events"]} for r in rooms]}
 
 
 def _text(content) -> str:
@@ -148,7 +156,7 @@ def send(core: str, name: str, token: str, body: dict) -> int:
 def main(argv: list[str]) -> int:
     home = Path(os.environ.get("HOME", "~")).expanduser()
     ap = argparse.ArgumentParser(prog="thornswood_decisions.feed_reader")
-    ap.add_argument("--room", required=True, help="the Workbench room id")
+    ap.add_argument("--room", required=True, action="append", help="a room's id; once for each room")
     ap.add_argument("--hermes-home", default=str(home / ".hermes"))
     ap.add_argument("--tokens", default=str(home / ".config" / "thornswood"))
     ap.add_argument("--core", default=CORE)
@@ -159,7 +167,7 @@ def main(argv: list[str]) -> int:
     from . import contracts
     bots = contracts.load()["profiles"]["ids"]
     for name, make in (("work", lambda: work_snapshot(hh / "kanban.db", now)),
-                       ("room", lambda: room_snapshot(hh / "shared-state.db", args.room, now)),
+                       ("room", lambda: rooms_snapshot(hh / "shared-state.db", args.room, now)),
                        ("bots", lambda: bots_snapshot(hh, bots, now))):
         try:
             body = make()

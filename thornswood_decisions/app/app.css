@@ -48,3 +48,11 @@ textarea { font: inherit; width: 100%; padding: 10px; border: 1px solid var(--li
   background: var(--card); color: var(--fg); margin-top: 10px; resize: vertical; }
 .msg.mine { border-left: 3px solid var(--accent); padding-left: 8px; }
 .receipt { font-weight: 600; }
+.install { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--card);
+  border-bottom: 1px solid var(--line); font-size: 14px; }
+.install[hidden] { display: none; }
+.install p { flex: 1; margin: 0; }
+.install .primary { margin: 0; }
+h2.section { font-size: 15px; margin: 18px 0 4px; color: var(--muted); }
+.row.done { opacity: 0.8; }
+.row .rec { font-size: 12px; color: var(--accent); margin-left: 8px; }
