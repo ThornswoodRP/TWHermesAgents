@@ -1,5 +1,5 @@
 # tw-decide-push: the push worker (07 section 8, step 5). It sends one quiet
-# line, "Thornswood needs you", to the phone through the phone's own push
+# line, "Hermes needs you", to the phone through the phone's own push
 # service, with a VAPID key made here and kept in /srv/tw/push (0700, tw-push's
 # only). It does nothing while push_send is off.
 #

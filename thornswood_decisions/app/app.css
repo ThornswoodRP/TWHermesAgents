@@ -1,11 +1,14 @@
+/* Thornswood's own colours, from the site (site/public/home.css): the night
+   palette and its gold. Dark only, like the site (Patrick, 1 Nov). Measured
+   contrast: gold on night 8.1 to 1, text on night 15.5 to 1, quiet text on
+   stone 6.6 to 1; "high risk" and warnings use a lighter ember, 5.2 to 1. */
+@font-face { font-family: "Cinzel"; font-weight: 600; font-display: swap;
+  src: url("/m/cinzel-title.woff2") format("woff2"); }
 :root {
-  --bg: #f6f7f4; --fg: #1d231f; --muted: #5d6a61; --card: #ffffff; --line: #d9ded7;
-  --accent: #1f3b2d; --accent-fg: #ffffff; --warn: #8a3b12;
-  color-scheme: light dark;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #121714; --fg: #e5ebe5; --muted: #9aa79d; --card: #1b221d; --line: #2c362f;
-          --accent: #cfe3c8; --accent-fg: #121714; --warn: #f0a37a; }
+  --bg: #0B0E0A; --card: #14180F; --raised: #1D2318; --line: #2B3323; --line2: #3D4733;
+  --fg: #E4E7DA; --muted: #96A084; --faint: #7A8568;
+  --accent: #C9A24B; --accent-hot: #E4BE66; --accent-fg: #0B0E0A; --warn: #D9693F;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--fg);
@@ -13,12 +16,17 @@ html, body { margin: 0; background: var(--bg); color: var(--fg);
 body { min-height: 100vh; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
 .top { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px;
   border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
-.top h1 { font-size: 18px; margin: 0; }
+.top h1 { display: flex; align-items: center; gap: 10px; margin: 0;
+  font: 600 18px/1 "Cinzel", Georgia, serif; letter-spacing: .14em; text-transform: uppercase; }
+.top h1 img { border-radius: 50%; }
 main { padding: 12px 16px; max-width: 720px; margin: 0 auto; }
 .tabs { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--card);
   border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
 .tabs a { flex: 1; text-align: center; padding: 12px 2px; color: var(--muted); text-decoration: none; font-size: 13px; }
-.tabs a[aria-current="page"] { color: var(--fg); font-weight: 600; }
+.tabs a { position: relative; }
+.tabs a[aria-current="page"] { color: var(--accent-hot); font-weight: 600; }
+.tabs a[aria-current="page"]::before { content: ""; position: absolute; top: -1px; left: 22%; right: 22%;
+  height: 2px; background: var(--accent); }
 .badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent);
   color: var(--accent-fg); font-size: 12px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 10px 0; }
@@ -30,7 +38,7 @@ main { padding: 12px 16px; max-width: 720px; margin: 0 auto; }
 button { font: inherit; }
 .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 8px; padding: 12px 16px;
   width: 100%; margin: 8px 0; }
-.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line2); border-radius: 8px;
   padding: 10px 14px; width: 100%; margin: 6px 0; }
 .icon { background: transparent; border: 0; color: var(--fg); font-size: 20px; }
 input { font: inherit; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
@@ -56,3 +64,10 @@ textarea { font: inherit; width: 100%; padding: 10px; border: 1px solid var(--li
 h2.section { font-size: 15px; margin: 18px 0 4px; color: var(--muted); }
 .row.done { opacity: 0.8; }
 .row .rec { font-size: 12px; color: var(--accent); margin-left: 8px; }
+.option .rec, .row .rec { border: 1px solid var(--accent); border-radius: 3px; padding: 0 4px;
+  letter-spacing: .04em; white-space: nowrap; }
+.receipt { border-left: 3px solid var(--accent); background: var(--raised); padding: 6px 10px; border-radius: 0 6px 6px 0; }
+h2.section { text-transform: uppercase; letter-spacing: .12em; font-size: 12px; color: var(--faint); }
+pre.artifact { background: var(--raised); }
+.install { background: var(--raised); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent-hot); outline-offset: 2px; }

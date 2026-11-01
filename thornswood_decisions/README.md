@@ -13,7 +13,7 @@ Until test T33 passes and Patrick says so, the Claude report page stays the only
 | 2 | The Desktop pane: the same cards, revision-checked answers, a polling fallback, pairing | `api.py`, `cli.py`, `plugins/thornswood-decisions/` |
 | 3 | The phone, read only: the app shell on the `ts.net` origin, sign-in, cards, the Work and Room views | `passkey.py`, `feeds.py`, `feed_reader.py`, `app/` |
 | 4 | Phone answers and chat: the same commands as Desktop, the six Bot Chats and the room | `chat.py`, `connector.py`, `room_send.py`, `app/` |
-| 5 | Web Push: the outbox, the one quiet "Thornswood needs you", deep links, denial and revoke tests | `webpush.py`, `push.py`, `push_worker.py`, `app/sw.js` |
+| 5 | Web Push: the outbox, the one quiet "Hermes needs you", deep links, denial and revoke tests | `webpush.py`, `push.py`, `push_worker.py`, `app/sw.js` |
 | 6 | The Main card | Waits for phase 7. Not built |
 
 Every feature flag starts off: `decision_write`, `mobile_read`, `mobile_chat_write`, `push_send`, `connector_effects`. Tests use a separate test workspace and test actions, never a real deploy, merge or Ship.
@@ -78,7 +78,7 @@ No API_SERVER_KEY, no api_server listener and no change to the gateway's setting
 
 ## Web Push (step 5)
 
-A card that needs Patrick puts one quiet line on his phone's lock screen: "Thornswood needs you", with no body, no buttons and no sound. A tap opens that exact card in the app. Nothing a notification does answers a card. Standard Web Push with our own VAPID key, through the phone browser's own push service: no paid push, no account, no Cloudflare. The Tailscale `ts.net` origin is enough for the phone to subscribe, so Cloudflare Tunnel comes in only if T10 or T11 fail there.
+A card that needs Patrick puts one quiet line on his phone's lock screen: "Hermes needs you", with no body, no buttons and no sound. A tap opens that exact card in the app. Nothing a notification does answers a card. Standard Web Push with our own VAPID key, through the phone browser's own push service: no paid push, no account, no Cloudflare. The Tailscale `ts.net` origin is enough for the phone to subscribe, so Cloudflare Tunnel comes in only if T10 or T11 fail there.
 
 | File | What it holds |
 |---|---|
@@ -134,7 +134,7 @@ On the VM, after step 7 above, with the installed commit:
 
 1. `sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/phone-test.sh <commit> start`
 2. On the phone, with Tailscale on: open `https://hermes.<tailnet>.ts.net:8443/m/`, then `phone-test.sh <commit> pair` and type the code within 10 minutes. Add a passkey from Settings, and add the app to the home screen (T10).
-3. Turn alerts on in Settings, close the app, lock the phone, and run `phone-test.sh <commit> card`. One quiet "Thornswood needs you" should arrive (T11). Tapping it opens that exact card after sign-in, and the lock screen shows nothing else (T12, T13).
+3. Turn alerts on in Settings, close the app, lock the phone, and run `phone-test.sh <commit> card`. One quiet "Hermes needs you" should arrive (T11). Tapping it opens that exact card after sign-in, and the lock screen shows nothing else (T12, T13).
 4. `phone-test.sh <commit> card high` checks the high-risk path: its check screen, then a passkey sign-in.
 5. `phone-test.sh <commit> stop` takes 8443 off Tailscale Serve and stops both. The test store stays.
 
@@ -149,6 +149,8 @@ Patrick's first phone test (1 Nov) passed, and asked for these:
 - **An answered card stops showing.** After an answer the app goes back to Decisions, which says what was chosen and keeps the card under **Answered** for a day. The service worker, which shows the alerts, now takes them off: the app tells it which cards still need Patrick each time it reads Decisions, and which card was just opened or answered. An alert of a card answered on Desktop while the phone app is closed stays until the app next opens.
 - **Alerts that stop reaching the phone.** Alerts were turned on in the Chrome tab before the app was installed; the installed app's subscription replaced that one, and the tab's answered 410. The core cannot see endpoints (they are sealed to the push worker), so it now keeps the SHA-256 of each one (migration 6) and `GET /push` says it, and says `lapsed` when the push service retired the subscription (404 or 410) or the operator reset the keys while the phone's yes still stands. Each time the app opens (and when it comes back after ten minutes) it compares that with the browser's own subscription: the same, nothing; a different one, it sends the browser's; none, one made with another key, or the very one that lapsed, it makes a new one and sends that. It never does this after Patrick turned alerts off or said no, or once the phone's permission is gone, and Settings says when it renewed them. `alertsPlan` in `app.js` is that choice, checked case by case in the browser check.
 - **Installing.** Chrome keeps its install under the three-dot menu. In a browser tab the app shows a line saying where it is (Chrome's menu, Add to home screen, Install), or an **Install the app** button when Chrome hands it the install prompt, and Settings says to install first and turn alerts on from the installed app.
+
+- **The look** (Patrick's answers, 1 Nov, from the mock-up): Thornswood's whole emblem everywhere (`icon-192.png`, `icon-512.png`, and `icon-maskable-512.png` with the emblem inside the safe circle on the night ground), dark only in the site's night palette with its gold (`--gold #C9A24B`, `--gold-hot #E4BE66`), the HERMES title in the site's Cinzel (`cinzel-title.woff2`, only the five letters of HERMES, 1.4 KB, under the SIL Open Font License in `cinzel-OFL.txt`) and the phone's own font for everything else, and the alert line "Hermes needs you". Measured contrast: gold on night 8.1 to 1, text on night 15.5 to 1, quiet text 6.6 to 1, and warnings in a lighter ember at 5.2 to 1.
 
 Checked here: the unit tests above, and `tests/decisions_phone_check.js` in Chromium (the tabs and old paths, the Rooms list and a room's deep link, an answer leaving Decisions for Answered, the alerts of answered and opened cards taken off, every `alertsPlan` case, the install line, and the manifest). Not checked here: a real push service, the install prompt itself (headless Chromium never offers it), and Patrick's phone.
 

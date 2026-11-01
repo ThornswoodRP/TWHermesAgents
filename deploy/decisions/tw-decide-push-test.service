@@ -1,6 +1,6 @@
 # tw-decide-push-test: the push worker for the phone test bench, as tw-push,
 # with keys and a core token of its own in /srv/tw/push-test (0700), never the
-# real worker's. It sends "Thornswood needs you" only for the test workspace's
+# real worker's. It sends "Hermes needs you" only for the test workspace's
 # cards, through the phone's own push service. phone-test.sh starts and stops
 # it; nothing starts it at boot.
 [Unit]

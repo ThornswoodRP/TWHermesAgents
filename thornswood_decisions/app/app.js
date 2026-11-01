@@ -578,7 +578,7 @@ async function alertsPart(status) {
       'notifications for this app in the phone\'s settings, then tap Turn on alerts.'))
   } else {
     part.append(el('p', { class: 'quiet' }, 'Alerts are off. When on, a card that needs you shows ' +
-      '"Thornswood needs you" on the lock screen, and nothing more.'))
+      '"Hermes needs you" on the lock screen, and nothing more.'))
   }
   if (!s.vapid_public) {
     part.append(el('p', { class: 'quiet' }, 'Alerts are not ready on the core yet.'))

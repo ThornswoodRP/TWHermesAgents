@@ -1,6 +1,6 @@
 """Web Push in the core: subscriptions, consent and the push outbox (07 section 8, step 5).
 
-What the phone shows is always the same: "Thornswood needs you", no body, the
+What the phone shows is always the same: "Hermes needs you", no body, the
 tag `decision:<id>`, quiet, no buttons. The payload is only
 `{v, event_id, decision_id, attention_revision, path}`: no question, repo,
 answer or token. A tap opens the card; nothing a notification does answers it.

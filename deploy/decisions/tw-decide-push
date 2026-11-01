@@ -1,5 +1,5 @@
 #!/opt/thornswood-hermes/decisions-venv/bin/python3 -I
-# Sends "Thornswood needs you" to Patrick's phone, as the tw-push user, from the
+# Sends "Hermes needs you" to Patrick's phone, as the tw-push user, from the
 # root-owned copy, with the core's own venv (its cryptography). -I: only this
 # copy's code is imported.
 import sys

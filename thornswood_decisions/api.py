@@ -48,9 +48,10 @@ APP_FILES = {
     "app.css": "text/css; charset=utf-8",
     "sw.js": "text/javascript; charset=utf-8",
     "manifest.webmanifest": "application/manifest+json",
-    "icon.svg": "image/svg+xml",
     "icon-192.png": "image/png",
     "icon-512.png": "image/png",
+    "icon-maskable-512.png": "image/png",
+    "cinzel-title.woff2": "font/woff2",
 }
 # The app's own views, each a deep link that loads the shell. needs-you, work
 # and room are the tabs' first names (before Decisions, Board and Rooms), kept
@@ -58,7 +59,7 @@ APP_FILES = {
 APP_VIEWS = re.compile(r"^(|decisions|board|rooms|bots|bramble|settings|needs-you|work|room|"
                        r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64})$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
-           "manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+           "font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 # The service worker's own policy: it fetches only this origin, to keep the shell,
 # and its alerts' icon is this origin's too.
 SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"

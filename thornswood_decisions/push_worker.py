@@ -1,4 +1,4 @@
-"""The push worker: sends "Thornswood needs you" to Patrick's phone (07 section 8, step 5).
+"""The push worker: sends "Hermes needs you" to Patrick's phone (07 section 8, step 5).
 
 Runs on the VM as its own user, `tw-push` (tw-decide-push.service), with the
 core's venv:
