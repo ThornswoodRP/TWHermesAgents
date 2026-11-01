@@ -300,7 +300,8 @@ def main() -> int:
             print(f"  - {f}")
         return 1
     print(f"\nApplied {a.expect} to {', '.join(plans)} and the gateway's own profile. The guard's self-test passed in every profile.")
-    print("The gateway picks up the plugin and config on restart, from One: ssh -t thornswood-bots sudo systemctl restart tw-hermes-gateway")
+    print("Every Bot process picks up the plugin and config when it starts again. End the hermes user's login sessions"
+          " (Hermes Desktop's backends) and restart the gateway in one step: ssh -t thornswood-bots sudo /opt/thornswood-hermes/bin/tw-reload-bots")
     return 0
 
 

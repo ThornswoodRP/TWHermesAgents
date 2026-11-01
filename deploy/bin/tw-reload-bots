@@ -1,0 +1,6 @@
+#!/usr/bin/python3 -I
+# After an apply: end the hermes user's login sessions and restart the gateway (thornswood_brokers/reload.py).
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_brokers.reload import main  # noqa: E402
+sys.exit(main())

@@ -139,7 +139,7 @@
   },
   "claims": {
     "prefix": "claimed: ",
-    "label_color": "5319e7",
+    "label_color": "e8590c",
     "label_description": "Claimed by {name}, a Thornswood Hermes Bot",
     "retired_labels": [
       "claimed: Claude",

@@ -42,7 +42,7 @@ The VM holds no GitHub credential, so for now it never pulls from GitHub; One se
 
    It fetches `main`, refuses unless that commit is `main`'s tip, bundles it, copies it to `thornswood-bots`, and as the `hermes` user unpacks it into `/home/hermes/thornswood-hermes/releases/<commit>` and runs `apply.py --check`. That prints, for each Bot and for the gateway's own profile (the `hermes` user's default profile, which the gateway runs as), which config keys would change, and writes nothing. Any problem prints as `STOP` with the reason.
 3. If the check is clean, the same command without `--check` applies it and points `/home/hermes/thornswood-hermes/current` at that release.
-4. The gateway loads the new plugin and config when it restarts. Since the Phase 2 install it is the `tw-hermes-gateway` system unit, so the restart is root's, from One: `ssh -t thornswood-bots sudo systemctl restart tw-hermes-gateway`.
+4. Every Bot process loads the plugin and config when it starts and keeps them: the `tw-hermes-gateway` system unit, and the hermes user's login sessions, where Hermes Desktop's backends run the room's turns. So after an apply both start again, in one root step: `ssh -t thornswood-bots sudo /opt/thornswood-hermes/bin/tw-reload-bots`. It ends the hermes user's login sessions (never `terminate-user`, which would stop the gateway too) and restarts the gateway. A gateway restart alone left Bramble's room turns on the old tool list (31 Oct).
 
 What `apply.py` does, for each of the six profiles under `/home/hermes/.hermes/profiles/`:
 
@@ -57,7 +57,7 @@ What `apply.py` does, for each of the six profiles under `/home/hermes/.hermes/p
 
 It checks everything first and changes nothing if any check fails. It never touches `SOUL.md`, memories, sessions, `auth.json` or any `.env`. It records the applied commit in each profile's `local/thornswood-hermes/applied.json`.
 
-**Going back** to an earlier version: every applied version stays in `/home/hermes/thornswood-hermes/releases/`. On the VM, as `hermes`, inside the older release's folder, run `python3 scripts/apply.py --expect <older commit>`, then restart the gateway the same way. The lasting fix is a new PR here, sent the normal way.
+**Going back** to an earlier version: every applied version stays in `/home/hermes/thornswood-hermes/releases/`. On the VM, as `hermes`, inside the older release's folder, run `python3 scripts/apply.py --expect <older commit>`, then run `tw-reload-bots` the same way. The lasting fix is a new PR here, sent the normal way.
 
 ## Running the tests
 

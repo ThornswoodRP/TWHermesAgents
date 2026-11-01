@@ -384,13 +384,19 @@ class ClaimLabels(unittest.TestCase):
         w = World()
         out = self.make(w)
         self.assertEqual([l["name"] for l in out["labels"]], SIX)
-        self.assertEqual({l["color"] for l in out["labels"]}, {"5319e7"})
+        self.assertEqual({l["color"] for l in out["labels"]}, {"e8590c"})
         self.assertEqual(out["labels"][1]["description"], "Claimed by Rift, a Thornswood Hermes Bot")
         self.assertEqual(len(w.fake.writes("POST", "/labels")), 6)
         # Every label write went through Bramble's App.
         label_tokens = [t for t in w.fake.tokens if t["permissions"].get("issues") == "write"]
         self.assertTrue(label_tokens)
         self.assertEqual({t["installation"] for t in label_tokens}, {BRAMBLE_INSTALLATION})
+
+    def test_the_colour_is_distinct_from_the_old_claim_labels(self):
+        # 04 section 6.1: one colour for the six, distinct from the old
+        # labels. The old claim labels' colours, read on GitHub 31 Oct.
+        old = {"5319e7", "10a37f", "0e8a16"}
+        self.assertNotIn(policy().data["claims"]["label_color"].lower(), old)
 
     def test_a_second_run_writes_nothing(self):
         w = World()
@@ -406,12 +412,12 @@ class ClaimLabels(unittest.TestCase):
         w.fake.repo_labels[(APP, "claimed: echo")].update(color="ffffff", description="someone's")
         out = self.make(w)
         echo = next(l for l in out["labels"] if l["name"] == "claimed: Echo")
-        self.assertEqual((echo["color"], echo["description"]), ("5319e7", "Claimed by Echo, a Thornswood Hermes Bot"))
+        self.assertEqual((echo["color"], echo["description"]), ("e8590c", "Claimed by Echo, a Thornswood Hermes Bot"))
         self.assertEqual(len(w.fake.writes("PATCH", "/labels/")), 1)
         # A second drift of the same label is a new operation, not "already done".
         w.fake.repo_labels[(APP, "claimed: echo")].update(color="000000")
         self.make(w)
-        self.assertEqual(w.fake.repo_labels[(APP, "claimed: echo")]["color"], "5319e7")
+        self.assertEqual(w.fake.repo_labels[(APP, "claimed: echo")]["color"], "e8590c")
 
     def test_only_bramble_and_only_the_bots_repos(self):
         w = World()
