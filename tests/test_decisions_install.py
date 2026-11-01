@@ -152,7 +152,7 @@ class Unit(unittest.TestCase):
 
 
 class Scripts(unittest.TestCase):
-    SCRIPTS = ("install.sh", "install-plugin.sh")
+    SCRIPTS = ("install.sh", "install-plugin.sh", "phone-test.sh")
 
     @unittest.skipUnless(shutil.which("bash"), "bash is not installed here")
     def test_they_parse(self):
@@ -183,6 +183,75 @@ class Scripts(unittest.TestCase):
         run = [ln for ln in src.splitlines() if not ln.lstrip().startswith(("#", "echo "))]
         self.assertFalse([ln for ln in run if "plugins enable" in ln or "config.yaml" in ln],
                          "turning the plugin on is Patrick's step, not the script's")
+
+
+def _service(name: str) -> dict:
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    cp.optionxform = str
+    cp.read_string((DEPLOY / name).read_text(encoding="utf-8"))
+    return cp
+
+
+class PhoneTestBench(unittest.TestCase):
+    """T10 to T13 run on a second core with its own store and test workspace."""
+
+    # What may differ between each bench unit and the real unit it copies.
+    DIFFERENT = {"Description", "After", "EnvironmentFile", "ExecStart", "ReadWritePaths"}
+
+    def assert_copy(self, real: str, bench: str):
+        r, b = _service(real), _service(bench)
+        self.assertNotIn("Install", b.sections(), f"{bench} must never start at boot")
+        for section in ("Unit", "Service"):
+            for key in set(r[section]) | set(b[section]):
+                if key in self.DIFFERENT:
+                    continue
+                self.assertEqual(b[section].get(key), r[section].get(key), f"{bench} [{section}] {key}")
+        return b["Service"]
+
+    def test_the_bench_core_is_the_real_core_on_its_own_store_port_and_test_workspace(self):
+        s = self.assert_copy("tw-decide.service", "tw-decide-test.service")
+        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide-test/core.db "
+                                         "serve --workspace phone-test --port 9136 --origin ${TW_DECIDE_TEST_ORIGIN}")
+        self.assertEqual(s["ReadWritePaths"], "/srv/tw/decide-test")
+        self.assertEqual(s["EnvironmentFile"], "/etc/thornswood/tw-decide-test.env")
+        self.assertEqual((s["IPAddressDeny"], s["IPAddressAllow"]), ("any", "localhost"))
+
+    def test_the_bench_push_worker_has_its_own_keys_token_and_core(self):
+        s = self.assert_copy("tw-decide-push.service", "tw-decide-push-test.service")
+        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-push --store /srv/tw/push-test "
+                                         "--core http://127.0.0.1:9136/api/v1 --subject ${TW_DECIDE_TEST_ORIGIN}")
+        self.assertEqual(s["ReadWritePaths"], "/srv/tw/push-test")
+
+    def test_the_bench_touches_only_the_test_workspace(self):
+        src = (DEPLOY / "phone-test.sh").read_text(encoding="utf-8")
+        code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+        self.assertIn("ws=phone-test", code)
+        self.assertIn('db="$state/core.db"', code)
+        self.assertIn("state=/srv/tw/decide-test", code)
+        self.assertIn('run init --workspace "$ws" --test', code)
+        self.assertNotIn("thornswood ", code)
+        self.assertNotIn("--workspace thornswood", code)
+        self.assertNotIn("/srv/tw/decide/", code)
+        self.assertNotIn("--patrick-switched", code)
+        self.assertNotIn("tw-decide.service", code)
+        self.assertNotIn("tw-decide-push.service", code)
+        self.assertNotIn("tw-decide-connector", code)
+        self.assertNotRegex(code, r"--https=443\b")
+        # The one place a flag changes, and the only three it turns on.
+        self.assertEqual(code.count("run flag"), 1)
+        self.assertIn("for flag in mobile_read decision_write push_send; do\n"
+                      '      run flag --workspace "$ws" "$flag" on', code)
+
+    def test_the_bench_serves_on_8443_and_takes_it_off_again(self):
+        src = (DEPLOY / "phone-test.sh").read_text(encoding="utf-8")
+        self.assertIn('test_origin="$origin:8443"', src)
+        self.assertIn("tailscale serve --bg --https=8443 127.0.0.1:9136", src)
+        self.assertIn("tailscale serve --bg --https=8443 off", src)
+        self.assertNotIn("|| true\n    systemctl stop", src)
+
+    @unittest.skipIf(os.name == "nt", "file modes are POSIX")
+    def test_the_bench_script_is_executable(self):
+        self.assertTrue(os.stat(DEPLOY / "phone-test.sh").st_mode & 0o111)
 
 
 class PluginPackage(unittest.TestCase):

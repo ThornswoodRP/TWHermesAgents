@@ -120,6 +120,24 @@ With every flag off the pane pairs and reads, and an answer is refused with "Ans
 
 After this first install, `tw-follow-main` runs `deploy/decisions/install.sh` again at each merge it installs, right after `deploy/install.sh`, keeping the room and origin from `/etc/thornswood/tw-decide.env`; if a later step fails, it runs it again for the release it puts back. Steps 3 to 6 are not repeated: the plugin is linked through `/opt/thornswood-hermes/current`.
 
+## The phone tests (T10 to T13)
+
+Tests use a separate test workspace and test actions, never a real deploy, merge or Ship, and the real workspace keeps every flag off until the switch. So `deploy/decisions/phone-test.sh` runs a test bench beside the real core:
+
+- a second core (`tw-decide-test.service`) serving only the test workspace `phone-test`, from its own store in `/srv/tw/decide-test`, on 127.0.0.1:9136;
+- its own push worker (`tw-decide-push-test.service`), with keys and a token of its own in `/srv/tw/push-test`;
+- Tailscale Serve on port 8443, so its address is the real origin with `:8443`.
+
+Each unit is the real one with only its store, port, settings file and description changed (the tests check this), and neither starts at boot. Only in `phone-test` does the bench turn on `mobile_read`, `decision_write` and `push_send`. It never turns on chat or `connector_effects`, so nothing reaches a Bot or the room. Its cards are test cards, and answering one changes nothing anywhere.
+
+On the VM, after step 7 above, with the installed commit:
+
+1. `sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/phone-test.sh <commit> start`
+2. On the phone, with Tailscale on: open `https://thornswood-bots.<tailnet>.ts.net:8443/m/`, then `phone-test.sh <commit> pair` and type the code within 10 minutes. Add a passkey from Settings, and add the app to the home screen (T10).
+3. Turn alerts on in Settings, close the app, lock the phone, and run `phone-test.sh <commit> card`. One quiet "Thornswood needs you" should arrive (T11). Tapping it opens that exact card after sign-in, and the lock screen shows nothing else (T12, T13).
+4. `phone-test.sh <commit> card high` checks the high-risk path: its check screen, then a passkey sign-in.
+5. `phone-test.sh <commit> stop` takes 8443 off Tailscale Serve and stops both. The test store stays.
+
 ## The pinned contract (step 0)
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:

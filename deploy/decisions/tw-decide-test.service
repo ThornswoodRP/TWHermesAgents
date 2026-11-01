@@ -1,0 +1,48 @@
+# tw-decide-test: a second decision core for Patrick's phone tests (T10 to T13),
+# on 127.0.0.1:9136 only, serving the test workspace phone-test from its own
+# store in /srv/tw/decide-test. Its cards are test cards: answering one changes
+# nothing anywhere. It never serves the real workspace, and the real core
+# (tw-decide, the thornswood workspace, every flag off) is not touched.
+# phone-test.sh starts and stops it; it has no [Install] section, so nothing
+# starts it at boot.
+[Unit]
+Description=Thornswood decision core, phone test bench (test workspace only)
+After=network.target
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-decide
+Group=tw-decide
+MemoryHigh=150M
+MemoryMax=200M
+TasksMax=64
+EnvironmentFile=/etc/thornswood/tw-decide-test.env
+ExecStart=/opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide-test/core.db serve --workspace phone-test --port 9136 --origin ${TW_DECIDE_TEST_ORIGIN}
+ReadWritePaths=/srv/tw/decide-test
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+Restart=on-failure
+RestartSec=5s

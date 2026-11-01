@@ -1,0 +1,45 @@
+# tw-decide-push-test: the push worker for the phone test bench, as tw-push,
+# with keys and a core token of its own in /srv/tw/push-test (0700), never the
+# real worker's. It sends "Thornswood needs you" only for the test workspace's
+# cards, through the phone's own push service. phone-test.sh starts and stops
+# it; nothing starts it at boot.
+[Unit]
+Description=Thornswood decision core push worker, phone test bench (test workspace only)
+After=tw-decide-test.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-push
+Group=tw-push
+EnvironmentFile=/etc/thornswood/tw-decide-test.env
+ExecStart=/opt/thornswood-hermes/bin/tw-decide-push --store /srv/tw/push-test --core http://127.0.0.1:9136/api/v1 --subject ${TW_DECIDE_TEST_ORIGIN}
+ReadWritePaths=/srv/tw/push-test
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+MemoryHigh=100M
+MemoryMax=150M
+TasksMax=16
+Restart=on-failure
+RestartSec=30s
