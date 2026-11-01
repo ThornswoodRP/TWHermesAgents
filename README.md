@@ -66,17 +66,16 @@ python -m pip install pyyaml
 python -m unittest discover -s tests
 ```
 
-This repo's Actions minutes are held at $0, so GitHub's own runners never start here, and the repo has no workflow. Instead, after every push to a PR, Hermes on One runs:
+Every push to a PR, and every push to `main`, runs `.github/workflows/guard-rail-tests.yml` on GitHub's own runners (Patrick's answer B on q-hermes-tests-without-one, 31 Oct, once One was off the list):
 
-```bash
-scripts/test-at-head.sh <the PR's full head commit>
-```
+- **Guard rail tests (VM's Python)**: Ubuntu 24.04 with Python 3.12, the VM's, with PyYAML and the decision core's libraries;
+- **Guard rail tests (One's Python)**: Windows with Python 3.13, so the suite keeps working for a Windows checkout.
 
-On One, set `TWH_ONE_PYTHON` to the Python that has PyYAML: Hermes's own runtime is first on One's PATH and has none, so a bare `python` there can't load the suite. The script stops before setting any status when the Python it would use can't import PyYAML.
+Every library comes from a hash-pinned wheel (`tests/requirements-ci.txt`, `deploy/decisions/requirements.txt`). The job holds no secret, reads the repo only, and keeps no credential. It runs on the account's included free minutes, and the spending limit stays at $0: if the minutes run out, the job doesn't start and nothing merges until they come back. Nothing pre-merge runs on the VM itself; the VM is checked when each merge is applied there (`send-to-oracle.sh --check` today, and the VM's own pull of main once #21 merges).
 
-It runs the whole suite on One and on the VM at that exact commit, then sets the commit status **Guard rail tests (One and VM)**: success only when both pass, with both counts, failure otherwise. A commit status costs nothing.
+`scripts/test-at-head.sh` and its **Guard rail tests (One and VM)** status are no longer the merge rule. The script stays for a run by hand from a machine with the VM's ssh key.
 
-**Merge rule here:** Patrick merges a PR only when **Guard rail tests (One and VM)** is a success on the PR's exact head. A new push needs a new run. A failure is fixed at its cause, never re-run to get a pass.
+**Merge rule here:** Patrick merges a PR only when both **Guard rail tests** checks are a success on the PR's exact head. A new push runs them again. A failure is fixed at its cause, never re-run to get a pass.
 
 ## Which Python runs what on the VM
 
