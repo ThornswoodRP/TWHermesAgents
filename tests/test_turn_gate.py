@@ -122,9 +122,9 @@ class Tools(unittest.TestCase):
         ctx = Ctx("rift")
         brokers.register(ctx, ready_policy(), "rift", ask=f.ask)
         _, _, handler = ctx.tools["tw_git"]
-        out = json.loads(handler({"op": "merge", "bot": "bramble", "repo": "EvilPatrick06/Thornswood", "number": 42}))
+        out = json.loads(handler({"op": "merge", "bot": "bramble", "repo": "ThornswoodRP/Thornswood", "number": 42}))
         self.assertTrue(out["ok"])
-        self.assertEqual(f.seen[-1], ("git", "merge", {"bot": "rift", "repo": "EvilPatrick06/Thornswood", "number": 42}))
+        self.assertEqual(f.seen[-1], ("git", "merge", {"bot": "rift", "repo": "ThornswoodRP/Thornswood", "number": 42}))
 
     def test_only_the_named_ops(self):
         f = Fleet()

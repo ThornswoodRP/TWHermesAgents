@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "owner": "EvilPatrick06",
+  "owner": "ThornswoodRP",
   "repos": {
-    "app": "EvilPatrick06/Thornswood",
-    "fork": "EvilPatrick06/skymp",
-    "ops": "EvilPatrick06/Thornswood-Ops",
+    "app": "ThornswoodRP/Thornswood",
+    "fork": "ThornswoodRP/skymp",
+    "ops": "ThornswoodRP/Thornswood-Ops",
     "hermes": "ThornswoodRP/Thornswood-Hermes"
   },
   "bots": {
@@ -78,26 +78,26 @@
   },
   "merge": {
     "required_checks": {
-      "EvilPatrick06/Thornswood": [
+      "ThornswoodRP/Thornswood": [
         "Launcher builds",
         "Build check result"
       ],
-      "EvilPatrick06/Thornswood-Ops": [
+      "ThornswoodRP/Thornswood-Ops": [
         "check"
       ],
-      "EvilPatrick06/skymp": [
+      "ThornswoodRP/skymp": [
         "build-pr"
       ]
     },
     "method": {
-      "EvilPatrick06/Thornswood": "squash",
-      "EvilPatrick06/Thornswood-Ops": "squash",
-      "EvilPatrick06/skymp": "merge"
+      "ThornswoodRP/Thornswood": "squash",
+      "ThornswoodRP/Thornswood-Ops": "squash",
+      "ThornswoodRP/skymp": "merge"
     },
     "base": {
-      "EvilPatrick06/Thornswood": "main",
-      "EvilPatrick06/Thornswood-Ops": "main",
-      "EvilPatrick06/skymp": "thornswood/engine-changes"
+      "ThornswoodRP/Thornswood": "main",
+      "ThornswoodRP/Thornswood-Ops": "main",
+      "ThornswoodRP/skymp": "thornswood/engine-changes"
     },
     "patrick_paths": [
       ".github/workflows/**",
@@ -111,7 +111,7 @@
   },
   "runs": {
     "ref": "main",
-    "repo": "EvilPatrick06/Thornswood",
+    "repo": "ThornswoodRP/Thornswood",
     "workflows": {
       "box-run.yml": {
         "verbs": "scripts/vps/gate/verbs.json"
@@ -486,12 +486,12 @@
     "apps": {
       "bramble": {
         "app_id": 5547080,
-        "installation_id": 177016548,
+        "installation_id": 177392923,
         "key_file": "/etc/thornswood/apps/thornswood-bramble.pem"
       },
       "workers": {
         "app_id": 5547094,
-        "installation_id": 177016745,
+        "installation_id": 177393064,
         "key_file": "/etc/thornswood/apps/thornswood-workers.pem"
       }
     }

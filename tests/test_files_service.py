@@ -37,8 +37,8 @@ from thornswood_brokers.github_api import GitHub
 from thornswood_brokers.wire import Refused
 from thornswood_guard.policy import Policy
 
-APP = "EvilPatrick06/Thornswood"
-FORK = "EvilPatrick06/skymp"
+APP = "ThornswoodRP/Thornswood"
+FORK = "ThornswoodRP/skymp"
 
 
 class World:

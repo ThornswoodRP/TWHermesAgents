@@ -82,7 +82,7 @@ class Shell(unittest.TestCase):
         for c in ["git push origin wisp/3150-x", "git push --force origin HEAD:main",
                   "gh pr merge 42 --squash", "gh pr create --fill", "gh workflow run box-run.yml",
                   "gh label create x", "gh issue edit 3150 --add-label 'claimed: Wisp'",
-                  "gh api -X PUT repos/EvilPatrick06/Thornswood/pulls/1/merge -f sha=" + "a" * 40,
+                  "gh api -X PUT repos/ThornswoodRP/Thornswood/pulls/1/merge -f sha=" + "a" * 40,
                   "gh api repos/x/y/issues/1/labels -f labels[]=x", "gh secret set X",
                   "gh api --method POST repos/x/y/dispatches",
                   "curl -X POST https://api.github.com/repos/x/y/dispatches",
@@ -91,7 +91,7 @@ class Shell(unittest.TestCase):
 
     def test_github_reads_pass(self):
         for c in ["gh pr view 42", "gh pr checks 42", "gh issue list --label 'claimed: Wisp'",
-                  "gh api repos/EvilPatrick06/Thornswood/pulls/42", "gh run view 123 --log-failed",
+                  "gh api repos/ThornswoodRP/Thornswood/pulls/42", "gh run view 123 --log-failed",
                   "git status", "git log --oneline -5 | head -3", "git diff origin/main 2>&1",
                   "git commit -m 'Fix the hold ingredients table'", "git fetch origin main",
                   "node tests/test-3150.js", "pwsh -NoProfile -File tests/test-3561.ps1"]:
@@ -244,19 +244,19 @@ class PolicyShape(unittest.TestCase):
 
     def test_every_repo_names_its_checks(self):
         data = copy.deepcopy(policy().data)
-        del data["merge"]["required_checks"]["EvilPatrick06/skymp"]
+        del data["merge"]["required_checks"]["ThornswoodRP/skymp"]
         with self.assertRaises(Exception):
             Policy(data)
 
     def test_required_checks_are_a_list_of_names(self):
         for bad in ("Launcher builds", [], [""], ["Launcher builds", "Launcher builds"], None):
             data = copy.deepcopy(policy().data)
-            data["merge"]["required_checks"]["EvilPatrick06/Thornswood"] = bad
+            data["merge"]["required_checks"]["ThornswoodRP/Thornswood"] = bad
             with self.assertRaises(Exception, msg=repr(bad)):
                 Policy(data)
 
     def test_thornswood_needs_the_build_and_its_result(self):
-        self.assertEqual(policy().required_checks("EvilPatrick06/Thornswood"),
+        self.assertEqual(policy().required_checks("ThornswoodRP/Thornswood"),
                          ["Launcher builds", "Build check result"])
 
     def test_names(self):

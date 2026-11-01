@@ -7,7 +7,7 @@
 #
 # for example, the workers' App:
 #
-#   sudo -u tw-git bash scripts/check-board-access.sh 5547094 177016745 /home/tw-git/apps/workers.pem
+#   sudo -u tw-git bash scripts/check-board-access.sh 5547094 177393064 /home/tw-git/apps/workers.pem
 #
 # It signs a ten-minute App token with the key (the key never leaves this
 # process and nothing is printed from it), trades it for an installation

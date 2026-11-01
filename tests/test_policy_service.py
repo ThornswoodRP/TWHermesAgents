@@ -25,7 +25,7 @@ from thornswood_brokers.policy_service import PolicyService
 from thornswood_brokers.wire import Refused
 from thornswood_guard.decisions import new_decision
 
-APP = "EvilPatrick06/Thornswood"
+APP = "ThornswoodRP/Thornswood"
 
 
 def roomy() -> HostState:

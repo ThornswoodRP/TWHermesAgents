@@ -57,7 +57,7 @@ class Pushes(unittest.TestCase):
         self.assertFalse(self.r.push("bramble", APP, "refs/heads/echo/12-site", workflow_files_changed=True).allowed)
 
     def test_only_wisp_works_in_the_fork(self):
-        fork = "EvilPatrick06/skymp"
+        fork = "ThornswoodRP/skymp"
         self.assertTrue(self.r.push("wisp", fork, "refs/heads/wisp/77-equip-drop").allowed)
         self.assertFalse(self.r.push("rift", fork, "refs/heads/rift/77-x").allowed)
         self.assertFalse(self.r.push("wisp", fork, "refs/heads/thornswood/engine-changes").allowed)
@@ -81,7 +81,7 @@ class PullRequests(unittest.TestCase):
         self.assertTrue(self.r.open_pr("sprocket", APP, "sprocket/3561-path-fence", "main").allowed)
 
     def test_fork_prs_go_to_engine_changes(self):
-        fork = "EvilPatrick06/skymp"
+        fork = "ThornswoodRP/skymp"
         self.assertTrue(self.r.open_pr("wisp", fork, "wisp/77-equip-drop", "thornswood/engine-changes").allowed)
         self.assertFalse(self.r.open_pr("wisp", fork, "wisp/77-equip-drop", "main").allowed)
 
@@ -182,7 +182,7 @@ class Merges(unittest.TestCase):
         self.assertFalse(self.merge(method="merge").allowed)
 
     def test_fork_merges_with_merge(self):
-        fork_pr = pr(repo="EvilPatrick06/skymp", base_ref="thornswood/engine-changes",
+        fork_pr = pr(repo="ThornswoodRP/skymp", base_ref="thornswood/engine-changes",
                      head_ref="wisp/77-equip-drop", author_bot="wisp")
         checks = green(name="build-pr")
         self.assertTrue(self.merge(p=fork_pr, method="merge", checks=checks).allowed)
@@ -398,15 +398,15 @@ class Settings(unittest.TestCase):
 
     def test_10_nobody_approves_a_deployment_or_touches_settings(self):
         calls = [
-            ("POST", "/repos/EvilPatrick06/Thornswood/actions/runs/123/pending_deployments"),
-            ("PUT", "/repos/EvilPatrick06/Thornswood/rulesets/1"),
-            ("PUT", "/repos/EvilPatrick06/Thornswood/environments/desk"),
-            ("PUT", "/repos/EvilPatrick06/Thornswood/actions/secrets/DESK_KEY_B64"),
-            ("PUT", "/repos/EvilPatrick06/Thornswood/collaborators/someone"),
-            ("POST", "/repos/EvilPatrick06/Thornswood/hooks"),
-            ("PATCH", "/repos/EvilPatrick06/Thornswood"),
-            ("PUT", "/repos/EvilPatrick06/Thornswood/branches/main/protection"),
-            ("POST", "/repos/EvilPatrick06/Thornswood/keys"),
+            ("POST", "/repos/ThornswoodRP/Thornswood/actions/runs/123/pending_deployments"),
+            ("PUT", "/repos/ThornswoodRP/Thornswood/rulesets/1"),
+            ("PUT", "/repos/ThornswoodRP/Thornswood/environments/desk"),
+            ("PUT", "/repos/ThornswoodRP/Thornswood/actions/secrets/DESK_KEY_B64"),
+            ("PUT", "/repos/ThornswoodRP/Thornswood/collaborators/someone"),
+            ("POST", "/repos/ThornswoodRP/Thornswood/hooks"),
+            ("PATCH", "/repos/ThornswoodRP/Thornswood"),
+            ("PUT", "/repos/ThornswoodRP/Thornswood/branches/main/protection"),
+            ("POST", "/repos/ThornswoodRP/Thornswood/keys"),
         ]
         for bot in ("bramble", "magpie"):
             for method, path in calls:

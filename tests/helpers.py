@@ -16,7 +16,7 @@ from thornswood_guard.github import CheckRun, GitHubRules, Issue, PullRequest  #
 from thornswood_guard.policy import Policy  # noqa: E402
 
 FIXTURES = Path(__file__).with_name("fixtures")
-APP = "EvilPatrick06/Thornswood"
+APP = "ThornswoodRP/Thornswood"
 HEAD = "a" * 40
 OTHER = "b" * 40
 # Thornswood's required checks on a pull request since #5119 (31 Oct).

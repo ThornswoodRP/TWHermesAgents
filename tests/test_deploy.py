@@ -492,7 +492,7 @@ class Backups(unittest.TestCase):
         db = self.root / "srv/tw/policy/policy.db"
         db.parent.mkdir(parents=True)
         s = PolicyService(db, self.p, host_reader=roomy, clock=Clock())
-        d = new_decision(id="d1", kind="main", repo="EvilPatrick06/Thornswood", commit=HEAD, revision=1,
+        d = new_decision(id="d1", kind="main", repo="ThornswoodRP/Thornswood", commit=HEAD, revision=1,
                          answered_by="EvilPatrick06", at=s.clock())
         s.decision_record("root", {"decision": d.__dict__})
         s.db.close()
@@ -546,7 +546,7 @@ class Backups(unittest.TestCase):
         from thornswood_brokers.policy_service import PolicyService
         from test_policy_service import Clock
         s = PolicyService(fresh / "srv/tw/policy/policy.db", p, host_reader=roomy, clock=Clock())
-        self.assertIn("restored", s.check_decision("d1", kind="main", repo="EvilPatrick06/Thornswood", commit=HEAD).reason)
+        self.assertIn("restored", s.check_decision("d1", kind="main", repo="ThornswoodRP/Thornswood", commit=HEAD).reason)
         self.assertIn(backup.STORE_IN_ARCHIVE, owners)
 
     def bad_tar(self, name: str, *, kind=tarfile.REGTYPE, uname="hermes") -> Path:

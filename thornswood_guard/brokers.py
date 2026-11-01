@@ -183,7 +183,7 @@ TW_GIT_SCHEMA = {
         "type": "object",
         "properties": {
             "op": {"type": "string", "enum": GIT_OPS},
-            "repo": {"type": "string", "description": "owner/name, e.g. EvilPatrick06/Thornswood"},
+            "repo": {"type": "string", "description": "owner/name, e.g. ThornswoodRP/Thornswood"},
             "task": {"type": "string", "description": "The task this write is for, e.g. the issue number"},
             "branch": {"type": "string"}, "bundle": {"type": "string"},
             "head": {"type": "string"}, "base": {"type": "string"},

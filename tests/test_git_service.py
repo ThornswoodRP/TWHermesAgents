@@ -30,8 +30,8 @@ from thornswood_brokers.git_service import GitService
 from thornswood_brokers.github_api import GitHub
 from thornswood_brokers.wire import Refused
 
-APP = "EvilPatrick06/Thornswood"
-FORK = "EvilPatrick06/skymp"
+APP = "ThornswoodRP/Thornswood"
+FORK = "ThornswoodRP/skymp"
 HERMES = "ThornswoodRP/Thornswood-Hermes"
 
 
@@ -107,7 +107,7 @@ class Push(unittest.TestCase):
         # The token asked for was the workers' App, one repo, contents only.
         writes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
         self.assertEqual(len(writes), 1)
-        self.assertEqual(writes[0]["installation"], "177016745")
+        self.assertEqual(writes[0]["installation"], "177393064")
         self.assertEqual(writes[0]["repositories"], ["Thornswood"])
         self.assertNotIn("workflows", writes[0]["permissions"])
 
@@ -139,7 +139,7 @@ class Push(unittest.TestCase):
         self.assertTrue(out["workflow_change"])
         writes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
         self.assertEqual(len(writes), 1)
-        self.assertEqual(writes[0]["installation"], "177016548")
+        self.assertEqual(writes[0]["installation"], "177392923")
         self.assertEqual(writes[0]["permissions"].get("workflows"), "write")
 
     def test_only_wisp_works_in_the_fork(self):
@@ -205,7 +205,7 @@ class Merge(unittest.TestCase):
         self.assertEqual(len(w.fake.writes("PUT", "/merge")), 1)
         self.assertEqual(w.fake.writes("PUT", "/merge")[0][2], {"sha": sha, "merge_method": "squash"})
         merge_tokens = [t for t in w.fake.tokens if t["permissions"].get("pull_requests") == "write"]
-        self.assertEqual([t["installation"] for t in merge_tokens], ["177016548"])
+        self.assertEqual([t["installation"] for t in merge_tokens], ["177392923"])
 
     def test_attack_9_a_worker_cannot_merge_its_own_pr(self):
         w = World()
@@ -368,8 +368,8 @@ class PullRequestsAndIssues(unittest.TestCase):
             w.git.ledger_event("hermes", {"bot": "rift", "repo": APP, "issue": 1, "event": "merged"})
 
 
-OPS = "EvilPatrick06/Thornswood-Ops"
-BRAMBLE_INSTALLATION = "177016548"
+OPS = "ThornswoodRP/Thornswood-Ops"
+BRAMBLE_INSTALLATION = "177392923"
 SIX = ["claimed: Bramble", "claimed: Rift", "claimed: Sprocket", "claimed: Echo", "claimed: Magpie", "claimed: Wisp"]
 
 
