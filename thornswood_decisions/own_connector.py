@@ -102,8 +102,44 @@ def hermes_home() -> Path:
     return Path.home() / ".hermes"
 
 
+# The entry that ends the command Hermes's launcher prints for --print-runtime-command (pinned
+# Hermes, hermes_cli/_launchers.py runtime_command and print_runtime_command; contracts.json own_chat).
+RUNTIME_ENTRY = "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
+HELPER = Path(__file__).with_name("room_send.py")
+
+
+def helper_command(hermes_bin: str, helper: Path = HELPER, python: str | None = None) -> list[str]:
+    """How to run the readiness helper inside this Hermes's own Python, with its packages.
+
+    Hermes's launcher says how it starts its runtime (`hermes --print-runtime-command`): on One
+    that is a Python kept in Hermes's own store, started with a bootstrap that puts Hermes on its
+    path, and nothing lies beside hermes.exe. The helper runs in that same bootstrap, with the
+    helper's file in place of Hermes's own entry. A launcher too old to answer is a plain script
+    or a venv's hermes.exe, whose interpreter the command names (hermes_python)."""
+    if python:
+        return [python, "-I", str(helper)]
+    try:
+        out = subprocess.run([hermes_bin, "--print-runtime-command"], capture_output=True, timeout=60,
+                             check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(f"STOP: {hermes_bin} --print-runtime-command did not run ({type(exc).__name__})")
+    if out.returncode != 0:
+        return [hermes_python(hermes_bin), "-I", str(helper)]
+    try:
+        cmd = json.loads(out.stdout.decode("utf-8", "replace"))
+    except json.JSONDecodeError:
+        cmd = None
+    if (not isinstance(cmd, list) or len(cmd) != 4 or not all(isinstance(c, str) for c in cmd)
+            or cmd[1:3] != ["-I", "-c"] or not cmd[3].endswith(RUNTIME_ENTRY)
+            or not os.path.isabs(cmd[0]) or not os.path.isfile(cmd[0])):
+        raise SystemExit(f"STOP: {hermes_bin} --print-runtime-command answered a command this connector does "
+                         "not know; check contracts.json own_chat against this Hermes")
+    run_helper = f"runpy.run_path({json.dumps(str(helper))}, run_name='__main__')"
+    return [cmd[0], "-I", "-c", cmd[3][:-len(RUNTIME_ENTRY)] + run_helper]
+
+
 def hermes_python(hermes_bin: str) -> str:
-    """The interpreter the `hermes` command runs with: python.exe beside hermes.exe, or its #! line."""
+    """The interpreter an older `hermes` command runs with: python.exe beside a venv's hermes.exe, or its #! line."""
     path = Path(hermes_bin)
     if path.suffix.lower() == ".exe":
         py = path.with_name("python.exe")
@@ -201,15 +237,14 @@ def fitted(state_db: Path, wanted: list[str], now: datetime) -> bytes:
 # ── running a turn ────────────────────────────────────────────────────────
 
 class Hermes:
-    def __init__(self, hermes_cmd: list[str], python: str, home_dir: Path, name: str,
-                 helper: Path = Path(__file__).with_name("room_send.py")):
-        self.cmd, self.python, self.home_dir, self.name, self.helper = list(hermes_cmd), python, home_dir, name, helper
+    def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str):
+        self.cmd, self.ready_cmd, self.home_dir, self.name = list(hermes_cmd), list(ready_cmd), home_dir, name
 
     def ready(self) -> tuple[bool, str]:
         """Is this Hermes's gateway running? Asked without starting one."""
         req = json.dumps({"op": "ready", "profile": "", "name": self.name}).encode("utf-8")
         try:
-            out = subprocess.run([self.python, "-I", str(self.helper)], input=req, capture_output=True,
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True,
                                  timeout=60, cwd=str(self.home_dir), check=False)
             got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
@@ -410,7 +445,7 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="own_connector")
     ap.add_argument("--gateway", required=True, choices=sorted(GATEWAYS))
     ap.add_argument("--hermes", required=True, help="the hermes command this user runs")
-    ap.add_argument("--hermes-python", help="its Python, when it cannot be found from the command")
+    ap.add_argument("--hermes-python", help="a Python with Hermes's packages, in place of asking the hermes command")
     ap.add_argument("--hermes-home", help="Hermes's state folder for this user (default: as Hermes finds it)")
     ap.add_argument("--token", help="this connector's token file")
     ap.add_argument("--core", default=LOCAL_CORE, help="the core's API: loopback on the VM, the VM's ts.net on One")
@@ -425,7 +460,7 @@ def main(argv: list[str]) -> int:
     else:
         token = Path.home() / ".config" / "thornswood" / f"own-{args.gateway}.token"
     home = Path(args.hermes_home) if args.hermes_home else hermes_home()
-    hermes = Hermes([args.hermes], args.hermes_python or hermes_python(args.hermes), Path.home(),
+    hermes = Hermes([args.hermes], helper_command(args.hermes, python=args.hermes_python), Path.home(),
                     GATEWAYS[args.gateway])
     conn = OwnConnector(Core(args.core, args.gateway, read_token(token)), hermes, home / "state.db")
     if args.once:

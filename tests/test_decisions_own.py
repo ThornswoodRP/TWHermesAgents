@@ -527,8 +527,8 @@ class TheConnector(unittest.TestCase):
         self.log = self.dir / "turns.jsonl"
         os.environ["TW_FAKE_LOG"] = str(self.log)
         self.addCleanup(lambda: [os.environ.pop(k, None) for k in ("TW_FAKE_LOG", "TW_FAKE_MODE", "TW_FAKE_READY")])
-        hermes = own_connector.Hermes([sys.executable, str(self.dir / "hermes.py")], sys.executable, self.dir,
-                                      "One's Hermes", helper=self.dir / "ready.py")
+        hermes = own_connector.Hermes([sys.executable, str(self.dir / "hermes.py")],
+                                      [sys.executable, "-I", str(self.dir / "ready.py")], self.dir, "One's Hermes")
         self.lines = []
         self.conn = own_connector.OwnConnector(FakeCore(self.g.own, self.w.ws, "one", self.g.tok["one"]), hermes,
                                                self.db, say=self.lines.append)
@@ -631,6 +631,48 @@ class TheConnector(unittest.TestCase):
             own_connector.hermes_python(str(exe))
         (exe.parent / "python.exe").write_bytes(b"MZ")
         self.assertEqual(own_connector.hermes_python(str(exe)), str(exe.parent / "python.exe"))
+
+    def launcher(self, body: str) -> Path:
+        """A stand-in hermes launcher: a script that answers --print-runtime-command as `body` says."""
+        path = self.dir / "bin-hermes"
+        path.write_text(f"#!{sys.executable}\nimport json, sys\n{body}\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    @unittest.skipIf(os.name == "nt", "the stand-in launcher is a #! script")
+    def test_the_readiness_check_runs_inside_the_runtime_hermes_says_it_starts(self):
+        # One's launcher (1 Nov): hermes.exe in .hermes\bin, its Python in Hermes's store, nothing beside it.
+        boot = "import os, sys, runpy; os.environ['TW_BOOTSTRAPPED'] = 'yes'; " + own_connector.RUNTIME_ENTRY
+        hermes = self.launcher(f"print(json.dumps([sys.executable, '-I', '-c', {boot!r}])) "
+                               "if sys.argv[1:2] == ['--print-runtime-command'] else sys.exit(5)")
+        helper = self.dir / "probe.py"
+        helper.write_text("import json, os, sys\nreq = json.loads(sys.stdin.read())\n"
+                          "print(json.dumps({'ready': os.environ.get('TW_BOOTSTRAPPED') == 'yes', 'name': req['name']}))\n",
+                          encoding="utf-8")
+        cmd = own_connector.helper_command(str(hermes), helper)
+        self.assertEqual(cmd[:3], [sys.executable, "-I", "-c"])
+        self.assertNotIn("hermes_cli.main", cmd[3])
+        h = own_connector.Hermes([str(hermes)], cmd, self.dir, "One's Hermes")
+        self.assertEqual(h.ready(), (True, ""))
+
+    @unittest.skipIf(os.name == "nt", "the stand-in launcher is a #! script")
+    def test_an_older_launcher_falls_back_to_the_python_it_names(self):
+        hermes = self.launcher("sys.exit(2)")
+        self.assertEqual(own_connector.helper_command(str(hermes), self.dir / "h.py"),
+                         [sys.executable, "-I", str(self.dir / "h.py")])
+
+    @unittest.skipIf(os.name == "nt", "the stand-in launcher is a #! script")
+    def test_a_runtime_command_of_another_shape_stops_it(self):
+        for answer in ("[]", '["python", "-c", "x"]', "not json",
+                       json.dumps([sys.executable, "-I", "-c", "runpy.run_module('other')"])):
+            with self.subTest(answer=answer):
+                hermes = self.launcher(f"print({answer!r})")
+                with self.assertRaises(SystemExit):
+                    own_connector.helper_command(str(hermes), self.dir / "h.py")
+
+    def test_a_given_python_is_used_as_it_is(self):
+        self.assertEqual(own_connector.helper_command("hermes", self.dir / "h.py", python="/p/python3"),
+                         ["/p/python3", "-I", str(self.dir / "h.py")])
 
     def test_a_token_others_can_read_is_refused(self):
         if os.name == "nt":
@@ -775,6 +817,21 @@ class OneInstall(unittest.TestCase):
         r = self.install()
         self.assertIn("PASS the connector's token is already in", r.stdout)
         self.assertFalse(self.calls.exists())
+
+    def test_finds_hermess_python_from_its_launcher_not_beside_it(self):
+        import subprocess
+        boot = "import runpy; " + "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
+        self.hermes.write_text("#!/bin/sh\n[ \"$1\" = --print-runtime-command ] && "
+                               f"printf '%s\\n' '{json.dumps([sys.executable, '-I', '-c', boot])}'\nexit 0\n",
+                               encoding="utf-8")
+        (self.t / "own-one.token").write_text("tok_already", encoding="ascii")
+        env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}"}
+        r = subprocess.run(["pwsh", "-NoProfile", "-File", str(self.clone / "scripts/one/Install-OwnConnector.ps1"),
+                            "-Core", "https://hermes.tail0000.ts.net/api/v1", "-Hermes", str(self.hermes),
+                            "-Folder", str(self.t / "own-connector"), "-TokenFile", str(self.t / "own-one.token"),
+                            "-NoTask"], capture_output=True, text=True, env=env, timeout=120)
+        self.assertIn(f"the connector runs with {sys.executable}", r.stdout)
+        self.assertNotIn("python.exe", r.stdout)
 
     def test_refuses_an_address_that_is_not_the_vms_ts_net(self):
         import subprocess

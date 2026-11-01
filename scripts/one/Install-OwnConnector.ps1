@@ -9,7 +9,8 @@ Runs on One, as Patrick, from a clone of Thornswood-Hermes at main. Patrick
 chose a small connector on One that reaches out to the decision core on the
 VM (1 Nov, answer A): nothing listens on One, and the VM never reaches in.
 
-  1. It finds Hermes on One (the hermes command and the Python beside it).
+  1. It finds Hermes on One: the hermes command, and the Python its launcher
+     says it runs (hermes --print-runtime-command).
   2. The first time (or with -NewToken) it has the VM make the connector's
      token, over ssh to thornswood-bots (One's alias for the VM), straight into %APPDATA%\Thornswood\own-one.token; the
      token never shows on screen or in a log. Only Patrick's user can read
@@ -62,13 +63,26 @@ if (-not $Hermes) {
     $Hermes = $cmd.Source
 }
 if (-not (Test-Path $Hermes -PathType Leaf)) { Fail "no hermes command at $Hermes" }
+# The connector itself needs only the standard library; it runs with the Python Hermes's own
+# launcher says it starts (hermes --print-runtime-command: on One a Python in Hermes's store,
+# with nothing beside hermes.exe), and asks the launcher again for the readiness check.
+$given = [bool]$HermesPython
 if (-not $HermesPython) {
-    $HermesPython = Join-Path (Split-Path $Hermes) 'python.exe'
-    if (-not (Test-Path $HermesPython)) { Fail "no python.exe beside $Hermes; pass -HermesPython" }
+    $answer = & $Hermes --print-runtime-command 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        try { $HermesPython = @($answer | Out-String | ConvertFrom-Json)[0] } catch { $HermesPython = '' }
+        if (-not $HermesPython -or -not (Test-Path $HermesPython -PathType Leaf)) {
+            Fail "$Hermes --print-runtime-command did not name a Python that is there; pass -HermesPython"
+        }
+    } else {
+        # A launcher too old to answer: a venv's hermes.exe, with its python.exe beside it.
+        $HermesPython = Join-Path (Split-Path $Hermes) 'python.exe'
+        if (-not (Test-Path $HermesPython)) { Fail "$Hermes does not say its Python and has none beside it; pass -HermesPython" }
+    }
 }
 $quiet = Join-Path (Split-Path $HermesPython) 'pythonw.exe'
 $runner = if (Test-Path $quiet) { $quiet } else { $HermesPython }
-Pass "Hermes on One is $Hermes, with $HermesPython"
+Pass "Hermes on One is $Hermes; the connector runs with $runner"
 
 # 2. The token, made on the VM and written straight to its file.
 $tokenDir = Split-Path $TokenFile
@@ -112,8 +126,8 @@ Pass "own_connector.py and room_send.py from $commit are in $Folder"
 
 # 4. One round, to check the token, the address and Hermes.
 $script = Join-Path $Folder 'own_connector.py'
-$connArgs = @('-I', $script, '--gateway', 'one', '--hermes', $Hermes, '--hermes-python', $HermesPython,
-              '--core', $Core, '--token', $TokenFile)
+$connArgs = @('-I', $script, '--gateway', 'one', '--hermes', $Hermes, '--core', $Core, '--token', $TokenFile)
+if ($given) { $connArgs += @('--hermes-python', $HermesPython) }
 $out = & $HermesPython @connArgs --once 2>&1
 $code = $LASTEXITCODE
 $line = ($out | Select-Object -Last 1)
