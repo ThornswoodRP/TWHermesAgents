@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -213,9 +214,12 @@ class FakeVM:
         self.tip = tip
         self.fail = fail or {}
         self.calls: list[list[str]] = []
+        self.inputs: dict[int, bytes] = {}
 
     def __call__(self, args, **kw):
         self.calls.append(list(args))
+        if "input" in kw:
+            self.inputs[len(self.calls) - 1] = kw["input"]
         joined = " ".join(args)
         for needle, code in self.fail.items():
             if needle in joined:
@@ -225,6 +229,8 @@ class FakeVM:
             out = self.tip + "\n"
         if args[0] == "systemd-run":
             out = "Ran 412 tests in 30s\n\nOK\n"
+        if "bundle" in args and "create" in args:
+            return subprocess.CompletedProcess(args, 0, b"# v2 git bundle\n" + joined.encode(), b"")
         return subprocess.CompletedProcess(args, 0, out, "")
 
     def ran(self, needle: str) -> list[str]:
@@ -418,16 +424,172 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(len(applies), 2, "the apply and the put-back's apply")
         for commit, script in zip((NEW, OLD), applies):
             self.assertNotIn(str(f.opt), script, "hermes never runs git in a folder under /opt")
-            bundle = f"{f.mirror.parent}/apply-"
-            self.assertIn(f"fetch --quiet '{bundle}", script)
-            self.assertIn(f"/{commit}.bundle' '+refs/remotes/origin/main:refs/remotes/origin/main'", script)
+            self.assertNotIn("/srv/tw", script, "and needs no folder of root's open to it (1 Nov: /srv/tw/follow is 0700)")
+            self.assertIn(f"mktemp '{f.hermes_releases}/.incoming-XXXXXX.bundle'", script)
+            self.assertIn('cat > "$bundle"', script)
+            self.assertIn('fetch --quiet "$bundle" \'+refs/remotes/origin/main:refs/remotes/origin/main\'', script)
             made = [c for c in vm.calls if "bundle" in c and "create" in c and f"releases/{commit}" in " ".join(c)]
             self.assertEqual(len(made), 1, f"root bundles {commit[:4]} from its own release")
+            self.assertEqual(made[0][-2:], ["-", "refs/remotes/origin/main"], "to stdout, never to a file")
             named = [c for c in vm.calls if "update-ref" in c and f"releases/{commit}" in " ".join(c)]
             self.assertEqual(named[0][-2:], ["refs/remotes/origin/main", commit])
-        self.assertEqual(list(f.mirror.parent.glob("apply-*")), [], "the bundles go once applied")
+        handed = [vm.inputs[i] for i, c in enumerate(vm.calls) if c[0] == "runuser"]
+        self.assertEqual(len(handed), 2)
+        self.assertTrue(all(b.startswith(b"# v2 git bundle") for b in handed), "the bundle's bytes go in on stdin")
+        self.assertIn(f"releases/{NEW}".encode(), handed[0])
+        self.assertIn(f"releases/{OLD}".encode(), handed[1])
         self.assertEqual(json.loads(f.state_file.read_text())["put_back"], f"put back {OLD}")
 
+    def store_at(self, f: follow_main.Follower, schema: int) -> None:
+        env = f._at(f.r["decide_env"])
+        env.parent.mkdir(parents=True, exist_ok=True)
+        env.write_text("TW_DECIDE_ROOM=\n")
+        db = f._at(f.r["decide_db"])
+        db.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("INSERT INTO meta VALUES('schema_version', ?)", (str(schema),))
+        con.commit()
+        con.close()
+        for c in (NEW, OLD):
+            core = f.opt / "releases" / c / "deploy" / "decisions" / "install.sh"
+            core.parent.mkdir(parents=True, exist_ok=True)
+            core.write_text("#!/usr/bin/env bash\n")
+
+    def knows(self, vm: FakeVM, old: int, *, downgrade: int = 0, active: str = ""):
+        canaries = []
+
+        def run(args, **kw):
+            if args[:2] == ["python3", "-I"] and "MIGRATIONS" in args[3]:
+                vm.calls.append(list(args))
+                return subprocess.CompletedProcess(args, 0, f"{old}\n", "")
+            if args[0].endswith("tw-canary") and not canaries:
+                canaries.append(1)
+                vm.calls.append(list(args))
+                return subprocess.CompletedProcess(args, 1, "FAIL attack 3", "")
+            if "downgrade" in args:
+                vm.calls.append(list(args))
+                if downgrade:
+                    return subprocess.CompletedProcess(args, downgrade, "", (
+                        "STOP store_written: the store holds what the older schema cannot "
+                        "(schema 6: 2 phone alerts that keep their address's SHA-256); fix forward"))
+                return subprocess.CompletedProcess(args, 0, '{"from": 6, "to": 5}', "")
+            if args[:2] == ["systemctl", "is-active"]:
+                vm.calls.append(list(args))
+                return subprocess.CompletedProcess(args, 3, active, "")
+            return vm(args, **kw)
+        return run
+
+    # What tw-decide's installs leave in /etc/systemd/system, the phone test's included.
+    UNITS = ["tw-decide.service", "tw-decide-connector.service", "tw-decide-feed.service", "tw-decide-feed.timer",
+             "tw-decide-push.service", "tw-decide-test.service", "tw-decide-push-test.service"]
+
+    def units(self, f: follow_main.Follower, installed: list[str], old_ships: list[str]) -> None:
+        etc = f._at("/etc/systemd/system")
+        etc.mkdir(parents=True, exist_ok=True)
+        (etc / "tw-decide-connector.service.d").mkdir(exist_ok=True)
+        for u in installed:
+            (etc / u).write_text("[Service]\n")
+        ships = f.opt / "releases" / OLD / "deploy" / "decisions"
+        ships.mkdir(parents=True, exist_ok=True)
+        for u in old_ships:
+            (ships / u).write_text("[Service]\n")
+
+    def at(self, vm: FakeVM, needle: str) -> int:
+        hits = [i for i, c in enumerate(vm.calls) if needle in " ".join(c)]
+        self.assertTrue(hits, f"nothing ran with {needle!r}: {vm.calls}")
+        return hits[0]
+
+    # 1 Nov: 5d92dda8 migrated the store to schema 6, then its apply failed,
+    # and putting back 507dfdbf stopped half way: its code refuses schema 6.
+    # The failed release's own downgrade (#36) puts the store back first.
+    def test_the_failed_release_puts_the_store_back_before_the_older_release_goes_in(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.store_at(f, 6)
+        self.units(f, self.UNITS + ["tw-decide-own.service"], self.UNITS)
+        f.run_ = self.knows(vm, 5)
+        self.assertEqual(f.follow(), 1)
+        stop = vm.calls[self.at(vm, "systemctl stop")]
+        # Every unit of the core, timers first; never the phone test's own.
+        self.assertEqual(stop[2], "tw-decide-feed.timer")
+        self.assertEqual(sorted(stop[2:]), sorted(["tw-decide.service", "tw-decide-connector.service", "tw-decide-feed.service",
+                                                   "tw-decide-feed.timer", "tw-decide-push.service", "tw-decide-own.service"]))
+        down = vm.calls[self.at(vm, "downgrade")]
+        self.assertEqual(down[:4], ["runuser", "-u", "tw-decide", "--"])
+        self.assertTrue(down[4].endswith("/opt/thornswood-hermes/decisions-venv/bin/python3"), down)
+        self.assertTrue(down[8].endswith(f"releases/{NEW}"), "the failed release's code, which knows the way back")
+        self.assertEqual(down[-5:], ["--db", str(f._at("/srv/tw/decide/core.db")), "downgrade", "--to", "5"])
+        disable = vm.calls[self.at(vm, "systemctl disable")]
+        self.assertEqual(disable[-1:], ["tw-decide-own.service"], "only what the older release does not ship")
+        order = [self.at(vm, "systemctl stop"), self.at(vm, "downgrade"), self.at(vm, "systemctl disable"),
+                 self.at(vm, f"releases/{OLD}/deploy/install.sh")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(json.loads(f.state_file.read_text())["put_back"], f"put back {OLD}")
+        self.assertTrue(any("back at schema 5 from 6" in s for s in self.said), self.said)
+
+    def test_no_put_back_when_the_downgrade_refuses_and_the_core_starts_again(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.store_at(f, 6)
+        self.units(f, self.UNITS + ["tw-decide-own.service"], self.UNITS)
+        units = f.core_units()  # is-active answers in this order
+        active = "\n".join("inactive" if u == "tw-decide-feed.service" else "active" for u in units) + "\n"
+        f.run_ = self.knows(vm, 5, downgrade=1, active=active)
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(vm.ran(f"releases/{OLD}/deploy"), [], "nothing of the older release is installed")
+        self.assertEqual(vm.ran("systemctl disable"), [], "the newer release keeps every unit")
+        start = vm.calls[self.at(vm, "systemctl start")]
+        self.assertEqual(sorted(start[2:]), sorted(u for u in units if u != "tw-decide-feed.service"))
+        self.assertGreater(self.at(vm, "systemctl start"), self.at(vm, "downgrade"))
+        st = json.loads(f.state_file.read_text())
+        self.assertEqual((st["result"], st["failed"], st["step"]), ("failed", NEW, "canary"))
+        self.assertIn("not put back: the core's store is at schema 6, aaaaaaaaaaaa knows only 5", st["put_back"])
+        self.assertIn("store_written", st["put_back"])
+        self.assertIn("fix it forward", st["put_back"])
+
+    def test_the_put_back_runs_when_the_older_release_knows_the_store(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.store_at(f, 5)
+        self.units(f, self.UNITS + ["tw-decide-own.service"], self.UNITS)
+        f.run_ = self.knows(vm, 5)
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(vm.ran("downgrade"), [])
+        self.assertEqual(vm.ran("systemctl stop"), [])
+        self.assertEqual(vm.calls[self.at(vm, "systemctl disable")][-1:], ["tw-decide-own.service"])
+        self.assertEqual(len(vm.ran(f"releases/{OLD}/deploy")), 2, "its install and its core's install")
+        self.assertEqual(json.loads(f.state_file.read_text())["put_back"], f"put back {OLD}")
+
+    def test_the_downgrade_line_reaches_the_cli_with_its_own_arguments(self):
+        # The -c line, run for real against a stand-in release: that release's
+        # code is what runs, and its CLI gets exactly --db ... downgrade --to N.
+        f = self.follower(FakeVM(NEW))
+        rel = Path(tempfile.mkdtemp())
+        (rel / "thornswood_decisions").mkdir()
+        (rel / "thornswood_decisions" / "__init__.py").write_text("")
+        (rel / "thornswood_decisions" / "cli.py").write_text(
+            "import json, sys\ndef main(argv):\n    print(json.dumps({'from': sys.path[0], 'argv': argv}))\n    return 3\n")
+        # Everything after runuser -u tw-decide -- <venv python>, with this python.
+        f.run_ = lambda args, **kw: subprocess.run([_sys.executable, *args[5:]], **kw)
+        with self.assertRaises(follow_main.Stop) as e:
+            f.downgrade(rel, 5)
+        self.assertIn("exited 3", str(e.exception))
+        out = json.loads(str(e.exception).split(": ", 1)[1])
+        self.assertEqual(out["from"], str(rel))
+        self.assertEqual(out["argv"], ["--db", str(f._at("/srv/tw/decide/core.db")), "downgrade", "--to", "5"])
+
+    def test_a_pause_file_stops_everything_and_survives_an_install(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        pause = f._at(f.r["pause_file"])
+        pause.parent.mkdir(parents=True, exist_ok=True)
+        pause.write_text("")
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(vm.calls, [], "not even a fetch")
+        self.assertIn("paused", self.said[-1])
+        # The install starts the timer again; the pause is the file, which it leaves alone.
+        self.assertNotIn(f.r["pause_file"], (REPO / "deploy" / "install.sh").read_text())
 
 @unittest.skipUnless(os.geteuid() == 0 and shutil.which("runuser"), "needs root, to hand the release to another user as the VM does")
 class ApplyAsAnotherUser(unittest.TestCase):
@@ -454,8 +616,13 @@ class ApplyAsAnotherUser(unittest.TestCase):
             dest = self.f.opt / "releases" / c
             subprocess.run(["git", "clone", "-q", "--no-checkout", str(rel), str(dest)], check=True)
             subprocess.run(["git", "-C", str(dest), "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", c], check=True)
-        for d in (self.f.opt, self.f.opt.parent, self.f.opt.parent.parent):
-            os.chmod(d, 0o755)
+        # Root's folders stay closed to hermes, as on the VM (1 Nov:
+        # /srv/tw/follow is 0700): the apply must not need any of them.
+        for d in (self.f.opt, self.f.opt.parent):
+            os.chmod(d, 0o700)
+        self.f.mirror.parent.mkdir(parents=True)
+        for d in (self.f.mirror.parent, self.f.mirror.parent.parent, self.f.mirror.parent.parent.parent):
+            os.chmod(d, 0o700)
         home = self.f.hermes_releases.parent
         home.mkdir(parents=True)
         for d in (home.parent, home.parent.parent):

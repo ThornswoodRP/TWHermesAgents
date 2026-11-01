@@ -602,3 +602,13 @@ follow_main:
   # Its install wrote this file, so the decision core is installed here and each
   # merge installs it again (deploy/decisions/install.sh keeps --room and --origin from it).
   decide_env: /etc/thornswood/tw-decide.env
+  # The core's store, which root reads (read only) for its schema number: a
+  # store a release has migrated cannot be opened by an older release.
+  decide_db: /srv/tw/decide/core.db
+  # Whose store it is, and the core's own interpreter: a put-back over a
+  # migrated store runs the failed release's downgrade as this user, with it.
+  decide_user: tw-decide
+  decide_python: /opt/thornswood-hermes/decisions-venv/bin/python3
+  # While this file exists the follower fetches and installs nothing. An install
+  # starts the timer again, so pausing is this file, never stopping the timer.
+  pause_file: /etc/thornswood/follow-main.paused

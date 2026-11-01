@@ -132,6 +132,8 @@ class FakeGitHub:
         repo = f"{parts[1]}/{parts[2]}"
         rest = parts[3:]
         page = int(query.get("page", "1"))
+        if not rest and method == "GET":
+            return Response(200, {"full_name": repo, "default_branch": "main"}, {})
         if rest[:3] == ["git", "ref", "heads"]:
             branch = urllib.parse.unquote("/".join(rest[3:]))
             sha = self.ref(repo, branch)

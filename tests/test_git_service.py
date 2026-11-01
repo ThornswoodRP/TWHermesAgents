@@ -358,7 +358,10 @@ class PullRequestsAndIssues(unittest.TestCase):
         w = World()
         w.fake.add_issue(APP, 3150)
         self.assertEqual(w.git.read("hermes", {"bot": "rift", "repo": APP, "path": f"/repos/{APP}/issues/3150"})["body"]["number"], 3150)
-        for path in ("/user", f"/repos/{APP}/../../orgs/x", "/repos/EvilPatrick06/Other/issues/1"):
+        # The repository's own fields, such as its default branch (1 Nov).
+        self.assertEqual(w.git.read("hermes", {"bot": "bramble", "repo": APP, "path": f"/repos/{APP}"})["body"]["default_branch"], "main")
+        for path in ("/user", f"/repos/{APP}/../../orgs/x", "/repos/EvilPatrick06/Other/issues/1",
+                     f"/repos/{APP}-Ops/issues/1", f"/repos/{APP}x", f"/repos/{APP}..", ""):
             with self.subTest(path=path), self.assertRaises(Refused):
                 w.git.read("hermes", {"bot": "rift", "repo": APP, "path": path})
 

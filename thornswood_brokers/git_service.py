@@ -546,8 +546,12 @@ class GitService:
         """A GET for any Bot, as the workers' App, in the three repos only."""
         bot, repo = self._bot(args), self._repo(args)
         path = str(args.get("path") or "")
-        if not path.startswith(f"/repos/{repo}/") or ".." in path:
-            raise Refused(f"reads stay inside /repos/{repo}/")
+        root = f"/repos/{repo}"
+        # The repository itself (default_branch and its other fields), or
+        # anything under it. 1 Nov: Bramble could not read default_branch.
+        inside = path == root or path.startswith((root + "/", root + "?"))
+        if not inside or ".." in path:
+            raise Refused(f"reads stay inside {root}")
         self._check(self.rules.admin_call(bot, "GET", path))
         return {"body": self.gh.get("workers", repo, path)}
 

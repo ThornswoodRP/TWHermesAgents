@@ -25,7 +25,13 @@ Runs as root from tw-follow-main.timer. Each run:
      restarts, since a gateway restart alone left Desktop's turns on the old
      tool list on 31 Oct) and runs the canary;
   6. if any of 5 fails, installs and applies the release that was running
-     before, the same way, and says both.
+     before, the same way, and says both. When the failed release migrated
+     the core's store past what the earlier release knows, the core's units
+     stop and the failed release's own `tw-decide downgrade` puts the store
+     back first, as tw-decide; when it refuses (the store holds what the
+     older schema cannot), nothing is put back and the core starts again on
+     the newer release. Units of the core that the earlier release does not
+     ship are stopped and disabled before it goes back in.
 
 What it did is in /var/lib/thornswood/follow-main.json and the journal.
 """
@@ -35,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -45,6 +52,10 @@ from typing import Callable
 from thornswood_guard.policy import Policy
 
 Run = Callable[..., subprocess.CompletedProcess]
+
+
+def _text(b) -> str:
+    return b.decode("utf-8", "replace") if isinstance(b, (bytes, bytearray)) else (b or "")
 
 
 class Stop(Exception):
@@ -72,7 +83,11 @@ class Follower:
         return self.root / path.lstrip("/")
 
     def sh(self, step: str, args: list[str], **kw) -> subprocess.CompletedProcess:
-        c = self.run_(args, capture_output=True, text=True, **kw)
+        if isinstance(kw.get("input"), bytes):
+            c = self.run_(args, capture_output=True, **kw)
+            c.stdout, c.stderr = (_text(c.stdout), _text(c.stderr))
+        else:
+            c = self.run_(args, capture_output=True, text=True, **kw)
         if c.returncode != 0:
             tail = ((c.stdout or "") + (c.stderr or "")).strip()[-600:]
             raise Stop(step, f"{' '.join(args[:3])} ... exited {c.returncode}: {tail}")
@@ -174,37 +189,39 @@ class Follower:
     def apply(self, dest: Path, commit: str) -> None:
         # hermes never runs git against the root-owned release: git refuses a
         # repository another user owns ("dubious ownership"), and a -c
-        # safe.directory does not reach the upload-pack a local fetch starts,
-        # because git clears GIT_CONFIG_PARAMETERS for it (1 Nov on the VM:
-        # the apply and its put-back both stopped there). Root bundles the
-        # commit, as send-to-oracle.sh did, and hermes fetches from that file.
+        # safe.directory does not reach the upload-pack a local fetch starts
+        # (1 Nov, f02c3193). Root bundles the commit and hands the bytes over
+        # on stdin, and hermes writes them into a file of its own, under its own
+        # folder: no folder of root's has to be open to hermes, and root never
+        # writes where hermes could plant a link. (1 Nov, 5d92dda8: a bundle
+        # left in /srv/tw/follow, which is 0700, could not be read.)
         user = self.r["hermes_user"]
         hdest = self.hermes_releases / commit
-        self.mirror.parent.mkdir(parents=True, exist_ok=True)
-        hand = Path(tempfile.mkdtemp(prefix="apply-", dir=str(self.mirror.parent)))
-        try:
-            os.chmod(hand, 0o755)
-            bundle = hand / f"{commit}.bundle"
-            # A bundle carries refs, not bare commits: name this one first, in
-            # the release root owns, so it is this commit and nothing else.
-            self.sh("apply", self.git("-C", str(dest), "update-ref", "refs/remotes/origin/main", commit))
-            self.sh("apply", self.git("-C", str(dest), "bundle", "create", "--quiet", str(bundle), "refs/remotes/origin/main"))
-            self.sh("apply", ["chmod", "0644", str(bundle)])
-            script = (
-                "set -euo pipefail\n"
-                f"dest='{hdest}'\n"
-                f"mkdir -p '{self.hermes_releases}'\n"
-                "[[ -d \"$dest/.git\" ]] || git init --quiet \"$dest\"\n"
-                f"git -C \"$dest\" fetch --quiet '{bundle}' '+refs/remotes/origin/main:refs/remotes/origin/main'\n"
-                f"git -C \"$dest\" -c advice.detachedHead=false checkout --quiet --force --detach '{commit}'\n"
-                "cd \"$dest\"\n"
-                f"python3 scripts/apply.py --expect '{commit}' --check\n"
-                f"python3 scripts/apply.py --expect '{commit}'\n"
-                f"ln -sfn \"$dest\" '{self.hermes_releases.parent / 'current'}'\n"
-            )
-            self.sh("apply", ["runuser", "-u", user, "--", "bash", "-c", script])
-        finally:
-            shutil.rmtree(hand, ignore_errors=True)
+        # A bundle carries refs, not bare commits: name this one first, in the
+        # release root owns, so it is this commit and nothing else.
+        self.sh("apply", self.git("-C", str(dest), "update-ref", "refs/remotes/origin/main", commit))
+        made = self.run_(self.git("-C", str(dest), "bundle", "create", "--quiet", "-", "refs/remotes/origin/main"),
+                         capture_output=True)
+        if made.returncode != 0 or not made.stdout:
+            raise Stop("apply", f"git bundle create in {dest} exited {made.returncode}: {_text(made.stderr).strip()[-300:]}")
+        bundle = made.stdout if isinstance(made.stdout, bytes) else made.stdout.encode()
+        script = (
+            "set -euo pipefail\n"
+            "umask 077\n"
+            f"dest='{hdest}'\n"
+            f"mkdir -p '{self.hermes_releases}'\n"
+            f"bundle=\"$(mktemp '{self.hermes_releases}/.incoming-XXXXXX.bundle')\"\n"
+            "trap 'rm -f \"$bundle\"' EXIT\n"
+            "cat > \"$bundle\"\n"
+            "[[ -d \"$dest/.git\" ]] || git init --quiet \"$dest\"\n"
+            "git -C \"$dest\" fetch --quiet \"$bundle\" '+refs/remotes/origin/main:refs/remotes/origin/main'\n"
+            f"git -C \"$dest\" -c advice.detachedHead=false checkout --quiet --force --detach '{commit}'\n"
+            "cd \"$dest\"\n"
+            f"python3 scripts/apply.py --expect '{commit}' --check\n"
+            f"python3 scripts/apply.py --expect '{commit}'\n"
+            f"ln -sfn \"$dest\" '{self.hermes_releases.parent / 'current'}'\n"
+        )
+        self.sh("apply", ["runuser", "-u", user, "--", "bash", "-c", script], input=bundle)
 
     def restart(self) -> None:
         # The installed release's own tw-reload-bots (thornswood_brokers/reload.py),
@@ -212,11 +229,84 @@ class Follower:
         # sessions, restarts the gateway and says STOP unless it is active.
         self.sh("reload", [str(self.opt / "bin" / "tw-reload-bots")])
 
+    def store_schema(self) -> int | None:
+        """The schema number the core's store is at, read only; None with no core."""
+        if not self._at(self.r["decide_env"]).exists():
+            return None
+        db = self._at(self.r["decide_db"])
+        if not db.exists():
+            return None
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        finally:
+            con.close()
+        return int(row[0]) if row else 0
+
+    def known_schema(self, dest: Path) -> int:
+        """How many store migrations a release's own code knows."""
+        c = self.sh("put back", ["python3", "-I", "-c",
+                                 "import sys; sys.path.insert(0, sys.argv[1]); "
+                                 "from thornswood_decisions.schema import MIGRATIONS; print(len(MIGRATIONS))", str(dest)])
+        try:
+            return int(c.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise Stop("put back", f"could not read how many store migrations {dest.name[:12]} knows: {c.stdout.strip()[-200:]}")
+
+    def core_units(self) -> list[str]:
+        """The core's units installed on this VM, by their unit files. The phone
+        test's own (tw-decide-test, tw-decide-push-test) keep their own store
+        and are left alone."""
+        d = self._at("/etc/systemd/system")
+        return sorted(p.name for p in d.glob("tw-decide*")
+                      if p.suffix in (".service", ".timer") and p.is_file() and "-test." not in p.name)
+
+    def stop_core(self) -> list[str]:
+        """Stops every unit of the core and says which were running. A
+        connection made while the core runs migrates the store forward again,
+        so nothing of it may run while the store is put back."""
+        units = self.core_units()
+        if not units:
+            return []
+        c = self.run_(["systemctl", "is-active", *units], capture_output=True, text=True)
+        states = (c.stdout or "").split()
+        active = [u for u, st in zip(units, states) if st == "active"]
+        # Timers first, so none starts a service again while the rest stop.
+        self.sh("put back", ["systemctl", "stop", *[u for u in units if u.endswith(".timer")],
+                             *[u for u in units if not u.endswith(".timer")]])
+        return active
+
+    def downgrade(self, failed: Path, to: int) -> None:
+        """The failed release's own code puts the store back to schema `to`
+        (thornswood_decisions.cli downgrade): only it knows the way back, and it
+        changes nothing and exits 1 when that would lose what the store holds.
+        As tw-decide, whose store it is, with the core's own venv."""
+        self.sh("put back", ["runuser", "-u", self.r["decide_user"], "--", str(self._at(self.r["decide_python"])), "-I", "-c",
+                             "import sys; sys.path.insert(0, sys.argv[1]); "
+                             "from thornswood_decisions.cli import main; sys.exit(main(sys.argv[2:]))",
+                             str(failed), "--db", str(self._at(self.r["decide_db"])), "downgrade", "--to", str(to)])
+
+    def drop_units_not_in(self, dest: Path) -> list[str]:
+        """Stops and disables the core's units that the release going back in
+        does not ship (1 Nov: tw-decide-own from #33 would stay running on code
+        the older release does not have). Its install puts back the rest."""
+        ships = {p.name for p in (dest / "deploy" / "decisions").glob("tw-decide*")}
+        extra = [u for u in self.core_units() if u not in ships]
+        if extra:
+            self.sh("put back", ["systemctl", "disable", "--quiet", "--now", *extra])
+        return extra
+
     def canary(self) -> None:
         self.sh("canary", [str(self.opt / "bin" / "tw-canary")])
 
     # -- the run
     def follow(self) -> int:
+        pause = self._at(self.r["pause_file"])
+        if pause.exists():
+            # An install starts the timer again, so a pause is this file (1 Nov:
+            # a hand install turned the stopped timer back on).
+            self.say(f"paused: {self.r['pause_file']} is there, so nothing is fetched or installed")
+            return 0
         try:
             tip = self.fetch()
         except Stop as e:
@@ -237,7 +327,7 @@ class Follower:
             self.say(f"PASS {ran} at {tip[:12]} on the VM")
         except Stop as e:
             self.say(f"STOP {tip[:12]} is not installed: {e}")
-            self.record(failed=tip, step=e.step, why=str(e), installed=before)
+            self.record(result="not installed", failed=tip, step=e.step, why=str(e), installed=before, put_back=None)
             return 1
         try:
             self.install(dest, tip)
@@ -246,18 +336,36 @@ class Follower:
             self.canary()
         except Stop as e:
             self.say(f"STOP {tip[:12]} failed at {e.step}: {e}")
-            back = self.put_back(before)
-            self.record(failed=tip, step=e.step, why=str(e), installed=self.installed(), put_back=back)
+            back = self.put_back(before, dest)
+            self.record(result="failed", failed=tip, step=e.step, why=str(e), installed=self.installed(), put_back=back)
             return 1
         self.say(f"PASS {tip[:12]} is installed, applied, every Bot process reloaded and the canary passed")
-        self.record(installed=tip, failed=None, step=None, why=None, put_back=None)
+        self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None)
         return 0
 
-    def put_back(self, before: str | None) -> str:
+    def put_back(self, before: str | None, failed: Path) -> str:
         if not before:
             return "nothing was installed before, so nothing was put back"
         dest = self.opt / "releases" / before
         try:
+            have = self.store_schema()
+            if have is not None:
+                knows = self.known_schema(dest)
+                if have > knows:
+                    # The older code refuses a newer store (1 Nov: 5d92dda8's
+                    # schema 6, and 507dfdbf's put-back stopped at the core's
+                    # install, half done), so the store goes back first, by the
+                    # failed release's own downgrade, or nothing is put back.
+                    refused = self.store_back(failed, have, knows)
+                    if refused:
+                        msg = (f"not put back: the core's store is at schema {have}, {before[:12]} knows only {knows}, "
+                               f"and {failed.name[:12]}'s downgrade refused: {refused}. The newer release stays installed; "
+                               f"fix it forward with a merge")
+                        self.say(f"FAIL {msg}")
+                        return msg
+                dropped = self.drop_units_not_in(dest)
+                if dropped:
+                    self.say(f"stopped and disabled {', '.join(dropped)}, which {before[:12]} does not ship")
             self.install(dest, before)
             self.apply(dest, before)
             self.restart()
@@ -267,6 +375,23 @@ class Follower:
             return f"putting back {before} failed at {e.step}: {e}"
         self.say(f"PASS put back {before[:12]}, which runs as it did")
         return f"put back {before}"
+
+    def store_back(self, failed: Path, have: int, knows: int) -> str | None:
+        """Stops the core, has the failed release put its store back to schema
+        `knows`, and says why not when it refuses (the core then starts again as
+        it ran, on the newer release)."""
+        active = self.stop_core()
+        try:
+            self.downgrade(failed, knows)
+        except Stop as e:
+            if active:
+                try:
+                    self.sh("put back", ["systemctl", "start", *active])
+                except Stop as again:
+                    return f"{e}; and starting {', '.join(active)} again failed: {again}"
+            return str(e)
+        self.say(f"PASS the core's store is back at schema {knows} from {have}, by {failed.name[:12]}'s downgrade")
+        return None
 
 
 def main(argv: list[str]) -> int:
