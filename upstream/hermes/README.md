@@ -1,0 +1,47 @@
+# Fixes for Hermes itself, to send upstream
+
+Two causes found on 1 Nov 2026 are in Hermes, not in this repository, so
+they are fixed where they come from: as pull requests to Hermes
+(NousResearch/hermes-agent), made against v0.22.5
+(`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM runs.
+Nothing here is applied to the VM's Hermes by hand: the VM takes them in a
+Hermes release.
+
+Apply them in order on a checkout of that commit:
+
+```
+git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch
+python -m pytest -q tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py
+```
+
+## 0001: the "too large" note names a path the Bot can read
+
+Cause: under the docker backend a Bot's read_file and terminal run in its
+container, but Hermes passed the sandbox it had registered for the turn,
+which is none once the idle reaper drops it after 5 minutes (the container
+itself lives on), and it read "no sandbox" as "runs on the host", so the
+note named `$HERMES_HOME/cache/spillover/<id>.txt`, which does not exist in
+the container. Seen 1 Nov: Bramble's container last ran at 3:49 PM, and a
+192,576-character tw_git result saved at 4:00:42 PM got the VM's path.
+
+The fix brings the sandbox back (`ensure_task_env`, as vision already does)
+before saving, and treats "no sandbox" as host side only on the local
+backend.
+
+The note will then name `/root/.hermes/cache/spillover/<id>.txt` inside the
+container. The Thornswood guard refuses any path with `.hermes` in it, so
+this alone does not let a Bot read the file. That is a separate decision
+for Patrick (the guard's rule is about Hermes's home on the VM, and the
+container's `/root/.hermes` is Hermes's read-only view of the Bot's caches),
+and it waits on each Bot's container mounting only its own caches.
+
+## 0002: a 429 records which limit refused it
+
+Cause: Hermes read only the reset time from a 429's headers, so which window
+refused the call (the subscription's 5-hour or weekly window, or a
+per-minute bucket) was never written down. On 1 Nov the 8:46 AM 429 left
+only the body and an 836-second cooldown.
+
+The fix keeps every `anthropic-ratelimit-*`, `x-ratelimit-*` and
+`retry-after` header of a refusal (counters, statuses and times; never a
+credential) and logs them in one line.
