@@ -39,8 +39,10 @@ param(
     [string]$SshHost = 'thornswood-bots',
     [string]$Hermes = '',
     [string]$HermesPython = '',
-    [string]$Folder = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Thornswood\own-connector'),
-    [string]$TokenFile = (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Thornswood\own-one.token'),
+    # Default: %LOCALAPPDATA%\Thornswood\own-connector.
+    [string]$Folder = '',
+    # Default: %APPDATA%\Thornswood\own-one.token.
+    [string]$TokenFile = '',
     [switch]$NewToken,
     [switch]$NoTask
 )
@@ -55,6 +57,18 @@ $here = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if ($Core -notmatch '^https://[a-z0-9-]+\.[a-z0-9-]+\.ts\.net/api/v1$') {
     Fail "-Core is the VM's Tailscale address and /api/v1, like https://hermes.tail1234.ts.net/api/v1"
 }
+
+# The default folders, worked out here rather than in param(): GetFolderPath answers an
+# empty string for a folder that does not exist yet unless told DoNotVerify (on Linux
+# ~/.config in a fresh home, as the VM's test run has), and Join-Path then stops the
+# script before it can say anything. This script makes both folders itself.
+function AppFolder([string]$which, [string]$sub, [string]$leaf) {
+    $base = [Environment]::GetFolderPath($which, [Environment+SpecialFolderOption]::DoNotVerify)
+    if (-not $base) { Fail "this user has no $which folder; pass -Folder and -TokenFile" }
+    Join-Path (Join-Path $base $sub) $leaf
+}
+if (-not $Folder) { $Folder = AppFolder 'LocalApplicationData' 'Thornswood' 'own-connector' }
+if (-not $TokenFile) { $TokenFile = AppFolder 'ApplicationData' 'Thornswood' 'own-one.token' }
 
 # 1. Hermes on One.
 if (-not $Hermes) {

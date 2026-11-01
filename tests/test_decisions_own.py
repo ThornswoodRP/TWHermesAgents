@@ -833,12 +833,33 @@ class OneInstall(unittest.TestCase):
         self.assertIn(f"the connector runs with {sys.executable}", r.stdout)
         self.assertNotIn("python.exe", r.stdout)
 
+    def fresh_home(self):
+        """A home with no ~/.config or ~/.local yet, as the VM's test run gives (tw-follow-main: HOME is a new folder)."""
+        home = self.t / "home"
+        home.mkdir()
+        return {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "HOME": str(home),
+                "XDG_CONFIG_HOME": "", "XDG_DATA_HOME": ""}, home
+
     def test_refuses_an_address_that_is_not_the_vms_ts_net(self):
         import subprocess
+        env, _ = self.fresh_home()
         r = subprocess.run(["pwsh", "-NoProfile", "-File", str(self.clone / "scripts/one/Install-OwnConnector.ps1"),
-                            "-Core", "http://192.135.112.23:9135/api/v1"], capture_output=True, text=True, timeout=60)
-        self.assertEqual(r.returncode, 1)
+                            "-Core", "http://192.135.112.23:9135/api/v1"], capture_output=True, text=True,
+                           env=env, timeout=60)
+        self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("-Core is the VM's Tailscale address", r.stdout)
+
+    def test_its_own_folders_are_made_when_they_are_not_there_yet(self):
+        import subprocess
+        env, home = self.fresh_home()
+        r = subprocess.run(["pwsh", "-NoProfile", "-File", str(self.clone / "scripts/one/Install-OwnConnector.ps1"),
+                            "-Core", "https://hermes.tail0000.ts.net/api/v1", "-Hermes", str(self.hermes),
+                            "-HermesPython", sys.executable, "-NoTask"], capture_output=True, text=True,
+                           env=env, timeout=120)
+        self.assertIn("PASS the VM made the connector's token", r.stdout, r.stderr)
+        token = home / ".config" / "Thornswood" / "own-one.token"
+        self.assertEqual(token.read_text(encoding="ascii"), "tok_" + "x" * 43)
+        self.assertTrue((home / ".local" / "share" / "Thornswood" / "own-connector" / "own_connector.py").exists())
 
     def test_never_replaces_a_task_it_does_not_own(self):
         from helpers import REPO
