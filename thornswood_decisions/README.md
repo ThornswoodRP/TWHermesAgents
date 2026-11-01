@@ -11,7 +11,7 @@ Until test T33 passes and Patrick says so, the Claude report page stays the only
 | 0 | Pin the Hermes contract | `contracts.json`, checked on the VM by `scripts/check-hermes-contract.py` |
 | 1 | The core: schema and migrations, idempotent answers, immutable artifacts, the hash-chained event log, outboxes, sign-in, backup and restore | `schema.py`, `store.py`, `core.py`, `auth.py`, `backup.py` |
 | 2 | The Desktop pane: the same cards, revision-checked answers, a polling fallback, pairing | `api.py`, `cli.py`, `plugins/thornswood-decisions/` |
-| 3 | The phone, read only: the app shell on the `ts.net` origin, sign-in, cards, the Work and Room views | |
+| 3 | The phone, read only: the app shell on the `ts.net` origin, sign-in, cards, the Work and Room views | `passkey.py`, `feeds.py`, `feed_reader.py`, `app/` |
 | 4 | Phone answers and chat: the same commands as Desktop, the six Bot Chats and the room | |
 | 5 | Web Push: the outbox, the one quiet "Thornswood needs you", deep links, denial and revoke tests | |
 | 6 | The Main card | Waits for phase 7. Not built |
@@ -49,15 +49,31 @@ What this leaves out: a fresh sign-in on Desktop for a high-risk card (until the
 
 Against a remote Hermes, Desktop does not copy the plugin's desktop half from the VM, so `desktop/plugin.js` goes in `desktop-plugins/thornswood-decisions/` on the machine Desktop runs on, and the backend half in the VM's `plugins/` with `thornswood-decisions` in `plugins.enabled`.
 
+## The phone, read only (step 3)
+
+| File | What it holds |
+|---|---|
+| `app/` | The installable app at `/m/`: `index.html`, `app.js` (no framework, no inline code; everything from the core is set as text), `app.css`, `manifest.webmanifest`, the icons, and `sw.js`, which keeps the shell for opening offline and never a card, an answer or an `/api/` reply. Bottom bar: Bramble, Bots, Room, Work, Needs you. Cards open by deep link (`/m/decisions/<id>`) and show their text, options, recommendation and what yes covers, with no answer button until step 4 |
+| `passkey.py` | Patrick's passkeys, checked by py_webauthn. A passkey is added only from a fresh session on a paired phone and belongs to it. Sign-in needs the phone's lock (user verification) and gives a fresh session on that phone. Challenges work once, for 5 minutes. Five failures in 15 minutes stop passkey sign-in for 15 minutes. Without the library every passkey route answers 503; nothing falls back |
+| `softkey.py` | A software passkey for the tests and the install's self-check, never for signing in |
+| `feeds.py` | The Work and Room views: the latest snapshot of each, sent by the feed with its own token, kept to the fields shown and marked "as of". What the Bots' Hermes reports, never authority |
+| `feed_reader.py` | Runs as `hermes` once a minute: reads Hermes's `kanban.db` and the Workbench room's events read-only and sends the two snapshots |
+
+`api.py` adds: `/m/` and its files; passkey sign-in and enrolment (exact Origin); a recovery code sign-in that makes the phone a new device; `POST /csrf`, which gives the app a new CSRF token after a reload (cookie and exact Origin, the one write without the old token); `GET /work` and `GET /room`; and `POST /feeds/<name>` for the feed's token only, never a browser. With `mobile_read` off the phone can pair, sign in and add a passkey, but reads no card, work or room.
+
+`tests/decisions_phone_check.js` drives the app in headless Chromium with Chrome's virtual authenticator: pairing, a deep link, adding a passkey, signing in with it, the views and the service worker. It is not T10; T10 to T13 are Patrick's phone.
+
 ## Installing on the VM
 
 `deploy/decisions/` holds the install. It runs from the root-owned release that `scripts/install-on-oracle.sh` puts in `/opt/thornswood-hermes/releases/<commit>`, so run that first at the same commit.
 
 | File | What it does |
 |---|---|
-| `tw-decide` | The launcher, `python3 -I` from `/opt/thornswood-hermes/current` only |
-| `tw-decide.service` | The core as the `tw-decide` user, on 127.0.0.1:9135. systemd lets it reach loopback and nothing else, and write only `/srv/tw/decide` |
-| `install.sh <commit> [--room <id>]` | Makes the user and `/srv/tw/decide` (0700), puts the launcher and unit in place, makes the store the first time with every flag off, binds the Workbench room, starts the core and checks it answers on loopback only. It changes no flag and makes no pairing code |
+| `tw-decide` | The launcher, the core's venv Python with `-I`, from `/opt/thornswood-hermes/current` only |
+| `tw-decide.service` | The core as the `tw-decide` user, on 127.0.0.1:9135, with `TW_DECIDE_ORIGIN` from `/etc/thornswood/tw-decide.env`. systemd lets it reach loopback and nothing else, and write only `/srv/tw/decide` |
+| `requirements.txt` | py_webauthn and what it needs, each pinned by hash; installed as wheels only |
+| `tw-decide-feed`, `tw-decide-feed.service`, `.timer` | The Work and Room feed as `hermes`, once a minute, loopback only |
+| `install.sh <commit> [--room <id>] [--origin <url>]` | Makes the user and `/srv/tw/decide` (0700), builds the venv, runs a whole passkey ceremony under the unit's limits, puts the launchers and units in place, makes the store the first time with every flag off, binds the room, makes the two feed tokens into `hermes`'s `~/.config/thornswood` (0600), starts the core and the feeds, and checks the core answers on loopback only. It changes no flag and makes no pairing code |
 | `install-plugin.sh <commit>` | Links `plugins/thornswood-decisions` in Patrick's own Hermes (`patrick-hermes`) to the root-owned release. It never touches the Bots' Hermes and never edits a Hermes setting; Patrick turns the plugin on with `hermes plugins enable thornswood-decisions` |
 
 The order, after the merge, with the merged commit:

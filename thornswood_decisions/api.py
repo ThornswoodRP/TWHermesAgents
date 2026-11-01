@@ -18,20 +18,45 @@ GET never changes a card. Every answer goes through `DecisionCore.answer`.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
+from pathlib import Path
+
 from .auth import Principal
 from .core import DecisionCore
+from .feeds import MAX_FEED_BYTES, Feeds
+from .passkey import Passkeys
 from .store import CoreError, Store, now_utc
 
 PREFIX = "/api/v1"
 MAX_REQUEST_BYTES = 64 * 1024
 COOKIE = "tw_session"
 DEFAULT_PORT = 9135
+APP_DIR = Path(__file__).with_name("app")
+APP_FILES = {
+    "index.html": "text/html; charset=utf-8",
+    "app.js": "text/javascript; charset=utf-8",
+    "app.css": "text/css; charset=utf-8",
+    "sw.js": "text/javascript; charset=utf-8",
+    "manifest.webmanifest": "application/manifest+json",
+    "icon.svg": "image/svg+xml",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+}
+# The app's own views, each a deep link that loads the shell.
+APP_VIEWS = re.compile(r"^(|needs-you|work|room|bots|bramble|settings|decisions/[A-Za-z0-9_-]{1,64})$")
+APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+           "manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+# The service worker's own policy: it fetches only this origin, to keep the shell.
+SW_CSP = "default-src 'none'; connect-src 'self'"
+# Data the phone reads only while mobile_read is on. Signing in, adding a
+# passkey and signing out work with it off, so the phone can be set up first.
+APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room")}
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -80,9 +105,13 @@ class Api:
         headers = {k.lower(): v for k, v in headers.items()}
         extra: dict[str, str] = {}
         try:
-            if len(body) > MAX_REQUEST_BYTES:
-                raise CoreError(413, "too_big", "the request body is too big")
             url = urlsplit(target)
+            if len(body) > body_limit(url.path):
+                raise CoreError(413, "too_big", "the request body is too big")
+            if url.path == "/" and method == "GET":
+                return 302, {**SECURITY_HEADERS, "Location": "/m/"}, b"{}"
+            if url.path.startswith("/m/"):
+                return self._static(method, url.path[3:])
             parts = [p for p in url.path.split("/") if p]
             if parts[:2] != ["api", "v1"]:
                 raise CoreError(404, "no_route", "no such route")
@@ -93,6 +122,31 @@ class Api:
         except CoreError as exc:
             return _refusal(exc.status, exc.reason, str(exc), exc.detail)
         return status, {**SECURITY_HEADERS, **extra}, json.dumps(out).encode("utf-8")
+
+    def _static(self, method: str, rest: str) -> tuple[int, dict, bytes]:
+        if method != "GET":
+            return _refusal(405, "method", "the app's files are read with GET")
+        name = rest if rest in APP_FILES else ("index.html" if APP_VIEWS.match(rest.rstrip("/")) else None)
+        if name is None:
+            return _refusal(404, "no_route", "no such file")
+        body = (APP_DIR / name).read_bytes()
+        headers = {"Content-Type": APP_FILES[name], "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff",
+                   "Referrer-Policy": "no-referrer", "Cross-Origin-Opener-Policy": "same-origin",
+                   "Content-Security-Policy": {"index.html": APP_CSP, "sw.js": SW_CSP}.get(name, "default-src 'none'")}
+        return 200, headers, body
+
+    def _passkeys(self, core: DecisionCore) -> Passkeys:
+        pk = getattr(self._local, "passkeys", None)
+        if pk is None:
+            pk = self._local.passkeys = Passkeys(core.s, self.origin)
+        return pk
+
+    def _exact_origin(self, headers: dict) -> None:
+        if not self.origin or headers.get("origin") != self.origin:
+            raise CoreError(403, "origin", "this is only for the app, from its exact origin")
+
+    def _app_session(self, s, extra: dict) -> None:
+        extra["Set-Cookie"] = f"{COOKIE}={s.token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={7 * 86400}"
 
     @staticmethod
     def _json(body: bytes) -> dict:
@@ -112,7 +166,31 @@ class Api:
             return self._pair(core, headers, data, extra)
         if method not in ("GET", "POST"):
             raise CoreError(405, "method", "GET or POST only")
-        p = self._principal(core, headers, write=(method == "POST"))
+        if method == "POST" and len(route) == 2 and route[0] == "feeds":
+            if "cookie" in headers or headers.get("origin") is not None:
+                raise CoreError(403, "not_a_feed", "a feed comes from the VM, not a browser")
+            return 200, Feeds(core.s).put(self.ws, route[1], _bearer(headers.get("authorization", "")), data)
+        if method == "POST" and route == ["passkeys", "sign-in", "options"]:
+            self._exact_origin(headers)
+            return 200, self._passkeys(core).sign_in_options(self.ws)
+        if method == "POST" and route == ["passkeys", "sign-in"]:
+            self._exact_origin(headers)
+            dev, sess = self._passkeys(core).sign_in(self.ws, data.get("credential"))
+            self._app_session(sess, extra)
+            return 200, {"device_id": dev, "csrf": sess.csrf, "expires_at": sess.expires_at}
+        if method == "POST" and route == ["recovery-sign-in"]:
+            self._exact_origin(headers)
+            label = str(data.get("label", ""))[:80] or "phone (recovery code)"
+            sess = core.auth.sign_in_with_recovery_code(self.ws, str(data.get("code", "")), None, new_phone=label)
+            self._app_session(sess, extra)
+            return 200, {"csrf": sess.csrf, "expires_at": sess.expires_at}
+        # A new CSRF token is the one write that cannot carry the old one (the app lost
+        # it on a reload); it still needs the cookie and the exact Origin.
+        rotate = method == "POST" and route == ["csrf"]
+        p = self._principal(core, headers, write=(method == "POST"), csrf=not rotate)
+        app = "cookie" in headers or p.device_kind == "phone"
+        if app and (method, route[0] if route else "") in APP_DATA and not core.s.flag(self.ws, "mobile_read"):
+            raise CoreError(423, "mobile_read_off", "the phone app is off for now")
         if method == "GET" and route == ["me"]:
             return 200, {"kind": p.kind, "device_id": p.device_id, "device_kind": p.device_kind,
                          "fresh": p.fresh, "workspace": self.workspace}
@@ -127,13 +205,30 @@ class Api:
             since = query.get("since", "0")
             return 200, self._changes(core, int(since) if since.isdigit() else 0)
         if method == "POST" and len(route) == 3 and route[0] == "cards" and route[2] == "answer":
-            if p.device_kind == "phone":
+            if app:
                 raise CoreError(403, "phone_read_only", "the phone answers from step 4; answer on Desktop for now")
             return 200, core.answer(
                 p, decision_id=route[1], option_key=str(data.get("option_key", "")),
                 revision=_int(data, "revision"), attention_revision=_int(data, "attention_revision"),
                 artifact_sha256=str(data.get("artifact_sha256", "")),
                 idempotency_key=str(data.get("idempotency_key", "")), note=str(data.get("note", ""))[:2000])
+        if method == "GET" and route in (["work"], ["room"]):
+            return 200, Feeds(core.s).get(self.ws, route[0])
+        if method == "POST" and route == ["csrf"]:
+            if "cookie" not in headers:
+                raise CoreError(400, "not_the_app", "only the app's cookie session asks for a new CSRF token")
+            return 200, {"csrf": core.auth.rotate_csrf(p)}
+        if method == "GET" and route == ["passkeys"]:
+            return 200, {"passkeys": self._passkeys(core).list(p)}
+        if method == "POST" and route == ["passkeys", "register", "options"]:
+            self._exact_origin(headers)
+            return 200, self._passkeys(core).register_options(p)
+        if method == "POST" and route == ["passkeys", "register"]:
+            self._exact_origin(headers)
+            return 200, self._passkeys(core).register(p, data.get("credential"), str(data.get("label", ""))[:80])
+        if method == "POST" and len(route) == 3 and route[0] == "passkeys" and route[2] == "revoke":
+            self._passkeys(core).revoke(p, route[1])
+            return 200, {"revoked": route[1]}
         if method == "POST" and route == ["sign-out"]:
             core.auth.revoke_session(p)
             if "cookie" in headers:
@@ -150,7 +245,7 @@ class Api:
 
     # ── who is asking ─────────────────────────────────────────────────────
 
-    def _principal(self, core: DecisionCore, headers: dict, *, write: bool) -> Principal:
+    def _principal(self, core: DecisionCore, headers: dict, *, write: bool, csrf: bool = True) -> Principal:
         bearer = _bearer(headers.get("authorization", ""))
         cookie = _cookie(headers.get("cookie", ""))
         if bearer and cookie:
@@ -164,9 +259,7 @@ class Api:
         p = core.auth.authenticate(bearer or cookie, hermes_principal=headers.get("x-tw-hermes-principal"))
         if p.workspace_id != self.ws:
             raise CoreError(401, "signed_out", "that session is for another workspace")
-        if p.device_kind == "phone" and not core.s.flag(self.ws, "mobile_read"):
-            raise CoreError(423, "mobile_read_off", "the phone app is off for now")
-        if write:
+        if write and csrf:
             core.auth.check_csrf(p, headers.get("x-csrf-token"))
         return p
 
@@ -177,7 +270,7 @@ class Api:
         dev, s = core.auth.redeem_pairing_code(self.ws, str(data.get("code", "")),
                                                hermes_principal=headers.get("x-tw-hermes-principal"))
         if origin is not None:  # the phone: the session goes only in the cookie
-            extra["Set-Cookie"] = f"{COOKIE}={s.token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={7 * 86400}"
+            self._app_session(s, extra)
             return 200, {"device_id": dev, "csrf": s.csrf, "expires_at": s.expires_at}
         return 200, {"device_id": dev, "token": s.token, "csrf": s.csrf, "expires_at": s.expires_at}
 
@@ -191,6 +284,10 @@ class Api:
         rows = core.s.db.execute("SELECT DISTINCT subject FROM events WHERE seq > ? AND workspace_id = ? "
                                  "AND (kind LIKE 'decision.%' OR kind = 'work.done')", (since, self.ws)).fetchall()
         return {"seq": self._seq(core), "changed": [r[0] for r in rows]}
+
+
+def body_limit(path: str) -> int:
+    return MAX_FEED_BYTES if path.startswith(PREFIX + "/feeds/") else MAX_REQUEST_BYTES
 
 
 def _refusal(status: int, reason: str, message: str, detail: dict | None = None) -> tuple[int, dict, bytes]:
@@ -230,7 +327,7 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
-        if not 0 <= length <= MAX_REQUEST_BYTES:
+        if not 0 <= length <= body_limit(urlsplit(self.path).path):
             # The body is not read, so the connection cannot be used again.
             self.close_connection = True
             status, headers, out = _refusal(413, "too_big", "the request body is too big")

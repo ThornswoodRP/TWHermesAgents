@@ -1,0 +1,11 @@
+# Once a minute: the phone's Work and Room views say how old they are ("as of").
+[Unit]
+Description=Thornswood decision core feeds, once a minute
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

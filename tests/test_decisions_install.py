@@ -36,7 +36,8 @@ class Unit(unittest.TestCase):
         self.assertEqual(s["IPAddressAllow"], "localhost")
         self.assertIn("serve --workspace thornswood --port 9135", s["ExecStart"])
         self.assertTrue(s["ExecStart"].startswith("/opt/thornswood-hermes/bin/tw-decide "))
-        self.assertNotIn("--origin", s["ExecStart"], "the phone's origin comes with step 3")
+        self.assertTrue(s["ExecStart"].endswith("--origin ${TW_DECIDE_ORIGIN}"), "the origin comes from the settings file")
+        self.assertEqual(s["EnvironmentFile"], "/etc/thornswood/tw-decide.env")
 
     def test_writes_only_its_own_folder(self):
         s = unit()["Service"]
@@ -47,10 +48,37 @@ class Unit(unittest.TestCase):
         self.assertIn("MemoryMax", s)
 
     def test_the_launcher_runs_only_the_root_owned_copy(self):
-        lines = (DEPLOY / "tw-decide").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(lines[0], "#!/usr/bin/python3 -I")
-        self.assertIn('sys.path.insert(0, "/opt/thornswood-hermes/current")', lines)
-        self.assertIn("from thornswood_decisions.cli import main  # noqa: E402", lines)
+        for name, shebang, module in (
+                ("tw-decide", "#!/opt/thornswood-hermes/decisions-venv/bin/python3 -I", "cli"),
+                ("tw-decide-feed", "#!/usr/bin/python3 -I", "feed_reader")):
+            lines = (DEPLOY / name).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[0], shebang, name)
+            self.assertIn('sys.path.insert(0, "/opt/thornswood-hermes/current")', lines)
+            self.assertIn(f"from thornswood_decisions.{module} import main  # noqa: E402", lines)
+
+    def test_the_feed_runs_as_hermes_on_loopback_only(self):
+        cp = configparser.ConfigParser(strict=False, interpolation=None)
+        cp.optionxform = str
+        cp.read_string((DEPLOY / "tw-decide-feed.service").read_text(encoding="utf-8"))
+        s = cp["Service"]
+        self.assertEqual((s["User"], s["IPAddressDeny"], s["IPAddressAllow"]), ("hermes", "any", "localhost"))
+        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-feed --room ${TW_DECIDE_ROOM}")
+
+    def test_the_venv_installs_only_hashed_wheels(self):
+        src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("--require-hashes", src)
+        self.assertIn("--only-binary :all:", src)
+        self.assertIn("--no-deps", src)
+        reqs = (DEPLOY / "requirements.txt").read_text(encoding="utf-8")
+        pins = [ln for ln in reqs.splitlines() if ln and not ln.startswith(("#", " "))]
+        self.assertTrue(pins and all("==" in ln for ln in pins), pins)
+        self.assertEqual(reqs.count("==") , len(pins))
+        self.assertTrue(all(ln.rstrip().endswith("\\") for ln in pins))
+
+    def test_the_selfcheck_runs_under_the_units_limits(self):
+        src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        for prop in ("User=tw-decide", "MemoryDenyWriteExecute=yes", "ProtectSystem=strict", "IPAddressDeny=any"):
+            self.assertIn(f"-p {prop}", src)
 
 
 class Scripts(unittest.TestCase):

@@ -328,4 +328,51 @@ CREATE TABLE backup_runs (
     """
 ALTER TABLE devices ADD COLUMN hermes_principal TEXT;
 """,
+    # 3: passkeys, their one-time challenges, and the read-only feeds for the
+    # phone's Work and Room views (07 sections 4 and 5.1, step 3)
+    """
+CREATE TABLE passkeys (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  credential_id TEXT NOT NULL UNIQUE,
+  public_key BLOB NOT NULL,
+  sign_count INTEGER NOT NULL DEFAULT 0 CHECK (sign_count >= 0),
+  label TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+
+CREATE TABLE webauthn_challenges (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  purpose TEXT NOT NULL CHECK (purpose IN ('register', 'sign_in')),
+  challenge_hash TEXT NOT NULL UNIQUE CHECK (length(challenge_hash) = 64),
+  session_hash TEXT CHECK (session_hash IS NULL OR length(session_hash) = 64),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  CHECK ((purpose = 'register') = (session_hash IS NOT NULL))
+);
+
+CREATE TABLE feed_sources (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room')),
+  token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+
+CREATE TABLE feed_snapshots (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room')),
+  body TEXT NOT NULL,
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  source_time TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+""",
 ]

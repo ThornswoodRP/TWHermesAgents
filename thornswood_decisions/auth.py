@@ -176,6 +176,15 @@ class Auth:
         if not row or not csrf or not hmac.compare_digest(row["csrf_hash"], sha256_hex(csrf)):
             raise CoreError(403, "csrf", "the request's CSRF token does not match this session")
 
+    def rotate_csrf(self, principal: Principal) -> str:
+        """A new CSRF token for this session (the app asks after a reload; only the
+        cookie and an exact Origin get here). The old one stops working."""
+        csrf = secrets.token_urlsafe(32)
+        with self.s.tx() as db:
+            db.execute("UPDATE sessions SET csrf_hash = ? WHERE id_hash = ? AND revoked_at IS NULL",
+                       (sha256_hex(csrf), principal.session_hash))
+        return csrf
+
     def revoke_session(self, principal: Principal, reason: str = "signed out") -> None:
         with self.s.tx() as db:
             db.execute("UPDATE sessions SET revoked_at = ?, revoked_reason = ? WHERE id_hash = ? "
@@ -236,7 +245,10 @@ class Auth:
                          {"count": len(codes)})
         return codes
 
-    def sign_in_with_recovery_code(self, workspace_id: str, code: str, device_id: str | None) -> IssuedSession:
+    def sign_in_with_recovery_code(self, workspace_id: str, code: str, device_id: str | None, *,
+                                   new_phone: str | None = None) -> IssuedSession:
+        """A code works once. With `new_phone`, the sign-in is a new phone device of
+        that label (the phone app's way back in after a lost passkey)."""
         if self._locked(workspace_id, "recovery"):
             raise CoreError(429, "too_many_tries", "too many wrong codes; wait 15 minutes")
         pid = self._patrick(workspace_id)
@@ -256,6 +268,13 @@ class Auth:
             if not n:
                 raise CoreError(401, "wrong_code", "that recovery code was just used")
             self.s.event(db, workspace_id, "recovery_code.used", match, "patrick", {})
+            if new_phone is not None:
+                device_id = new_id("dv")
+                db.execute("INSERT INTO devices(id, workspace_id, principal_id, kind, label, created_at) "
+                           "VALUES(?,?,?,?,?,?)", (device_id, workspace_id, pid, "phone", new_phone[:80] or "phone",
+                                                   self.s.now()))
+                self.s.event(db, workspace_id, "device.paired", device_id, "patrick",
+                             {"kind": "phone", "label": new_phone[:80], "by": "recovery_code"})
             return self.issue_session(workspace_id, method="recovery_code", device_id=device_id, db=db)
 
     # ── pairing a new device ──────────────────────────────────────────────

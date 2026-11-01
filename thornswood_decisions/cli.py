@@ -11,6 +11,8 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   flag        turn one flag on or off
   test-card   open a test card as Bramble, in a test workspace only
   serve       answer the API on 127.0.0.1
+  feed-token  print a new token for the work or room feed (replaces the old one)
+  selfcheck   a whole passkey ceremony against a scratch store, with the installed library
   backup      make a consistent copy
   verify      check the event chain
 
@@ -30,6 +32,8 @@ from . import backup as backup_mod
 from . import contracts
 from .api import DEFAULT_PORT, Api, make_server
 from .core import DecisionCore
+from .feeds import NAMES as FEED_NAMES
+from .feeds import Feeds
 from .schema import FLAGS
 from .store import CoreError, Store
 
@@ -95,7 +99,7 @@ def cmd_test_card(store: Store, args) -> dict:
 
 def cmd_serve(store: Store, args) -> None:
     store.close()
-    api = Api(args.db, args.workspace, origin=args.origin)
+    api = Api(args.db, args.workspace, origin=args.origin or None)
     server = make_server(api, "127.0.0.1", args.port)
     # SIGTERM (systemctl stop) ends serve_forever in this thread by raising here.
     # server.shutdown() would wait on this same thread and never return.
@@ -106,6 +110,44 @@ def cmd_serve(store: Store, args) -> None:
     finally:
         server.server_close()
         api.close()
+
+
+def cmd_feed_token(store: Store, args) -> None:
+    ws, _ = _workspace(store, args.workspace)
+    # Only the token goes to stdout, so the install can hand it straight to the feed's file.
+    print(Feeds(store).new_token(ws, args.name, by=OPERATOR))
+
+
+def cmd_selfcheck(store: Store, args) -> dict:
+    """Proves the installed passkey library and the core's records work together on this
+    machine: a scratch store in a temp folder, a test workspace, a software passkey."""
+    import tempfile
+    from .passkey import Passkeys
+    from .softkey import SoftKey
+    origin = "https://selfcheck.invalid"
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = Store(Path(tmp) / "selfcheck.db")
+        try:
+            core = DecisionCore(scratch)
+            ws = scratch.ensure_workspace("selfcheck", is_test=True, by=OPERATOR)
+            core.auth.ensure_patrick(ws)
+            code = core.auth.operator_pairing_code(ws, "phone", "selfcheck", by=OPERATOR)["code"]
+            _, session = core.auth.redeem_pairing_code(ws, code)
+            p = core.auth.authenticate(session.token)
+            pk = Passkeys(scratch, origin)
+            key = SoftKey(origin, "selfcheck.invalid")
+            pk.register(p, key.create(pk.register_options(p)), "selfcheck")
+            pk.sign_in(ws, key.get(pk.sign_in_options(ws)))
+            try:
+                pk.sign_in(ws, key.get(pk.sign_in_options(ws), origin="https://evil.invalid"))
+            except CoreError as exc:
+                refused = exc.reason
+            else:
+                raise CoreError(500, "selfcheck", "a passkey answer for another origin was accepted")
+        finally:
+            scratch.close()
+    import webauthn
+    return {"ok": True, "webauthn": webauthn.__version__, "wrong_origin": refused}
 
 
 def cmd_backup(store: Store, args) -> dict:
@@ -146,6 +188,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--workspace", required=True)
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--origin", default=None, help="the phone app's exact origin, once Tailscale Serve gives it")
+    p = sub.add_parser("feed-token")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--name", choices=FEED_NAMES, required=True)
+    sub.add_parser("selfcheck")
     p = sub.add_parser("backup")
     p.add_argument("--dest", required=True)
     sub.add_parser("verify")
@@ -153,7 +199,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"init": cmd_init, "bind-room": cmd_bind_room, "pair": cmd_pair, "flag": cmd_flag,
-            "test-card": cmd_test_card, "serve": cmd_serve, "backup": cmd_backup, "verify": cmd_verify}
+            "test-card": cmd_test_card, "serve": cmd_serve, "feed-token": cmd_feed_token, "selfcheck": cmd_selfcheck,
+            "backup": cmd_backup, "verify": cmd_verify}
 
 
 def main(argv: list[str]) -> int:

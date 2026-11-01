@@ -1,6 +1,6 @@
-#!/usr/bin/python3 -I
-# Runs the decision core's commands from the root-owned copy. -I: no user site,
-# no PYTHONPATH, no current folder on the path, so only this copy's code is imported.
+#!/opt/thornswood-hermes/decisions-venv/bin/python3 -I
+# Runs the decision core's commands from the root-owned copy, with the core's own venv (its passkey library). -I:
+# no user site, no PYTHONPATH, no current folder on the path, so only this copy's code is imported.
 import sys
 sys.path.insert(0, "/opt/thornswood-hermes/current")
 from thornswood_decisions.cli import main  # noqa: E402
