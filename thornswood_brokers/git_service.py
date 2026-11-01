@@ -567,7 +567,22 @@ class GitService:
             raise Refused("only Bramble keeps the Dev ledger")
         return self.ask("ledger_event", {k: args.get(k) for k in ("repo", "issue", "event", "release", "note")})
 
+    # Every op that changes something on GitHub.
+    WRITES = ("push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "start_run")
+
+    def _executor_only(self, name: str, op: Callable[[str, dict], dict]) -> Callable[[str, dict], dict]:
+        """One executor at a time (plan phases 4 and 5): until the cutover the
+        Bots read and plan only, and Patrick's Hermes is the one executor.
+        Read from the policy at each call, so nothing a Bot asks can change it."""
+        def guarded(caller: str, args: dict) -> dict:
+            who = self.policy.data["executor"]
+            if who != "bramble":
+                raise Refused(f"{name} is refused: until the cutover the Bots read and plan only, and {who} "
+                              f"is the one executor (policy.yaml executor; Patrick sets it to bramble at the cutover)")
+            return op(caller, args)
+        return guarded
+
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "start_run", "read", "refused", "ledger_event")
-        return {n: (getattr(self, n), {gw}) for n in names}
+        return {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}

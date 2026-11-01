@@ -17,6 +17,8 @@ and exits 1 when any check fails.
       has any network interface but lo
   18  every listener of hermes and the brokers is on loopback or Tailscale
       only, and each Tailscale one refuses a request with no sign-in
+  one executor: as hermes, a Bramble merge through tw-git's socket is refused
+      by the one-executor rule until the cutover (policy.yaml executor)
 """
 
 from __future__ import annotations
@@ -107,6 +109,46 @@ wall = time.monotonic() - start
 cpu = resource.getrusage(resource.RUSAGE_CHILDREN).ru_utime + resource.getrusage(resource.RUSAGE_CHILDREN).ru_stime
 print("CPU %.2f WALL %.2f" % (cpu, wall))
 '''
+
+# Asks a broker over its socket, as whoever runs it, with the standard
+# library only: argv is the socket, the op and the args as JSON. Prints the
+# broker's answer as one JSON line.
+ASK = r'''
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(60)
+try:
+    s.connect(sys.argv[1])
+except OSError as e:
+    print(json.dumps({"ok": False, "reason": "NOCONNECT " + str(e)}))
+    sys.exit(0)
+s.sendall((json.dumps({"op": sys.argv[2], "args": json.loads(sys.argv[3])}) + "\n").encode())
+buf = b""
+while not buf.endswith(b"\n"):
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    buf += chunk
+print(buf.decode().strip() or json.dumps({"ok": False, "reason": "NOANSWER"}))
+'''
+
+
+def executor_problem(executor: str, answer: str) -> str | None:
+    """Reads tw-git's answer to a Bramble merge that can never go through
+    (the head SHA is forty zeros)."""
+    try:
+        got = json.loads(answer.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return f"tw-git gave no answer the canary can read: {answer.strip()[-200:]!r}"
+    if got.get("ok"):
+        return "tw-git did the merge it was asked for"
+    reason = str(got.get("reason") or "")
+    if reason.startswith(("NOCONNECT", "NOANSWER")):
+        return f"tw-git did not answer: {reason}"
+    if executor != "bramble" and "until the cutover the Bots read and plan only" not in reason:
+        return f"refused, but not by the one-executor rule: {reason[:200]}"
+    return None
+
 
 CONTAINER = r'''
 mount -t tmpfs canary /mnt 2>/dev/null && echo "MOUNTED tmpfs"
@@ -321,6 +363,20 @@ class Canary:
         self.check("18: the admission proxy refuses a request with no Bot token",
                    None if status in (401, 403, 0) else f"the proxy answered {status}")
 
+    def one_executor(self) -> None:
+        """Before the cutover, a Bramble merge through tw-git's own socket, as
+        the hermes user the Bots run as, is refused by the one-executor rule.
+        After it, still refused, by the head check: nothing is ever merged."""
+        executor = self.policy.data["executor"]
+        sock = self.policy.data["brokers"]["sockets"]["git"]["path"]
+        args = {"bot": "bramble", "repo": self.policy.data["repos"]["app"], "task": "tw-canary",
+                "number": 1, "sha": "0" * 40}
+        r = self.run(["runuser", "-u", self.policy.data["brokers"]["users"]["gateway"], "--",
+                      "python3", "-I", "-c", ASK, sock, "merge", json.dumps(args)], timeout=90)
+        self.check(f"one executor ({executor}): a Bramble merge through tw-git is refused"
+                   + (" until the cutover" if executor != "bramble" else ""),
+                   executor_problem(executor, r.stdout or r.stderr or ""))
+
     def services_up(self) -> None:
         units = ["tw-policy", "tw-git", "tw-files", "tw-proxy"]
         gw = "tw-hermes-gateway" if self.run(["systemctl", "is-enabled", "--quiet", "tw-hermes-gateway.service"]).returncode == 0 else None
@@ -382,6 +438,7 @@ def main() -> int:
         c.disk_quota()
         c.tier_a(SANDBOX_IMAGE)
         c.listeners()
+        c.one_executor()
         c.services_up()
     except Exception as e:
         c.check("the canary ran to the end", f"{type(e).__name__}: {e}")

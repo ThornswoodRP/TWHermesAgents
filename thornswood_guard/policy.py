@@ -16,6 +16,10 @@ POLICY_SOURCE = Path(__file__).with_name("policy.yaml")
 POLICY_FILE = Path(__file__).with_name("policy.json")
 
 
+# Who writes to GitHub: Patrick's Hermes until the cutover, then Bramble.
+EXECUTORS = ("patrick-hermes", "bramble")
+
+
 class PolicyError(Exception):
     """The policy file itself is wrong. Nothing is allowed until it is fixed."""
 
@@ -63,6 +67,8 @@ class Policy:
         for bot, v in bots.items():
             if v.get("claim_label") != f"claimed: {v.get('name')}":
                 raise PolicyError(f"{bot}'s claim label must be 'claimed: {v.get('name')}'")
+        if self.data.get("executor") not in EXECUTORS:
+            raise PolicyError(f"executor must be one of {', '.join(EXECUTORS)}, not {self.data.get('executor')!r}")
         checks = self.data.get("merge", {}).get("required_checks") or {}
         for repo in self.data.get("merge", {}).get("base", {}):
             names = checks.get(repo)

@@ -76,6 +76,7 @@
       "may_merge": false
     }
   },
+  "executor": "patrick-hermes",
   "merge": {
     "required_checks": {
       "ThornswoodRP/Thornswood": [

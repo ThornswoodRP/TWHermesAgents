@@ -474,3 +474,122 @@ class Runs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OneExecutor(unittest.TestCase):
+    """Until the cutover the Bots read and plan only (the shadow run), and
+    Patrick's Hermes is the one executor: every GitHub write through the
+    socket is refused, whatever a Bot asks, and nothing reaches GitHub."""
+
+    def call(self, w: World, op: str, args: dict) -> dict:
+        handler, callers = w.git.ops()[op]
+        self.assertEqual(callers, {"hermes"})
+        return handler("hermes", json.loads(json.dumps(args)))
+
+    def test_the_shipped_policy_names_patricks_hermes(self):
+        self.assertEqual(policy().data["executor"], "patrick-hermes")
+
+    def test_every_write_is_refused_before_the_cutover(self):
+        w = World()
+        sha = w.green_pr()
+        main = w.fake.ref(APP, "main")
+        name, _ = w.bundle("sprocket", "sprocket/3561-other", {"x.txt": "x\n"})
+        calls = len(w.fake.calls)
+        asks = {
+            "push": {"bot": "sprocket", "repo": APP, "task": "t", "branch": "sprocket/3561-other", "bundle": name},
+            "open_pr": {"bot": "sprocket", "repo": APP, "task": "t", "head": "sprocket/3561-path-fence", "title": "t", "body": "b"},
+            "edit_pr": {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "title": "t2"},
+            "comment": {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "body": "hi"},
+            "label": {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "label": "claimed: Sprocket"},
+            "claim_labels": {"bot": "bramble", "repo": APP, "task": "t"},
+            "merge": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "sha": sha},
+            "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml", "ref": "main",
+                          "commit": main, "inputs": {}},
+        }
+        self.assertEqual(sorted(asks), sorted(GitService.WRITES))
+        for op, args in asks.items():
+            with self.subTest(op=op), self.assertRaises(Refused) as e:
+                self.call(w, op, args)
+            self.assertIn("until the cutover the Bots read and plan only", str(e.exception))
+            self.assertIn("patrick-hermes is the one executor", str(e.exception))
+        self.assertEqual(w.fake.calls[calls:], [], "nothing reached GitHub")
+        self.assertFalse(w.fake.prs[(APP, 42)]["merged"])
+        self.assertIsNone(w.fake.ref(APP, "sprocket/3561-other"))
+
+    def test_reads_and_the_base_still_work_in_the_shadow_run(self):
+        w = World()
+        self.assertEqual(self.call(w, "read", {"bot": "rift", "repo": APP, "path": f"/repos/{APP}"})["body"]["default_branch"], "main")
+        self.assertTrue(self.call(w, "base", {"bot": "sprocket", "repo": APP})["bundle"])
+
+    def test_after_the_cutover_the_same_merge_goes_through(self):
+        w = World()
+        sha = w.green_pr()
+        w.git.policy.data["executor"] = "bramble"
+        out = self.call(w, "merge", {"bot": "bramble", "repo": APP, "task": "merge-42", "number": 42, "sha": sha})
+        self.assertTrue(out["done"], out)
+        self.assertTrue(w.fake.prs[(APP, 42)]["merged"])
+        # A worker still never merges.
+        with self.assertRaises(Refused):
+            self.call(w, "merge", {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "sha": sha})
+
+    def test_an_unknown_executor_is_a_broken_policy(self):
+        from thornswood_guard.policy import Policy, PolicyError
+        data = json.loads(json.dumps(policy().data))
+        data["executor"] = "rift"
+        with self.assertRaises(PolicyError):
+            Policy(data)
+        del data["executor"]
+        with self.assertRaises(PolicyError):
+            Policy(data)
+
+
+class CanaryOneExecutor(unittest.TestCase):
+    """tw-canary's check, against a real tw-git socket: the ASK script the
+    canary runs as hermes, and how the canary reads the answer."""
+
+    def serve(self, w: World) -> str:
+        import os
+        import threading
+        from thornswood_brokers import wire
+        sock = str(w.root / "git.sock")
+        me = wire.user_name(os.getuid())
+        ops = {n: (h, {me}) for n, (h, _) in w.git.ops().items()}
+        server = wire.Server(sock, ops, mode=0o600)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return sock
+
+    def ask(self, sock: str, sha: str, number: int = 42) -> str:
+        from thornswood_brokers import canary
+        args = {"bot": "bramble", "repo": APP, "task": "tw-canary", "number": number, "sha": sha}
+        return subprocess.run([_sys.executable, "-I", "-c", canary.ASK, sock, "merge", json.dumps(args)],
+                              capture_output=True, text=True, timeout=60).stdout
+
+    def test_before_the_cutover_the_rule_refuses_it(self):
+        from thornswood_brokers.canary import executor_problem
+        w = World()
+        sha = w.green_pr()
+        sock = self.serve(w)
+        # Even a merge that would go through: the head is right and green.
+        out = self.ask(sock, sha)
+        self.assertIsNone(executor_problem("patrick-hermes", out), out)
+        self.assertFalse(w.fake.prs[(APP, 42)]["merged"])
+
+    def test_after_the_cutover_the_zero_head_is_refused_and_nothing_merges(self):
+        from thornswood_brokers.canary import executor_problem
+        w = World()
+        w.green_pr()
+        w.git.policy.data["executor"] = "bramble"
+        out = self.ask(self.serve(w), "0" * 40)
+        self.assertIsNone(executor_problem("bramble", out), out)
+        self.assertIn("head moved", out)
+        self.assertFalse(w.fake.prs[(APP, 42)]["merged"])
+
+    def test_reading_the_answer(self):
+        from thornswood_brokers.canary import executor_problem
+        self.assertIn("did the merge", executor_problem("patrick-hermes", '{"ok": true, "result": {}}'))
+        self.assertIn("not by the one-executor rule",
+                      executor_problem("patrick-hermes", '{"ok": false, "reason": "the head moved"}'))
+        self.assertIn("did not answer", executor_problem("patrick-hermes", '{"ok": false, "reason": "NOCONNECT [Errno 2]"}'))
+        self.assertIn("no answer the canary can read", executor_problem("bramble", ""))

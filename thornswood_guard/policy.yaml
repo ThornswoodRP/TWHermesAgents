@@ -66,6 +66,14 @@ github_apps:
     workflows: false
     may_merge: false
 
+# One executor at a time (plan 01 phases 4 and 5; handoff of 31 Oct, Patrick's
+# answer A). Until the cutover the Bots triage and plan read only (the shadow
+# run), and Patrick's Hermes merges, releases and deploys: tw-git refuses every
+# GitHub write a Bot asks for (push, pull request, comment, label, merge, run).
+# At the cutover Patrick sets this to bramble by a PR here, and Bramble takes
+# merge authority once. Nothing a Bot does can change it.
+executor: patrick-hermes
+
 merge:
   # The checks per repo that must each be a success on the exact head.
   # Skipped is not success. Read from each repo's PR builds.
