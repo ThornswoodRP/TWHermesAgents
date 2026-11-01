@@ -752,14 +752,15 @@ class OneInstall(unittest.TestCase):
                               capture_output=True, text=True, env=env, timeout=120)
 
     def test_makes_the_token_on_the_vm_straight_into_its_file(self):
-        r = self.install("-SshHost", "hermes")
+        r = self.install()
         out = r.stdout + r.stderr
         self.assertIn("PASS the VM made the connector's token", out)
         self.assertNotIn("tok_", out, "the token never shows")
         self.assertEqual((self.t / "own-one.token").read_text(encoding="ascii"), "tok_" + "x" * 43)
         self.assertEqual(oct((self.t / "own-one.token").stat().st_mode & 0o777), "0o600")
         call = self.calls.read_text(encoding="utf-8")
-        self.assertIn("-o BatchMode=yes hermes sudo -n runuser -u tw-decide -- /opt/thornswood-hermes/bin/tw-decide "
+        # One's ssh alias for the VM, as install-on-oracle.sh uses it; "hermes" is only the HTTPS name.
+        self.assertIn("-o BatchMode=yes thornswood-bots sudo -n runuser -u tw-decide -- /opt/thornswood-hermes/bin/tw-decide "
                       "--db /srv/tw/decide/core.db feed-token --workspace thornswood --name own-one", call)
         self.assertTrue((self.t / "own-connector" / "own_connector.py").exists())
         self.assertTrue((self.t / "own-connector" / "room_send.py").exists())
@@ -767,12 +768,11 @@ class OneInstall(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("FAIL one round did not work", out)
 
-    def test_needs_the_ssh_name_the_first_time_and_never_remakes_a_token(self):
+    def test_the_ssh_name_can_be_given_and_a_token_is_never_remade(self):
+        r = self.install("-SshHost", "other-name")
+        self.assertIn("-o BatchMode=yes other-name sudo", self.calls.read_text(encoding="utf-8"))
+        self.calls.unlink()
         r = self.install()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("pass -SshHost", r.stdout)
-        (self.t / "own-one.token").write_text("tok_already", encoding="ascii")
-        r = self.install("-SshHost", "hermes")
         self.assertIn("PASS the connector's token is already in", r.stdout)
         self.assertFalse(self.calls.exists())
 

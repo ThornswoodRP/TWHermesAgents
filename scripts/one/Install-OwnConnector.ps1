@@ -11,7 +11,7 @@ VM (1 Nov, answer A): nothing listens on One, and the VM never reaches in.
 
   1. It finds Hermes on One (the hermes command and the Python beside it).
   2. The first time (or with -NewToken) it has the VM make the connector's
-     token, over ssh, straight into %APPDATA%\Thornswood\own-one.token; the
+     token, over ssh to thornswood-bots (One's alias for the VM), straight into %APPDATA%\Thornswood\own-one.token; the
      token never shows on screen or in a log. Only Patrick's user can read
      that file.
   3. It copies own_connector.py and room_send.py from this clone into
@@ -26,14 +26,16 @@ does nothing and copies nothing. It prints a PASS or FAIL line for each step
 and exits 1 when any fails. Run it again after an update to main.
 
 .EXAMPLE
-pwsh -NoProfile -File scripts\one\Install-OwnConnector.ps1 -Core https://hermes.<tailnet>.ts.net/api/v1 -SshHost hermes
+pwsh -NoProfile -File scripts\one\Install-OwnConnector.ps1 -Core https://hermes.<tailnet>.ts.net/api/v1
 #>
 [CmdletBinding()]
 param(
     # The decision core's API through Tailscale Serve: the VM's ts.net address and /api/v1.
     [Parameter(Mandatory)][string]$Core,
-    # The ssh name One uses to run sudo on the VM; needed the first time, or with -NewToken.
-    [string]$SshHost = '',
+    # The ssh name One uses to run sudo on the VM, the first time or with -NewToken. One's ssh
+    # config knows the VM as thornswood-bots (the VM's address and key, as install-on-oracle.sh
+    # and send-to-oracle.sh use it); the tailnet name hermes is the HTTPS address only.
+    [string]$SshHost = 'thornswood-bots',
     [string]$Hermes = '',
     [string]$HermesPython = '',
     [string]$Folder = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Thornswood\own-connector'),
@@ -72,7 +74,6 @@ Pass "Hermes on One is $Hermes, with $HermesPython"
 $tokenDir = Split-Path $TokenFile
 New-Item -ItemType Directory -Force -Path $tokenDir | Out-Null
 if ($NewToken -or -not (Test-Path $TokenFile) -or (Get-Item $TokenFile).Length -eq 0) {
-    if (-not $SshHost) { Fail 'the token is made on the VM the first time; pass -SshHost, the ssh name One uses to run sudo there' }
     $mint = 'sudo -n runuser -u tw-decide -- /opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db ' +
             'feed-token --workspace thornswood --name own-one'
     $token = & ssh -o BatchMode=yes $SshHost $mint 2>$null
