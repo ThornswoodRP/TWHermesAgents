@@ -220,6 +220,56 @@ class ConnectorSide(unittest.TestCase):
         self.assertEqual(s.db.execute("SELECT status FROM chat_messages").fetchone()[0], "quarantined")
 
 
+class DecidedLine(unittest.TestCase):
+    """An answered question or change card tells its Bot to give DECIDED.md the line (q-p18-decided-auto)."""
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+        seat(self.w)
+        flags(self.w, "connector_effects")
+        self.chat = Chat(self.w.store)
+        self.tok = Feeds(self.w.store).new_token(self.w.ws, "connector", by="tests")
+
+    def told(self, key: str = "key-00000001", **kw) -> tuple[str, str]:
+        card = self.w.card(**kw)
+        self.w.core.answer(self.w.patrick(), **self.w.answer_args(card, key=key))
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([i["kind"] for i in items], ["decision.answered"])
+        self.chat.result(self.w.ws, self.tok, items[0]["id"], "confirmed", "turn finished")  # one lease per Bot
+        return card["id"], items[0]["text"]
+
+    def test_a_question_names_the_issue_the_format_and_the_checks(self):
+        cid, text = self.told(links=[("issue", "#4321")])
+        self.assertIn("Do it (option a)", text)
+        self.assertIn("docs/DECIDED.md", text)
+        self.assertIn("Comment on issue #4321", text)
+        self.assertIn(f"- **The decision as one plain sentence.** ({cid}) 1 Nov 2026, [#N]", text)
+        self.assertIn("that line goes and this one takes its place", text)
+        self.assertIn("never reorder or rewrite any other line", text)
+        for check in ("scripts/dev/Check-Words.ps1", "tests/test-docs-index.js", "tests/test-3283-docs-word-number.js"):
+            self.assertIn(check, text)
+        self.assertNotIn("\u2014", text)
+
+    def test_a_change_card_gets_it_too(self):
+        self.assertIn("docs/DECIDED.md", self.told(kind="change", links=[("issue", "#7")])[1])
+
+    def test_no_issue_means_one_is_filed_first(self):
+        text = self.told()[1]
+        self.assertIn("Comment on a new issue for it (file it on the board first, unclaimed, in Todo)", text)
+
+    def test_the_date_is_patricks_mountain_day(self):
+        # 3:30 AM UTC on 2 Nov is 8:30 PM on 1 Nov in Mountain time.
+        self.w.clock.t = datetime(2026, 11, 2, 3, 30, tzinfo=timezone.utc)
+        self.assertIn(") 1 Nov 2026, [#N]", self.told()[1])
+
+    def test_a_step_approval_settles_nothing_and_writes_no_line(self):
+        for kind in ("review", "todo"):
+            text = self.told(key=f"key-{kind}-0001", kind=kind)[1]
+            self.assertIn("approves nothing by itself", text)
+            self.assertNotIn("DECIDED", text)
+
+
 class Rooms(unittest.TestCase):
     """The Rooms list: every bound room, each its own chat (Patrick, 1 Nov)."""
     SECOND = "00000000-0000-4000-8000-000000000002"

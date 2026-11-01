@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from .auth import Principal
 from .core import DecisionCore
@@ -41,6 +42,11 @@ from .own import PAGE_TEXT, PAGES, _page_mid, clean_page, fetch_page, page_kind
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
 MAX_TEXT = 8000
+# The cards whose answer settles something, so DECIDED.md gets its line (plan line 39,
+# q-p18-decided-auto). A review, a to-do or a board or weekly review approves one step
+# and settles nothing that outlives it.
+SETTLES = ("question", "change")
+MOUNTAIN = ZoneInfo("America/Denver")  # Patrick's dates, as DECIDED.md writes them
 LEASE = timedelta(minutes=20)
 ROOM = "room"  # the first room bound, by its first name
 OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
@@ -348,7 +354,39 @@ class Chat:
                        (body["decision_id"], body["revision"], body["option"])).fetchone()
         return (f"Patrick answered the card \"{d['title']}\" ({body['decision_id']}, revision {body['revision']}): "
                 f"{o['label'] if o else body['option']} (option {body['option']}). Response {body['response']}. "
-                "The card in the decision core is the record; this message approves nothing by itself.")
+                "The card in the decision core is the record; this message approves nothing by itself."
+                + Chat._decided_text(db, body["decision_id"], body["response"]))
+
+    @staticmethod
+    def _decided_text(db, decision_id: str, response_id: str) -> str:
+        """What the Bot that asked does so DECIDED.md carries this answer.
+
+        The core is private and on the VM, and DECIDED.md links where each decision was
+        made, so the Bot first puts the answer on the card's public issue and the line
+        links that comment, with the card id beside it so the record can be found. The
+        format and the checks that read the file are DECIDED.md's own (PR #5339)."""
+        d = db.execute("SELECT kind FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+        if d["kind"] not in SETTLES:
+            return ""
+        at = db.execute("SELECT answered_at FROM responses WHERE id = ?", (response_id,)).fetchone()["answered_at"]
+        day = parse(at).astimezone(MOUNTAIN)
+        date = f"{day.day} {day:%b %Y}"
+        issues = [r["ref"] for r in db.execute("SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'issue' "
+                                               "ORDER BY rowid", (decision_id,))]
+        where = (f"issue {issues[0]}" if issues else
+                 "a new issue for it (file it on the board first, unclaimed, in Todo)")
+        return ("\n\nRecord the answer in docs/DECIDED.md in ThornswoodRP/Thornswood; every answered question "
+                "or change card gets its line:\n"
+                f"1. Comment on {where}: what was asked, Patrick's answer and the date, {date}. Plain, as the "
+                "guide's \"How an issue and a comment are written\" says: no byline and no footer.\n"
+                "2. On a branch of your own, add one bullet under the topic heading it is about, or under "
+                "\"### After the plan\" when it is a design card:\n"
+                f"   - **The decision as one plain sentence.** ({decision_id}) {date}, [#N](the link to that "
+                "comment).\n"
+                "   Wrap it near 78 columns with a two-space continuation. If it changes a line already there, "
+                "that line goes and this one takes its place; never reorder or rewrite any other line.\n"
+                "3. Run pwsh scripts/dev/Check-Words.ps1, node tests/test-docs-index.js and "
+                "node tests/test-3283-docs-word-number.js, then open the pull request through tw_git.")
 
     def result(self, workspace_id: str, token: str | None, item_id: str, outcome: str, ref: str = "",
                reason: str = "") -> dict:

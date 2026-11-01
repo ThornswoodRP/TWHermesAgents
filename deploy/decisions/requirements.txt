@@ -34,3 +34,7 @@ pyopenssl==26.4.0 \
     --hash=sha256:f0eb0cb2d581d3ad2b9c489468485e7f2ab6727d08401bcf9d824c3caddf3c1c
 typing-extensions==4.16.0 ; python_version < "3.13" \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+# The time zone data zoneinfo reads where the system has none (Windows, as on One's Python
+# job): the core writes Patrick's Mountain date into what it tells a Bot (chat.py). Pure Python.
+tzdata==2026.5 \
+    --hash=sha256:b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac
