@@ -617,6 +617,33 @@
       "checkpoints",
       "tools",
       "installs"
-    ]
+    ],
+    "offsite": {
+      "remote": "thornswood-gdrive",
+      "rclone_config": "/var/lib/tw-offsite/rclone.conf",
+      "hermes_folder": "Thornswood-Hermes-Backups",
+      "box_folder": "Thornswood-Box-Backups",
+      "drive_keep_days": 90,
+      "box_drive_keep_days": 30,
+      "fresh_hours": 26,
+      "box_drop": "/srv/tw/boxdrop",
+      "box_store": "/srv/tw/boxbackups",
+      "box_keep_days": 30,
+      "box_keep_newest": 7,
+      "box_address": "192.135.112.23",
+      "box_key_file": "deploy/keys/box-drop.pub"
+    }
+  },
+  "follow_main": {
+    "url": "git@github.com:EvilPatrick06/Thornswood-Hermes.git",
+    "read_key": "/etc/thornswood/hermes-read-key",
+    "known_hosts": "/etc/thornswood/github_known_hosts",
+    "mirror": "/srv/tw/follow/thornswood-hermes.git",
+    "state_file": "/var/lib/thornswood/follow-main.json",
+    "ci_user": "tw-ci",
+    "ci_dir": "/srv/tw/ci",
+    "tests_minutes": 20,
+    "hermes_user": "hermes",
+    "hermes_releases": "/home/hermes/thornswood-hermes/releases"
   }
 }

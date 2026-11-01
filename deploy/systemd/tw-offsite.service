@@ -1,0 +1,25 @@
+# Off-site copies (thornswood_brokers/offsite.py): root takes each complete
+# drop out of the box's add-only jail, then tw-offsite copies the VM's and the
+# box's encrypted backups to Google Drive and says whether last night's of
+# each arrived.
+[Unit]
+Description=Thornswood backups to Google Drive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tw-offsite
+Group=tw-offsite
+SupplementaryGroups=tw-backup
+Slice=tw-brokers.slice
+ExecStartPre=+/opt/thornswood-hermes/bin/tw-offsite intake
+ExecStart=/opt/thornswood-hermes/bin/tw-offsite copy
+ProtectSystem=strict
+ProtectHome=yes
+# The intake above runs as root, outside these limits (the + prefix).
+ReadWritePaths=/srv/tw/boxbackups
+ReadOnlyPaths=/srv/tw/backups /etc/thornswood
+PrivateTmp=yes
+NoNewPrivileges=yes
+TimeoutStartSec=2h

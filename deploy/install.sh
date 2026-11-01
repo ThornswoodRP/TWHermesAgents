@@ -75,7 +75,7 @@ print(json.dumps(v) if isinstance(v,(dict,list,bool)) else v)' "$here/thornswood
 
 bots="bramble rift sprocket echo magpie wisp"
 workers="rift sprocket echo magpie wisp"
-for tool in git openssl age podman systemd-run python3 visudo sshd; do
+for tool in git openssl age podman systemd-run python3 visudo sshd ssh-keygen; do
   command -v "$tool" >/dev/null || stop "$tool is not installed on the VM."
 done
 id hermes >/dev/null 2>&1 || stop "the hermes user does not exist."
@@ -93,7 +93,9 @@ mkuser() {
     useradd --system --no-create-home --home-dir / --shell /usr/sbin/nologin --user-group "$u"
   fi
 }
-for u in tw-policy tw-files tw-git tw-proxy tw-backup; do mkuser "$u"; done
+for u in tw-policy tw-files tw-git tw-proxy tw-backup tw-offsite tw-boxdrop tw-ci; do mkuser "$u"; done
+# tw-offsite reads the VM's archives (tw-backup:tw-backup 0440) to copy them to Drive.
+usermod -a -G tw-backup tw-offsite
 for b in $workers; do mkuser "tw-$b"; usermod -a -G "tw-work-$b" "tw-$b"; done
 usermod -a -G tw-policy-clients,tw-git-clients,tw-files-clients hermes
 usermod -a -G tw-policy-clients,tw-spool tw-git
@@ -119,6 +121,17 @@ for b in $bots; do
 done
 install -d -m 0755 -o root -g root /srv/tw/backups
 install -d -m 0700 -o root -g root /srv/tw/snapshots
+# The box's add-only drop: the jail's root must be root's and not writable by
+# anyone else (sshd's ChrootDirectory rule); /in lets tw-boxdrop add and open
+# by name, never list. Root's intake moves each finished file to boxbackups.
+install -d -m 0755 -o root -g root /srv/tw/boxdrop
+install -d -m 0730 -o root -g tw-boxdrop /srv/tw/boxdrop/in
+install -d -m 0700 -o root -g root /srv/tw/boxdrop/rejected
+install -d -m 0750 -o tw-offsite -g tw-offsite /srv/tw/boxbackups
+install -d -m 0700 -o tw-offsite -g tw-offsite "$(dirname "$(pol backups.offsite.rclone_config)")"
+# Following main: root's mirror of it, the test runs' folder, and the record.
+install -d -m 0700 -o root -g root "$(dirname "$(pol follow_main.mirror)")" "$(dirname "$(pol follow_main.state_file)")"
+install -d -m 0755 -o root -g root "$(pol follow_main.ci_dir)"
 ok "folders under /srv/tw, with one tw-files:tw-work-<bot> 2770 folder for each of $bots"
 
 # 3. The Apps' keys: tw-git's alone.
@@ -198,6 +211,47 @@ systemctl reload ssh 2>/dev/null || systemctl reload sshd
 [[ -s /etc/ssh/authorized_keys/tw-backup ]] && ok "tw-backup can pull over SFTP" || \
   echo "SKIP the SFTP pull: put One's backup public key in /etc/thornswood/backup-sftp.pub and run this again"
 
+# 5b. The box's add-only drop (#2862). Its public key is in this repository
+# (backups.offsite.box_key_file), so a merge here is how it changes; it works
+# only from the box's address.
+box_key="$here/$(pol backups.offsite.box_key_file)"
+box_addr="$(pol backups.offsite.box_address)"
+if [[ -s "$box_key" ]]; then
+  grep -qE '^ssh-ed25519 [A-Za-z0-9+/=]+ thornswood-box-drops-backups$' "$box_key" || stop "$box_key is not the box's drop key."
+  printf 'from="%s",restrict %s\n' "$box_addr" "$(cat "$box_key")" > /etc/ssh/authorized_keys/tw-boxdrop.new
+  chmod 0644 /etc/ssh/authorized_keys/tw-boxdrop.new
+  mv /etc/ssh/authorized_keys/tw-boxdrop.new /etc/ssh/authorized_keys/tw-boxdrop
+fi
+install -m 0644 "$here/deploy/sshd/51-tw-boxdrop.conf" /etc/ssh/sshd_config.d/51-tw-boxdrop.conf
+sshd -t || stop "sshd rejects the tw-boxdrop jail; nothing was reloaded."
+systemctl reload ssh 2>/dev/null || systemctl reload sshd
+[[ -s /etc/ssh/authorized_keys/tw-boxdrop ]] && ok "the box can add its backups to /srv/tw/boxdrop/in from $box_addr, and do nothing else" || \
+  echo "SKIP the box's drop: its key is not in $(pol backups.offsite.box_key_file) yet"
+
+# 5c. Drive, for both kinds of backup (tw-offsite.service). The sign-in is
+# made once, by Patrick, with rclone's own headless flow; README, Off-site
+# copies, has the two commands. Its file is tw-offsite's alone.
+command -v rclone >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q rclone >/dev/null
+command -v rclone >/dev/null || stop "rclone could not be installed."
+rconf="$(pol backups.offsite.rclone_config)"
+if [[ -f "$rconf" ]]; then
+  chown tw-offsite:tw-offsite "$rconf"; chmod 0600 "$rconf"
+  ok "tw-offsite holds the Drive sign-in ($rconf, 0600)"
+else
+  echo "SKIP Drive: no sign-in at $rconf yet (README, Off-site copies)"
+fi
+
+# 5d. The VM's own read-only key for this repository (tw-follow-main.service).
+# Made here once, root's alone. Patrick adds its public half to the repo as a
+# deploy key with write access off; until then each run says so.
+read_key="$(pol follow_main.read_key)"
+if [[ ! -f "$read_key" ]]; then
+  ssh-keygen -q -t ed25519 -N '' -C thornswood-bots-reads-hermes -f "$read_key"
+fi
+chown root:root "$read_key" "$read_key.pub"; chmod 0400 "$read_key"; chmod 0644 "$read_key.pub"
+install -m 0644 -o root -g root "$here/deploy/ssh/github_known_hosts" "$(pol follow_main.known_hosts)"
+ok "the VM's read key for Thornswood-Hermes: $(cat "$read_key.pub")"
+
 # 6. The code: this commit, root-owned, as current.
 install -d -m 0755 "$opt/bin"
 for f in "$here"/deploy/bin/*; do install -m 0755 -o root -g root "$f" "$opt/bin/"; done
@@ -275,7 +329,8 @@ install -m 0644 "$here/deploy/systemd/user-hermes.slice.conf" "/etc/systemd/syst
 systemctl daemon-reload
 systemctl enable --quiet tw-limits-check.service
 systemctl restart tw-limits-check.service
-systemctl enable --quiet --now tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer
+systemctl enable --quiet --now tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
+  tw-offsite.timer tw-offsite.path tw-follow-main.timer
 systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
 ok "units in place and started"
 

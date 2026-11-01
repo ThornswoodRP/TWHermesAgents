@@ -533,8 +533,11 @@ slices:
     TasksMax: 1024
 
 # Backups (02 section 7, OPEN item 7). Encrypted on the VM to Patrick's age
-# public key, pulled by One over SFTP as tw-backup, and uploaded by One to
-# Google Drive. Never in an archive: sign-ins, .env files, keys.
+# public key. Never in an archive: sign-ins, .env files, keys. Until 31 Oct
+# One pulled them over SFTP as tw-backup and uploaded them to Google Drive;
+# since Patrick's answer A on q-retire-hermes-one (#2862) the VM copies them
+# to Drive itself (offsite below), and the game box's nightly comes the same
+# way through an add-only drop.
 backups:
   age_recipient_file: /etc/thornswood/backup-recipient.txt
   archive_keep_days: 14
@@ -557,3 +560,42 @@ backups:
     - "*.db-wal"
     - "*.db-shm"
   exclude_dirs: [cache, image_cache, audio_cache, document_cache, node_modules, hermes-agent, logs, checkpoints, tools, installs]
+  # Off-site copies (thornswood_brokers/offsite.py, tw-offsite.service).
+  # Patrick, 31 Oct: Google Drive, through the VM, so a stolen box cannot
+  # delete the copies it sent. The Drive sign-in is tw-offsite's alone.
+  offsite:
+    remote: thornswood-gdrive
+    rclone_config: /var/lib/tw-offsite/rclone.conf
+    hermes_folder: Thornswood-Hermes-Backups
+    box_folder: Thornswood-Box-Backups
+    drive_keep_days: 90
+    # The box's copies hold people's records, and the public privacy page
+    # promises off-box copies are kept 30 days with at least seven retained
+    # (Thornswood site/data/site/privacy.md, Backups), on Drive as here.
+    box_drive_keep_days: 30
+    # A backup of either kind older than this is a missed night, said as a
+    # failure (One's Check-OffBox used 26 hours).
+    fresh_hours: 26
+    box_drop: /srv/tw/boxdrop
+    box_store: /srv/tw/boxbackups
+    box_keep_days: 30
+    box_keep_newest: 7
+    box_address: 192.135.112.23
+    # The box's public key, in this repository so a merge is how it changes.
+    box_key_file: deploy/keys/box-drop.pub
+
+# The VM follows main by itself (thornswood_brokers/follow_main.py,
+# tw-follow-main.timer). Patrick's answer A on q-retire-hermes-one, 31 Oct
+# (#2862): no other machine sends it a commit. It reads this repository with
+# its own read-only deploy key, root's alone.
+follow_main:
+  url: git@github.com:EvilPatrick06/Thornswood-Hermes.git
+  read_key: /etc/thornswood/hermes-read-key
+  known_hosts: /etc/thornswood/github_known_hosts
+  mirror: /srv/tw/follow/thornswood-hermes.git
+  state_file: /var/lib/thornswood/follow-main.json
+  ci_user: tw-ci
+  ci_dir: /srv/tw/ci
+  tests_minutes: 20
+  hermes_user: hermes
+  hermes_releases: /home/hermes/thornswood-hermes/releases

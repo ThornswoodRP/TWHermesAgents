@@ -236,9 +236,9 @@ class Units(unittest.TestCase):
             self.skipTest("systemd-analyze is not here")
         with tempfile.TemporaryDirectory() as t:
             for f in UNITS.iterdir():
-                if f.suffix in (".service", ".timer", ".slice"):
+                if f.suffix in (".service", ".timer", ".slice", ".path"):
                     shutil.copy(f, t)
-            names = [str(Path(t) / f.name) for f in UNITS.iterdir() if f.suffix in (".service", ".timer", ".slice")]
+            names = [str(Path(t) / f.name) for f in UNITS.iterdir() if f.suffix in (".service", ".timer", ".slice", ".path")]
             r = subprocess.run(["systemd-analyze", "verify", "--man=no", *names], capture_output=True, text=True)
             # verify also loads the host's own units and warns about them (on
             # the VM, Oracle's unified-monitoring-agent files are marked

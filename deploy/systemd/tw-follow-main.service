@@ -1,0 +1,13 @@
+# The VM follows main by itself: fetches it with its own read-only deploy
+# key, tests it, installs and applies it, restarts the gateway and runs the
+# canary, and puts the earlier release back if any of that fails
+# (thornswood_brokers/follow_main.py). Root, because the install is root's.
+[Unit]
+Description=Thornswood-Hermes follows main
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/thornswood-hermes/bin/tw-follow-main
+TimeoutStartSec=45min

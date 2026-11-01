@@ -1,0 +1,12 @@
+# Half past four Mountain, an hour after the VM's own archive (3:30 AM) and
+# after the box's nightly has had time to arrive. The freshness check in each
+# run says when either did not.
+[Unit]
+Description=Thornswood backups to Google Drive, 4:30 AM Mountain
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 America/Denver
+Persistent=true
+
+[Install]
+WantedBy=timers.target
