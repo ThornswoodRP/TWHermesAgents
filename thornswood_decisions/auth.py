@@ -200,6 +200,8 @@ class Auth:
                 raise CoreError(404, "no_device", "no such live device")
             db.execute("UPDATE sessions SET revoked_at = ?, revoked_reason = 'device revoked' "
                        "WHERE device_id = ? AND revoked_at IS NULL", (self.s.now(), device_id))
+            db.execute("UPDATE push_subscriptions SET revoked_at = ?, retired_reason = 'device revoked' "
+                       "WHERE device_id = ? AND revoked_at IS NULL", (self.s.now(), device_id))
             self.s.event(db, principal.workspace_id, "device.revoked", device_id, "patrick", {})
 
     def revoke_all(self, workspace_id: str, reason: str, db) -> int:

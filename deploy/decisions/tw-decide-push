@@ -1,0 +1,8 @@
+#!/opt/thornswood-hermes/decisions-venv/bin/python3 -I
+# Sends "Thornswood needs you" to Patrick's phone, as the tw-push user, from the
+# root-owned copy, with the core's own venv (its cryptography). -I: only this
+# copy's code is imported.
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_decisions.push_worker import main  # noqa: E402
+sys.exit(main(sys.argv[1:]))

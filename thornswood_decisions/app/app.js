@@ -1,5 +1,5 @@
-// The Thornswood phone app (07 sections 4 and 5; step 3 read only, step 4
-// answers and chat).
+// The Thornswood phone app (07 sections 4, 5 and 8; step 3 read only, step 4
+// answers and chat, step 5 alerts).
 //
 // Plain script, no framework, no inline code (the page's CSP allows only this
 // file). Everything shown from the core is set with textContent, never as
@@ -218,6 +218,7 @@ async function needsYou() {
   if (refused(r)) return
   seq = r.body.seq
   badge(r.body.cards.length)
+  tidyAlerts(new Set(r.body.cards.map(c => c.id)))
   if (!r.body.cards.length) return show(el('p', { class: 'quiet' }, 'Nothing needs you right now.'))
   show(r.body.cards.map(c => el('button', { class: 'row', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
     el('strong', {}, c.title),
@@ -232,6 +233,7 @@ async function cardView(id, note) {
   const a = await call('GET', '/cards/' + encodeURIComponent(id) + '/artifact')
   const status = el('p', { class: 'warn', role: 'status' }, note || '')
   const pending = c.status === 'pending'
+  if (!pending) tidyAlerts(new Set(), c.id)
   const parts = [
     el('h2', {}, c.title),
     el('p', { class: 'quiet' }, `${c.kind}, revision ${c.revision}, ${c.status}${c.risk === 'high' ? ', high risk' : ''}`),
@@ -396,9 +398,97 @@ async function chatView(target, tab) {
   show(parts)
 }
 
-async function settingsView() {
+// ── alerts (step 5) ───────────────────────────────────────────────────────
+//
+// Asked for only on a deliberate tap. A "no" is told to the core, which keeps
+// it, and the app never asks again by itself. An alert of a card that no
+// longer needs Patrick is taken off the phone when the app next sees it.
+
+function alertsSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
+}
+
+async function tidyAlerts(pending, only) {
+  if (!alertsSupported()) return
+  try {
+    const reg = await navigator.serviceWorker.getRegistration('/m/')
+    if (!reg) return
+    for (const n of await reg.getNotifications()) {
+      const m = /^decision:(.+)$/.exec(n.tag || '')
+      if (m && !pending.has(m[1]) && (!only || m[1] === only)) n.close()
+    }
+  } catch (err) { /* the phone keeps the alert; tapping it opens the answered card */ }
+}
+
+async function alertsPart(status) {
+  const part = el('div', {})
+  if (!alertsSupported()) {
+    part.append(el('p', { class: 'quiet' }, 'This browser cannot show alerts. Open the app from the home screen icon.'))
+    return part
+  }
+  const r = await call('GET', '/push')
+  if (r.status !== 200) { part.append(el('p', { class: 'quiet' }, said(r.body))); return part }
+  const s = r.body
+  if (s.subscribed) {
+    part.append(el('p', {}, 'Alerts are on for this phone.'))
+    if (!s.sending) part.append(el('p', { class: 'quiet' }, 'The core is not sending alerts yet, so none will come.'))
+    part.append(el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      try {
+        const reg = await navigator.serviceWorker.ready
+        const sub = await reg.pushManager.getSubscription()
+        if (sub) await sub.unsubscribe()
+      } catch (err) { /* the core forgets it below either way */ }
+      const done = await call('POST', '/push/unsubscribe')
+      if (done.status === 200) return settingsView('Alerts are off.')
+      status.textContent = said(done.body)
+    } }, 'Turn off alerts'))
+    return part
+  }
+  if (Notification.permission === 'denied' || s.consent === 'denied') {
+    part.append(el('p', { class: 'quiet' }, 'Alerts are off because this phone said no. To have them, allow ' +
+      'notifications for this app in the phone\'s settings, then tap Turn on alerts.'))
+  } else {
+    part.append(el('p', { class: 'quiet' }, 'Alerts are off. When on, a card that needs you shows ' +
+      '"Thornswood needs you" on the lock screen, and nothing more.'))
+  }
+  if (!s.vapid_public) {
+    part.append(el('p', { class: 'quiet' }, 'Alerts are not ready on the core yet.'))
+    return part
+  }
+  part.append(el('button', { class: 'secondary', type: 'button', onclick: async () => {
+    status.textContent = ''
+    let perm = Notification.permission
+    if (perm !== 'granted') {
+      try { perm = await Notification.requestPermission() } catch (err) { perm = 'denied' }
+    }
+    if (perm !== 'granted') {
+      const told = await call('POST', '/push/denied')
+      return settingsView(told.status === 200 ? 'Alerts stay off. The app will not ask again by itself.' : said(told.body))
+    }
+    let sub
+    try {
+      const reg = await navigator.serviceWorker.ready
+      const old = await reg.pushManager.getSubscription()
+      if (old) await old.unsubscribe()
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64url(s.vapid_public) })
+    } catch (err) {
+      status.textContent = 'This phone could not turn alerts on. Nothing changed.'
+      return
+    }
+    const done = await call('POST', '/push/subscribe', { subscription: sub.toJSON() })
+    if (done.status !== 200) {
+      try { await sub.unsubscribe() } catch (err) { /* nothing was kept */ }
+      status.textContent = said(done.body)
+      return
+    }
+    settingsView('Alerts are on.')
+  } }, 'Turn on alerts'))
+  return part
+}
+
+async function settingsView(note) {
   setTab('')
-  const status = el('p', { class: 'quiet' })
+  const status = el('p', { class: 'quiet', role: 'status' }, note || '')
   const list = el('div', {})
   const r = await call('GET', '/passkeys')
   if (r.status === 401) return signInView(said(r.body))
@@ -408,7 +498,9 @@ async function settingsView() {
       : [el('p', { class: 'quiet' }, 'No passkey yet. Add one so this phone can sign in again.')]))
   }
   const name = el('input', { autocomplete: 'off', placeholder: 'This phone', 'aria-label': 'Passkey name' })
+  const alerts = await alertsPart(status)
   show(
+    el('h2', {}, 'Alerts'), alerts,
     el('h2', {}, 'Passkeys'), list, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
@@ -423,7 +515,7 @@ async function settingsView() {
       }
       const done = await call('POST', '/passkeys/register', { credential: credentialJSON(cred), label: name.value.trim() })
       status.textContent = done.status === 200 ? 'Passkey added.' : said(done.body)
-      if (done.status === 200) settingsView()
+      if (done.status === 200) settingsView('Passkey added.')
     } }, 'Add a passkey on this phone'),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       const done = await call('POST', '/recovery-codes')
@@ -505,6 +597,13 @@ document.addEventListener('click', event => {
 document.getElementById('settings').addEventListener('click', () => go('/m/settings'))
 window.addEventListener('popstate', route)
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') poll() })
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(() => {})
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(() => {})
+  // A tapped alert, with the app already open: the worker says which card.
+  navigator.serviceWorker.addEventListener('message', event => {
+    const p = event.data && event.data.go
+    if (typeof p === 'string' && /^\/m\/(decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/.test(p)) go(p)
+  })
+}
 pollTimer = setInterval(poll, POLL_MS)
 route()

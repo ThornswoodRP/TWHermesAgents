@@ -26,7 +26,7 @@ ok() { echo "PASS $*"; }
 [[ "$here" == "$opt/releases/$commit" ]] || stop "run the copy in $opt/releases/$commit, not $here."
 [[ "$(stat -c %U "$here")" == root ]] || stop "$here is not root's."
 [[ "$(git -C "$here" rev-parse HEAD)" == "$commit" ]] || stop "$here is not at $commit."
-[[ "$(readlink -f "$opt/current")" == "$here" ]] || stop "$opt/current is not this commit; run scripts/install-on-oracle.sh $commit on One first."
+[[ "$(readlink -f "$opt/current")" == "$here" ]] || stop "$opt/current is not this commit; the VM puts main in place by itself (tw-follow-main), so wait for it to reach $commit, or see /var/lib/thornswood/follow-main.json for why it has not."
 target="$opt/current/plugins/thornswood-decisions"
 [[ -f "$target/dashboard/plugin_api.py" ]] || stop "$target has no plugin in it."
 

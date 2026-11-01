@@ -11,8 +11,9 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   flag        turn one flag on or off
   test-card   open a test card as Bramble, in a test workspace only
   serve       answer the API on 127.0.0.1
-  feed-token  print a new token for a feed (work, room, bots) or the connector (replaces the old one)
-  selfcheck   a whole passkey ceremony against a scratch store, with the installed library
+  feed-token  print a new token for a feed (work, room, bots), the connector or the push worker (replaces the old one)
+  push-reset  forget the push worker's keys and every phone's alerts, when the worker's keys are lost
+  selfcheck   a whole passkey ceremony and one sealed, encrypted push, with the installed libraries
   backup      make a consistent copy
   verify      check the event chain
 
@@ -146,8 +147,38 @@ def cmd_selfcheck(store: Store, args) -> dict:
                 raise CoreError(500, "selfcheck", "a passkey answer for another origin was accepted")
         finally:
             scratch.close()
+    import cryptography
     import webauthn
-    return {"ok": True, "webauthn": webauthn.__version__, "wrong_origin": refused}
+    return {"ok": True, "webauthn": webauthn.__version__, "wrong_origin": refused, "push": _push_selfcheck(),
+            "cryptography": cryptography.__version__}
+
+
+def _push_selfcheck() -> str:
+    """One subscription sealed and opened, and one push encrypted and read back, with throwaway keys."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    import os as _os
+    from . import webpush
+    seal_key = X25519PrivateKey.generate()
+    seal_pub = seal_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    ua = ec.generate_private_key(ec.SECP256R1())
+    auth = _os.urandom(16)
+    sub = {"endpoint": "https://fcm.googleapis.com/fcm/send/selfcheck", "p256dh": webpush.b64u(webpush._point(ua.public_key())),
+           "auth": webpush.b64u(auth)}
+    opened = webpush.unseal(webpush.seal(sub, seal_pub, b"ps_selfcheck"), seal_key, b"ps_selfcheck")
+    body = webpush.encrypt(b'{"v":1}', webpush.unb64u(opened["p256dh"]), webpush.unb64u(opened["auth"]))
+    if webpush.decrypt(body, ua, auth) != b'{"v":1}':
+        raise CoreError(500, "selfcheck", "a push did not read back")
+    webpush.vapid_header(sub["endpoint"], webpush.new_vapid_key(), "https://selfcheck.invalid")
+    return "sealed, encrypted and signed"
+
+
+def cmd_push_reset(store: Store, args) -> dict:
+    from .push import Push
+    ws, _ = _workspace(store, args.workspace)
+    Push(store).reset_keys(ws, by=OPERATOR)
+    return {"push_keys": "reset", "subscriptions": "revoked; each phone turns alerts on again"}
 
 
 def cmd_backup(store: Store, args) -> dict:
@@ -191,6 +222,8 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("feed-token")
     p.add_argument("--workspace", required=True)
     p.add_argument("--name", choices=FEED_NAMES, required=True)
+    p = sub.add_parser("push-reset")
+    p.add_argument("--workspace", required=True)
     sub.add_parser("selfcheck")
     p = sub.add_parser("backup")
     p.add_argument("--dest", required=True)
@@ -200,6 +233,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"init": cmd_init, "bind-room": cmd_bind_room, "pair": cmd_pair, "flag": cmd_flag,
             "test-card": cmd_test_card, "serve": cmd_serve, "feed-token": cmd_feed_token, "selfcheck": cmd_selfcheck,
+            "push-reset": cmd_push_reset,
             "backup": cmd_backup, "verify": cmd_verify}
 
 

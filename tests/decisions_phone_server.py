@@ -4,7 +4,9 @@
 
 It prints one JSON line (a phone pairing code and two card ids, the second
 high risk) and serves until killed. Test data only: no real workspace, no Bot,
-no deploy; nothing takes the chat messages it queues.
+no deploy; nothing takes the chat messages it queues, and the push worker's
+keys are throwaway ones said straight to the core, with no worker and no push
+service.
 """
 import json
 import sys
@@ -28,6 +30,11 @@ tw = f.new_token(w.ws, "work", by="t"); tr = f.new_token(w.ws, "room", by="t"); 
 f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}]}]})
 f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [{"id": "t1", "title": "Fix the <b>launcher</b> log", "assignee": "sprocket", "status": "running"}]})
 f.put(w.ws, "room", tr, {"source_time": "2026-11-01T18:00:00+00:00", "room_id": "54b3ad46-3419-4adb-b60d-c79cb347fcee", "events": [{"seq": 1, "kind": "message.member", "actor": "Bramble", "text": "<script>alert(1)</script> hello", "at": "2026-11-01T17:59:00+00:00"}]})
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from thornswood_decisions import push_worker, webpush
+from thornswood_decisions.push import Push
+tp = f.new_token(w.ws, "push", by="t")
+Push(w.store).hello(w.ws, tp, webpush.vapid_public(webpush.new_vapid_key()), push_worker.seal_public(X25519PrivateKey.generate()))
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
 srv = make_server(api, "127.0.0.1", port)

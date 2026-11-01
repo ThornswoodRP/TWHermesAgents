@@ -79,6 +79,34 @@ class Unit(unittest.TestCase):
         self.assertEqual(lines[0], "#!/usr/bin/python3 -I")
         self.assertIn("from thornswood_decisions.connector import main  # noqa: E402", lines)
 
+    def test_the_push_worker_has_its_own_user_and_only_its_folder(self):
+        cp = configparser.ConfigParser(strict=False, interpolation=None)
+        cp.optionxform = str
+        cp.read_string((DEPLOY / "tw-decide-push.service").read_text(encoding="utf-8"))
+        s = cp["Service"]
+        self.assertEqual((s["User"], s["Group"]), ("tw-push", "tw-push"))
+        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-push --store /srv/tw/push "
+                                         "--subject ${TW_DECIDE_ORIGIN}")
+        self.assertEqual(s["ReadWritePaths"], "/srv/tw/push")
+        for key, want in (("ProtectSystem", "strict"), ("ProtectHome", "yes"), ("NoNewPrivileges", "yes"),
+                          ("PrivateTmp", "yes"), ("MemoryDenyWriteExecute", "yes"), ("CapabilityBoundingSet", ""),
+                          ("UMask", "0077")):
+            self.assertEqual(s[key], want, key)
+        self.assertNotIn("ListenStream", s)
+        for key in s:
+            self.assertNotRegex(key + s[key], r"(?i)token=|secret|vapid")
+        lines = (DEPLOY / "tw-decide-push").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "#!/opt/thornswood-hermes/decisions-venv/bin/python3 -I")
+        self.assertIn("from thornswood_decisions.push_worker import main  # noqa: E402", lines)
+
+    def test_the_install_gives_the_push_worker_its_token_and_folder_and_waits_for_the_origin(self):
+        src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("install -d -m 0700 -o tw-push -g tw-push /srv/tw/push", src)
+        self.assertIn("run feed-token --workspace thornswood --name push | runuser -u tw-push", src)
+        self.assertIn('grep -q \'"push": "sealed, encrypted and signed"\'', src)
+        self.assertIn('if [[ -n "$origin" ]]; then\n  systemctl enable --quiet tw-decide-push.service', src)
+        self.assertNotIn("push_send on", src)
+
     def test_the_connector_logs_each_line_at_once(self):
         import io
         from unittest import mock
@@ -88,6 +116,16 @@ class Unit(unittest.TestCase):
         with mock.patch("sys.stdout", out), mock.patch.object(out, "flush") as flush:
             connector.say("PASS x")
         flush.assert_called()
+
+    def test_the_push_worker_logs_each_line_at_once(self):
+        import ast
+        tree = ast.parse((REPO / "thornswood_decisions" / "push_worker.py").read_text(encoding="utf-8"))
+        say = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "say")
+        call = say.body[-1].value
+        self.assertEqual((call.func.id, [k.arg for k in call.keywords]), ("print", ["flush"]))
+        worker = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Worker")
+        init = next(n for n in worker.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        self.assertEqual(init.args.defaults[-1].id, "say")
 
     def test_the_install_makes_the_connector_token_and_turns_no_effect_on(self):
         src = (DEPLOY / "install.sh").read_text(encoding="utf-8")

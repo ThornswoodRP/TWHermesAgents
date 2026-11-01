@@ -33,6 +33,7 @@ from .chat import Chat
 from .core import DecisionCore
 from .feeds import MAX_FEED_BYTES, Feeds
 from .passkey import Passkeys
+from .push import Push
 from .store import CoreError, Store, now_utc
 
 PREFIX = "/api/v1"
@@ -55,11 +56,12 @@ APP_VIEWS = re.compile(r"^(|needs-you|work|room|bots|bramble|settings|decisions/
                        r"bots/[a-z0-9][a-z0-9_-]{0,63})$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
            "manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-# The service worker's own policy: it fetches only this origin, to keep the shell.
-SW_CSP = "default-src 'none'; connect-src 'self'"
+# The service worker's own policy: it fetches only this origin, to keep the shell,
+# and its alerts' icon is this origin's too.
+SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 # Data the phone reads only while mobile_read is on. Signing in, adding a
 # passkey and signing out work with it off, so the phone can be set up first.
-APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat")}
+APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push")}
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -169,12 +171,23 @@ class Api:
             return self._pair(core, headers, data, extra)
         if method not in ("GET", "POST"):
             raise CoreError(405, "method", "GET or POST only")
-        if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector"):
+        if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector", "push-worker"):
             if "cookie" in headers or headers.get("origin") is not None:
-                raise CoreError(403, "not_a_feed", "a feed or the connector comes from the VM, not a browser")
+                raise CoreError(403, "not_a_feed", "a feed, the connector or the push worker comes from the VM, "
+                                                   "not a browser")
             token = _bearer(headers.get("authorization", ""))
             if route[0] == "feeds":
                 return 200, Feeds(core.s).put(self.ws, route[1], token, data)
+            if route[0] == "push-worker":
+                push = Push(core.s)
+                if route[1] == "hello":
+                    return 200, push.hello(self.ws, token, str(data.get("vapid_public", "")),
+                                           str(data.get("seal_public", "")))
+                if route[1] == "claim":
+                    return 200, push.claim(self.ws, token, data.get("limit", 20))
+                if route[1] == "result":
+                    return 200, push.result(self.ws, token, str(data.get("id", "")), data.get("results"))
+                raise CoreError(404, "no_route", "no such route")
             if route[1] == "claim":
                 return 200, Chat(core.s).claim(self.ws, token, data.get("limit", 7))
             if route[1] == "result":
@@ -224,6 +237,15 @@ class Api:
                 idempotency_key=str(data.get("idempotency_key", "")), note=str(data.get("note", ""))[:2000])
         if method == "GET" and route in (["work"], ["room"]):
             return 200, Feeds(core.s).get(self.ws, route[0])
+        if method == "GET" and route == ["push"]:
+            return 200, Push(core.s).state(p)
+        if method == "POST" and route == ["push", "subscribe"]:
+            self._exact_origin(headers)
+            return 200, Push(core.s).subscribe(p, data.get("subscription"))
+        if method == "POST" and route == ["push", "unsubscribe"]:
+            return 200, Push(core.s).unsubscribe(p)
+        if method == "POST" and route == ["push", "denied"]:
+            return 200, Push(core.s).denied(p)
         if method == "GET" and route == ["chat"]:
             return 200, Chat(core.s).summary(p)
         if len(route) == 2 and route[0] == "chat":

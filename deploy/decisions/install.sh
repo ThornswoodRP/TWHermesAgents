@@ -4,8 +4,8 @@
 #
 #   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> [--room <id>] [--origin <url>]
 #
-# scripts/install-on-oracle.sh puts that copy there and points
-# /opt/thornswood-hermes/current at it; run that first, at the same commit.
+# tw-follow-main puts that copy there and points /opt/thornswood-hermes/current
+# at it once main reaches the VM; run this after it, at the same commit.
 #
 # --room is the Workbench room id check-hermes-contract.py printed. --origin is
 # the phone app's exact address once Tailscale Serve gives the VM one, like
@@ -20,7 +20,11 @@
 # and the connector's token once, into the hermes user's ~/.config/thornswood
 # (0600); starts the core on 127.0.0.1:9135, the feeds once a minute and the
 # connector (which does nothing while connector_effects is off); and checks the
-# core answers on loopback only. It changes no flag and makes no pairing code.
+# core answers on loopback only. Step 5: it makes the tw-push user and
+# /srv/tw/push (0700, tw-push's only), puts the push worker's core token there,
+# and, once --origin is known, starts the push worker, which makes its own VAPID
+# and seal keys there the first time and sends nothing while push_send is off.
+# It changes no flag and makes no pairing code.
 set -euo pipefail
 umask 022
 
@@ -49,7 +53,7 @@ ok() { echo "PASS $*"; }
 [[ "$(stat -c %U "$here")" == root ]] || stop "$here is not root's."
 [[ "$(git -C "$here" rev-parse HEAD)" == "$commit" ]] || stop "$here is not at $commit."
 [[ -z "$(git -C "$here" status --porcelain)" ]] || stop "$here has changes; only the merged commit is installed."
-[[ "$(readlink -f "$opt/current")" == "$here" ]] || stop "$opt/current is not this commit; run scripts/install-on-oracle.sh $commit on One first."
+[[ "$(readlink -f "$opt/current")" == "$here" ]] || stop "$opt/current is not this commit; the VM puts main in place by itself (tw-follow-main), so wait for it to reach $commit, or see /var/lib/thornswood/follow-main.json for why it has not."
 if [[ -n "$room" && ! "$room" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
   stop "the room id is the one check-hermes-contract.py printed, like 54b3ad46-3419-4adb-b60d-c79cb347fcee."
 fi
@@ -71,10 +75,18 @@ fi
 members="$(getent group tw-decide | cut -d: -f4)"
 [[ -z "$members" ]] || stop "the tw-decide group has members ($members); it must have none."
 ok "user tw-decide"
+# The push worker's user: the one part that reaches the internet, so a user of its own.
+if ! id tw-push >/dev/null 2>&1; then
+  useradd --system --no-create-home --home-dir / --shell /usr/sbin/nologin --user-group tw-push
+fi
+members="$(getent group tw-push | cut -d: -f4)"
+[[ -z "$members" ]] || stop "the tw-push group has members ($members); it must have none."
+ok "user tw-push"
 
 # 2. The store's folder: tw-decide's only. The settings file: root's, no secrets.
 install -d -m 0755 -o root -g root /srv/tw /etc/thornswood
 install -d -m 0700 -o tw-decide -g tw-decide "$state"
+install -d -m 0700 -o tw-push -g tw-push /srv/tw/push
 old_room=""; old_origin=""  # TW_HERMES_BIN is found again each time
 if [[ -f "$envfile" ]]; then
   old_room="$(sed -n 's/^TW_DECIDE_ROOM=//p' "$envfile")"
@@ -102,10 +114,11 @@ ok "venv at $venv, requirements $want"
 
 # 4. The launchers and units, from this copy.
 install -d -m 0755 "$opt/bin"
-for f in tw-decide tw-decide-feed tw-decide-connector; do
+for f in tw-decide tw-decide-feed tw-decide-connector tw-decide-push; do
   install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
 done
-for u in tw-decide.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service; do
+for u in tw-decide.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service \
+         tw-decide-push.service; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
 # The connector finds the gateway's control socket where the gateway's own unit puts it.
@@ -123,7 +136,8 @@ check="$(systemd-run --quiet --wait --pipe --collect -p User=tw-decide -p NoNewP
   -p IPAddressDeny=any -p IPAddressAllow=localhost \
   "$opt/bin/tw-decide" --db /tmp/selfcheck-store.db selfcheck 2>&1)" || stop "the passkey self-check failed: $check"
 grep -q '"ok": true' <<<"$check" || stop "the passkey self-check did not pass: $check"
-ok "passkey self-check: $(tr -d '\n ' <<<"$check")"
+grep -q '"push": "sealed, encrypted and signed"' <<<"$check" || stop "the push self-check did not pass: $check"
+ok "passkey and push self-check: $(tr -d '\n ' <<<"$check")"
 
 run() { runuser -u tw-decide -- "$opt/bin/tw-decide" --db "$db" "$@"; }
 
@@ -154,6 +168,14 @@ for name in work room bots connector; do
     ok "token for $name already there"
   fi
 done
+
+# The push worker's token, once, straight into its own folder (0600).
+if ! runuser -u tw-push -- test -s /srv/tw/push/core.token; then
+  run feed-token --workspace thornswood --name push | runuser -u tw-push -- sh -c 'umask 077; cat > "$1"' _ /srv/tw/push/core.token
+  ok "token for the push worker made"
+else
+  ok "token for the push worker already there"
+fi
 
 # 8. Start the core and check it answers on loopback, and only there.
 systemctl enable --quiet tw-decide.service
@@ -192,3 +214,16 @@ systemctl restart tw-decide-connector.service
 sleep 2
 systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
 ok "the connector runs (it waits while connector_effects is off)"
+
+# 11. The push worker, once the origin is known (it names it in every VAPID
+# header). While push_send is off it says its public keys to the core and then
+# asks every half minute and sends nothing. Only Patrick changes push_send.
+if [[ -n "$origin" ]]; then
+  systemctl enable --quiet tw-decide-push.service
+  systemctl restart tw-decide-push.service
+  sleep 3
+  systemctl is-active --quiet tw-decide-push.service || stop "the push worker did not start: journalctl -u tw-decide-push -n 20"
+  ok "the push worker runs (it sends nothing while push_send is off)"
+else
+  echo "The push worker waits for --origin."
+fi

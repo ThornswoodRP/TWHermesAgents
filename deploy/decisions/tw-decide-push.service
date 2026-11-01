@@ -1,0 +1,54 @@
+# tw-decide-push: the push worker (07 section 8, step 5). It sends one quiet
+# line, "Thornswood needs you", to the phone through the phone's own push
+# service, with a VAPID key made here and kept in /srv/tw/push (0700, tw-push's
+# only). It does nothing while push_send is off.
+#
+# It is the one part of the decision system that reaches the internet, so it
+# has a user of its own and nothing else: no home, no other folder it may
+# write, no listening port. Its outbound connections are not limited by
+# address here, because the push services' addresses are not fixed; the
+# worker itself refuses any host that is not a browser push service, and
+# follows no redirect. Its core token and keys never leave /srv/tw/push.
+[Unit]
+Description=Thornswood decision core push worker (alerts to the phone)
+After=tw-decide.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-push
+Group=tw-push
+EnvironmentFile=/etc/thornswood/tw-decide.env
+ExecStart=/opt/thornswood-hermes/bin/tw-decide-push --store /srv/tw/push --subject ${TW_DECIDE_ORIGIN}
+ReadWritePaths=/srv/tw/push
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+MemoryHigh=100M
+MemoryMax=150M
+TasksMax=16
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

@@ -421,4 +421,34 @@ CREATE TABLE chat_messages (
 );
 CREATE INDEX chat_messages_by_target ON chat_messages(workspace_id, target, created_at);
 """,
+    # 5: Web Push (07 section 8, step 5). The push worker gets a token of its
+    # own ("push"), says its two public keys once (the VAPID key the phone
+    # subscribes with, and the X25519 key the core seals subscriptions to),
+    # and a phone's "no" to alerts is kept so it is never asked again in a loop.
+    """
+CREATE TABLE feed_sources_5 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room', 'bots', 'connector', 'push')),
+  token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO feed_sources_5 SELECT workspace_id, name, token_hash, created_at FROM feed_sources;
+DROP TABLE feed_sources;
+ALTER TABLE feed_sources_5 RENAME TO feed_sources;
+
+CREATE TABLE push_keys (
+  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
+  vapid_public TEXT NOT NULL CHECK (length(vapid_public) = 87),
+  seal_public BLOB NOT NULL CHECK (length(seal_public) = 32),
+  set_at TEXT NOT NULL
+);
+
+CREATE TABLE push_consent (
+  device_id TEXT PRIMARY KEY REFERENCES devices(id),
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  state TEXT NOT NULL CHECK (state IN ('granted', 'denied')),
+  at TEXT NOT NULL
+);
+""",
 ]

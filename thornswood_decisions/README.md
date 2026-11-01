@@ -13,14 +13,14 @@ Until test T33 passes and Patrick says so, the Claude report page stays the only
 | 2 | The Desktop pane: the same cards, revision-checked answers, a polling fallback, pairing | `api.py`, `cli.py`, `plugins/thornswood-decisions/` |
 | 3 | The phone, read only: the app shell on the `ts.net` origin, sign-in, cards, the Work and Room views | `passkey.py`, `feeds.py`, `feed_reader.py`, `app/` |
 | 4 | Phone answers and chat: the same commands as Desktop, the six Bot Chats and the room | `chat.py`, `connector.py`, `room_send.py`, `app/` |
-| 5 | Web Push: the outbox, the one quiet "Thornswood needs you", deep links, denial and revoke tests | |
+| 5 | Web Push: the outbox, the one quiet "Thornswood needs you", deep links, denial and revoke tests | `webpush.py`, `push.py`, `push_worker.py`, `app/sw.js` |
 | 6 | The Main card | Waits for phase 7. Not built |
 
 Every feature flag starts off: `decision_write`, `mobile_read`, `mobile_chat_write`, `push_send`, `connector_effects`. Tests use a separate test workspace and test actions, never a real deploy, merge or Ship.
 
 ## The core (step 1)
 
-Standard library only, so the same code runs in the VM's system Python and in the tests on One.
+Standard library only, so the same code runs in the VM's system Python and in the GitHub checks.
 
 | File | What it holds |
 |---|---|
@@ -76,9 +76,24 @@ The phone answers a card with the same command Desktop sends (`POST /cards/<id>/
 
 No API_SERVER_KEY, no api_server listener and no change to the gateway's settings: the connector uses the paths Hermes uses on its own machine (`contracts.json`, `bot_chat.local_send` and `room.client`). `api.py` adds `GET /chat` (the six Bots), `GET /chat/<bot or room>` (the snapshot, as of its time, and Patrick's own messages with their state), `POST /chat/<bot or room>`, and `POST /connector/claim` and `/connector/result` for the connector's token only, never a browser. The bottom bar's Bramble, Bots and Room now chat; each Bot has a deep link at `/m/bots/<bot>`. A chat message is never an answer to a card.
 
+## Web Push (step 5)
+
+A card that needs Patrick puts one quiet line on his phone's lock screen: "Thornswood needs you", with no body, no buttons and no sound. A tap opens that exact card in the app. Nothing a notification does answers a card. Standard Web Push with our own VAPID key, through the phone browser's own push service: no paid push, no account, no Cloudflare. The Tailscale `ts.net` origin is enough for the phone to subscribe, so Cloudflare Tunnel comes in only if T10 or T11 fail there.
+
+| File | What it holds |
+|---|---|
+| `webpush.py` | The message encryption of RFC 8291 (aes128gcm), checked byte for byte against the RFC's own example, and the VAPID header of RFC 8292 (an ES256 token naming the app's origin). `seal` keeps a subscription encrypted in the core's store to the push worker's key, so the store and its backups never hold one anybody can use. `push_host_ok` allows only the browsers' push services (Google's, Mozilla's, Microsoft's, Apple's) |
+| `push.py` | The phone's alerts and the push outbox. A phone subscribes only after a deliberate "Turn on alerts" tap; a "no" is kept and the app never asks again by itself; a revoked phone's subscription goes with it. The card's own commit writes the push row (`core.py`). The worker leases it only while `push_send` is on, and the lease checks again, right then, that the card is still pending at that attention revision and a live phone has alerts on, or the row is cancelled. 2xx from the push service is "push service accepted", never "shown" or "read"; 404 and 410 retire the subscription; 429, 5xx and no answer come back after Retry-After (a minute to an hour), five tries in all; a lease that runs out is "uncertain" and is not sent again |
+| `push_worker.py` | Runs on the VM as its own user, `tw-push` (`tw-decide-push.service`), with the core's venv. It makes its VAPID key and seal key in `/srv/tw/push` (0700, 0600 files) the first time, says the two public keys to the core once, then encrypts each push for that one browser and posts it to the push service, following no redirect. It logs push ids and status codes only, never an endpoint, a key or a payload. It is the only part that reaches the internet, and it listens on no port |
+| `app/sw.js`, `app/app.js` | The service worker shows the one line, tagged `decision:<id>` so a second push for a card replaces the first, and opens `/m/decisions/<id>` on a tap (the id is checked before it becomes a path). Settings has "Turn on alerts" and "Turn off alerts". When the app sees a card is no longer pending, it takes that card's alert off the phone |
+
+The payload is only `{v, event_id, decision_id, attention_revision, path}`: no question, repo, answer or token, and the push service sees only ciphertext. `api.py` adds `GET /push` (the alert state, phone data like the cards), `POST /push/subscribe` (cookie, CSRF and the exact Origin), `/push/unsubscribe` and `/push/denied`, and `POST /push-worker/hello`, `/claim` and `/result` for the worker's token only, never a browser. If the worker's keys are ever lost, `tw-decide push-reset --workspace thornswood` forgets them and every subscription, and the phone turns alerts on again.
+
+`tests/test_decisions_push.py` checks the encryption against the RFC's example, the VAPID header, the seal, the allowlist, the outbox rules and the worker against a stand-in push service. `tests/decisions_phone_check.js` now also turns alerts on and is told no, has DevTools deliver a push (no push service) and checks the one quiet line and its tag, and checks the alert of an answered card is taken off. Not checked here: a real push service taking a push, the tap on an alert (DevTools cannot tap one), and T10 to T13 on Patrick's phone.
+
 ## Installing on the VM
 
-`deploy/decisions/` holds the install. It runs from the root-owned release that `scripts/install-on-oracle.sh` puts in `/opt/thornswood-hermes/releases/<commit>`, so run that first at the same commit.
+`deploy/decisions/` holds the install. It runs from the root-owned release that `tw-follow-main` puts in `/opt/thornswood-hermes/releases/<commit>` when main reaches the VM, so it runs after that, at the same commit. Nothing here runs on One.
 
 | File | What it does |
 |---|---|
@@ -86,18 +101,20 @@ No API_SERVER_KEY, no api_server listener and no change to the gateway's setting
 | `tw-decide.service` | The core as the `tw-decide` user, on 127.0.0.1:9135, with `TW_DECIDE_ORIGIN` from `/etc/thornswood/tw-decide.env`. systemd lets it reach loopback and nothing else, and write only `/srv/tw/decide` |
 | `requirements.txt` | py_webauthn and what it needs, each pinned by hash; installed as wheels only |
 | `tw-decide-feed`, `tw-decide-feed.service`, `.timer` | The Work, Room and Bot Chat feeds as `hermes`, once a minute, loopback only |
+| `tw-decide-push`, `tw-decide-push.service` | The push worker as `tw-push`, writing only `/srv/tw/push`, at most 150 MB. Its outbound connections are not limited by address, because the push services' addresses are not fixed; the worker refuses every host but theirs |
 | `tw-decide-connector`, `tw-decide-connector.service` | The connector as `hermes`, loopback only, at most 900 MB. It runs `hermes` and finds the gateway's control socket, so it is not `ProtectSystem=strict`; the install adds `XDG_RUNTIME_DIR` as the gateway's own unit has it |
-| `install.sh <commit> [--room <id>] [--origin <url>]` | Makes the user and `/srv/tw/decide` (0700), builds the venv, runs a whole passkey ceremony under the unit's limits, puts the launchers and units in place, makes the store the first time with every flag off, binds the room, makes the three feed tokens and the connector's token into `hermes`'s `~/.config/thornswood` (0600), finds the `hermes` command as that user's login shell does, starts the core, the feeds and the connector, and checks the core answers on loopback only. It changes no flag and makes no pairing code |
+| `install.sh <commit> [--room <id>] [--origin <url>]` | Makes the user and `/srv/tw/decide` (0700), builds the venv, runs a whole passkey ceremony under the unit's limits, puts the launchers and units in place, makes the store the first time with every flag off, binds the room, makes the three feed tokens and the connector's token into `hermes`'s `~/.config/thornswood` (0600), finds the `hermes` command as that user's login shell does, starts the core, the feeds and the connector, and checks the core answers on loopback only. Since step 5 it also makes the `tw-push` user and `/srv/tw/push`, puts the push worker's token there, checks one sealed, encrypted and signed push under the unit's limits, and starts the push worker once `--origin` is known. It changes no flag and makes no pairing code |
 | `install-plugin.sh <commit>` | Links `plugins/thornswood-decisions` in Patrick's own Hermes (`patrick-hermes`) to the root-owned release. It never touches the Bots' Hermes and never edits a Hermes setting; Patrick turns the plugin on with `hermes plugins enable thornswood-decisions` |
 
-The order, after the merge, with the merged commit:
+The order, after the merge, with the merged commit. Every line but 5 and 7 runs on the VM, by someone with sudo there (Patrick's own Hermes, as it ran #21's install):
 
-1. `scripts/install-on-oracle.sh <commit>` on One (Phase 2's install, which also puts the release in place).
-2. `ssh -t thornswood-bots sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> --room <Workbench room id>`
-3. `ssh -t thornswood-bots sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install-plugin.sh <commit>`
-4. As `patrick-hermes` on the VM: `hermes plugins enable thornswood-decisions`.
+1. Wait for main to reach the VM: `readlink -f /opt/thornswood-hermes/current` ends in the merged commit. `tw-follow-main` does that by itself; `/var/lib/thornswood/follow-main.json` says what it last did.
+2. `sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> --room <Workbench room id>`
+3. `sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install-plugin.sh <commit>`
+4. As `patrick-hermes`: `hermes plugins enable thornswood-decisions`.
 5. On the machine Desktop runs on: `desktop/plugin.js` into `desktop-plugins/thornswood-decisions/`, then turn it on in Capabilities, Plugins.
-6. The first code: `ssh thornswood-bots sudo -u tw-decide /opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db pair --workspace thornswood --kind desktop --label One`, typed into the pane within 10 minutes.
+6. The first code: `sudo -u tw-decide /opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db pair --workspace thornswood --kind desktop --label Desktop`, typed into the pane within 10 minutes.
+7. For the phone, once: in the Tailscale admin console, the DNS page, MagicDNS on, then HTTPS Certificates, Enable HTTPS (the VM's name goes into the public certificate log). Then on the VM `sudo tailscale serve --bg --https=443 127.0.0.1:9135`, and step 2 again with `--origin https://thornswood-bots.<tailnet>.ts.net` added. `tailscale serve status` shows it; `sudo tailscale serve --bg --https=443 off` takes it away.
 
 With every flag off the pane pairs and reads, and an answer is refused with "Answers are off for now".
 
@@ -115,7 +132,7 @@ The room's id is data on the VM, not in the source. `check-hermes-contract.py` r
 
 ## Checking the VM
 
-On the VM, as `hermes`, from the release folder `send-to-oracle.sh` made:
+On the VM, as `hermes`, from the release folder `tw-follow-main` made for it (`/home/hermes/thornswood-hermes/current`):
 
 ```bash
 python3 -I scripts/check-hermes-contract.py

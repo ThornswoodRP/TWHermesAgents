@@ -11,7 +11,8 @@ only ever a card (07 section 5, "never authority").
 
 The connector (`connector.py`, step 4) has a token of the same kind under the
 name "connector". It is not a feed: it carries Patrick's chat to Hermes and
-says what came of each message, and it can do nothing else.
+says what came of each message, and it can do nothing else. The push worker
+(`push_worker.py`, step 5) has one too, under "push".
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import secrets
 from .store import CoreError, Store, canonical, parse, sha256_hex
 
 NAMES = ("work", "room", "bots")
-TOKENS = NAMES + ("connector",)
+TOKENS = NAMES + ("connector", "push")
 MAX_FEED_BYTES = 512 * 1024
 MAX_TASKS = 500
 MAX_EVENTS = 200

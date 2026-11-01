@@ -2,12 +2,16 @@ const { chromium } = require('playwright')
 // The phone app in headless Chromium with a virtual passkey (Chrome's WebAuthn
 // testing API): pairing, a deep link, adding a passkey, signing in with it,
 // answering a card, a high-risk card's own check screen, the Bot Chats and the
-// room (as text), the Work view, and the service worker. Started by
-// test_decisions_phone_browser.py.
+// room (as text), the Work view, the service worker, and alerts: a "no" kept,
+// a push shown as the one quiet line with its card's tag (delivered by
+// DevTools, with no push service), and the alert of an answered card taken off.
+// Started by test_decisions_phone_browser.py.
 const [port, code, card, high] = process.argv.slice(2)
 const base = `http://localhost:${port}`
 ;(async () => {
-  const browser = await chromium.launch({ args: ['--host-resolver-rules=MAP localhost 127.0.0.1'] })
+  // channel 'chromium': the full browser in its new headless mode. The bare
+  // headless shell refuses every notification, so it cannot show an alert.
+  const browser = await chromium.launch({ channel: 'chromium', args: ['--host-resolver-rules=MAP localhost 127.0.0.1'] })
   const ctx = await browser.newContext({ viewport: { width: 412, height: 860 } })
   const page = await ctx.newPage()
   const errors = []
@@ -89,6 +93,45 @@ const base = `http://localhost:${port}`
   await page.getByRole('button', { name: 'Send to the Workbench room' }).click()
   await step('a room message waits for the connector', () => page.getByText('Waiting to send').waitFor({ timeout: 5000 }))
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-room.png', fullPage: true })
+  await page.goto(base + '/m/settings')
+  await step('settings shows alerts off', () => page.getByText(/^Alerts are off\. When on/).waitFor({ timeout: 5000 }))
+  await page.getByRole('button', { name: 'Turn on alerts' }).click()
+  await step('a "no" from the phone is kept and alerts stay off', async () => {
+    await page.getByText('Alerts stay off. The app will not ask again by itself.').waitFor({ timeout: 5000 })
+    await page.getByText(/^Alerts are off because this phone said no/).waitFor({ timeout: 3000 })
+  })
+  await ctx.grantPermissions(['notifications'], { origin: base })
+  const regs = []
+  cdp.on('ServiceWorker.workerRegistrationUpdated', e => regs.push(...e.registrations))
+  await cdp.send('ServiceWorker.enable')
+  await page.evaluate(() => navigator.serviceWorker.ready)
+  for (let i = 0; i < 50 && !regs.some(r => r.scopeURL === base + '/m/' && !r.isDeleted); i++) await new Promise(ok => setTimeout(ok, 100))
+  const reg = regs.find(r => r.scopeURL === base + '/m/' && !r.isDeleted)
+  const shown = async () => page.evaluate(async () => (await (await navigator.serviceWorker.getRegistration('/m/')).getNotifications())
+    .map(n => ({ title: n.title, body: n.body, tag: n.tag, silent: n.silent, path: n.data && n.data.path, actions: n.actions.length })))
+  await step('a push shows only "Thornswood needs you", quiet, tagged by its card', async () => {
+    if (!reg) throw new Error('no service worker registration seen')
+    await cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId: reg.registrationId,
+      data: JSON.stringify({ v: 1, event_id: 'px_1', decision_id: card, attention_revision: 1, path: '/m/decisions/' + card }) })
+    let list = []
+    for (let i = 0; i < 50 && !list.length; i++) { list = await shown(); if (!list.length) await new Promise(ok => setTimeout(ok, 100)) }
+    const want = { title: 'Thornswood needs you', body: '', tag: 'decision:' + card, silent: true, path: '/m/decisions/' + card, actions: 0 }
+    if (JSON.stringify(list) !== JSON.stringify([want])) throw new Error(JSON.stringify(list))
+  })
+  await step('a push with a bad card id opens only Needs you', async () => {
+    await cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId: reg.registrationId,
+      data: JSON.stringify({ decision_id: '../../api/v1/sign-out' }) })
+    let list = []
+    for (let i = 0; i < 50 && list.length < 2; i++) { list = await shown(); if (list.length < 2) await new Promise(ok => setTimeout(ok, 100)) }
+    const odd = list.find(n => n.tag === 'thornswood')
+    if (!odd || odd.path !== '/m/needs-you') throw new Error(JSON.stringify(list))
+  })
+  await page.getByRole('link', { name: /Needs you/ }).click()
+  await step('the alert of an answered card is taken off the phone', async () => {
+    let list = await shown()
+    for (let i = 0; i < 50 && list.some(n => n.tag === 'decision:' + card); i++) { await new Promise(ok => setTimeout(ok, 100)); list = await shown() }
+    if (list.some(n => n.tag === 'decision:' + card)) throw new Error(JSON.stringify(list))
+  })
   const sw = await page.evaluate(async () => { const r = await Promise.race([navigator.serviceWorker.ready, new Promise(ok => setTimeout(() => ok(null), 5000))]); return r ? r.scope : null })
   if (!sw) failed++
   console.log(sw ? 'PASS the service worker is registered for ' + sw : 'FAIL no service worker')

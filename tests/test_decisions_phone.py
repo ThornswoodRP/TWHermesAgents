@@ -49,6 +49,7 @@ class Migrations(unittest.TestCase):
         2: "0410fe14fec9508e85fb8d9e40eb1887d2d5450309fadf59bcc2ff6c5c55ad61",
         3: "8a79c74a0938504cd8e43e758be0dbbe607cd53ca3e7bae273424c55ad3632da",
         4: "7d599a7b92702912c989d590afdfb21235025cf7fda9f24dcc091fc11027c95c",
+        5: "d36394b9f9ba7c25fc560c05a7834d52955de09312aed15256602e6a05ce1406",
     }
 
     def test_merged_migrations_never_change(self):
@@ -269,7 +270,7 @@ class AppFiles(unittest.TestCase):
         _, h, _ = self.raw("GET", "/m/app.js")
         self.assertTrue(h["Content-Type"].startswith("text/javascript"))
         _, h, body = self.raw("GET", "/m/sw.js")
-        self.assertEqual(h["Content-Security-Policy"], "default-src 'none'; connect-src 'self'")
+        self.assertEqual(h["Content-Security-Policy"], "default-src 'none'; connect-src 'self'; img-src 'self'")
         files = body.split(b"const FILES = [", 1)[1].split(b"]", 1)[0]
         self.assertNotIn(b"/api/", files, "the worker keeps the shell only")
         self.assertIn(b"!url.pathname.startsWith('/m/')", body, "the worker leaves the API to the network")
