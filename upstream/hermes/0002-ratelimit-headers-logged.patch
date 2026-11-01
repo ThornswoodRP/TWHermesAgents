@@ -1,0 +1,125 @@
+From f1f4d5a0cfd500e81534f328369586161c73f451 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 23:44:54 +0000
+Subject: [PATCH] fix(errors): keep and log a refusal's rate-limit headers
+
+Cause: extract_api_error_context read only the reset time from a 429's
+headers, so which window refused the call (the subscription's 5-hour or
+weekly window, or a per-minute bucket) was never recorded; after the fact
+the log held only the body ("would exceed your account's rate limit") and
+the cooldown.
+
+extract_api_error_context now keeps every anthropic-ratelimit-*,
+x-ratelimit-* and retry-after header (lower-cased, values capped at 120
+characters; they are counters, statuses and times, never credentials) in
+context["ratelimit_headers"] and logs them at INFO in one line.
+---
+ agent/agent_runtime_helpers.py               | 29 ++++++++++++
+ tests/agent/test_ratelimit_headers_logged.py | 48 ++++++++++++++++++++
+ 2 files changed, 77 insertions(+)
+ create mode 100644 tests/agent/test_ratelimit_headers_logged.py
+
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index 1d8e4851..80277864 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -3658,6 +3658,28 @@ def _set_reset_from_vendor_headers(context: dict[str, Any], headers: Any) -> Non
+             return
+ 
+ 
++# Rate-limit response headers worth keeping on a refusal. Prefix match: the unified
++# subscription headers carry one family per window (anthropic-ratelimit-unified-5h-*,
++# -7d-*, ...), and new windows must not need a code change to be recorded.
++_RATELIMIT_HEADER_PREFIXES = ("anthropic-ratelimit-", "x-ratelimit-")
++_RATELIMIT_HEADER_NAMES = ("retry-after",)
++_RATELIMIT_VALUE_MAX = 120
++
++
++def ratelimit_headers(headers: Any) -> dict[str, str]:
++    """The rate-limit headers of a provider response, lower-cased and sorted, values capped."""
++    out: dict[str, str] = {}
++    try:
++        items = list(headers.items())
++    except Exception:
++        return out
++    for name, value in items:
++        key = str(name).strip().lower()
++        if key in _RATELIMIT_HEADER_NAMES or key.startswith(_RATELIMIT_HEADER_PREFIXES):
++            out[key] = str(value).strip()[:_RATELIMIT_VALUE_MAX]
++    return dict(sorted(out.items()))
++
++
+ def extract_api_error_context(error: Exception) -> dict[str, Any]:
+     """Extract structured rate-limit details from provider errors."""
+     context: dict[str, Any] = {}
+@@ -3682,6 +3704,13 @@ def extract_api_error_context(error: Exception) -> dict[str, Any]:
+         _set_reset_from_retry_after(context, payload.get("retry_after"))
+     headers = getattr(getattr(error, "response", None), "headers", None)
+     if headers:
++        limits = ratelimit_headers(headers)
++        if limits:
++            # Counters, limits, statuses and reset times only: which window refused the call
++            # (5-hour, weekly, per-minute) is otherwise unrecorded once the 429 is gone.
++            context["ratelimit_headers"] = limits
++            logger.info("Rate-limit headers on %s: %s", getattr(error, "status_code", "error"),
++                        "; ".join(f"{k}={v}" for k, v in limits.items()))
+         _set_reset_from_retry_after(context, headers)
+         ratelimit_reset = headers.get("x-ratelimit-reset")
+         if ratelimit_reset and "reset_at" not in context:
+diff --git a/tests/agent/test_ratelimit_headers_logged.py b/tests/agent/test_ratelimit_headers_logged.py
+new file mode 100644
+index 00000000..e518ffa1
+--- /dev/null
++++ b/tests/agent/test_ratelimit_headers_logged.py
+@@ -0,0 +1,48 @@
++"""A 429's rate-limit headers are kept and logged, so the window that refused the call
++(5-hour, weekly, per-minute) is on record after the fact."""
++
++import logging
++from types import SimpleNamespace
++
++from agent.agent_runtime_helpers import extract_api_error_context, ratelimit_headers
++
++
++def _err(headers, status=429):
++    err = Exception("Error code: 429 - rate_limit_error")
++    err.status_code = status
++    err.response = SimpleNamespace(headers=headers)
++    return err
++
++
++def test_unified_window_headers_are_kept_and_logged(caplog):
++    headers = {
++        "Anthropic-Ratelimit-Unified-Status": "rejected",
++        "anthropic-ratelimit-unified-5h-utilization": "1.0",
++        "anthropic-ratelimit-unified-5h-reset": "1793602800",
++        "anthropic-ratelimit-unified-7d-utilization": "0.61",
++        "retry-after": "836",
++        "request-id": "req_x",
++        "content-type": "application/json",
++    }
++    with caplog.at_level(logging.INFO, logger="agent.agent_runtime_helpers"):
++        ctx = extract_api_error_context(_err(headers))
++    kept = ctx["ratelimit_headers"]
++    assert kept["anthropic-ratelimit-unified-status"] == "rejected"
++    assert kept["anthropic-ratelimit-unified-5h-utilization"] == "1.0"
++    assert kept["retry-after"] == "836"
++    assert "request-id" not in kept and "content-type" not in kept
++    line = next(r.getMessage() for r in caplog.records if "Rate-limit headers" in r.getMessage())
++    assert "anthropic-ratelimit-unified-5h-utilization=1.0" in line
++    assert "on 429" in line
++
++
++def test_no_rate_limit_headers_logs_nothing(caplog):
++    with caplog.at_level(logging.INFO, logger="agent.agent_runtime_helpers"):
++        ctx = extract_api_error_context(_err({"content-type": "application/json"}))
++    assert "ratelimit_headers" not in ctx
++    assert not any("Rate-limit headers" in r.getMessage() for r in caplog.records)
++
++
++def test_values_are_capped_and_unreadable_headers_are_skipped():
++    assert ratelimit_headers({"x-ratelimit-remaining-tokens": "9" * 500})["x-ratelimit-remaining-tokens"] == "9" * 120
++    assert ratelimit_headers(object()) == {}
+-- 
+2.43.0
+
