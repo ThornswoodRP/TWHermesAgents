@@ -1,0 +1,46 @@
+# tw-decide: the decision core (07). Patrick's cards, his answers and their
+# receipts, on 127.0.0.1:9135 only. Tailscale Serve puts the phone in front of
+# it in step 3; Patrick's Hermes reaches it through the plugin's backend.
+[Unit]
+Description=Thornswood decision core
+After=network.target
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-decide
+Group=tw-decide
+MemoryHigh=150M
+MemoryMax=200M
+TasksMax=64
+ExecStart=/opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db serve --workspace thornswood --port 9135
+ReadWritePaths=/srv/tw/decide
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

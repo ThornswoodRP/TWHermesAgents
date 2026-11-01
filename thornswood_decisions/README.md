@@ -45,9 +45,31 @@ The push rule here (board review findings never push; weekly project review find
 
 Pairing: the first Desktop types a code made on the VM with `cli pair --kind desktop`; later devices get theirs from a signed-in one. The code works once, for 10 minutes. The pane keeps the session the core gave it in plugin storage on that machine.
 
-What this leaves out: the core's install on the VM as its own user (the next pull request; it needs Patrick's `sudo`), a fresh sign-in on Desktop for a high-risk card (until the passkey in step 3, a high-risk card on Desktop needs a new pairing code), and any answer from the phone.
+What this leaves out: a fresh sign-in on Desktop for a high-risk card (until the passkey in step 3, a high-risk card on Desktop needs a new pairing code), and any answer from the phone.
 
 Against a remote Hermes, Desktop does not copy the plugin's desktop half from the VM, so `desktop/plugin.js` goes in `desktop-plugins/thornswood-decisions/` on the machine Desktop runs on, and the backend half in the VM's `plugins/` with `thornswood-decisions` in `plugins.enabled`.
+
+## Installing on the VM
+
+`deploy/decisions/` holds the install. It runs from the root-owned release that `scripts/install-on-oracle.sh` puts in `/opt/thornswood-hermes/releases/<commit>`, so run that first at the same commit.
+
+| File | What it does |
+|---|---|
+| `tw-decide` | The launcher, `python3 -I` from `/opt/thornswood-hermes/current` only |
+| `tw-decide.service` | The core as the `tw-decide` user, on 127.0.0.1:9135. systemd lets it reach loopback and nothing else, and write only `/srv/tw/decide` |
+| `install.sh <commit> [--room <id>]` | Makes the user and `/srv/tw/decide` (0700), puts the launcher and unit in place, makes the store the first time with every flag off, binds the Workbench room, starts the core and checks it answers on loopback only. It changes no flag and makes no pairing code |
+| `install-plugin.sh <commit>` | Links `plugins/thornswood-decisions` in Patrick's own Hermes (`patrick-hermes`) to the root-owned release. It never touches the Bots' Hermes and never edits a Hermes setting; Patrick turns the plugin on with `hermes plugins enable thornswood-decisions` |
+
+The order, after the merge, with the merged commit:
+
+1. `scripts/install-on-oracle.sh <commit>` on One (Phase 2's install, which also puts the release in place).
+2. `ssh -t thornswood-bots sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> --room <Workbench room id>`
+3. `ssh -t thornswood-bots sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install-plugin.sh <commit>`
+4. As `patrick-hermes` on the VM: `hermes plugins enable thornswood-decisions`.
+5. On the machine Desktop runs on: `desktop/plugin.js` into `desktop-plugins/thornswood-decisions/`, then turn it on in Capabilities, Plugins.
+6. The first code: `ssh thornswood-bots sudo -u tw-decide /opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db pair --workspace thornswood --kind desktop --label One`, typed into the pane within 10 minutes.
+
+With every flag off the pane pairs and reads, and an answer is refused with "Answers are off for now".
 
 ## The pinned contract (step 0)
 

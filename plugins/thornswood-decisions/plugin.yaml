@@ -1,0 +1,4 @@
+name: thornswood-decisions
+version: 0.1.0
+description: "Thornswood's decision cards in Hermes Desktop. The backend forwards to the decision core on the VM's loopback; the agent half registers nothing."
+author: Thornswood
