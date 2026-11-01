@@ -40,7 +40,7 @@ class FakeHost:
             self._ended_rows = getattr(self, "_ended_rows", {})
             self._ended_rows[argv[2]] = self.rows.pop(argv[2])
             return subprocess.CompletedProcess(argv, 0, "", "")
-        if argv[:2] == ["systemctl", "restart"]:
+        if argv[:2] in (["systemctl", "stop"], ["systemctl", "start"]):
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0 if self.gateway_after == "active" else 3, self.gateway_after + "\n", "")
@@ -48,9 +48,14 @@ class FakeHost:
 
 
 class Reload(unittest.TestCase):
-    def run_it(self, host):
+    def run_it(self, host, release=None):
         said = []
-        code = reload_bots(run=host, sleep=lambda s: None, say=said.append)
+        self.released = []
+
+        def gave_back(why):
+            self.released.append((why, [c[:2] + c[2:] for c in host.calls]))
+            return {"released": 2}
+        code = reload_bots(run=host, sleep=lambda s: None, say=said.append, release=release or gave_back)
         return code, said
 
     def test_only_the_hermes_users_sessions(self):
@@ -61,9 +66,33 @@ class Reload(unittest.TestCase):
         code, said = self.run_it(host)
         self.assertEqual(code, 0, said)
         verbs = [c for c in host.calls if c[1] != "list-sessions"]
-        self.assertEqual(verbs, [["loginctl", "terminate-session", "3"], ["loginctl", "terminate-session", "7"],
-                                 ["systemctl", "restart", GATEWAY], ["systemctl", "is-active", GATEWAY]])
+        self.assertEqual(verbs, [["systemctl", "stop", GATEWAY],
+                                 ["loginctl", "terminate-session", "3"], ["loginctl", "terminate-session", "7"],
+                                 ["systemctl", "start", GATEWAY], ["systemctl", "is-active", GATEWAY]])
         self.assertIn("ended 2 hermes login sessions", said[0])
+
+    def test_the_ended_turns_tickets_go_back_while_nothing_runs(self):
+        # 1 Nov, 3:42 PM: a reload mid-turn left Bramble's ticket holding the
+        # fleet's one slot for ten minutes.
+        host = FakeHost()
+        code, said = self.run_it(host)
+        self.assertEqual(code, 0, said)
+        [(why, calls_then)] = self.released
+        self.assertEqual(why, "the Bots were reloaded")
+        verbs_then = [c for c in calls_then if c[1] != "list-sessions"]
+        self.assertEqual(verbs_then[0], ["systemctl", "stop", GATEWAY], "the gateway is stopped first")
+        self.assertNotIn(["systemctl", "start", GATEWAY], verbs_then, "and started only after the release")
+        self.assertIn("gave back 2 model turn tickets", " ".join(said))
+
+    def test_a_release_tw_policy_refuses_is_said_and_the_gateway_still_starts(self):
+        host = FakeHost()
+
+        def down(why):
+            raise RuntimeError("the broker at /run/tw/policy.sock is not answering")
+        code, said = self.run_it(host, release=down)
+        self.assertEqual(code, 1)
+        self.assertIn(["systemctl", "start", GATEWAY], host.calls)
+        self.assertTrue([l for l in said if l.startswith("FAIL: tw-policy did not take back")])
 
     def test_never_terminate_user_and_never_other_users(self):
         host = FakeHost()
@@ -86,7 +115,7 @@ class Reload(unittest.TestCase):
         host = FakeHost(table="    12 1000 ubuntu - pts/3 active no -\n")
         code, said = self.run_it(host)
         self.assertEqual(code, 0)
-        self.assertIn(["systemctl", "restart", GATEWAY], host.calls)
+        self.assertIn(["systemctl", "start", GATEWAY], host.calls)
 
     def test_the_install_puts_it_in_bin_and_the_docs_name_it(self):
         self.assertTrue((REPO / "deploy" / "bin" / "tw-reload-bots").exists())

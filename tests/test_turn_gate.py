@@ -116,6 +116,80 @@ class Gate(unittest.TestCase):
         self.assertEqual({a.get("ticket") for a in asks[1:]}, {first[0][0]})
 
 
+class Waiting(unittest.TestCase):
+    """1 Nov, 3:43 PM: the board review rerun, a Hermes cron turn, was refused
+    at once and never ran, and each refusal left a waiting ticket behind.
+    3:49 PM: Bramble's pick in the Workbench room answered "Queued, not
+    started" and ended; nothing ran it when the queue cleared at about 3:59."""
+
+    def clocked(self, f, bot, **kw):
+        now = [0.0]
+        return TurnGate(ready_policy(), bot, f.ask,
+                        sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0], **kw), now
+
+    def test_a_scheduled_turn_waits_for_its_ticket(self):
+        f = Fleet()
+        rift = gate(f, "rift")
+        rift.before_llm(session_id="r1", task_id="12")
+        g, now = self.clocked(f, "bramble")
+        asks = []
+        real = f.ask
+
+        def ask(broker, op, args):
+            asks.append(op)
+            if op == "admit" and len(asks) == 4:
+                rift.after_turn(session_id="r1")  # the slot frees while it waits
+            return real(broker, op, args)
+        g.ask = ask
+        self.assertIsNone(g.before_llm(session_id="cron_x", task_id="board", platform="cron"))
+        self.assertIsNone(g.before_tool("read_file", session_id="cron_x"))
+        self.assertGreater(now[0], 0, "it waited")
+        self.assertEqual(f.policy.db.execute("SELECT COUNT(*) FROM tickets WHERE bot='bramble'").fetchone()[0], 1,
+                         "one ticket, asked again while it waited")
+
+    def test_a_room_turn_waits_for_its_slot_too(self):
+        f = Fleet()
+        rift = gate(f, "rift")
+        rift.before_llm(session_id="r1", task_id="12")
+        g, now = self.clocked(f, "bramble")
+        asks = []
+        real = f.ask
+
+        def ask(broker, op, args):
+            asks.append(op)
+            if op == "admit" and len(asks) == 8:
+                rift.after_turn(session_id="r1")
+            return real(broker, op, args)
+        g.ask = ask
+        self.assertIsNone(g.before_llm(session_id="20261031_160420_c3caf4", platform="desktop"))
+        self.assertIsNone(g.before_tool("read_file", session_id="20261031_160420_c3caf4"))
+        self.assertGreater(now[0], 20, "it waited past the old 20 seconds")
+
+    def test_every_turn_waits_as_long_by_default(self):
+        from thornswood_guard.brokers import TURN_WAIT
+        self.assertEqual(TurnGate(ready_policy(), "bramble", Fleet().ask).wait_seconds, TURN_WAIT)
+
+    def test_a_scheduled_turn_that_never_gets_one_says_how_long_and_gives_its_place_back(self):
+        f = Fleet()
+        gate(f, "rift").before_llm(session_id="r1")
+        g, now = self.clocked(f, "bramble", wait_seconds=30)
+        out = g.before_llm(session_id="cron_y", platform="cron")
+        self.assertIn("waited 30 seconds", out["context"])
+        self.assertIn("did not start", out["context"])
+        g.after_turn(session_id="cron_y")
+        left = f.policy.db.execute("SELECT state FROM tickets WHERE bot='bramble'").fetchall()
+        self.assertEqual([r[0] for r in left], ["done"], "no waiting ticket left behind")
+
+    def test_the_wait_fits_inside_hermess_hook_bound(self):
+        from thornswood_guard.brokers import TURN_WAIT
+        from thornswood_guard.profile_config import HOOK_TIMEOUT, build, build_gateway
+        self.assertLess(TURN_WAIT + 30, HOOK_TIMEOUT)
+        self.assertLessEqual(HOOK_TIMEOUT, 600, "Hermes's maximum")
+        p = policy()
+        self.assertEqual(build(p, "bramble")["plugins"]["hook_callback_timeout"], HOOK_TIMEOUT)
+        self.assertEqual(build_gateway(p)["plugins"]["hook_callback_timeout"], HOOK_TIMEOUT)
+
+
 class Tools(unittest.TestCase):
     def test_14_the_bot_comes_from_the_profile_not_the_model(self):
         f = Fleet()

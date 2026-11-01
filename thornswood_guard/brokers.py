@@ -74,10 +74,25 @@ def socket_caller(policy: Policy) -> Caller:
     return ask
 
 
+# Every turn waits in pre_llm_call for its ticket, asking again so its place
+# stays fresh, up to this long, and runs as soon as it is let through. A turn
+# that answered "queued" and ended was never run again: nothing starts a
+# Hermes turn but a new message or a schedule. 1 Nov, 3:43 PM: the board
+# review rerun (a cron turn) was refused at once and never ran; 3:49 PM:
+# Bramble's pick in the Workbench room answered "Queued, not started", the
+# queue cleared at about 3:59 PM, and the pick waited until Patrick asked
+# again at 4:00 PM. HOOK_TIMEOUT (profile_config) is above this, so Hermes
+# does not skip the hook first.
+TURN_WAIT = 540.0
+# A scheduled turn (Hermes's cron) has no next turn: its session is made for
+# that one run, so a ticket it never used goes back when it ends.
+SCHEDULED = ("cron",)
+
+
 class TurnGate:
     """One per profile. Keyed by Hermes's session id, one turn at a time per session."""
 
-    def __init__(self, policy: Policy, bot: str, ask: Caller, *, wait_seconds: float = 20.0,
+    def __init__(self, policy: Policy, bot: str, ask: Caller, *, wait_seconds: float = TURN_WAIT,
                  sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
         self.policy = policy
         self.bot = bot
@@ -98,6 +113,7 @@ class TurnGate:
         with self.lock:
             held = self.turns.get(key)
         ticket = held["ticket"] if held and held.get("state") == "waiting" else None
+        scheduled = str(kwargs.get("platform") or "") in SCHEDULED
         deadline = self.clock() + self.wait_seconds
         pause = 1.0
         try:
@@ -112,8 +128,11 @@ class TurnGate:
                     return None
                 if self.clock() + pause > deadline:
                     with self.lock:
-                        self.turns[key] = {"ticket": ticket, "state": "waiting", "reason": got.get("reason")}
-                    return {"context": self._queued(got.get("reason") or "the fleet is busy")}
+                        self.turns[key] = {"ticket": ticket, "state": "waiting", "reason": got.get("reason"),
+                                           "scheduled": scheduled}
+                    why = (got.get("reason") or "the fleet is busy") + \
+                        f" (this turn waited {int(self.wait_seconds)} seconds for it)"
+                    return {"context": self._queued(why)}
                 self.sleep(pause)
                 pause = min(pause * 2, 5.0)
         except BrokerRefused as e:
@@ -123,7 +142,8 @@ class TurnGate:
 
     def _queued(self, reason: str) -> str:
         return ("[Thornswood queue] This turn was not admitted by the fleet queue: " + reason +
-                ". Every tool is refused for this turn. Reply in one short line that the work is queued and why, then stop.")
+                ". Every tool is refused for this turn, and nothing starts it again by itself. Reply in one short line "
+                "that the work did not start and why, and that it needs asking again once the fleet is free, then stop.")
 
     def before_tool(self, tool_name: str, **kwargs) -> str | None:
         """A block message, or None to let the guard's other checks run."""
@@ -146,10 +166,13 @@ class TurnGate:
         with self.lock:
             turn = self.turns.get(key)
             # A waiting ticket keeps its place for the next turn of this
-            # session; an admitted one goes back now.
-            if turn and turn.get("state") != "waiting":
+            # session; an admitted one goes back now. A scheduled turn's
+            # session has no next turn, so its waiting ticket goes back too
+            # (1 Nov: each refused rerun left one in the line).
+            give_back = turn and (turn.get("state") == "admitted" or turn.get("scheduled"))
+            if turn and (turn.get("state") != "waiting" or turn.get("scheduled")):
                 self.turns.pop(key, None)
-        if turn and turn.get("state") == "admitted":
+        if give_back and turn.get("ticket"):
             try:
                 self.ask("policy", "finish", {"bot": self.bot, "ticket": turn["ticket"]})
             except BrokerRefused:

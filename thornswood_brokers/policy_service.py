@@ -249,6 +249,19 @@ class PolicyService:
                                 (iso(self.clock()), args.get("ticket"), bot)).rowcount
         return {"finished": bool(n)}
 
+    def release_turns(self, caller: str, args: dict) -> dict:
+        """tw-reload-bots, as root, once it has ended every Bot process: each
+        model turn's ticket goes back, admitted or waiting, because the turn
+        that held it is gone. 1 Nov, 3:42 PM: the #47/#48 install reloaded the
+        Bots mid-turn, and Bramble's killed turn kept the fleet's one slot for
+        ten minutes. Sandbox tickets are tw-files's and stay."""
+        with self._tx():
+            n = self.db.execute("UPDATE tickets SET state='done', finished_at=?, reason=? "
+                                "WHERE kind='turn' AND state IN ('admitted','waiting')",
+                                (iso(self.clock()), str(args.get("why") or "the Bots were reloaded"))).rowcount
+            self._audit(caller, "release_turns", {"released": n})
+        return {"released": n}
+
     def active(self, bot: str) -> dict | None:
         self._expire_silent()
         row = self.db.execute("SELECT id, kind, risk, task FROM tickets WHERE bot=? AND state='admitted' AND kind='turn' ORDER BY admitted_at DESC LIMIT 1", (bot,)).fetchone()
@@ -590,10 +603,11 @@ class PolicyService:
     def ops(self) -> dict:
         u = self.policy.data["brokers"]["users"]
         gw, git, files, proxy = u["gateway"], u["git"], u["files"], u["proxy"]
-        return {
+        table = {
             "admit": (self.admit, {gw, files}),
             "touch": (self.touch, {gw, files}),
             "finish": (self.finish, {gw, files}),
+            "release_turns": (self.release_turns, {"root"}),
             "set_task_risk": (self.set_task_risk, {gw}),
             "status": (self.status, {gw, git, files, proxy, "root"}),
             "op_begin": (self.op_begin, {git}),
@@ -614,6 +628,19 @@ class PolicyService:
             "ledger_event": (self.ledger_event, {git}),
             "ledger_pending": (lambda c, a: self.ledger_pending(), {gw, git, "root"}),
         }
+        return {name: (self._one_at_a_time(handler), users) for name, (handler, users) in table.items()}
+
+    def _one_at_a_time(self, handler):
+        """Every op holds the store's lock, reads as well as writes. The socket
+        answers each caller on a thread of its own, and they share one SQLite
+        connection: two threads running the same statement on one connection
+        share sqlite3's cached statement and misread rows (1 Nov: a flag read
+        as off 1 time in 40,000, with "bad parameter or other API misuse").
+        Every op is a few quick statements, so one at a time costs nothing."""
+        def run(caller, args):
+            with self.lock:
+                return handler(caller, args)
+        return run
 
 
 class _Tx:

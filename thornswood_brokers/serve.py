@@ -12,6 +12,7 @@ import os
 import pwd
 import signal
 import sys
+import threading
 from pathlib import Path
 
 from thornswood_guard.policy import Policy
@@ -44,9 +45,41 @@ def _serve(policy: Policy, name: str, ops: dict) -> None:
         if extra:
             raise SystemExit(f"{name}: op {op} names {sorted(extra)}, who may not connect to its socket")
     server = wire.Server(sock["path"], ops, mode=0o660, group=sock.get("group"))
-    signal.signal(signal.SIGTERM, lambda *a: (server.shutdown(), sys.exit(0)))
     logger.info("tw-%s listening on %s", name, sock["path"])
-    server.serve_forever()
+    run_until_stopped(server, f"tw-{name}")
+
+
+# How long a stop waits for the requests in hand to be answered. systemd's
+# own stop timeout is 90 seconds; a request still running after this is
+# reported and left: tw-git reads back any write whose answer it lost.
+DRAIN_SECONDS = 20
+
+
+def run_until_stopped(server, name: str, *, stop: threading.Event | None = None,
+                      drain_seconds: float = DRAIN_SECONDS) -> None:
+    """Serve until SIGTERM or SIGINT, then stop cleanly: take no new request,
+    let the ones in hand answer, close the socket, and return.
+
+    serve_forever() runs on a thread of its own. shutdown() waits for
+    serve_forever() to return, so called from a signal handler on the thread
+    that runs serve_forever() it waits for itself forever; until 1 Nov every
+    broker did that, and systemd killed each one after 90 seconds, so every
+    follower install left the Bots without tw-git and tw-policy for about
+    three minutes."""
+    stop = stop or threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *a: stop.set())
+    serving = threading.Thread(target=server.serve_forever, name=f"{name}-serve", daemon=True)
+    serving.start()
+    stop.wait()
+    logger.info("%s stopping: no new requests", name)
+    server.shutdown()
+    left = server.drain(drain_seconds) if hasattr(server, "drain") else 0
+    if left:
+        logger.warning("%s stopped with %d request(s) unanswered after %ss", name, left, drain_seconds)
+    server.server_close()
+    serving.join(5)
+    logger.info("%s stopped", name)
 
 
 def main(argv: list[str]) -> None:
@@ -96,9 +129,8 @@ def main(argv: list[str]) -> None:
             logger.warning("no proxy tokens yet; every request is refused until admission_proxy.ready and the install make them")
         proxy = Proxy(policy, _asker(policy), env, tokens)
         server = Server(cfg["listen"], proxy)
-        signal.signal(signal.SIGTERM, lambda *a: (server.shutdown(), sys.exit(0)))
         logger.info("tw-proxy listening on %s", cfg["listen"])
-        server.serve_forever()
+        run_until_stopped(server, "tw-proxy")
 
 
 if __name__ == "__main__":

@@ -95,7 +95,7 @@ plugins:
   - thornswood_guard
   auto_apply: false
   auto_update_check_hours: 0
-  hook_callback_timeout: 30
+  hook_callback_timeout: 600
 hooks_auto_accept: false
 security:
   redact_secrets: true

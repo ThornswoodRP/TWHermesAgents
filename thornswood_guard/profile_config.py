@@ -41,6 +41,13 @@ DENY_COMMANDS = [
 
 WORK_ROOT = "/home/hermes/tw-work"
 
+# Hermes bounds each plugin hook by plugins.hook_callback_timeout (default 30,
+# at most 600) and skips a pre_llm_call that runs past it. Every turn waits
+# in that hook for its ticket (brokers.TURN_WAIT, 540 seconds), so
+# the bound is Hermes's maximum. Every other hook here answers in well under
+# a second; a pre_tool_call past the bound still fails closed.
+HOOK_TIMEOUT = 600
+
 # Hermes's own sandbox image (amd64 and arm64), named in full for podman.
 SANDBOX_IMAGE = "docker.io/nousresearch/hermes-sandbox:desktop"
 
@@ -115,7 +122,7 @@ def build(policy: Policy, bot: str) -> dict:
             "enabled": ["thornswood_guard"],
             "auto_apply": False,
             "auto_update_check_hours": 0,
-            "hook_callback_timeout": 30,
+            "hook_callback_timeout": HOOK_TIMEOUT,
         },
         "hooks_auto_accept": False,
         "security": {"redact_secrets": True},
@@ -183,7 +190,7 @@ def build_gateway(policy: Policy) -> dict:
             "enabled": ["thornswood_guard"],
             "auto_apply": False,
             "auto_update_check_hours": 0,
-            "hook_callback_timeout": 30,
+            "hook_callback_timeout": HOOK_TIMEOUT,
         },
         "hooks_auto_accept": False,
         "security": {"redact_secrets": True},

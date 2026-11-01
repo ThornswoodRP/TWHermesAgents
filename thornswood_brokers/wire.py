@@ -94,6 +94,25 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             import grp
             os.chown(self.path, -1, grp.getgrnam(group).gr_gid)
         self._lock = threading.Lock()
+        self._busy = 0
+        self._idle = threading.Condition()
+
+    def process_request_thread(self, request, client_address):
+        with self._idle:
+            self._busy += 1
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._idle:
+                self._busy -= 1
+                self._idle.notify_all()
+
+    def drain(self, timeout: float) -> int:
+        """Wait up to `timeout` seconds for the requests in hand to be answered.
+        Returns how many were still running."""
+        with self._idle:
+            self._idle.wait_for(lambda: self._busy == 0, timeout)
+            return self._busy
 
     def dispatch(self, caller: str, op: str, args: dict):
         entry = self.ops.get(op)

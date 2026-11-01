@@ -10,7 +10,7 @@ starts and keeps them. Two kinds of process run the Bots:
 31 Oct: after the #20 apply and a gateway restart, Bramble's room turn still
 had the old tool list, because Desktop's backends had started before the
 apply. So both go: the hermes user's login sessions are ended, one by one,
-and the gateway is restarted. Never terminate-user: that also stops
+and the gateway is restarted (stopped first, started last). Never terminate-user: that also stops
 user@<uid>.service, which the gateway needs, and took the gateway down once
 (31 Oct). Desktop reconnects by itself.
 """
@@ -45,12 +45,33 @@ def sessions(run: Runner, user: str = USER) -> list[str]:
     return out
 
 
-def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep, say=print) -> int:
+def _release_turns(why: str) -> dict:
+    """Ask tw-policy, as root, to take back every model turn's ticket."""
+    import json
+    from pathlib import Path
+
+    from .wire import call
+    policy = json.loads(Path(__file__).resolve().parent.parent.joinpath("thornswood_guard", "policy.json").read_text())
+    return call(policy["brokers"]["sockets"]["policy"]["path"], "release_turns", {"why": why}, timeout=30)
+
+
+def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep, say=print,
+                release: Callable[[str], dict] = _release_turns) -> int:
+    """Stop the gateway, end the hermes login sessions, give back the tickets
+    of the turns that just ended, then start the gateway. Stopped first, so no
+    new turn takes a ticket between the release and the start: 1 Nov, 3:42 PM,
+    the #47/#48 install reloaded the Bots mid-turn, and Bramble's killed turn
+    kept the fleet's one slot for ten minutes."""
+    r = run(["systemctl", "stop", GATEWAY])
+    if r.returncode != 0:
+        say(f"STOP: systemctl stop {GATEWAY} failed: {r.stderr.strip()}")
+        return 1
     ended = sessions(run)
     for sid in ended:
         r = run(["loginctl", "terminate-session", sid])
         if r.returncode != 0:
-            say(f"STOP: loginctl terminate-session {sid} failed: {r.stderr.strip()}")
+            say(f"STOP: loginctl terminate-session {sid} failed: {r.stderr.strip()}; the gateway is stopped: "
+                f"systemctl start {GATEWAY}")
             return 1
     for _ in range(30):
         left = [s for s in sessions(run) if s in ended]
@@ -58,13 +79,20 @@ def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep,
             break
         sleep(1)
     else:
-        say(f"STOP: the hermes sessions {' '.join(left)} did not end in 30 seconds; look at: loginctl list-sessions")
+        say(f"STOP: the hermes sessions {' '.join(left)} did not end in 30 seconds; look at: loginctl list-sessions; "
+            f"the gateway is stopped: systemctl start {GATEWAY}")
         return 1
     say(f"ended {len(ended)} hermes login session{'s' if len(ended) != 1 else ''} (Hermes Desktop's backends; Desktop reconnects)")
-
-    r = run(["systemctl", "restart", GATEWAY])
+    released = None
+    try:
+        released = release("the Bots were reloaded")["released"]
+        say(f"gave back {released} model turn ticket{'s' if released != 1 else ''} the ended turns held")
+    except Exception as e:  # noqa: BLE001  the queue's ten-minute rule still frees them
+        say(f"FAIL: tw-policy did not take back the ended turns' tickets ({e}); they go back after ten minutes "
+            f"of silence, and the next turns wait until then")
+    r = run(["systemctl", "start", GATEWAY])
     if r.returncode != 0:
-        say(f"STOP: systemctl restart {GATEWAY} failed: {r.stderr.strip()}")
+        say(f"STOP: systemctl start {GATEWAY} failed: {r.stderr.strip()}")
         return 1
     sleep(5)
     r = run(["systemctl", "is-active", GATEWAY])
@@ -72,7 +100,7 @@ def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep,
         say(f"STOP: {GATEWAY} is {r.stdout.strip() or 'not active'} after the restart: journalctl -u {GATEWAY} -n 50")
         return 1
     say(f"{GATEWAY} restarted and active; every Bot process now has the applied plugin and config")
-    return 0
+    return 0 if released is not None else 1
 
 
 def main(argv: list[str] | None = None) -> int:

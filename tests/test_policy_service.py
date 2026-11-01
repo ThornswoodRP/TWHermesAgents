@@ -53,6 +53,22 @@ def service(host=None, clock=None, db=None, data=None) -> PolicyService:
     return PolicyService(db, p, host_reader=host or roomy, clock=clock or Clock())
 
 
+class Release(unittest.TestCase):
+    def test_a_reload_gives_back_every_turn_ticket_and_keeps_sandbox_jobs(self):
+        s = service()
+        a = s.admit("hermes", {"bot": "rift", "task": "t1"})
+        b = s.admit("hermes", {"bot": "wisp", "task": "t2"})
+        self.assertEqual((a["state"], b["state"]), ("admitted", "waiting"))
+        s.db.execute("INSERT INTO tickets(id, bot, kind, risk, task, source, state, created_at) "
+                     "VALUES('sb', 'rift', 'sandbox', 'high', 't3', 'files', 'admitted', '2026-11-01T00:00:00+00:00')")
+        handler, callers = s.ops()["release_turns"]
+        self.assertEqual(callers, {"root"})
+        self.assertEqual(handler("root", {"why": "the Bots were reloaded"}), {"released": 2})
+        states = dict(s.db.execute("SELECT id, state FROM tickets").fetchall())
+        self.assertEqual((states[a["ticket"]], states[b["ticket"]], states["sb"]), ("done", "done", "admitted"))
+        self.assertEqual(s.admit("hermes", {"bot": "echo", "task": "t4"})["state"], "admitted")
+
+
 class Queue(unittest.TestCase):
     def test_one_model_turn_at_a_time_in_the_pilot(self):
         s = service()
