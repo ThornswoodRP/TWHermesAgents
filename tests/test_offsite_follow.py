@@ -305,5 +305,69 @@ class FollowMain(unittest.TestCase):
         self.assertEqual((st["failed"], st["step"], st["put_back"]), (NEW, "canary", f"put back {OLD}"))
 
 
+    # 1 Nov: once the decision core is installed, each merge moves current, and
+    # its feeds and connector run the new code at once; the core itself has to
+    # be installed again at that commit or it keeps running the old one.
+    def core_installed(self, f: follow_main.Follower, *releases: str) -> None:
+        env = f._at(f.r["decide_env"])
+        env.parent.mkdir(parents=True, exist_ok=True)
+        env.write_text("TW_DECIDE_ROOM=54b3ad46-3419-4adb-b60d-c79cb347fcee\nTW_DECIDE_ORIGIN=\nTW_HERMES_BIN=/usr/local/bin/hermes\n")
+        for c in releases:
+            core = f.opt / "releases" / c / "deploy" / "decisions" / "install.sh"
+            core.parent.mkdir(parents=True, exist_ok=True)
+            core.write_text("#!/usr/bin/env bash\n")
+
+    def test_the_decision_core_is_installed_again_right_after_each_install(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.core_installed(f, NEW)
+        self.assertEqual(f.follow(), 0, self.said)
+        installs = vm.ran("install.sh")
+        self.assertEqual(installs, [f"bash {f.opt}/releases/{NEW}/deploy/install.sh {NEW}",
+                                    f"bash {f.opt}/releases/{NEW}/deploy/decisions/install.sh {NEW}"])
+        # No --room or --origin: the core's install keeps them from its env file.
+        order = [i for i, c in enumerate(vm.calls) for k in ("decisions/install.sh", "runuser", "tw-reload-bots", "tw-canary")
+                 if k in " ".join(c)]
+        self.assertEqual(len(order), 4, vm.calls)
+        self.assertEqual(order, sorted(order))
+
+    def test_no_decision_core_on_the_vm_means_no_core_install(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        core = f.opt / "releases" / NEW / "deploy" / "decisions" / "install.sh"
+        core.parent.mkdir(parents=True, exist_ok=True)
+        core.write_text("#!/usr/bin/env bash\n")
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(vm.ran("decisions/install.sh"), [])
+
+    def test_a_failed_core_install_puts_the_earlier_release_back_core_and_all(self):
+        vm = FakeVM(NEW, fail={f"decisions/install.sh {NEW}": 1})
+        f = self.follower(vm)
+        self.core_installed(f, NEW, OLD)
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(vm.ran("tw-canary"), [f"{f.opt}/bin/tw-canary"], "only the put-back release's canary ran")
+        self.assertEqual(vm.ran("install.sh"), [
+            f"bash {f.opt}/releases/{NEW}/deploy/install.sh {NEW}",
+            f"bash {f.opt}/releases/{NEW}/deploy/decisions/install.sh {NEW}",
+            f"bash {f.opt}/releases/{OLD}/deploy/install.sh {OLD}",
+            f"bash {f.opt}/releases/{OLD}/deploy/decisions/install.sh {OLD}"])
+        st = json.loads(f.state_file.read_text())
+        self.assertEqual((st["failed"], st["step"], st["put_back"]), (NEW, "install", f"put back {OLD}"))
+
+    def test_a_release_without_the_core_install_stops_rather_than_leave_the_core_behind(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.core_installed(f)  # the env file, and no deploy/decisions/install.sh in either release
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(vm.ran("tw-reload-bots"), [])
+        self.assertIn("has no deploy/decisions/install.sh", self.said[-2])
+        self.assertIn("putting back", json.loads(f.state_file.read_text())["put_back"])
+
+    def test_the_policy_names_the_cores_env_file_as_its_install_writes_it(self):
+        self.assertEqual(policy().data["follow_main"]["decide_env"], "/etc/thornswood/tw-decide.env")
+        self.assertIn("envfile=/etc/thornswood/tw-decide.env",
+                      (REPO / "deploy" / "decisions" / "install.sh").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

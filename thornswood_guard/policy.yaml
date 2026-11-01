@@ -599,3 +599,6 @@ follow_main:
   tests_minutes: 20
   hermes_user: hermes
   hermes_releases: /home/hermes/thornswood-hermes/releases
+  # Its install wrote this file, so the decision core is installed here and each
+  # merge installs it again (deploy/decisions/install.sh keeps --room and --origin from it).
+  decide_env: /etc/thornswood/tw-decide.env

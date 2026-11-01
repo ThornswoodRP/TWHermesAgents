@@ -644,6 +644,7 @@
     "ci_dir": "/srv/tw/ci",
     "tests_minutes": 20,
     "hermes_user": "hermes",
-    "hermes_releases": "/home/hermes/thornswood-hermes/releases"
+    "hermes_releases": "/home/hermes/thornswood-hermes/releases",
+    "decide_env": "/etc/thornswood/tw-decide.env"
   }
 }

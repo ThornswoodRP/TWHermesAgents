@@ -14,7 +14,12 @@ Runs as root from tw-follow-main.timer. Each run:
      install-on-oracle.sh did;
   4. runs the whole test suite at that commit, as the tw-ci user, with no
      network, and installs nothing if one test fails;
-  5. runs that release's deploy/install.sh, then apply.py as hermes (its own
+  5. runs that release's deploy/install.sh and, once the decision core is
+     installed here (its /etc/thornswood/tw-decide.env is there), that
+     release's deploy/decisions/install.sh too, so the core's process, venv,
+     units and store move with the code under /opt/thornswood-hermes/current
+     (1 Nov: without it the feeds and the connector ran the new release
+     while the core kept the old one); then apply.py as hermes (its own
      checks first, as send-to-oracle.sh did), reloads every Bot process with
      tw-reload-bots (the hermes user's login sessions end and the gateway
      restarts, since a gateway restart alone left Desktop's turns on the old
@@ -156,6 +161,15 @@ class Follower:
 
     def install(self, dest: Path, commit: str) -> None:
         self.sh("install", ["bash", str(dest / "deploy" / "install.sh"), commit])
+        # deploy/install.sh has just pointed current at this release, which the
+        # decision core's install checks before it does anything.
+        if not self._at(self.r["decide_env"]).exists():
+            return  # the decision core is not installed on this VM
+        core = dest / "deploy" / "decisions" / "install.sh"
+        if not core.exists():
+            raise Stop("install", f"the decision core is installed here ({self.r['decide_env']}), "
+                                  f"but {commit[:12]} has no deploy/decisions/install.sh to keep it at this release")
+        self.sh("install", ["bash", str(core), commit])
 
     def apply(self, dest: Path, commit: str) -> None:
         user = self.r["hermes_user"]

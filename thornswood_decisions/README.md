@@ -118,6 +118,8 @@ The order, after the merge, with the merged commit. Every line but 5 and 7 runs 
 
 With every flag off the pane pairs and reads, and an answer is refused with "Answers are off for now".
 
+After this first install, `tw-follow-main` runs `deploy/decisions/install.sh` again at each merge it installs, right after `deploy/install.sh`, keeping the room and origin from `/etc/thornswood/tw-decide.env`; if a later step fails, it runs it again for the release it puts back. Steps 3 to 6 are not repeated: the plugin is linked through `/opt/thornswood-hermes/current`.
+
 ## The pinned contract (step 0)
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:

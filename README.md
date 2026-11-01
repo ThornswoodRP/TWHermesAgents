@@ -39,7 +39,7 @@ The VM follows main by itself (Patrick's answer A on q-retire-hermes-one, 31 Oct
 2. When `main` is the commit already installed, it stops. When `main` is a commit that already failed here, it stops too: the failure was said once, and a new merge is the fix.
 3. It puts the commit in `/opt/thornswood-hermes/releases/<commit>`, root-owned.
 4. It runs the whole suite at that commit as `tw-ci`, with no network. One failing test and nothing is installed.
-5. It runs that release's `deploy/install.sh`, then, as `hermes`, `apply.py --check` and `apply.py` in `/home/hermes/thornswood-hermes/releases/<commit>`, restarts `tw-hermes-gateway` and runs the canary.
+5. It runs that release's `deploy/install.sh`, and once the decision core is installed on the VM (`/etc/thornswood/tw-decide.env` is there), that release's `deploy/decisions/install.sh` as well, so the core moves with the code its feeds and connector run. Then, as `hermes`, `apply.py --check` and `apply.py` in `/home/hermes/thornswood-hermes/releases/<commit>`, then `tw-reload-bots`, then the canary.
 6. If any step of 5 fails, it installs and applies the release that ran before the same way, and says both.
 
 What it did is in `/var/lib/thornswood/follow-main.json` and `journalctl -u tw-follow-main`.
