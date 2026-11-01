@@ -184,6 +184,43 @@ class Units(unittest.TestCase):
         self.assertIn("tw-policy-clients tw-git-clients tw-files-clients", step)
         self.assertLess(text.index("usermod -a -G tw-policy-clients"), text.index("# 9b."))
 
+    def _place_units(self, systemd_dir: Path) -> tuple[subprocess.CompletedProcess, Path]:
+        text = (REPO / "deploy" / "install.sh").read_text()
+        block = text[text.index("unit_dir=/etc/systemd/system\n"):text.index("# end of the unit copy")]
+        out = Path(tempfile.mkdtemp())
+        here = Path(tempfile.mkdtemp())
+        shutil.copytree(systemd_dir, here / "deploy" / "systemd")
+        script = ('set -euo pipefail\nstop() { echo "STOP: $*"; exit 1; }\n'
+                  f'here={here}\nhermes_uid=1007\n' + block.replace("unit_dir=/etc/systemd/system", f"unit_dir={out}"))
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True), out
+
+    def test_every_unit_the_install_enables_is_put_in_place(self):
+        # 1 Nov: tw-offsite.path, the first .path unit, was never copied, and
+        # "systemctl enable" stopped the #21 install.
+        r, out = self._place_units(REPO / "deploy" / "systemd")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = (REPO / "deploy" / "install.sh").read_text()
+        enabled = set()
+        for m in re.finditer(r"systemctl enable[^\n]*", text.replace("\\\n", " ")):
+            enabled |= {w for w in m.group(0).split() if re.fullmatch(r"[\w@-]+\.(service|timer|path|socket|slice|target)", w)}
+        enabled.discard("tw-hermes-gateway.service")  # made from its .in template in step 9
+        self.assertIn("tw-offsite.path", enabled)
+        for unit in sorted(enabled):
+            self.assertTrue((out / unit).is_file(), f"{unit} is enabled but never put in /etc/systemd/system")
+        placed = {f.name for f in out.iterdir()}
+        sources = {f.name for f in (REPO / "deploy" / "systemd").iterdir()} - {"tw-hermes-gateway.service.in", "user-hermes.slice.conf"}
+        self.assertEqual(placed, sources)
+        self.assertIn("user@1007.service", "".join(
+            (out / f).read_text() for f in placed))
+
+    def test_a_unit_file_of_an_unknown_kind_stops_the_install(self):
+        d = Path(tempfile.mkdtemp()) / "systemd"
+        shutil.copytree(REPO / "deploy" / "systemd", d)
+        (d / "tw-new.automount").write_text("[Automount]\n")
+        r, _ = self._place_units(d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("tw-new.automount is not a kind of unit file", r.stdout)
+
     def test_the_install_makes_and_proves_every_bots_folder(self):
         # 31 Oct: a listing of /srv/tw/work showed no wisp folder, and the
         # file broker no longer makes a Bot's own folder.

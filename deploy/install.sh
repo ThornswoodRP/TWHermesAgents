@@ -320,10 +320,21 @@ if [[ -z "$(swapon --show --noheadings)" ]]; then
   ok "a 4 GB swapfile is on, and in /etc/fstab for every boot"
 fi
 
-# 8. Units and slices.
-for f in "$here"/deploy/systemd/*.service "$here"/deploy/systemd/*.timer "$here"/deploy/systemd/*.slice; do
-  sed "s/user@1002\.service/user@$hermes_uid.service/g" "$f" > "/etc/systemd/system/$(basename "$f")"
+# 8. Units and slices. Every file in deploy/systemd is placed here or named
+# as handled below; one the install does not know stops it (1 Nov: the
+# first .path unit, tw-offsite.path, was left out by a list of suffixes, and
+# enabling it failed).
+unit_dir=/etc/systemd/system
+for f in "$here"/deploy/systemd/*; do
+  name="$(basename "$f")"
+  case "$name" in
+    tw-hermes-gateway.service.in|user-hermes.slice.conf) ;;  # placed below, filled in for this VM
+    *.service|*.timer|*.slice|*.path|*.socket|*.target)
+      sed "s/user@1002\.service/user@$hermes_uid.service/g" "$f" > "$unit_dir/$name" ;;
+    *) stop "deploy/systemd/$name is not a kind of unit file the install places; add it to step 8." ;;
+  esac
 done
+# end of the unit copy
 install -d "/etc/systemd/system/user-$hermes_uid.slice.d"
 install -m 0644 "$here/deploy/systemd/user-hermes.slice.conf" "/etc/systemd/system/user-$hermes_uid.slice.d/50-thornswood.conf"
 systemctl daemon-reload
