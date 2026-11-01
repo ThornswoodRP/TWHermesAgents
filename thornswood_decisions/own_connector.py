@@ -74,6 +74,10 @@ OPEN_RECENT = 5
 MESSAGES = 30
 TEXT = 2000
 FEED_BYTES = 480 * 1024  # under the core's 512 KB
+PAGE_CHATS = 50
+PAGE_MESSAGES = 50
+PAGE_TEXT = 8000
+PAGE_KINDS = ("chats", "messages")
 # Sessions Hermes's own pickers leave out (hermes_state_sessions.py INTERNAL_LISTING_SOURCES), and sub-agent runs.
 NOT_LISTED = ("kanban", "tool", "oneshot", "subagent")
 WINDOWS = os.name == "nt"
@@ -222,6 +226,99 @@ def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = M
     finally:
         con.close()
     return {"source_time": now.isoformat(), "chats": chats, "open": opened}
+
+
+# A chat's compression lineage, as Hermes's own hermes_state_sessions.py _LINEAGE_CTE_SQL walks it: the
+# chats it went on from (each ended with 'compression') and the chats it goes on as.
+LINEAGE_SQL = """
+WITH RECURSIVE
+  ancestors(id) AS (
+    SELECT ?
+    UNION
+    SELECT parent.id FROM ancestors a JOIN sessions child ON child.id = a.id
+    JOIN sessions parent ON parent.id = child.parent_session_id WHERE parent.end_reason = 'compression'),
+  descendants(id, depth) AS (
+    SELECT ?, 0
+    UNION
+    SELECT child.id, d.depth + 1 FROM descendants d JOIN sessions parent ON parent.id = d.id
+    JOIN sessions child ON child.parent_session_id = parent.id WHERE parent.end_reason = 'compression')
+"""
+
+
+def _columns(con: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+
+
+def chat_exists(state_db: Path, session_id: str) -> bool:
+    con = _ro(state_db)
+    try:
+        return con.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is not None
+    finally:
+        con.close()
+
+
+def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS) -> dict:
+    """Chats Hermes's own pickers list, newest first, older than `before`, with `q` in the title."""
+    sql = LIST_SQL.replace("ORDER BY last_at DESC LIMIT ?", "")
+    where, args = [], [*NOT_LISTED]
+    if before:
+        where.append("coalesce(s.last_activity_at, s.started_at) < ?")
+        args.append(datetime.fromisoformat(before).timestamp())
+    if q:
+        where.append("lower(coalesce(s.title, '')) LIKE ? ESCAPE '\\'")
+        args.append("%" + q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+    sql = sql.rstrip() + "".join(f"\n  AND {w}" for w in where) + "\nORDER BY last_at DESC, s.id LIMIT ?"
+    con = _ro(state_db)
+    try:
+        rows = con.execute(sql, (*args, n + 1)).fetchall()
+        chats = []
+        for r in rows[:n]:
+            last = con.execute(MESSAGES_SQL, (r["id"], 1)).fetchone()
+            chats.append({"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]),
+                          "preview": (_text(last["content"]) if last else "")[:200]})
+    finally:
+        con.close()
+    return {"chats": chats, "more": len(rows) > n}
+
+
+def messages_page(state_db: Path, session_id: str, before: int | None, n: int = PAGE_MESSAGES) -> dict:
+    """One page of a chat's messages, the newest `n` older than Hermes's message id `before`, oldest
+    first, across its whole compression lineage, by Hermes's own message ids. `gone` when Hermes no
+    longer has the chat; `continued_as` the chat it goes on as when Hermes compressed it."""
+    con = _ro(state_db)
+    try:
+        if con.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return {"messages": [], "more": False, "gone": True, "continued_as": None}
+        tip = con.execute(LINEAGE_SQL + "SELECT d.id FROM descendants d JOIN sessions s ON s.id = d.id "
+                          "ORDER BY d.depth DESC, s.started_at DESC LIMIT 1", (session_id, session_id)).fetchone()[0]
+        summary = "AND m._compressed_summary = 0 " if "_compressed_summary" in _columns(con, "messages") else ""
+        rows = con.execute(
+            LINEAGE_SQL + "SELECT m.id, m.role, m.content, m.timestamp FROM messages m "
+            "WHERE m.session_id IN (SELECT id FROM ancestors UNION SELECT id FROM descendants) AND m.active = 1 "
+            "AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL AND m.content != '' " + summary +
+            "AND (? IS NULL OR m.id < ?) ORDER BY m.id DESC LIMIT ?",
+            (session_id, session_id, before, before, n + 1)).fetchall()
+    finally:
+        con.close()
+    msgs = [{"mid": r["id"], "role": r["role"], "text": _text(r["content"])[:PAGE_TEXT], "at": _iso(r["timestamp"])}
+            for r in reversed(rows[:n])]
+    return {"messages": msgs, "more": len(rows) > n, "gone": False,
+            "continued_as": tip if tip != session_id else None, "read_at": datetime.now(timezone.utc).isoformat()}
+
+
+def fitted_page(state_db: Path, req: dict) -> bytes:
+    """A page as the core takes it: under its size, with fewer rows if need be. The cursor is the oldest row
+    sent, so a shorter page leaves no gap."""
+    n = PAGE_CHATS if req["kind"] == "chats" else PAGE_MESSAGES
+    while True:
+        if req["kind"] == "chats":
+            page = chats_page(state_db, req.get("before"), req.get("q") or "", n)
+        else:
+            page = messages_page(state_db, req["chat"], req.get("before"), n)
+        body = json.dumps({"id": req["id"], "page": page}, ensure_ascii=False).encode("utf-8")
+        if len(body) <= FEED_BYTES or n <= 1:
+            return body
+        n //= 2
 
 
 def fitted(state_db: Path, wanted: list[str], now: datetime) -> bytes:
@@ -386,6 +483,17 @@ class OwnConnector:
             self.unsaid = keep + self.unsaid
 
     def _deliver(self, item: dict) -> None:
+        sid = item.get("session_id")
+        try:
+            # No silent new chats: a chat Hermes no longer has is refused here, and nothing starts in its place.
+            gone = bool(sid) and SESSION_ID.match(sid) is not None and not chat_exists(self.state_db, sid)
+        except (sqlite3.Error, OSError):
+            gone = False  # Hermes's own resume refuses a missing chat too
+        if gone:
+            with self._lock:
+                self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": "that chat is gone"})
+                self.feed_now = True
+            return
         try:
             outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), item["text"])
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
@@ -397,6 +505,26 @@ class OwnConnector:
         with self._lock:
             self.unsaid.append(r)
             self.feed_now = True
+
+    def pages(self, wanted: list) -> int:
+        """The pages the core handed over: each read from state.db, read only, and posted. Returns how many."""
+        sent = 0
+        for req in wanted[:3]:
+            if not (isinstance(req, dict) and req.get("kind") in PAGE_KINDS and isinstance(req.get("id"), str)):
+                continue
+            if req["kind"] == "messages" and not (isinstance(req.get("chat"), str) and SESSION_ID.match(req["chat"])):
+                continue
+            try:
+                body = fitted_page(self.state_db, req)
+            except (sqlite3.Error, OSError, ValueError) as exc:
+                self.say(f"FAIL page: could not read Hermes's chats ({type(exc).__name__})")
+                continue
+            status, _ = self.core.post("page", body)
+            if status == 200:
+                sent += 1
+            elif status not in (409, 423):
+                self.say(f"FAIL page: the core answered {status}")
+        return sent
 
     def feed(self) -> int:
         try:
@@ -430,6 +558,9 @@ class OwnConnector:
         wanted = [w for w in body.get("wanted", []) if isinstance(w, str)]
         if wanted != self.wanted:
             self.wanted, self.feed_now = wanted, True
+        pages = body.get("pages", [])
+        if isinstance(pages, list) and pages:
+            self.pages(pages)
         items = body.get("items", [])
         for item in items:
             t = threading.Thread(target=self._deliver, args=(item,), daemon=True)

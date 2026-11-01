@@ -78,3 +78,6 @@ ol.steps li { margin: 8px 0; }
 ol.steps pre.artifact, ol.steps input { margin-top: 6px; }
 details.fold { margin: 14px 0; }
 details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cursor: pointer; }
+.search { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+.search input { flex: 1; }
+.search .secondary { width: auto; margin: 0; }

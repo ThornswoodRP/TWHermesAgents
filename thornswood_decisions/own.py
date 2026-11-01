@@ -32,6 +32,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from .auth import Principal
@@ -62,6 +64,18 @@ ROLES = ("user", "assistant")
 # readiness check itself failing. Anything else it sends is read as no word at all.
 STATES = ("ready", "gateway_down", "check_failed")
 PEER_FRESH = timedelta(minutes=3)    # `tw-decide peers` runs once a minute
+# Full history (step 2, plan Part 4): pages fetched from Hermes's own state.db by the connector, held in
+# the core's memory for 10 minutes to answer a second look, and never stored.
+PAGE_TTL = timedelta(minutes=10)
+PAGE_FRESH = timedelta(seconds=20)   # the newest page of a chat or a search changes as the chat goes on
+PAGE_AGAIN = timedelta(seconds=30)   # a request handed out and not answered is handed out again after this
+PAGE_HAND = 3                        # page requests handed to a connector in one claim
+PAGE_CHATS = 50
+PAGE_MESSAGES = 50
+PAGE_TEXT = 8000
+PAGE_QUERY = 80
+MAX_WAIT = 10
+PAGE_ID = re.compile(r"^pg_[A-Za-z0-9_-]{8,40}$")
 # The tailnet's own addresses: an X-Forwarded-For from Tailscale Serve is one of these.
 TAILNET = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 
@@ -140,6 +154,183 @@ def clean(body) -> dict:
     if len({o["id"] for o in out_open}) != len(out_open):
         raise CoreError(400, "bad_feed", "the feed opens a chat twice")
     return {"source_time": source_time, "chats": out_chats, "open": out_open}
+
+
+class _Pages:
+    """The pages of Patrick's own chats that the phone asked for, in the core's memory only.
+
+    A page is asked for (kind "chats", with `before` and `q`, or kind "messages", with `chat` and
+    `before`), handed to that gateway's connector on its next claim, posted back, and held for 10
+    minutes. Nothing here is written to the store, the event chain or a log."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.held: dict[tuple, tuple[datetime, dict]] = {}
+        self.asked: dict[tuple, dict] = {}
+
+    def _drop_old(self, now: datetime) -> None:
+        for k in [k for k, (until, _) in self.held.items() if until <= now]:
+            del self.held[k]
+        for k in [k for k, a in self.asked.items() if now - a["at"] > PAGE_TTL]:
+            del self.asked[k]
+
+    def get(self, key: tuple, now: datetime) -> dict | None:
+        with self.cond:
+            self._drop_old(now)
+            got = self.held.get(key)
+            return got[1] if got else None
+
+    def ask(self, key: tuple, now: datetime) -> None:
+        with self.cond:
+            if key not in self.asked and key not in self.held:
+                self.asked[key] = {"id": new_id("pg"), "at": now, "handed": None}
+
+    def wait(self, key: tuple, seconds: float, now) -> dict | None:
+        """The page, once the connector posts it, for at most `seconds` of real time."""
+        end = time.monotonic() + seconds
+        with self.cond:
+            while True:
+                got = self.held.get(key)
+                if got:
+                    return got[1]
+                left = end - time.monotonic()
+                if left <= 0:
+                    return None
+                self.cond.wait(left)
+
+    def hand(self, ws: str, gw: str, now: datetime) -> list[dict]:
+        with self.cond:
+            self._drop_old(now)
+            out = []
+            for key, a in sorted(self.asked.items(), key=lambda kv: kv[1]["at"]):
+                if key[0] != ws or key[1] != gw or len(out) >= PAGE_HAND:
+                    continue
+                if a["handed"] and now - a["handed"] < PAGE_AGAIN:
+                    continue
+                a["handed"] = now
+                kind, chat, before, q = key[2:]
+                out.append({"id": a["id"], "kind": kind, "chat": chat, "before": before, "q": q})
+            return out
+
+    def answer(self, ws: str, gw: str, rid: str, page: dict, now: datetime) -> tuple:
+        with self.cond:
+            key = next((k for k, a in self.asked.items() if a["id"] == rid and k[0] == ws and k[1] == gw), None)
+            if key is None:
+                raise CoreError(409, "not_asked", "no page with that id was asked of this gateway")
+            del self.asked[key]
+            self.held[key] = (now + (PAGE_FRESH if key[4] is None else PAGE_TTL), page)
+            self.cond.notify_all()
+            return key
+
+    def listed(self, ws: str, gw: str, sid: str, now: datetime) -> bool:
+        """Whether a chats page this gateway's connector posted names the chat, or a messages page says the
+        chat goes on under it."""
+        with self.cond:
+            self._drop_old(now)
+            for key, (_, page) in self.held.items():
+                if key[0] != ws or key[1] != gw:
+                    continue
+                if key[2] == "chats" and any(c["id"] == sid for c in page["chats"]):
+                    return True
+                if key[2] == "messages" and page.get("continued_as") == sid:
+                    return True
+            return False
+
+
+PAGES = _Pages()
+
+
+def fetch_page(key: tuple, wait, now: datetime) -> dict:
+    """A page from memory, or asked for and waited on for at most `wait` seconds; {"pending": true} until then."""
+    try:
+        wait = min(max(float(wait or 0), 0.0), MAX_WAIT)
+    except (TypeError, ValueError):
+        raise CoreError(400, "bad_wait", f"wait is 0 to {MAX_WAIT} seconds") from None
+    got = PAGES.get(key, now)
+    if got is None:
+        PAGES.ask(key, now)
+        got = PAGES.wait(key, wait, now) if wait else None
+    return {"pending": True} if got is None else {"pending": False, **got}
+
+
+def page_kind(rid) -> tuple | None:
+    """The request a page id names, or None."""
+    if not isinstance(rid, str) or not PAGE_ID.match(rid):
+        return None
+    with PAGES.cond:
+        return next((k for k, a in PAGES.asked.items() if a["id"] == rid), None)
+
+
+def _page_time(value) -> str | None:
+    if value in (None, ""):
+        return None
+    try:
+        return parse(str(value)).isoformat()
+    except (ValueError, TypeError):
+        raise CoreError(400, "bad_before", "before is an ISO time with a zone") from None
+
+
+def _page_mid(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        mid = int(str(value))
+    except ValueError:
+        raise CoreError(400, "bad_before", "before is a message id, a whole number") from None
+    if not 0 < mid < 2 ** 63:
+        raise CoreError(400, "bad_before", "before is a message id, a whole number")
+    return mid
+
+
+def clean_page(kind: str, body) -> dict:
+    """Only what the phone shows of one page, each field cut to size."""
+    if not isinstance(body, dict):
+        raise CoreError(400, "bad_page", "a page is a JSON object")
+    more = body.get("more")
+    if not isinstance(more, bool):
+        raise CoreError(400, "bad_page", "more is true or false")
+    if kind == "chats":
+        chats = body.get("chats")
+        if not isinstance(chats, list) or len(chats) > PAGE_CHATS:
+            raise CoreError(400, "bad_page", f"a page of chats has at most {PAGE_CHATS}")
+        out = []
+        for c in chats:
+            if not isinstance(c, dict):
+                raise CoreError(400, "bad_page", "each chat is an object")
+            row = {k: _text(c.get(k), n) for k, n in CHAT_FIELDS.items()}
+            row["id"] = _sid(row["id"])
+            out.append(row)
+        if len({c["id"] for c in out}) != len(out):
+            raise CoreError(400, "bad_page", "the page names a chat twice")
+        return {"chats": out, "more": more}
+    msgs = body.get("messages")
+    if not isinstance(msgs, list) or len(msgs) > PAGE_MESSAGES:
+        raise CoreError(400, "bad_page", f"a page of messages has at most {PAGE_MESSAGES}")
+    gone = body.get("gone", False)
+    if not isinstance(gone, bool):
+        raise CoreError(400, "bad_page", "gone is true or false")
+    out, last = [], None
+    for m in msgs:
+        if not isinstance(m, dict):
+            raise CoreError(400, "bad_page", "each message is an object")
+        mid = m.get("mid")
+        if not isinstance(mid, int) or isinstance(mid, bool) or not 0 < mid < 2 ** 63:
+            raise CoreError(400, "bad_page", "each message has Hermes's own id, a whole number")
+        if last is not None and mid <= last:
+            raise CoreError(400, "bad_page", "a page's messages are in Hermes's own order, oldest first")
+        last = mid
+        row = {"mid": mid, "role": _text(m.get("role"), 16), "text": _text(m.get("text"), PAGE_TEXT),
+               "at": _text(m.get("at"), 40)}
+        if row["role"] not in ROLES:
+            raise CoreError(400, "bad_page", "a message is from the user or the assistant")
+        out.append(row)
+    cont = body.get("continued_as")
+    try:
+        read_at = parse(str(body.get("read_at"))).isoformat() if body.get("read_at") else None
+    except (ValueError, TypeError):
+        raise CoreError(400, "bad_page", "read_at is an ISO time with a zone") from None
+    return {"messages": out, "more": more, "gone": gone, "continued_as": _sid(cont) if cont else None,
+            "read_at": read_at}
 
 
 class OwnChat:
@@ -388,6 +579,58 @@ class OwnChat:
                        (p.workspace_id, p.id, idempotency_key, "own.send", body_sha, canonical(receipt), now))
         return receipt
 
+    # ── full history: pages ───────────────────────────────────────────────
+
+    def _listed(self, workspace_id: str, gw: str, sid: str) -> bool:
+        """A chat id answers only on the gateway whose own connector listed it: in its chat list, a page
+        of it, a chat Patrick started there, or the chat a compressed one goes on as."""
+        snap = Feeds(self.s).get(workspace_id, gw)[gw] or {}
+        if any(c["id"] == sid for c in snap.get("chats", [])):
+            return True
+        if self.s.db.execute("SELECT 1 FROM own_messages WHERE workspace_id = ? AND gateway = ? "
+                             "AND made_session_id = ?", (workspace_id, gw, sid)).fetchone():
+            return True
+        return PAGES.listed(workspace_id, gw, sid, self.s.clock())
+
+    def page(self, p: Principal, gw: str, kind: str, chat=None, before=None, q=None, wait=0) -> dict:
+        """One page of the chat list (newest first, `before` a time, `q` words in the title) or of one
+        chat's messages (`before` Hermes's own message id). Answered from memory, or once the connector
+        posts it, waiting at most `wait` seconds; {"pending": true} until then."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        if kind == "chats":
+            before = _page_time(before)
+            q = str(q or "").strip()[:PAGE_QUERY]
+            if before is None and not q:
+                # The newest chats are the chat list the connector already sends.
+                snap = Feeds(self.s).get(p.workspace_id, gw)[gw] or {}
+                chats = snap.get("chats", [])
+                return {"pending": False, "chats": chats, "more": len(chats) >= MAX_CHATS}
+            key = (p.workspace_id, gw, "chats", None, before, q)
+        elif kind == "messages":
+            chat = _sid(chat)
+            if not self._listed(p.workspace_id, gw, chat):
+                raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
+            key = (p.workspace_id, gw, "messages", chat, _page_mid(before), "")
+        else:
+            raise CoreError(404, "no_route", "no such route")
+        return fetch_page(key, wait, self.s.clock())
+
+    def page_post(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """A page the connector read from Hermes's state.db, for a request the core handed it."""
+        self._check_token(workspace_id, gw, token)
+        if not self.s.flag(workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "the core takes no page while own_chat_write is off")
+        if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not PAGE_ID.match(body["id"]):
+            raise CoreError(400, "bad_page", "a page names the request it answers")
+        key = page_kind(body["id"])
+        if key is None or key[1] != gw or key[2] not in ("chats", "messages"):
+            raise CoreError(409, "not_asked", "no page with that id was asked of this gateway")
+        PAGES.answer(workspace_id, gw, body["id"], clean_page(key[2], body.get("page")), self.s.clock())
+        return {"ok": True}
+
     # ── the connector's side ──────────────────────────────────────────────
 
     def feed(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
@@ -443,7 +686,8 @@ class OwnChat:
                 self.s.event(db, workspace_id, "own.leased", r["id"], f"own connector ({gw})", {})
                 items.append({"id": r["id"], "session_id": r["session_id"], "text": r["text"],
                               "send_key": r["send_key"], "lease_until": until})
-        return {"items": items, "wanted": self._wanted(workspace_id, gw)}
+        return {"items": items, "wanted": self._wanted(workspace_id, gw),
+                "pages": PAGES.hand(workspace_id, gw, self.s.clock())}
 
     def _lapse(self, db, workspace_id: str, gw: str) -> None:
         """A lease that ran out means the connector stopped mid-turn: unclear, so never sent again by itself."""

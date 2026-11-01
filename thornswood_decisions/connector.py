@@ -20,6 +20,10 @@ way Hermes itself does:
 - the room: `room_send.py` with Hermes's own Python, which calls `groups.send`
   on the running gateway with the core's key as the event id.
 
+Every few seconds, whatever connector_effects says, it also answers the pages of
+full history the phone asked for (`POST /api/v1/connector/pages`, then
+`/connector/page`): a Bot's Bot Chat from that profile's state.db and a room
+from shared-state.db, both read only, 50 messages at a time.
 Then it tells the core what came of it (`POST /api/v1/connector/result`):
 confirmed only when Hermes said so, failed only when nothing was sent, and
 uncertain for everything else. An uncertain message is never sent again by
@@ -33,6 +37,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -51,6 +57,42 @@ CHECK_SECONDS = 60
 # the unit's MemoryMax holds them all.
 PARALLEL = 3
 BOT_CHAT = "Bot Chat"
+PAGE_BYTES = 480 * 1024  # under the core's 512 KB
+ROOM_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def bot_page(hermes_home: Path, bot: str, before: int | None) -> dict:
+    """One page of a Bot's one canonical Bot Chat, from that profile's state.db, read only."""
+    from .own_connector import _ro, messages_page
+    db = hermes_home / "profiles" / bot / "state.db"
+    if not db.exists():
+        return {"messages": [], "more": False, "gone": True, "continued_as": None}
+    con = _ro(db)
+    try:
+        s = con.execute("SELECT id FROM sessions WHERE title = ? AND archived = 0 ORDER BY started_at DESC LIMIT 1",
+                        (BOT_CHAT,)).fetchone()
+    finally:
+        con.close()
+    if not s:
+        return {"messages": [], "more": False, "gone": True, "continued_as": None}
+    n = 50
+    while True:
+        page = messages_page(db, s["id"], before, n)
+        page["continued_as"] = None  # one Bot Chat per Bot: the phone names it by the Bot, not by its id
+        if len(json.dumps(page, ensure_ascii=False).encode("utf-8")) <= PAGE_BYTES or n <= 1:
+            return page
+        n //= 2
+
+
+def room_page(shared_db: Path, room_id: str, before: int | None) -> dict:
+    from .feed_reader import room_page as read
+    n = 50
+    while True:
+        page = read(shared_db, room_id, before, n)
+        if len(json.dumps(page, ensure_ascii=False).encode("utf-8")) <= PAGE_BYTES or n <= 1:
+            return page
+        n //= 2
 
 
 def read_token(path: Path) -> str:
@@ -155,8 +197,9 @@ def say(line: str) -> None:
 
 
 class Connector:
-    def __init__(self, core: Core, hermes: Hermes, say=say):
+    def __init__(self, core: Core, hermes: Hermes, say=say, hermes_home: Path | None = None):
         self.core, self.hermes, self.say = core, hermes, say
+        self.hermes_home = hermes_home or Path.home() / ".hermes"
         self.unsaid: list[dict] = []  # results the core has not taken yet
         self._lock = threading.Lock()
 
@@ -208,10 +251,45 @@ class Connector:
         self._report()
         return len(items)
 
+    def pages(self) -> int:
+        """The pages the phone asked for: each Bot Chat or room read from Hermes's own stores, read only, and
+        posted. Reading only, so it runs whatever connector_effects says. Returns how many were posted."""
+        status, body = self.core.post("/connector/pages", {})
+        if status != 200:
+            return 0
+        sent = 0
+        for req in body.get("pages", [])[:3]:
+            if not isinstance(req, dict) or not isinstance(req.get("id"), str):
+                continue
+            before = req.get("before") if isinstance(req.get("before"), int) else None
+            target = req.get("chat")
+            try:
+                if req.get("kind") == "bot" and isinstance(target, str) and PROFILE_ID.match(target):
+                    page = bot_page(self.hermes_home, target, before)
+                elif req.get("kind") == "room" and isinstance(target, str) and ROOM_ID.match(target):
+                    page = room_page(self.hermes_home / "shared-state.db", target, before)
+                else:
+                    continue
+            except (sqlite3.Error, OSError) as exc:
+                self.say(f"FAIL page: could not read Hermes's store ({type(exc).__name__})")
+                continue
+            status, _ = self.core.post("/connector/page", {"id": req["id"], "target": target, "page": page})
+            if status == 200:
+                sent += 1
+            elif status not in (409, 423):
+                self.say(f"FAIL page: the core answered {status}")
+        return sent
+
     def forever(self) -> None:
+        # Pages every few seconds, whatever connector_effects says; the claim every few seconds, or every
+        # half minute while the core says connector_effects is off.
+        claim_at = 0.0
         while True:
-            n = self.once()
-            time.sleep(POLL_SECONDS * (6 if n < 0 else 1))
+            self.pages()
+            if time.monotonic() >= claim_at:
+                n = self.once()
+                claim_at = time.monotonic() + (POLL_SECONDS * 6 if n < 0 else 0)
+            time.sleep(POLL_SECONDS)
 
 
 def main(argv: list[str]) -> int:
@@ -224,7 +302,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--once", action="store_true", help="one round, then stop")
     args = ap.parse_args(argv)
     hermes = Hermes([args.hermes], args.hermes_python or hermes_python(args.hermes), home)
-    conn = Connector(Core(args.core, read_token(Path(args.token))), hermes)
+    conn = Connector(Core(args.core, read_token(Path(args.token))), hermes, hermes_home=home / ".hermes")
     if args.once:
         n = conn.once()
         print("WAIT connector_effects is off" if n < 0 else f"PASS {n} handed to Hermes")

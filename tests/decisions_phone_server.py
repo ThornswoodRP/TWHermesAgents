@@ -6,8 +6,10 @@ It prints one JSON line (a phone pairing code and three card ids, the second
 high risk, the third left for the alert checks) and serves until killed. Test data only: no real workspace, no Bot,
 no deploy; nothing takes the chat messages it queues, and the push worker's
 keys are throwaway ones said straight to the core, with no worker and no push
-service. One's own-Hermes connector is stood in for by one call to the core,
-and nothing takes the messages sent to it.
+service. One's own-Hermes connector is stood in for by one call to the core
+for its chat list and a loop that answers the pages the core asks for from a
+scratch state.db (the real connector's own page reads), and nothing takes the
+messages sent to it.
 """
 import json
 import sys
@@ -46,9 +48,86 @@ to = f.new_token(w.ws, "own-one", by="t"); f.new_token(w.ws, "own-me", by="t")
 own.claim(w.ws, "one", to, 0, True)
 own.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "chats": [
     {"id": "s_plan", "title": "Plan the week", "last_at": "2026-11-01T17:30:00+00:00", "preview": "three things"},
+    {"id": "s_long", "title": "A long chat", "last_at": "2026-11-01T16:00:00+00:00", "preview": "message 119"},
     {"id": "s_old", "title": "", "last_at": "2026-10-30T17:30:00+00:00", "preview": "older"}],
     "open": [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
                                            {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]})
+# The pages: s_plan and s_long are in the scratch state.db, s_old is not (gone from Hermes).
+import sqlite3, tempfile, threading, time
+from datetime import datetime
+from test_decisions_own import STATE_SQL
+from thornswood_decisions import own_connector
+from thornswood_decisions.store import CoreError, Store
+sdb = Path(tempfile.mkdtemp()) / "state.db"
+con = sqlite3.connect(sdb)
+con.executescript(STATE_SQL)
+def epoch(iso): return datetime.fromisoformat(iso).timestamp()
+con.execute("INSERT INTO sessions VALUES('s_plan', 'cli', 'Plan the week', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-11-01T17:00:00+00:00"), epoch("2026-11-01T17:30:00+00:00")))
+con.execute("INSERT INTO sessions VALUES('s_long', 'cli', 'A long chat', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-11-01T10:00:00+00:00"), epoch("2026-11-01T16:00:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_plan', 'user', 'What is on this week?', ?)",
+            (epoch("2026-11-01T17:29:00+00:00"),))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_plan', 'assistant', '<b>three</b> things', ?)",
+            (epoch("2026-11-01T17:30:00+00:00"),))
+for i in range(120):
+    con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_long', ?, ?, ?)",
+                ("user" if i % 2 == 0 else "assistant", f"message {i}", epoch("2026-11-01T10:00:00+00:00") + i))
+con.commit()
+con.close()
+def one_pages():
+    o = OwnChat(Store(w.path, clock=w.clock))
+    while True:
+        try:
+            for req in o.claim(w.ws, "one", to, 0, True)["pages"]:
+                o.page_post(w.ws, "one", to, json.loads(own_connector.fitted_page(sdb, req)))
+        except CoreError:
+            pass
+        time.sleep(0.3)
+threading.Thread(target=one_pages, daemon=True).start()
+# The Bots' connector's page reads, against a stand-in ~/.hermes: Bramble's Bot Chat of 70 messages and the
+# Workbench room's messages.
+from thornswood_decisions.chat import Chat
+from thornswood_decisions.connector import Connector
+bhome = Path(tempfile.mkdtemp()) / ".hermes"
+(bhome / "profiles" / "bramble").mkdir(parents=True)
+con = sqlite3.connect(bhome / "profiles" / "bramble" / "state.db")
+con.executescript(STATE_SQL)
+con.execute("INSERT INTO sessions VALUES('s_bc', 'cli', 'Bot Chat', 1, 900, NULL, NULL, NULL, 0, 0)")
+for i in range(68):
+    con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', ?, ?, ?)",
+                ("user" if i % 2 == 0 else "assistant", f"bramble {i}", epoch("2026-11-01T09:00:00+00:00") + i))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'user', 'How is the nightly?', ?)",
+            (epoch("2026-11-01T17:00:00+00:00"),))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'assistant', 'All green <i>tonight</i>.', ?)",
+            (epoch("2026-11-01T17:01:00+00:00"),))
+con.commit()
+con.close()
+con = sqlite3.connect(bhome / "shared-state.db")
+con.execute("CREATE TABLE hosted_room_events (room_id TEXT, seq INTEGER, event_id TEXT, kind TEXT, "
+            "actor_json TEXT, authority_epoch INTEGER, payload_json TEXT, created_at REAL)")
+con.execute("INSERT INTO hosted_room_events VALUES('54b3ad46-3419-4adb-b60d-c79cb347fcee', 1, 'e1', 'message.member', "
+            "?, 1, ?, ?)", (json.dumps({"display_name": "Bramble"}), json.dumps({"text": "<script>alert(1)</script> hello"}),
+                            epoch("2026-11-01T17:59:00+00:00")))
+con.commit()
+con.close()
+tc = f.new_token(w.ws, "connector", by="t")
+class Direct:
+    def __init__(self):
+        self.chat = Chat(Store(w.path, clock=w.clock))
+    def post(self, path, body):
+        try:
+            if path == "/connector/pages":
+                return 200, self.chat.page_requests(w.ws, tc)
+            return 200, self.chat.page_post(w.ws, tc, json.loads(json.dumps(body)))
+        except CoreError as exc:
+            return exc.status, {"error": exc.reason}
+def bots_pages():
+    conn = Connector(Direct(), None, say=lambda _: None, hermes_home=bhome)
+    while True:
+        conn.pages()
+        time.sleep(0.3)
+threading.Thread(target=bots_pages, daemon=True).start()
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
 srv = make_server(api, "127.0.0.1", port)

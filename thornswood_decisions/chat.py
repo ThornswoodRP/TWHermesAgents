@@ -37,6 +37,7 @@ from datetime import timedelta
 from .auth import Principal
 from .core import DecisionCore
 from .feeds import Feeds, room_events
+from .own import PAGE_TEXT, PAGES, _page_mid, clean_page, fetch_page, page_kind
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
 MAX_TEXT = 8000
@@ -45,6 +46,29 @@ ROOM = "room"  # the first room bound, by its first name
 OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
 MINE = 50
 MAX_CLAIM = 7  # the six Bots and the rooms, at most this many at once
+ROOM_PAGE = 50
+ROOM_KINDS = ("message.user", "message.member")
+PAGES_GW = "bots"   # the Bots' gateway, in the page store beside Patrick's own two
+
+
+def clean_room_page(body) -> dict:
+    """Only what the phone shows of one page of a room, oldest first by the room's own sequence."""
+    if not isinstance(body, dict) or not isinstance(body.get("more"), bool):
+        raise CoreError(400, "bad_page", "a page is a JSON object with more true or false")
+    events = body.get("events")
+    if not isinstance(events, list) or len(events) > ROOM_PAGE:
+        raise CoreError(400, "bad_page", f"a page of a room has at most {ROOM_PAGE} events")
+    out, last = [], None
+    for e in events:
+        seq = e.get("seq") if isinstance(e, dict) else None
+        if not isinstance(seq, int) or isinstance(seq, bool) or not 0 < seq < 2 ** 63 or (last and seq <= last):
+            raise CoreError(400, "bad_page", "each event has the room's own sequence number, oldest first")
+        last = seq
+        if e.get("kind") not in ROOM_KINDS:
+            raise CoreError(400, "bad_page", "a page of a room holds only its messages")
+        out.append({"seq": seq, "kind": e["kind"], "actor": str(e.get("actor") or "")[:80],
+                    "text": str(e.get("text") or "")[:PAGE_TEXT], "at": str(e.get("at") or "")[:40]})
+    return {"events": out, "more": body["more"]}
 
 
 def room_event_id(send_key: str) -> str:
@@ -212,6 +236,40 @@ class Chat:
                 "room": bool(rooms)}
 
     # ── the connector's side ──────────────────────────────────────────────
+
+    # ── full history: pages (step 2, plan Part 4) ─────────────────────────
+
+    def page(self, p: Principal, target: str, before=None, wait=0) -> dict:
+        """One page of a Bot's Bot Chat (`before` Hermes's own message id) or of a room (`before` the room's
+        sequence number), read by the Bots' connector and held in the core's memory only."""
+        self._patrick(p)
+        target = self._target(p.workspace_id, target)
+        kind = "room" if target in {r["room_id"] for r in self.rooms(p.workspace_id)} else "bot"
+        return fetch_page((p.workspace_id, PAGES_GW, kind, target, _page_mid(before), ""), wait, self.s.clock())
+
+    def page_requests(self, workspace_id: str, token: str | None) -> dict:
+        """The pages the phone asked for, for the Bots' connector. Reading only: it asks while mobile_read is
+        on, whatever connector_effects says."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not self.s.flag(workspace_id, "mobile_read"):
+            raise CoreError(423, "mobile_read_off", "the phone reads nothing while mobile_read is off")
+        return {"pages": PAGES.hand(workspace_id, PAGES_GW, self.s.clock())}
+
+    def page_post(self, workspace_id: str, token: str | None, body) -> dict:
+        """A page the Bots' connector read. It names the request, and the Bot or room it read, which must be
+        the one asked for."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not self.s.flag(workspace_id, "mobile_read"):
+            raise CoreError(423, "mobile_read_off", "the phone reads nothing while mobile_read is off")
+        key = page_kind(body.get("id") if isinstance(body, dict) else None)
+        if key is None or key[0] != workspace_id or key[1] != PAGES_GW:
+            raise CoreError(409, "not_asked", "no page with that id was asked of the Bots' connector")
+        if body.get("target") != key[3]:
+            raise CoreError(409, "not_that_chat", "the page is of another Bot or room than the one asked for")
+        page = body.get("page")
+        clean = clean_room_page(page) if key[2] == "room" else clean_page("messages", page)
+        PAGES.answer(workspace_id, PAGES_GW, body["id"], clean, self.s.clock())
+        return {"ok": True}
 
     def claim(self, workspace_id: str, token: str | None, limit: int = MAX_CLAIM) -> dict:
         """Lease the oldest waiting message for each Bot (and the room) that has nothing in flight, at most `limit`."""

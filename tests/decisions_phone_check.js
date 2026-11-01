@@ -23,7 +23,13 @@ const base = `http://localhost:${port}`
   const page = await ctx.newPage()
   const errors = []
   page.on('pageerror', e => errors.push(String(e)))
-  page.on('console', m => { if (m.type() === 'error' && !/status of 401/.test(m.text())) errors.push(m.text()) })
+  // A 401 is the signed-out app asking; a 404 is said below only when it is not a chat a gateway never listed.
+  page.on('console', m => { if (m.type() === 'error' && !/status of (401|404)/.test(m.text())) errors.push(m.text()) })
+  page.on('response', r => {
+    if (r.status() === 404 && !/\/api\/v1\/own\/(me|one)\/chats\/[^/]+\/messages$/.test(new URL(r.url()).pathname)) {
+      errors.push('404 ' + r.url())
+    }
+  })
   // The names Hermes and One are shown only: every request carries the ids me and one (plan Part 2).
   const shownNames = []
   page.on('request', q => {
@@ -140,6 +146,13 @@ const base = `http://localhost:${port}`
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-bramble.png', fullPage: true })
+  await page.getByRole('button', { name: 'Older messages' }).click()
+  await step("Bramble's Bot Chat pages back to its first message, from Hermes itself", async () => {
+    await page.getByText('bramble 0', { exact: true }).waitFor({ timeout: 15000 })
+    const texts = await page.locator('#view .msg[data-mid] .text').allTextContents()
+    const want = [...Array.from({ length: 68 }, (_, i) => `bramble ${i}`), 'How is the nightly?', 'All green <i>tonight</i>.']
+    if (JSON.stringify(texts) !== JSON.stringify(want)) throw new Error(texts.length + ' ' + texts.slice(0, 2))
+  })
   await page.goto(base + '/m/bramble')
   await step("Bramble's first path still opens its chat, under Bots", async () => {
     await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
@@ -169,7 +182,7 @@ const base = `http://localhost:${port}`
   })
   await page.getByText('Plan the week', { exact: true }).click()
   await step('a chat on One, as text, on its own deep link', async () => {
-    await page.getByText('<b>three</b> things').waitFor({ timeout: 5000 })
+    await page.getByText('<b>three</b> things').waitFor({ timeout: 15000 })
     if (!page.url().endsWith('/m/hermes/one/s_plan')) throw new Error('url ' + page.url())
     await page.getByText(/^You can send until .+ started from the phone or has \/yolo on\.$/).waitFor({ timeout: 3000 })
   })
@@ -180,8 +193,40 @@ const base = `http://localhost:${port}`
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-own-chat.png', fullPage: true })
+  await page.goto(base + '/m/hermes/one')
+  await page.getByLabel('Search chat titles').fill('long')
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
+  await step("the picker searches One's chat titles", async () => {
+    await page.getByRole('heading', { name: 'Chats with "long" in the title' }).waitFor({ timeout: 15000 })
+    const rows = await page.locator('#view button.row[data-chat] strong').allTextContents()
+    if (JSON.stringify(rows) !== JSON.stringify(['A long chat'])) throw new Error(JSON.stringify(rows))
+  })
+  await page.getByText('A long chat', { exact: true }).click()
+  await step('a long chat opens on its newest 50 messages, from Hermes itself', async () => {
+    await page.getByText('message 119', { exact: true }).waitFor({ timeout: 15000 })
+    if (await page.getByText('message 69', { exact: true }).count()) throw new Error('more than the newest page')
+  })
+  await page.getByRole('button', { name: 'Older messages' }).click()
+  await page.getByText('message 20', { exact: true }).waitFor({ timeout: 15000 })
+  await page.getByRole('button', { name: 'Older messages' }).click()
+  await step('older messages page back to the first, in order, with no gaps or repeats', async () => {
+    await page.getByText('message 0', { exact: true }).waitFor({ timeout: 15000 })
+    const texts = await page.locator('#view .msg[data-mid] .text').allTextContents()
+    const want = Array.from({ length: 120 }, (_, i) => `message ${i}`)
+    if (JSON.stringify(texts) !== JSON.stringify(want)) throw new Error(texts.length + ' ' + texts.slice(0, 3))
+    if (await page.getByRole('button', { name: 'Older messages' }).count()) throw new Error('more offered at the first')
+  })
   await page.goto(base + '/m/hermes/one/s_old')
-  await step('a chat the feed does not carry yet is asked for', () => page.getByText('Asking One for this chat. It shows here within half a minute.').waitFor({ timeout: 5000 }))
+  await step('a chat Hermes no longer has says so and offers no send', async () => {
+    await page.getByText('This chat is gone from One. Nothing sent here would reach it.').waitFor({ timeout: 15000 })
+    if (await page.getByLabel('Send to One').count()) throw new Error('a composer for a gone chat')
+  })
+  await page.goto(base + '/m/hermes/one/s_never')
+  await step('a chat One never listed does not open', () =>
+    page.getByText('One has not listed this chat, so it does not open here.').waitFor({ timeout: 5000 }))
+  await page.goto(base + '/m/hermes/me/s_plan')
+  await step("One's chat id does not open on Hermes", () =>
+    page.getByText('Hermes has not listed this chat, so it does not open here.').waitFor({ timeout: 5000 }))
   await page.goto(base + '/m/hermes/me')
   await step('Hermes on the VM, with no connector yet, says so and offers no send', async () => {
     await page.locator('#view h2', { hasText: /^Hermes$/ }).waitFor({ timeout: 5000 })

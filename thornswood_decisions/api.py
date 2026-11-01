@@ -71,7 +71,7 @@ SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
             ("GET", "own"), ("POST", "own")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed")
+OWN_CONNECTOR = ("claim", "result", "feed", "page")
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -203,6 +203,8 @@ class Api:
             token, own = _bearer(headers.get("authorization", "")), OwnChat(core.s)
             if route[2] == "feed":
                 return 200, own.feed(self.ws, route[1], token, data)
+            if route[2] == "page":
+                return 200, own.page_post(self.ws, route[1], token, data)
             if route[2] == "claim":
                 # Tailscale Serve sets X-Forwarded-For to the tailnet address the connector posts from
                 # (and replaces any it was sent); the core reads the tailnet's view of that machine.
@@ -227,6 +229,10 @@ class Api:
                 if route[1] == "result":
                     return 200, push.result(self.ws, token, str(data.get("id", "")), data.get("results"))
                 raise CoreError(404, "no_route", "no such route")
+            if route[1] == "pages":
+                return 200, Chat(core.s).page_requests(self.ws, token)
+            if route[1] == "page":
+                return 200, Chat(core.s).page_post(self.ws, token, data)
             if route[1] == "claim":
                 return 200, Chat(core.s).claim(self.ws, token, data.get("limit", 7))
             if route[1] == "result":
@@ -290,6 +296,8 @@ class Api:
             return 200, Push(core.s).denied(p)
         if method == "GET" and route == ["chat"]:
             return 200, Chat(core.s).summary(p)
+        if method == "GET" and len(route) == 3 and route[0] == "chat" and route[2] == "messages":
+            return 200, Chat(core.s).page(p, route[1], before=query.get("before"), wait=query.get("wait"))
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1])
@@ -298,6 +306,12 @@ class Api:
             return 200, OwnChat(core.s).summary(p)
         if method == "GET" and len(route) == 2 and route[0] == "own":
             return 200, OwnChat(core.s).chats(p, route[1])
+        if method == "GET" and len(route) == 3 and route[0] == "own" and route[2] == "chats":
+            return 200, OwnChat(core.s).page(p, route[1], "chats", before=query.get("before"), q=query.get("q"),
+                                             wait=query.get("wait"))
+        if method == "GET" and len(route) == 5 and route[0] == "own" and route[2] == "chats" and route[4] == "messages":
+            return 200, OwnChat(core.s).page(p, route[1], "messages", chat=route[3], before=query.get("before"),
+                                             wait=query.get("wait"))
         if method == "GET" and len(route) == 3 and route[0] == "own":
             return 200, OwnChat(core.s).view(p, route[1], route[2])
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
@@ -376,7 +390,8 @@ class Api:
 
 
 def body_limit(path: str) -> int:
-    feed = path.startswith(PREFIX + "/feeds/") or (path.startswith(PREFIX + "/own/") and path.endswith("/feed"))
+    feed = (path.startswith(PREFIX + "/feeds/") or path == PREFIX + "/connector/page"
+            or (path.startswith(PREFIX + "/own/") and path.endswith(("/feed", "/page"))))
     return MAX_FEED_BYTES if feed else MAX_REQUEST_BYTES
 
 

@@ -176,6 +176,32 @@ Patrick, 1 Nov: "I should be able to reach all three gateways and chats from the
 
 Checked here: `tests/test_decisions_own.py` (the flag, the 30-minute passkey rule, "One is off", idempotency, one turn per chat, the Bots' connector never seeing one, the tokens, migration 7 keeping every older row, the restore quarantine, the routes, and the connector against a scratch `state.db`, a stand-in `hermes` and a stand-in readiness check, and One's installer with a stand-in ssh), and the browser check. Not checked here: a real Hermes turn on the VM or One.
 
+## Full history of his own chats (step 2)
+
+Plan Part 4, for Hermes, One, each Bot's Bot Chat and each room.
+
+- **Bot Chats and rooms.** The Bots' connector reads these pages: a Bot's one Bot Chat from that profile's `state.db`, and a room's messages from `shared-state.db` by the room's own sequence number. It asks `POST /connector/pages` every few seconds and posts with `POST /connector/page`. This is reading only, so it runs whatever `connector_effects` says, and only while `mobile_read` is on.
+- **Each page is checked against its request.** A page names the Bot or room it read, and that must be the one asked for. Neither the own-Hermes tokens nor One's connector can answer one.
+- **Route.** The phone asks `GET /chat/<bot or room id>/messages?before=&wait=`. A room is reached by its id, as the chat routes already do.
+
+- **Where a page comes from.** The phone asks the core, and the core hands the request to that gateway's connector on its next claim, within about 5 seconds. The connector reads Hermes's `state.db` read only and posts the page (`POST /own/<gateway>/page`, its own token). A page holds 50 messages, or 50 chats.
+- **Ordering and compression.** Messages are in Hermes's own message-id order, across the chat's whole compression lineage. A compressed chat's id says what it goes on as (`continued_as`), and the phone follows it there and says so.
+- **Memory only.** The core holds a page in memory, never in the store or a log: 10 minutes for an older page, and 20 seconds for the newest one, which changes as the chat goes on. `GET /own/<gateway>/chats?before=<time>&q=<words>` is the picker, newest first, with a title search. Its first page is the chat list the connector already sends. `GET /own/<gateway>/chats/<chat id>/messages?before=<message id>&wait=<seconds>` is one page, answered at once from memory or within the wait once the connector posts it. Until then it answers `{"pending": true}`.
+- **Chat ids stay with their gateway.** A chat id answers only on the gateway whose own connector listed it: in its chat list, on a page of chats, as a chat Patrick started there, or as what a compressed chat goes on as. So an id from One never opens on Hermes, and the reverse.
+- **No silent new chats.** A message to a chat Hermes no longer has comes back "not sent: that chat is gone", and Hermes is never run for it. "New chat" is the only way a new conversation starts.
+
+Checked here: `tests/test_decisions_history.py`:
+
+- 500 messages page back to the first, in order, with no gaps and no repeats;
+- the picker pages and searches titles;
+- a compression lineage is read and followed;
+- a deleted chat is gone and its message is refused with no turn;
+- a chat id is refused on the other gateway, and another gateway's token and the Bots' connector are refused;
+- nothing of a page is in the store's files;
+- the newest page goes after 20 seconds.
+
+The browser check covers the picker search, a long chat paged back to its first message, a gone chat, and ids that do not open on the other gateway.
+
 ## The pinned contract (step 0)
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:

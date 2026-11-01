@@ -80,6 +80,30 @@ def room_snapshot(state_db: Path, room_id: str, now: datetime, limit: int = 200)
     return {"source_time": now.isoformat(), "room_id": room_id, "events": events}
 
 
+def room_page(state_db: Path, room_id: str, before: int | None, n: int = 50) -> dict:
+    """One page of a room for the phone's full history: the newest `n` messages before the room's sequence
+    number `before`, oldest first, the same events the room feed sends."""
+    con = _ro(state_db)
+    try:
+        rows = con.execute("SELECT seq, event_id, kind, actor_json, payload_json, created_at FROM hosted_room_events "
+                           "WHERE room_id = ? AND kind IN (?, ?) AND (? IS NULL OR seq < ?) ORDER BY seq DESC LIMIT ?",
+                           (room_id, *ROOM_KINDS, before, before, n + 1)).fetchall()
+    finally:
+        con.close()
+    events = []
+    for r in reversed(rows[:n]):
+        try:
+            actor = json.loads(r["actor_json"])
+            payload = json.loads(r["payload_json"])
+        except json.JSONDecodeError:
+            continue
+        name = actor.get("display_name") or actor.get("profile") or actor.get("id") or ""
+        text = payload.get("text") if isinstance(payload, dict) else ""
+        events.append({"seq": int(r["seq"]), "kind": r["kind"], "actor": str(name),
+                       "text": text if isinstance(text, str) else "", "at": _iso(r["created_at"])})
+    return {"events": events, "more": len(rows) > n}
+
+
 def rooms_snapshot(state_db: Path, room_ids: list[str], now: datetime) -> dict:
     """Every room in one snapshot; with several, fewer of each one's last events, so the feed stays small."""
     limit = max(25, 200 // max(1, len(room_ids)))

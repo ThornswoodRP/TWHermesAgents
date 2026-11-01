@@ -557,12 +557,41 @@ function offLine(v) {
   return el('p', { class: 'warn', 'data-state': v.state }, stateWords(v)[1])
 }
 
+// ── full history of his own chats (step 2, plan Part 4) ────────────────────
+//
+// A page comes from Hermes itself: the core asks that gateway's connector, which
+// reads Hermes's state.db and posts it back within about 5 seconds. The core holds
+// it in memory only. The app keeps what it fetched only while it is open.
+
+let viewSeq = 0          // each render of a view; a page that comes back late fills only its own
+const pickers = {}       // gw -> { q, results, more, extra }
+const threads = {}       // gw:sid -> { newest, older, olderMore, note }
+
+async function ownPage(path) {
+  const sep = path.includes('?') ? '&' : '?'
+  let r
+  for (let i = 0; i < 3; i++) {
+    r = await call('GET', path + sep + 'wait=8')
+    if (r.status !== 200 || !r.body.pending) return r
+  }
+  return r
+}
+
+function chatRow(gw, c) {
+  return el('button', { class: 'row', type: 'button', 'data-chat': c.id, onclick: () => go(`/m/hermes/${gw}/${c.id}`) },
+    el('strong', {}, c.title || 'Untitled chat'),
+    el('span', { class: 'quiet' }, '  ' + when(c.last_at)),
+    el('div', { class: 'quiet' }, c.preview.slice(0, 120)))
+}
+
 async function gatewayView(gw) {
   setTab('bots')
+  const seqNow = ++viewSeq
   const r = await call('GET', '/own/' + gw)
   if (refused(r)) return
   const v = r.body
   const name = GATEWAY[gw]
+  const pick = pickers[gw] || (pickers[gw] = { q: '', results: null, more: false, extra: [] })
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
     el('h2', {}, name),
@@ -572,7 +601,7 @@ async function gatewayView(gw) {
   if (v.can_send && v.online) {
     parts.push(signInPart(v, status))
     if (v.sign_in_until) {
-      parts.push(el('p', { class: 'quiet' }, 'A new chat has full power on every turn. Hermes names it.'),
+      parts.push(el('p', { class: 'quiet' }, 'New chat is the only way a new conversation starts. It has full power on every turn, and Hermes names it.'),
         composer('new:' + gw, 'Start a new chat',
           (text, key) => call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key }), status, gw), status)
     }
@@ -587,52 +616,136 @@ async function gatewayView(gw) {
       m.made_session_id ? el('button', { class: 'secondary', type: 'button',
         onclick: () => go(`/m/hermes/${gw}/${m.made_session_id}`) }, 'Open it') : null)))
   }
-  parts.push(el('h2', { class: 'section' }, 'Chats'),
-    v.chats.length ? v.chats.map(c => el('button', { class: 'row', type: 'button',
-      onclick: () => go(`/m/hermes/${gw}/${c.id}`) },
-      el('strong', {}, c.title || 'Untitled chat'),
-      el('span', { class: 'quiet' }, '  ' + when(c.last_at)),
-      el('div', { class: 'quiet' }, c.preview.slice(0, 120))))
-      : el('p', { class: 'quiet' }, 'No chats yet.'))
-  show(parts)
+  // The picker: every chat Hermes's own pickers list, newest first, paged, with a title search.
+  const search = el('input', { type: 'search', autocomplete: 'off', placeholder: 'Search chat titles',
+    'aria-label': 'Search chat titles' })
+  search.value = pick.q
+  search.addEventListener('input', () => { pick.q = search.value })
+  const note = el('p', { class: 'quiet', role: 'status' })
+  async function more(before) {
+    note.textContent = `Asking ${name}...`
+    const q = pick.results ? pick.q.trim() : ''
+    const p = await ownPage(`/own/${gw}/chats?` + new URLSearchParams({ ...(before ? { before } : {}), ...(q ? { q } : {}) }))
+    if (seqNow !== viewSeq) return
+    if (p.status !== 200) { note.textContent = said(p.body); return }
+    if (p.body.pending) { note.textContent = `${name} has not answered yet. Try again in a moment.`; return }
+    if (before) pick.extra = pick.extra.concat(p.body.chats)
+    else { pick.results = p.body.chats; pick.extra = [] }
+    pick.more = p.body.more
+    route()
+  }
+  const searching = pick.results !== null
+  const shown = (searching ? pick.results : v.chats).concat(pick.extra)
+  const hasMore = (searching || pick.extra.length) ? pick.more : v.chats.length >= 50
+  parts.push(el('h2', { class: 'section' }, searching ? `Chats with "${pick.q.trim()}" in the title` : 'Chats'),
+    el('div', { class: 'search' }, search,
+      el('button', { class: 'secondary', type: 'button', onclick: () => {
+        if (!pick.q.trim()) { pick.results = null; pick.extra = []; return route() }
+        pick.results = []
+        more(null)
+      } }, 'Search')),
+    searching ? el('button', { class: 'secondary', type: 'button', onclick: () => {
+      pick.q = ''; pick.results = null; pick.extra = []; route()
+    } }, 'Show every chat') : null,
+    shown.length ? shown.map(c => chatRow(gw, c)) : el('p', { class: 'quiet' }, searching ? 'No chat has that in its title.' : 'No chats yet.'),
+    hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(shown[shown.length - 1].last_at) }, 'Older chats') : null,
+    note)
+  if (seqNow === viewSeq) show(parts)
+}
+
+function historyPart(gw, sid, t, name) {
+  const box = el('div', { class: 'history' })
+  if (t.error) { box.append(el('p', { class: 'warn' }, t.error)); return box }
+  if (!t.newest) {
+    box.append(el('p', { class: 'quiet' }, `Asking ${name} for this chat. It shows here within half a minute.`))
+    return box
+  }
+  if (t.newest.gone) {
+    box.append(el('p', { class: 'warn' }, `This chat is gone from ${name}. Nothing sent here would reach it.`))
+    return box
+  }
+  const seen = new Set()
+  const msgs = t.older.concat(t.newest.messages).filter(m => !seen.has(m.mid) && seen.add(m.mid))
+  const olderMore = t.older.length ? t.olderMore : t.newest.more
+  if (t.note) box.append(el('p', { class: 'receipt', role: 'status' }, t.note))
+  if (olderMore) {
+    const olderNote = el('p', { class: 'warn', role: 'status' })
+    box.append(el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      olderNote.textContent = `Asking ${name}...`
+      const p = await ownPage(`/own/${gw}/chats/${encodeURIComponent(sid)}/messages?before=${msgs[0].mid}`)
+      if (p.status !== 200 || p.body.pending) {
+        olderNote.textContent = p.status === 200 ? `${name} has not answered yet. Try again in a moment.` : said(p.body)
+        return
+      }
+      t.older = p.body.messages.concat(t.older)
+      t.olderMore = p.body.more
+      route()
+    } }, 'Older messages'), olderNote)
+  }
+  box.append(...(msgs.length ? msgs.map(m => el('div', { class: 'msg', 'data-mid': String(m.mid) },
+    el('div', { class: 'who' }, m.role === 'user' ? 'Patrick' : 'Hermes', el('span', { class: 'quiet' }, '  ' + when(m.at))),
+    el('div', { class: 'text' }, m.text))) : [el('p', { class: 'quiet' }, 'Nothing here yet.')]))
+  return box
 }
 
 async function ownChatView(gw, sid) {
   setTab('bots')
+  const seqNow = ++viewSeq
+  const key = `${gw}:${sid}`
+  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false, note: '', error: null })
   const r = await call('GET', `/own/${gw}/${encodeURIComponent(sid)}`)
   if (refused(r)) return
   const v = r.body
   const name = GATEWAY[gw]
-  const asOf = v.as_of ? new Date(v.as_of) : null
   const status = el('p', { class: 'warn', role: 'status' })
-  const history = v.history.map(m => el('div', { class: 'msg' },
-    el('div', { class: 'who' }, m.who, el('span', { class: 'quiet' }, '  ' + when(m.at))),
-    el('div', { class: 'text' }, m.text)))
-  const mine = v.mine.filter(m => m.status !== 'sent' || !asOf || new Date(m.updated_at) > asOf)
-    .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
-      el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
-      el('div', { class: 'text' }, m.text),
-      el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
-        STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''))))
-  const parts = [
-    el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/hermes/' + gw) }, 'All chats on ' + name),
-    el('h2', {}, v.chat.title || 'Untitled chat'),
-    el('p', { class: 'quiet' }, `On ${name}, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
-    v.loaded ? (history.length ? history : el('p', { class: 'quiet' }, 'Nothing here yet.'))
-      : el('p', { class: 'quiet' }, `Asking ${name} for this chat. It shows here within half a minute.`),
-    mine,
-    offLine(v)
-  ]
-  if (v.can_send && v.online) {
-    parts.push(signInPart(v, status, true))
-    if (v.sign_in_until) {
-      parts.push(composer(`own:${gw}:${sid}`, 'Send to ' + name,
-        (text, key) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: key }), status, gw), status)
+  function render() {
+    // The phone's copy of what Patrick sent gives way to Hermes's copy once Hermes holds it.
+    const readAt = t.newest && t.newest.read_at ? new Date(t.newest.read_at) : (v.as_of ? new Date(v.as_of) : null)
+    const mine = v.mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
+      .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
+        el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
+        el('div', { class: 'text' }, m.text),
+        el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
+          STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''))))
+    const parts = [
+      el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/hermes/' + gw) }, 'All chats on ' + name),
+      el('h2', {}, v.chat.title || 'Untitled chat'),
+      el('p', { class: 'quiet' }, `On ${name}. A chat is never an answer to a card.`),
+      historyPart(gw, sid, t, name),
+      mine,
+      offLine(v)
+    ]
+    const gone = t.newest && t.newest.gone
+    if (v.can_send && v.online && !gone && !t.error) {
+      parts.push(signInPart(v, status, true))
+      if (v.sign_in_until) {
+        parts.push(composer(`own:${gw}:${sid}`, 'Send to ' + name,
+          (text, k) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k }), status, gw), status)
+      }
+    } else if (!v.can_send) {
+      parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
     }
-  } else if (!v.can_send) {
-    parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
+    if (seqNow === viewSeq) show(parts)
   }
-  show(parts)
+  render()
+  const p = await ownPage(`/own/${gw}/chats/${encodeURIComponent(sid)}/messages`)
+  if (seqNow !== viewSeq) return
+  if (p.status === 401) { csrf = null; return signInView(said(p.body)) }
+  if (p.status !== 200) {
+    t.error = p.body.error === 'not_listed' ? `${name} has not listed this chat, so it does not open here.` : said(p.body)
+    return render()
+  }
+  if (p.body.pending) return render()
+  if (p.body.continued_as) {
+    // Hermes carries a long chat on under a new id when it compresses it: follow on, and say so.
+    threads[`${gw}:${p.body.continued_as}`] = { newest: null, older: [], olderMore: false, error: null,
+      note: 'Hermes compressed this chat, so it goes on under a new id. This is where it goes on.' }
+    history.replaceState(null, '', `/m/hermes/${gw}/${p.body.continued_as}`)
+    return route()
+  }
+  t.newest = p.body
+  t.error = null
+  render()
 }
 
 async function roomsView() {
@@ -649,54 +762,97 @@ async function roomsView() {
       : el('p', { class: 'quiet' }, 'No rooms yet.'))
 }
 
+// A Bot's Bot Chat or a room: what the feed last sent shows at once, then the
+// newest page from Hermes itself takes its place, with older pages behind it.
 async function chatView(target, tab) {
   setTab(tab)
+  const seqNow = ++viewSeq
   const r = await call('GET', '/chat/' + encodeURIComponent(target))
   if (refused(r)) return
   const v = r.body
   const room = v.kind === 'room'
   const name = room ? v.name : (NAMES[target] || target)
-  const asOf = v.as_of ? new Date(v.as_of) : null
-  const history = v.history.map(m => el('div', { class: 'msg' },
-    el('div', { class: 'who' }, m.who, el('span', { class: 'quiet' }, '  ' + when(m.at))),
-    el('div', { class: 'text' }, m.text)))
-  // My own messages, until the chat above shows them.
-  const mine = v.mine.filter(m => m.status !== 'sent' || !asOf || new Date(m.updated_at) > asOf)
-    .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
-      el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
-      el('div', { class: 'text' }, m.text),
-      el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
-        STATE[m.status] + (m.status === 'dead' && m.reason ? ': ' + m.reason : ''))))
+  const key = 'chat:' + v.target
+  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false, note: '', error: null })
+  const idOf = m => room ? m.seq : m.mid
   const status = el('p', { class: 'warn', role: 'status' })
-  const parts = [
-    el('p', { class: 'quiet' }, room
-      ? `${name}, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
-      : `Your Bot Chat with ${name}, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
-    history.length ? history : el('p', { class: 'quiet' }, 'Nothing here yet.'),
-    mine
-  ]
-  if (v.can_send) {
-    const draft = drafts[target] || (drafts[target] = { text: '', key: newKey() })
-    const box = el('textarea', { rows: '3', 'aria-label': 'Message to ' + name, placeholder: 'Message ' + name })
-    box.value = draft.text
-    box.addEventListener('input', () => {
-      if (box.value !== draft.text) { draft.text = box.value; draft.key = newKey() }
-    })
-    parts.push(box, el('button', { class: 'primary', type: 'button', onclick: async () => {
-      const text = box.value.trim()
-      if (!text) return
-      status.textContent = 'Sending...'
-      const s = await call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: draft.key })
-      if (s.status === 200) { drafts[target] = null; return route() }
-      if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
-      status.textContent = s.status === 0
-        ? 'Could not reach the core. Sending again sends the same message, never a second one.'
-        : said(s.body)
-    } }, 'Send to ' + name), status)
-  } else {
-    parts.push(el('p', { class: 'quiet' }, said({ error: 'chat_write_off' })))
+  function historyNodes() {
+    if (!t.newest || t.newest.gone) {
+      // Before the first page, or a Bot with no Bot Chat yet: what the feed last sent.
+      return v.history.length ? v.history.map(m => el('div', { class: 'msg' },
+        el('div', { class: 'who' }, m.who, el('span', { class: 'quiet' }, '  ' + when(m.at))),
+        el('div', { class: 'text' }, m.text))) : [el('p', { class: 'quiet' }, 'Nothing here yet.')]
+    }
+    const seen = new Set()
+    const items = t.older.concat(room ? t.newest.events : t.newest.messages).filter(m => !seen.has(idOf(m)) && seen.add(idOf(m)))
+    const olderMore = t.older.length ? t.olderMore : t.newest.more
+    const olderNote = el('p', { class: 'warn', role: 'status' })
+    const out = []
+    if (olderMore && items.length) {
+      out.push(el('button', { class: 'secondary', type: 'button', onclick: async () => {
+        olderNote.textContent = 'Asking for older messages...'
+        const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages?before=${idOf(items[0])}`)
+        if (p.status !== 200 || p.body.pending) {
+          olderNote.textContent = p.status === 200 ? 'No answer yet. Try again in a moment.' : said(p.body)
+          return
+        }
+        t.older = (room ? p.body.events : p.body.messages).concat(t.older)
+        t.olderMore = p.body.more
+        route()
+      } }, 'Older messages'), olderNote)
+    }
+    out.push(...(items.length ? items.map(m => el('div', { class: 'msg', 'data-mid': String(idOf(m)) },
+      el('div', { class: 'who' }, room ? (m.actor || 'someone') : (m.role === 'user' ? 'Patrick' : name),
+        el('span', { class: 'quiet' }, '  ' + when(m.at))),
+      el('div', { class: 'text' }, m.text))) : [el('p', { class: 'quiet' }, 'Nothing here yet.')]))
+    return out
   }
-  show(parts)
+  function render() {
+    const readAt = v.as_of ? new Date(v.as_of) : null
+    // My own messages, until the chat above shows them.
+    const mine = v.mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
+      .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
+        el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
+        el('div', { class: 'text' }, m.text),
+        el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
+          STATE[m.status] + (m.status === 'dead' && m.reason ? ': ' + m.reason : ''))))
+    const parts = [
+      el('p', { class: 'quiet' }, room
+        ? `${name}, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
+        : `Your Bot Chat with ${name}, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+      historyNodes(),
+      mine
+    ]
+    if (v.can_send) {
+      const draft = drafts[target] || (drafts[target] = { text: '', key: newKey() })
+      const box = el('textarea', { rows: '3', 'aria-label': 'Message to ' + name, placeholder: 'Message ' + name })
+      box.value = draft.text
+      box.addEventListener('input', () => {
+        if (box.value !== draft.text) { draft.text = box.value; draft.key = newKey() }
+      })
+      parts.push(box, el('button', { class: 'primary', type: 'button', onclick: async () => {
+        const text = box.value.trim()
+        if (!text) return
+        status.textContent = 'Sending...'
+        const s = await call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: draft.key })
+        if (s.status === 200) { drafts[target] = null; return route() }
+        if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
+        status.textContent = s.status === 0
+          ? 'Could not reach the core. Sending again sends the same message, never a second one.'
+          : said(s.body)
+      } }, 'Send to ' + name), status)
+    } else {
+      parts.push(el('p', { class: 'quiet' }, said({ error: 'chat_write_off' })))
+    }
+    if (seqNow === viewSeq) show(parts)
+  }
+  render()
+  const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages`)
+  if (seqNow !== viewSeq || p.status !== 200 || p.body.pending) return
+  t.newest = p.body
+  // Never redrawn under someone typing; the next read shows it.
+  const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+  if (!typing) render()
 }
 
 // ── alerts (step 5) ───────────────────────────────────────────────────────
@@ -970,7 +1126,8 @@ async function poll() {
   // A chat view reads itself again, unless something is being typed.
   const box = document.querySelector('textarea')
   if (/^\/m\/(bramble$|room$|rooms\/|bots\/|hermes\/)/.test(path)) {
-    if (!box || (!box.value && document.activeElement !== box)) route()
+    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+    if ((!box || !box.value) && !typing) route()
     return
   }
   const r = await call('GET', '/changes?since=' + seq)

@@ -553,6 +553,8 @@ class FakeCore:
                 return 200, self.own.claim(self.ws, self.gw, self.token, body["limit"], body["ready"], body["why"])
             if op == "feed":
                 return 200, self.own.feed(self.ws, self.gw, self.token, body)
+            if op == "page":
+                return 200, self.own.page_post(self.ws, self.gw, self.token, body)
             return 200, self.own.result(self.ws, self.gw, self.token, body["id"], body["outcome"], body["ref"],
                                         body["reason"], body.get("session_id"))
         except CoreError as exc:
