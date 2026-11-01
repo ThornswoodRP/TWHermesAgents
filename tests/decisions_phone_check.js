@@ -42,7 +42,7 @@ const base = `http://localhost:${port}`
   })
   const cdp = await ctx.newCDPSession(page)
   await cdp.send('WebAuthn.enable')
-  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal',
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal',
     hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } })
   let failed = 0
   const step = async (name, fn) => { try { await fn(); console.log('PASS', name) } catch (e) { failed++; console.log('FAIL', name, e.message) } }
@@ -78,8 +78,32 @@ const base = `http://localhost:${port}`
     await page.getByText('Other ways in: a pairing code, or a recovery code').waitFor({ timeout: 3000 })
     if (await page.getByRole('button', { name: 'Pair and add a passkey' }).isVisible()) throw new Error('the pairing is not folded away')
   })
+  await step('signing out never opens the passkey prompt by itself', async () => {
+    if (!(await page.getByRole('button', { name: 'Sign in with your passkey' }).isVisible())) throw new Error('no button after signing out')
+    if (await page.getByText('Add a passkey on this phone').count()) throw new Error('signed in again by itself')
+  })
   await page.getByText('Sign in with your passkey').click()
   await step('signed in again with the passkey', () => page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 }))
+  // Opening the app signed out asks for the passkey at once, with no button (Patrick, 1 Nov).
+  await page.getByText('Sign out').click()
+  await page.getByRole('heading', { name: 'Welcome back' }).waitFor({ timeout: 5000 })
+  await page.goto(base + '/m/settings')
+  await step('opening the app signed out opens the passkey prompt by itself, and it signs in', async () => {
+    await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
+  })
+  // A dismissed prompt (no face or fingerprint given): then, and only then, the button shows.
+  await page.getByText('Sign out').click()
+  await page.getByRole('heading', { name: 'Welcome back' }).waitFor({ timeout: 5000 })
+  await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: false })
+  await page.goto(base + '/m/settings')
+  await step('a dismissed prompt on opening shows the button, and the button signs in', async () => {
+    const button = page.getByRole('button', { name: 'Sign in with your passkey' })
+    await page.getByText('The passkey did not sign in. Nothing changed.').waitFor({ timeout: 8000 })
+    if (!(await button.isVisible())) throw new Error('no button after a dismissed prompt')
+    await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: true })
+    await button.click()
+    await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
+  })
   await page.getByRole('link', { name: /Decisions/ }).click()
   await step('the Decisions list after the passkey sign-in, with its badge', async () => {
     await page.getByText('Turn on the nightly backup check?').waitFor({ timeout: 5000 })
@@ -101,16 +125,22 @@ const base = `http://localhost:${port}`
   })
   await page.goto(base + '/m/decisions/' + high)
   await page.getByRole('button', { name: 'Choose: Wait' }).waitFor({ timeout: 5000 })
+  // First the prompt is dismissed: the button shows, beside what is being approved, and nothing is answered.
+  await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: false })
   await page.getByRole('button', { name: 'Choose: Wait' }).click()
   await step('a high-risk card asks again on its own screen', () => page.getByText('Check this answer').waitFor({ timeout: 3000 }))
+  await step('a dismissed prompt on a high-risk answer shows its button and answers nothing', async () => {
+    await page.getByText('The passkey did not sign in. Nothing changed.').waitFor({ timeout: 8000 })
+    if (!(await page.getByRole('button', { name: 'Answer Wait with your passkey' }).isVisible())) throw new Error('no button')
+    await page.getByText('What yes covers: ').waitFor({ timeout: 3000 })
+    if (await page.getByText(/^Answered "Delete the old test branches\?"/).count()) throw new Error('answered without the passkey')
+  })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-high.png', fullPage: true })
-  await page.getByRole('button', { name: 'Yes, answer Wait' }).click()
-  await step('then a fresh passkey sign-in answers it', async () => {
-    const again = page.getByRole('button', { name: 'Sign in again and answer' })
-    const done = page.getByText('Answered "Delete the old test branches?": Wait. It is under Answered below.')
-    await again.or(done).first().waitFor({ timeout: 5000 })
-    if (await again.count()) await again.click()
-    await done.waitFor({ timeout: 8000 })
+  await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: true })
+  await page.getByRole('button', { name: 'Go back to the card' }).click()
+  await page.getByRole('button', { name: 'Choose: Wait' }).click()
+  await step('then the passkey prompt opens by itself and answers it, with no button', async () => {
+    await page.getByText('Answered "Delete the old test branches?": Wait. It is under Answered below.').waitFor({ timeout: 8000 })
   })
   await step('four tabs: Bots, Rooms, Board and Decisions', async () => {
     const tabs = (await page.locator('#tabs a').allTextContents()).map(t => t.replace(/\s*\d*\s*$/, '').trim())
@@ -303,7 +333,10 @@ const base = `http://localhost:${port}`
     for (let i = 0; i < 50 && list.some(n => n.tag === tag) === want; i++) { await new Promise(ok => setTimeout(ok, 100)); list = await shown() }
     return list
   }
-  await gone('decision:' + third, false)
+  await step("the third card's alert shows", async () => {
+    const list = await gone('decision:' + third, false)
+    if (!list.some(n => n.tag === 'decision:' + third)) throw new Error(JSON.stringify(list))
+  })
   await page.getByRole('link', { name: /Decisions/ }).click()
   await page.getByText('Move the backup to Sunday?').waitFor({ timeout: 5000 })
   await step('Decisions takes off the alert of an answered card and the plain one, and keeps the rest', async () => {

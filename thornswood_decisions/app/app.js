@@ -151,6 +151,22 @@ function credentialJSON(cred) {
 
 // ── signing in ────────────────────────────────────────────────────────────
 
+// The passkey prompt opens by itself, the way a bank app asks for a face or a
+// fingerprint, and its button shows only when that prompt was dismissed, failed
+// or was blocked (Patrick, 1 Nov). Once when the app opens: a dismissal is
+// never asked again by itself, and signing out never opens it.
+let askOnOpen = true
+
+// Opens the passkey prompt now and runs then(r) on a sign-in. If the prompt was
+// dismissed or failed, the button (made hidden) shows, with what happened.
+async function promptNow(button, status, then) {
+  button.hidden = true
+  const r = await passkeySignIn()
+  if (r.status === 200) return then(r)
+  status.textContent = said(r.body)
+  button.hidden = false
+}
+
 async function passkeySignIn() {
   const o = await call('POST', '/passkeys/sign-in/options')
   if (o.status !== 200) return o
@@ -268,18 +284,22 @@ async function signInView(note) {
       el('details', { class: 'fold' }, el('summary', {}, 'Lost your passkey: a recovery code'),
         el('div', { class: 'card' }, recoveryPart(done))))
   }
+  const button = el('button', { class: 'primary', type: 'button', onclick: async () => {
+    status.textContent = ''
+    done(await passkeySignIn())
+  } }, 'Sign in with your passkey')
+  const auto = hasKey === true && askOnOpen
+  askOnOpen = false
   show(
     el('h2', {}, 'Welcome back'),
     el('p', { class: 'quiet' }, hasKey ? 'Your passkey is set up.' : 'Sign in with your passkey, or set up this phone below.'),
-    el('button', { class: 'primary', type: 'button', onclick: async () => {
-      status.textContent = ''
-      done(await passkeySignIn())
-    } }, 'Sign in with your passkey'),
+    button,
     status,
     el('details', { class: 'fold', open: hasKey === null },
       el('summary', {}, 'Other ways in: a pairing code, or a recovery code'),
       el('div', { class: 'card' }, el('h2', {}, 'Pair this phone'), setupPart(status)),
       el('div', { class: 'card' }, el('h2', {}, 'Lost your passkey'), recoveryPart(done))))
+  if (auto) await promptNow(button, status, done)
 }
 
 // ── the views ─────────────────────────────────────────────────────────────
@@ -356,19 +376,25 @@ async function cardView(id, note) {
   show(el('div', { class: 'card' }, parts))
 }
 
-// One option chosen: a high-risk card asks again on its own screen first.
-function choose(c, o, status) {
+// One option chosen: a high-risk card shows what is being approved on its own
+// screen, and the passkey prompt opens over it by itself (Patrick, 1 Nov). The
+// passkey is the yes: it signs in afresh, then the answer goes. If the prompt is
+// dismissed or fails, its button shows; nothing is answered until it succeeds.
+async function choose(c, o, status) {
   if (c.risk !== 'high') return answer(c, o, status)
+  const note = el('p', { class: 'warn', role: 'status' })
+  const button = el('button', { class: 'primary', type: 'button', 'data-confirm': o.key, onclick: () =>
+    promptNow(button, note, () => answer(c, o, status)) }, 'Answer ' + o.label + ' with your passkey')
   show(el('div', { class: 'card' },
     el('h2', {}, 'Check this answer'),
     el('p', {}, `"${c.title}" is high risk. You are choosing:`),
     el('p', {}, el('strong', {}, o.label)),
     el('p', { class: 'quiet' }, o.consequence),
     el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
-    el('p', { class: 'quiet' }, 'A high-risk answer needs a passkey sign-in from the last five minutes.'),
-    el('button', { class: 'primary', type: 'button', 'data-confirm': o.key, onclick: () => answer(c, o, status) },
-      'Yes, answer ' + o.label),
+    el('p', { class: 'quiet' }, 'Your passkey answers it. Cancel the prompt to change your mind.'),
+    button, note,
     el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
+  await promptNow(button, note, () => answer(c, o, status))
 }
 
 async function answer(c, o, status) {
@@ -385,14 +411,15 @@ async function answer(c, o, status) {
   }
   if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
   if (r.status === 403 && r.body.error === 'sign_in_again') {
-    return show(el('div', { class: 'card' },
+    const note = el('p', { class: 'warn', role: 'status' })
+    const again = el('button', { class: 'primary', type: 'button', 'data-confirm': o.key, onclick: () =>
+      promptNow(again, note, () => answer(c, o, status)) }, 'Sign in again and answer')
+    show(el('div', { class: 'card' },
       el('p', {}, said(r.body)),
-      el('button', { class: 'primary', type: 'button', onclick: async () => {
-        const s = await passkeySignIn()
-        if (s.status !== 200) return cardView(c.id, said(s.body))
-        answer(c, o, status)
-      } }, 'Sign in again and answer'),
+      el('p', {}, el('strong', {}, o.label), ': ', o.consequence),
+      again, note,
       el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
+    return promptNow(again, note, () => answer(c, o, status))
   }
   if (r.status === 0 || r.status >= 500) {
     // The save may or may not have happened. Read the card back before offering anything.
@@ -563,7 +590,7 @@ function offLine(v) {
 // reads Hermes's state.db and posts it back within about 5 seconds. The core holds
 // it in memory only. The app keeps what it fetched only while it is open.
 
-let viewSeq = 0          // each render of a view; a page that comes back late fills only its own
+let viewSeq = 0          // each view, from route() and each chat render; a page that comes back late fills only its own
 const pickers = {}       // gw -> { q, results, more, extra }
 const threads = {}       // gw:sid -> { newest, older, olderMore, note }
 
@@ -1070,6 +1097,7 @@ async function settingsView(note) {
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       await call('POST', '/sign-out')
       csrf = null
+      askOnOpen = false
       signInView('Signed out.')
     } }, 'Sign out'),
     status)
@@ -1089,6 +1117,9 @@ function go(path) {
 }
 
 async function route() {
+  // Every route is a new view, so a page a chat asked for and gets back after
+  // Patrick left it fills nothing (it once redrew a room over the Rooms list).
+  viewSeq++
   if (!csrf) {
     const me = await call('GET', '/me')
     if (me.status !== 200) return signInView(me.status === 0 ? said(me.body) : '')
