@@ -10,7 +10,7 @@ repos:
   app: EvilPatrick06/Thornswood
   fork: EvilPatrick06/skymp
   ops: EvilPatrick06/Thornswood-Ops
-  hermes: EvilPatrick06/Thornswood-Hermes
+  hermes: ThornswoodRP/Thornswood-Hermes
 
 # Exactly six Bots. The ops file and the guide are skills, never Bots.
 # `app` names which GitHub App the git broker uses for that Bot's writes.
@@ -589,7 +589,7 @@ backups:
 # (#2862): no other machine sends it a commit. It reads this repository with
 # its own read-only deploy key, root's alone.
 follow_main:
-  url: git@github.com:EvilPatrick06/Thornswood-Hermes.git
+  url: git@github.com:ThornswoodRP/Thornswood-Hermes.git
   read_key: /etc/thornswood/hermes-read-key
   known_hosts: /etc/thornswood/github_known_hosts
   mirror: /srv/tw/follow/thornswood-hermes.git

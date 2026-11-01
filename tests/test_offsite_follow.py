@@ -293,7 +293,7 @@ class FollowMain(unittest.TestCase):
         f = self.follower(vm)
 
         def run(args, **kw):
-            if "fetch" in args and "git@github.com:EvilPatrick06/Thornswood-Hermes.git" in args:
+            if "fetch" in args and "git@github.com:ThornswoodRP/Thornswood-Hermes.git" in args:
                 return subprocess.CompletedProcess(args, 128, "", "Permission denied (publickey).")
             return vm(args, **kw)
 

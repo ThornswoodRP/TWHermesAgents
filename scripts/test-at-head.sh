@@ -16,7 +16,7 @@ set -euo pipefail
 
 commit="${1:?usage: test-at-head.sh <full commit>}"
 host="thornswood-bots"
-repo="EvilPatrick06/Thornswood-Hermes"
+repo="ThornswoodRP/Thornswood-Hermes"
 context="Guard rail tests (One and VM)"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 

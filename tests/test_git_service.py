@@ -32,7 +32,7 @@ from thornswood_brokers.wire import Refused
 
 APP = "EvilPatrick06/Thornswood"
 FORK = "EvilPatrick06/skymp"
-HERMES = "EvilPatrick06/Thornswood-Hermes"
+HERMES = "ThornswoodRP/Thornswood-Hermes"
 
 
 class World:

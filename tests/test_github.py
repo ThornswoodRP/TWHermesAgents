@@ -63,7 +63,7 @@ class Pushes(unittest.TestCase):
         self.assertFalse(self.r.push("wisp", fork, "refs/heads/thornswood/engine-changes").allowed)
 
     def test_no_bot_writes_to_thornswood_hermes(self):
-        self.assertFalse(self.r.push("bramble", "EvilPatrick06/Thornswood-Hermes", "refs/heads/bramble/1-x").allowed)
+        self.assertFalse(self.r.push("bramble", "ThornswoodRP/Thornswood-Hermes", "refs/heads/bramble/1-x").allowed)
 
     def test_grok_lane_branches_are_hands_off(self):
         self.assertFalse(self.r.push("bramble", APP, "refs/heads/codex/2618-thing").allowed)
@@ -241,7 +241,7 @@ class Merges(unittest.TestCase):
         self.assertFalse(v.allowed)
 
     def test_bramble_never_merges_in_thornswood_hermes(self):
-        self.assertFalse(self.merge(p=pr(repo="EvilPatrick06/Thornswood-Hermes")).allowed)
+        self.assertFalse(self.merge(p=pr(repo="ThornswoodRP/Thornswood-Hermes")).allowed)
 
 
 class Claims(unittest.TestCase):
