@@ -547,6 +547,18 @@ CREATE TABLE own_gateways (
   PRIMARY KEY (workspace_id, gateway)
 );
 """,
+    # 8: which of its states a gateway is in, in the phone's own words (Patrick, 1 Nov, plan Part 1).
+    # `state` is what the connector said of Hermes: ready, its gateway not running, or the check
+    # itself failing. `peer_*` is the tailnet's own view of the machine the connector posts from
+    # (One), written by `tw-decide peers` from `tailscale status --json`, so "One is off" comes from
+    # Tailscale and never from the connector going quiet.
+    """
+ALTER TABLE own_gateways ADD COLUMN state TEXT CHECK (state IS NULL OR state IN ('ready', 'gateway_down', 'check_failed'));
+ALTER TABLE own_gateways ADD COLUMN peer_ip TEXT CHECK (peer_ip IS NULL OR length(peer_ip) BETWEEN 7 AND 45);
+ALTER TABLE own_gateways ADD COLUMN peer_online INTEGER CHECK (peer_online IS NULL OR peer_online IN (0, 1));
+ALTER TABLE own_gateways ADD COLUMN peer_seen TEXT;
+ALTER TABLE own_gateways ADD COLUMN peer_checked TEXT;
+""",
 ]
 
 
@@ -608,4 +620,13 @@ DROP TABLE feed_snapshots;
 ALTER TABLE feed_snapshots_6 RENAME TO feed_snapshots;
 """, "The tokens of the connectors for Patrick's own Hermes are gone with schema 7. The next install of a newer "
          "release makes my-hermes's again by itself; on One, run scripts\\one\\Install-OwnConnector.ps1 -NewToken."),
+    # Only status lines: each connector writes its state again within 20 seconds, and `tw-decide peers`
+    # the tailnet's view within a minute, so nothing is lost by dropping them.
+    8: ([], """
+ALTER TABLE own_gateways DROP COLUMN peer_checked;
+ALTER TABLE own_gateways DROP COLUMN peer_seen;
+ALTER TABLE own_gateways DROP COLUMN peer_online;
+ALTER TABLE own_gateways DROP COLUMN peer_ip;
+ALTER TABLE own_gateways DROP COLUMN state;
+""", ""),
 }

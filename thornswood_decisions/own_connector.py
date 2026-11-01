@@ -240,20 +240,25 @@ class Hermes:
     def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str):
         self.cmd, self.ready_cmd, self.home_dir, self.name = list(hermes_cmd), list(ready_cmd), home_dir, name
 
-    def ready(self) -> tuple[bool, str]:
-        """Is this Hermes's gateway running? Asked without starting one."""
+    def ready(self) -> tuple[str, str]:
+        """(state, why): is this Hermes's gateway running? Asked without starting one.
+
+        "ready", "gateway_down" (the check ran and found no gateway running) or "check_failed"
+        (the check itself could not run), which the phone tells apart (plan Part 1)."""
         req = json.dumps({"op": "ready", "profile": "", "name": self.name}).encode("utf-8")
         try:
             out = subprocess.run(self.ready_cmd, input=req, capture_output=True,
                                  timeout=60, cwd=str(self.home_dir), check=False)
             got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
-            return False, "the readiness check did not answer in a minute"
+            return "check_failed", "the readiness check did not answer in a minute"
         except (OSError, IndexError, json.JSONDecodeError):
-            return False, "could not run the readiness check with Hermes's Python"
+            return "check_failed", "could not run the readiness check with Hermes's Python"
+        if not isinstance(got, dict):
+            return "check_failed", "the readiness check did not answer in its shape"
         if got.get("ready") is True:
-            return True, ""
-        return False, str(got.get("reason") or f"{self.name} is not ready")[:200]
+            return "ready", ""
+        return "gateway_down", str(got.get("reason") or f"{self.name} is not ready")[:200]
 
     def turn(self, session_id: str | None, text: str) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message."""
@@ -354,15 +359,15 @@ class OwnConnector:
         self.running: list[threading.Thread] = []
         self.wanted: list[str] = []
         self._lock = threading.Lock()
-        self._ready = (False, "not checked yet")
+        self._ready = ("check_failed", "not checked yet")
         self._ready_at = None
         self._fed_at = None
         self.feed_now = True
         self.last_claim = None
 
-    def ready(self) -> tuple[bool, str]:
+    def ready(self) -> tuple[str, str]:
         now = self.clock()
-        every = READY_SECONDS if self._ready[0] else NOT_READY_SECONDS
+        every = READY_SECONDS if self._ready[0] == "ready" else NOT_READY_SECONDS
         if self._ready_at is None or now - self._ready_at >= every:
             self._ready, self._ready_at = self.hermes.ready(), now
         return self._ready
@@ -410,9 +415,11 @@ class OwnConnector:
         """One round. Returns how many turns it started, or -1 when the core said to wait."""
         self._report()
         self.running = [t for t in self.running if t.is_alive()]
-        ready, why = self.ready()
+        state, why = self.ready()
+        ready = state == "ready"
         free = PARALLEL - len(self.running)
-        status, body = self.core.post("claim", {"limit": free if ready else 0, "ready": ready, "why": why})
+        status, body = self.core.post("claim", {"limit": free if ready else 0, "ready": ready, "why": why,
+                                                "state": state})
         self.last_claim = status
         if status == 401:
             raise SystemExit("STOP: the core refused this connector's token")
@@ -471,9 +478,11 @@ def main(argv: list[str]) -> int:
         if conn.last_claim not in (200, 423):
             print(f"FAIL the core at {args.core} answered {conn.last_claim or 'nothing'}")
             return 1
-        ready, why = conn._ready
+        state, why = conn._ready
+        said = {"gateway_down": f" (its gateway is not running: {why})",
+                "check_failed": f" (its readiness check failed: {why})"}
         print(("WAIT own_chat_write is off" if n < 0 else f"PASS {n} handed to {GATEWAYS[args.gateway]}")
-              + ("" if ready else f" (its gateway is not ready: {why})"))
+              + said.get(state, ""))
         return 1 if conn.unsaid else 0
     conn.forever()
     return 0

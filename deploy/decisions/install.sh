@@ -28,6 +28,9 @@
 # it makes my-hermes's connector token once, straight into that user's
 # ~/.config/thornswood/own-me.token (0600), and starts tw-decide-own as that
 # user, which does nothing and copies nothing while own_chat_write is off.
+# It starts tw-decide-peers once a minute, which reads the tailnet's view of
+# One (`tailscale status --json`, read only) so the phone says One is off only
+# when Tailscale says so.
 # It changes no flag and makes no pairing code.
 set -euo pipefail
 umask 022
@@ -129,7 +132,7 @@ for f in tw-decide tw-decide-feed tw-decide-connector tw-decide-push tw-decide-o
   install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
 done
 for u in tw-decide.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service \
-         tw-decide-push.service tw-decide-own.service; do
+         tw-decide-push.service tw-decide-own.service tw-decide-peers.service tw-decide-peers.timer; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
 # The connector finds the gateway's control socket where the gateway's own unit puts it.
@@ -273,4 +276,12 @@ if id "$own" >/dev/null 2>&1; then
   ok "my-hermes's connector runs (it waits while own_chat_write is off)"
 else
   echo "my-hermes's connector waits for the $own user."
+fi
+
+# 13. The tailnet's view of One, once now and then once a minute, as tw-decide,
+# from the VM's own Tailscale client, read only (`tailscale status --json`).
+command -v tailscale >/dev/null || stop "the tailscale command is not on this VM, and the core is behind Tailscale Serve."
+systemctl enable --quiet --now tw-decide-peers.timer
+if systemctl start tw-decide-peers.service; then ok "the tailnet's view of One read"; else
+  stop "the tailnet's view of One was not read: journalctl -u tw-decide-peers -n 20"
 fi

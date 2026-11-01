@@ -23,7 +23,7 @@ from unittest import mock
 from decisions_helpers import World
 
 from thornswood_decisions import cli, store as store_mod
-from thornswood_decisions.schema import DOWNS, FLAGS_1, MIGRATIONS
+from thornswood_decisions.schema import DOWNS, FLAGS, FLAGS_1, MIGRATIONS
 from thornswood_decisions.store import CoreError, Store, _statements, connect, downgrade, schema_version
 
 FIRST_WITH_A_WAY_BACK = 6
@@ -103,7 +103,16 @@ class PuttingBack(unittest.TestCase):
         self.addCleanup(older.close)
         self.assertEqual({t: older.db.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tables}, before)
         self.assertTrue(older.verify_events()[0])
-        # The flags the older schema knows, each as it was; own_chat_write (off) goes with schema 7.
+        # The flags the older schema knows, each as it was (schema 8 adds none).
+        self.assertEqual({r[0] for r in older.db.execute("SELECT name FROM flags")}, set(FLAGS))
+
+    def test_back_to_6_own_chat_write_goes_with_schema_7(self):
+        self.w.close()
+        code, out, err = run("--db", str(self.w.path), "downgrade", "--to", "6")
+        self.assertEqual(code, 0, err)
+        with mock.patch.object(store_mod, "MIGRATIONS", MIGRATIONS[:6]):
+            older = Store(self.w.path)
+        self.addCleanup(older.close)
         self.assertEqual({r[0] for r in older.db.execute("SELECT name FROM flags")}, set(FLAGS_1))
 
     def test_the_newer_release_takes_it_forward_again(self):

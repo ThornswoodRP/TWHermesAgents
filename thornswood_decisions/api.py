@@ -204,8 +204,10 @@ class Api:
             if route[2] == "feed":
                 return 200, own.feed(self.ws, route[1], token, data)
             if route[2] == "claim":
+                # Tailscale Serve sets X-Forwarded-For to the tailnet address the connector posts from
+                # (and replaces any it was sent); the core reads the tailnet's view of that machine.
                 return 200, own.claim(self.ws, route[1], token, data.get("limit", 3), data.get("ready", False),
-                                      str(data.get("why", "")))
+                                      str(data.get("why", "")), data.get("state"), headers.get("x-forwarded-for"))
             return 200, own.result(self.ws, route[1], token, str(data.get("id", "")), str(data.get("outcome", "")),
                                    str(data.get("ref", "")), str(data.get("reason", "")), data.get("session_id"))
         if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector", "push-worker"):
@@ -231,6 +233,9 @@ class Api:
                 return 200, Chat(core.s).result(self.ws, token, str(data.get("id", "")), str(data.get("outcome", "")),
                                                 str(data.get("ref", "")), str(data.get("reason", "")))
             raise CoreError(404, "no_route", "no such route")
+        if method == "GET" and route == ["sign-in", "state"]:
+            # Before any session: which sign-in screen to show. One yes or no, never names or ids.
+            return 200, {"passkeys": core.auth.has_passkey(self.ws)}
         if method == "POST" and route == ["passkeys", "sign-in", "options"]:
             self._exact_origin(headers)
             return 200, self._passkeys(core).sign_in_options(self.ws)

@@ -11,7 +11,7 @@
 // The worker shows the alerts, so it takes them off too: the app tells it which
 // cards still need Patrick each time it reads Decisions, and which card was just
 // opened or answered (Patrick, 1 Nov: an answered card kept showing).
-const SHELL = 'tw-shell-v6'
+const SHELL = 'tw-shell-v7'
 const CARD_ID = /^[A-Za-z0-9_-]{1,64}$/
 const APP_PATH = /^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/
 const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/cinzel-title.woff2',

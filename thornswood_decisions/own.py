@@ -29,9 +29,10 @@ section 5): it goes to Patrick's own Hermes and nowhere else. Its text goes in
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from .auth import Principal
 from .feeds import Feeds
@@ -57,6 +58,33 @@ OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
 CHAT_FIELDS = {"id": 128, "title": 120, "last_at": 40, "preview": 200}
 MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
 ROLES = ("user", "assistant")
+# What a connector says of its Hermes (migration 8): running, its gateway not running, or the
+# readiness check itself failing. Anything else it sends is read as no word at all.
+STATES = ("ready", "gateway_down", "check_failed")
+PEER_FRESH = timedelta(minutes=3)    # `tw-decide peers` runs once a minute
+# The tailnet's own addresses: an X-Forwarded-For from Tailscale Serve is one of these.
+TAILNET = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+
+
+def tailnet_ip(value) -> str | None:
+    """The tailnet address a connector posted from, as Tailscale Serve sets it, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        ip = ipaddress.ip_address(value.split(",")[0].strip())
+    except ValueError:
+        return None
+    return str(ip) if any(ip in net for net in TAILNET) else None
+
+
+def _tailscale_time(value) -> str | None:
+    if not isinstance(value, str) or value.startswith("0001-"):
+        return None
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).isoformat()
 
 
 def _text(value, limit: int) -> str:
@@ -139,8 +167,9 @@ class OwnChat:
         return until.isoformat() if self.s.clock() < until else None
 
     def _gw_row(self, workspace_id: str, gw: str):
-        return self.s.db.execute("SELECT last_seen, ready, why, wanted_json FROM own_gateways "
-                                 "WHERE workspace_id = ? AND gateway = ?", (workspace_id, gw)).fetchone()
+        return self.s.db.execute("SELECT last_seen, ready, why, wanted_json, state, peer_ip, peer_online, peer_seen, "
+                                 "peer_checked FROM own_gateways WHERE workspace_id = ? AND gateway = ?",
+                                 (workspace_id, gw)).fetchone()
 
     def _last_seen(self, workspace_id: str, gw: str) -> str | None:
         row = self._gw_row(workspace_id, gw)
@@ -161,16 +190,76 @@ class OwnChat:
             return "its connector has not been heard from in 2 minutes"
         return row["why"] or "its gateway is not running"
 
-    def _seen(self, workspace_id: str, gw: str, ready: bool, why: str) -> None:
+    def _seen(self, workspace_id: str, gw: str, ready: bool, why: str, state: str | None = None,
+              peer_ip: str | None = None) -> None:
+        if state not in STATES:
+            state = "ready" if ready else None
         row = self._gw_row(workspace_id, gw)
-        if row and bool(row["ready"]) == ready and (row["why"] or "") == why \
+        if row and bool(row["ready"]) == ready and (row["why"] or "") == why and row["state"] == state \
+                and (peer_ip is None or row["peer_ip"] == peer_ip) \
                 and self.s.clock() - parse(row["last_seen"]) < SEEN_EVERY:
             return
         with self.s.tx() as db:
-            db.execute("INSERT INTO own_gateways(workspace_id, gateway, last_seen, ready, why) VALUES(?,?,?,?,?) "
-                       "ON CONFLICT(workspace_id, gateway) DO UPDATE SET last_seen = excluded.last_seen, "
-                       "ready = excluded.ready, why = excluded.why",
-                       (workspace_id, gw, self.s.now(), int(ready), why or None))
+            db.execute("INSERT INTO own_gateways(workspace_id, gateway, last_seen, ready, why, state, peer_ip) "
+                       "VALUES(?,?,?,?,?,?,?) ON CONFLICT(workspace_id, gateway) DO UPDATE SET "
+                       "last_seen = excluded.last_seen, ready = excluded.ready, why = excluded.why, "
+                       "state = excluded.state, peer_ip = coalesce(excluded.peer_ip, own_gateways.peer_ip)",
+                       (workspace_id, gw, self.s.now(), int(ready), why or None, state, peer_ip))
+
+    def gateway_state(self, workspace_id: str, gw: str) -> dict:
+        """Which state the gateway is in, for the phone's words (plan Part 1), and since when.
+
+        turned_off      own_chat_write is off
+        missing         its connector was never heard from
+        ready           heard from in the last 2 minutes, and Hermes's gateway runs
+        gateway_down    heard from, and Hermes's gateway does not run
+        check_failed    heard from, and its check of Hermes could not run
+        machine_off     silent, and the tailnet says the machine it posts from is offline
+        connector_stopped  silent, and the machine is on (the VM always is: the core runs there)
+        not_heard       silent, and the tailnet's view of that machine is not in
+        """
+        row = self._gw_row(workspace_id, gw)
+        why = (row["why"] if row else None) or ""
+        if not self.s.flag(workspace_id, "own_chat_write"):
+            return {"state": "turned_off", "since": None, "why": ""}
+        if not row:
+            return {"state": "missing", "since": None, "why": ""}
+        now = self.s.clock()
+        if now - parse(row["last_seen"]) >= ONLINE:
+            if gw == "me":
+                return {"state": "connector_stopped", "since": row["last_seen"], "why": ""}
+            fresh = row["peer_checked"] and now - parse(row["peer_checked"]) < PEER_FRESH
+            if fresh and row["peer_online"] == 0:
+                return {"state": "machine_off", "since": row["peer_seen"] or row["last_seen"], "why": ""}
+            if fresh and row["peer_online"] == 1:
+                return {"state": "connector_stopped", "since": row["last_seen"], "why": ""}
+            return {"state": "not_heard", "since": row["last_seen"], "why": ""}
+        if row["ready"]:
+            return {"state": "ready", "since": row["last_seen"], "why": ""}
+        return {"state": row["state"] if row["state"] in ("gateway_down", "check_failed") else "gateway_down",
+                "since": row["last_seen"], "why": why}
+
+    def peers(self, workspace_id: str, status) -> int:
+        """The tailnet's view (`tailscale status --json`) of each machine a connector posts from. Returns
+        how many rows it wrote. Only Online and LastSeen are kept, for the address the connector used."""
+        if not isinstance(status, dict):
+            raise CoreError(400, "bad_status", "tailscale status --json is one JSON object")
+        nodes = [n for n in [status.get("Self"), *((status.get("Peer") or {}).values())] if isinstance(n, dict)]
+        now = self.s.now()
+        written = 0
+        with self.s.tx() as db:
+            for r in db.execute("SELECT gateway, peer_ip FROM own_gateways WHERE workspace_id = ? "
+                                "AND peer_ip IS NOT NULL", (workspace_id,)).fetchall():
+                node = next((n for n in nodes if r["peer_ip"] in (n.get("TailscaleIPs") or [])), None)
+                if node is None:
+                    online, seen = None, None
+                else:
+                    online = 1 if node.get("Online") is True else 0
+                    seen = now if online else _tailscale_time(node.get("LastSeen"))
+                db.execute("UPDATE own_gateways SET peer_online = ?, peer_seen = ?, peer_checked = ? "
+                           "WHERE workspace_id = ? AND gateway = ?", (online, seen, now, workspace_id, r["gateway"]))
+                written += 1
+        return written
 
     def _check_token(self, workspace_id: str, gw: str, token: str | None) -> None:
         Feeds(self.s).check_token(workspace_id, TOKENS[self._gateway(gw)], token)
@@ -195,6 +284,7 @@ class OwnChat:
     def _state(self, p: Principal, gw: str) -> dict:
         snap = Feeds(self.s).get(p.workspace_id, gw)
         return {"gateway": gw, "name": NAMES[gw], "online": self.online(p.workspace_id, gw),
+                **self.gateway_state(p.workspace_id, gw),
                 "off_why": self._off_why(p.workspace_id, gw), "last_seen": self._last_seen(p.workspace_id, gw),
                 "as_of": snap["as_of"], "snap": snap[gw]}
 
@@ -278,9 +368,11 @@ class OwnChat:
                                 "needs a passkey sign-in from the last 30 minutes; sign in with your passkey again")
             if not self.online(p.workspace_id, gw):
                 why = self._off_why(p.workspace_id, gw)
-                if gw == "one":
-                    raise CoreError(409, "one_off", "One is off", why=why)
-                raise CoreError(409, "gateway_off", f"my-hermes is not answering: {why}", why=why)
+                st = self.gateway_state(p.workspace_id, gw)
+                if st["state"] == "machine_off":
+                    raise CoreError(409, "one_off", "One is off", why=why, state=st["state"], since=st["since"])
+                raise CoreError(409, "gateway_off", f"{NAMES[gw]} is not answering: {why}", why=why,
+                                state=st["state"], since=st["since"])
             now = self.s.now()
             mid = new_id("own")
             db.execute("INSERT INTO own_messages(id, workspace_id, gateway, session_id, text, send_key, "
@@ -316,7 +408,7 @@ class OwnChat:
         return {"sha256": digest, "wanted": self._wanted(workspace_id, gw)}
 
     def claim(self, workspace_id: str, gw: str, token: str | None, limit: int = MAX_CLAIM, ready=False,
-              why: str = "") -> dict:
+              why: str = "", state: str | None = None, forwarded_for: str | None = None) -> dict:
         """Lease the oldest waiting message of each chat that has nothing in flight, at most `limit`.
 
         Every claim is also the connector saying it is there and whether that Hermes's gateway is running
@@ -327,7 +419,8 @@ class OwnChat:
         if not isinstance(ready, bool):
             raise CoreError(400, "bad_ready", "ready is true or false")
         self._check_token(workspace_id, gw, token)
-        self._seen(workspace_id, gw, ready, "" if ready else str(why)[:200])
+        self._seen(workspace_id, gw, ready, "" if ready else str(why)[:200], state if isinstance(state, str) else None,
+                   tailnet_ip(forwarded_for))
         if not self.s.flag(workspace_id, "own_chat_write"):
             raise CoreError(423, "own_chat_off", "nothing goes to your own Hermes while own_chat_write is off")
         items = []

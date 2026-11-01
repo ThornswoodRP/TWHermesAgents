@@ -1,9 +1,11 @@
 const { chromium } = require('playwright')
 // The phone app in headless Chromium with a virtual passkey (Chrome's WebAuthn
-// testing API): pairing, a deep link, adding a passkey, signing in with it,
+// testing API): setting up the phone (pairing and its first passkey on one
+// screen), a deep link, adding a passkey, signing in with it,
 // answering a card (it leaves Decisions for Answered), a high-risk card's own
-// check screen, the Bot Chats, the three gateways on the Bots tab and a chat with
-// Patrick's own Hermes on One (as text, a new chat, my-hermes off), the Rooms
+// check screen, the four tabs, the Thornswood Bots list (Hermes, One, then the
+// six Bots) and a chat with Patrick's own Hermes on One (as text, a new chat,
+// Hermes on the VM with no connector yet), the Rooms
 // list and a room (as text), the Board,
 // the install hint, the service worker, and alerts: a "no" kept, a push shown
 // as the one quiet line with its card's tag (delivered by DevTools, with no
@@ -22,6 +24,16 @@ const base = `http://localhost:${port}`
   const errors = []
   page.on('pageerror', e => errors.push(String(e)))
   page.on('console', m => { if (m.type() === 'error' && !/status of 401/.test(m.text())) errors.push(m.text()) })
+  // The names Hermes and One are shown only: every request carries the ids me and one (plan Part 2).
+  const shownNames = []
+  page.on('request', q => {
+    const u = new URL(q.url())
+    if (!u.pathname.startsWith('/api/')) return
+    const own = u.pathname.match(/^\/api\/v1\/own\/([^/]+)/)
+    if (own && !['me', 'one'].includes(own[1])) shownNames.push(u.pathname)
+    const body = q.postData() || ''
+    if (/"(gateway|target)"\s*:\s*"(Hermes|One)"/.test(body)) shownNames.push(u.pathname + ' ' + body)
+  })
   const cdp = await ctx.newCDPSession(page)
   await cdp.send('WebAuthn.enable')
   await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal',
@@ -29,13 +41,17 @@ const base = `http://localhost:${port}`
   let failed = 0
   const step = async (name, fn) => { try { await fn(); console.log('PASS', name) } catch (e) { failed++; console.log('FAIL', name, e.message) } }
   await page.goto(base + '/m/decisions/' + card)
-  await step('unsigned, the app shows sign-in', () => page.getByText('Pair this phone').waitFor({ timeout: 5000 }))
+  await step('with no passkey yet, the app shows setting up this phone', async () => {
+    await page.getByRole('heading', { name: 'Set up this phone' }).waitFor({ timeout: 5000 })
+    await page.getByText(/--kind phone --label 'Pixel 9a'"$/).waitFor({ timeout: 3000 })
+    if (await page.getByRole('button', { name: 'Sign in with your passkey' }).count()) throw new Error('a passkey button with no passkey')
+  })
   await step('in a browser tab, the app says where Chrome keeps its install', async () => {
     await page.getByText(/^To install the app: Chrome's \u22ee menu, then Add to home screen, then Install\.$/).waitFor({ timeout: 3000 })
   })
   await page.getByPlaceholder('XXXX-XXXX').fill(code)
-  await page.getByText('Pair this phone').click()
-  await step('after pairing, the deep link opens the exact card', () => page.getByText('Turn on the nightly backup check?').waitFor({ timeout: 5000 }))
+  await page.getByRole('button', { name: 'Pair and add a passkey' }).click()
+  await step('after pairing and its passkey, the deep link opens the exact card', () => page.getByText('Turn on the nightly backup check?').waitFor({ timeout: 8000 }))
   await step('the card shows its options and marks the recommendation', async () => {
     await page.getByText('Do it', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('Nothing happens until next week.').waitFor({ timeout: 3000 })
@@ -46,9 +62,16 @@ const base = `http://localhost:${port}`
   await page.goto(base + '/m/settings')
   await step('settings after a reload (CSRF asked for again)', () => page.getByText('Add a passkey on this phone').waitFor({ timeout: 5000 }))
   await page.getByText('Add a passkey on this phone').click()
-  await step('a passkey is added', () => page.getByText('Passkey added.').or(page.getByText('Added ')).first().waitFor({ timeout: 8000 }))
+  await step('the pairing added the first passkey, and the phone is not given a second', async () => {
+    await page.getByText('This phone already has a passkey for Hermes. Nothing changed.').waitFor({ timeout: 8000 })
+    if ((await page.getByText(/^Added /).count()) !== 1) throw new Error('not one passkey')
+  })
   await page.getByText('Sign out').click()
-  await step('signed out', () => page.getByText('Sign in with your passkey').waitFor({ timeout: 5000 }))
+  await step('signed out, with a passkey: one button, the other ways folded away', async () => {
+    await page.getByRole('heading', { name: 'Welcome back' }).waitFor({ timeout: 5000 })
+    await page.getByText('Other ways in: a pairing code, or a recovery code').waitFor({ timeout: 3000 })
+    if (await page.getByRole('button', { name: 'Pair and add a passkey' }).isVisible()) throw new Error('the pairing is not folded away')
+  })
   await page.getByText('Sign in with your passkey').click()
   await step('signed in again with the passkey', () => page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 }))
   await page.getByRole('link', { name: /Decisions/ }).click()
@@ -83,8 +106,33 @@ const base = `http://localhost:${port}`
     if (await again.count()) await again.click()
     await done.waitFor({ timeout: 8000 })
   })
-  await page.getByRole('link', { name: 'Bramble' }).click()
-  await step("Bramble's Bot Chat, as text", () => page.getByText('All green <i>tonight</i>.').waitFor({ timeout: 5000 }))
+  await step('four tabs: Bots, Rooms, Board and Decisions', async () => {
+    const tabs = (await page.locator('#tabs a').allTextContents()).map(t => t.replace(/\s*\d*\s*$/, '').trim())
+    if (JSON.stringify(tabs) !== JSON.stringify(['Bots', 'Rooms', 'Board', 'Decisions'])) throw new Error(JSON.stringify(tabs))
+  })
+  await page.getByRole('link', { name: 'Bots' }).click()
+  await step('the Thornswood Bots list: Hermes, One, then the six Bots', async () => {
+    await page.getByRole('heading', { name: 'Thornswood Bots' }).waitFor({ timeout: 5000 })
+    const rows = await page.locator('#view > button.row strong').allTextContents()
+    const want = ['Hermes', 'One', 'Bramble', 'Rift', 'Sprocket', 'Echo', 'Magpie', 'Wisp']
+    if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(rows))
+    await page.getByText('your own Hermes on the VM', { exact: true }).waitFor({ timeout: 3000 })
+    await page.getByText('your Hermes on One', { exact: true }).waitFor({ timeout: 3000 })
+    await page.getByText('router, merges', { exact: true }).waitFor({ timeout: 3000 })
+    await page.getByText('Plan the week: three things').waitFor({ timeout: 3000 })
+  })
+  await step("each gateway's state in its own words", async () => {
+    const tag = gw => page.locator(`#view > button.row[data-gateway="${gw}"] .rec`).first().textContent()
+    if ((await tag('one')) !== 'On') throw new Error('One: ' + (await tag('one')))
+    if ((await tag('me')) !== 'Connector missing') throw new Error('Hermes: ' + (await tag('me')))
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-bots.png', fullPage: true })
+  await page.getByText('Bramble', { exact: true }).click()
+  await step("Bramble's Bot Chat, as text, under Bots", async () => {
+    await page.getByText('All green <i>tonight</i>.').waitFor({ timeout: 5000 })
+    if (!page.url().endsWith('/m/bots/bramble')) throw new Error('url ' + page.url())
+    if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Bots') throw new Error('not on the Bots tab')
+  })
   await page.getByLabel('Message to Bramble').fill('Thanks, and look at the launcher log next.')
   await page.getByRole('button', { name: 'Send to Bramble' }).click()
   await step('a message to Bramble waits for the connector', async () => {
@@ -92,24 +140,20 @@ const base = `http://localhost:${port}`
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-bramble.png', fullPage: true })
-  await page.getByRole('link', { name: 'Bots' }).click()
-  await step('the Bots list has the other five', async () => {
-    for (const n of ['Rift', 'Sprocket', 'Echo', 'Magpie', 'Wisp']) await page.getByText(n, { exact: true }).waitFor({ timeout: 5000 })
+  await page.goto(base + '/m/bramble')
+  await step("Bramble's first path still opens its chat, under Bots", async () => {
+    await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
+    if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Bots') throw new Error('not on the Bots tab')
   })
+  await page.getByRole('link', { name: 'Bots' }).click()
   await page.getByText('Rift', { exact: true }).click()
   await step("Rift's chat opens on its own deep link", async () => {
     await page.getByLabel('Message to Rift').waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/bots/rift')) throw new Error('url ' + page.url())
   })
   await page.getByRole('link', { name: 'Bots' }).click()
-  await step('the Bots tab has the three gateways, as Desktop picks them', async () => {
-    const rows = await page.locator('#view > button.row strong').allTextContents()
-    if (JSON.stringify(rows.slice(0, 2)) !== JSON.stringify(['One (This device)', 'my-hermes'])) throw new Error(JSON.stringify(rows))
-    await page.getByRole('heading', { name: 'thornswood-bots' }).waitFor({ timeout: 3000 })
-    await page.getByText('Plan the week: three things').waitFor({ timeout: 3000 })
-    await page.getByText('Its chats show here once it is turned on.').waitFor({ timeout: 3000 })
-  })
-  await page.getByText('One (This device)', { exact: true }).click()
+  await page.getByText('Its chats show here once it is turned on.').waitFor({ timeout: 5000 })
+  await page.getByText('One', { exact: true }).click()
   await step("One's chats, with full power for 30 minutes after the passkey", async () => {
     await page.getByText('Plan the week', { exact: true }).waitFor({ timeout: 5000 })
     await page.getByText('Untitled chat', { exact: true }).waitFor({ timeout: 3000 })
@@ -129,18 +173,19 @@ const base = `http://localhost:${port}`
     if (!page.url().endsWith('/m/hermes/one/s_plan')) throw new Error('url ' + page.url())
     await page.getByText(/^You can send until .+ started from the phone or has \/yolo on\.$/).waitFor({ timeout: 3000 })
   })
-  await page.getByLabel('Send to One (This device)').fill('Add the backup check.')
-  await page.getByRole('button', { name: 'Send to One (This device)' }).click()
+  await page.getByLabel('Send to One').fill('Add the backup check.')
+  await page.getByRole('button', { name: 'Send to One' }).click()
   await step('a message to One waits for its connector', async () => {
     await page.getByText('Add the backup check.').waitFor({ timeout: 5000 })
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-own-chat.png', fullPage: true })
   await page.goto(base + '/m/hermes/one/s_old')
-  await step('a chat the feed does not carry yet is asked for', () => page.getByText('Asking One (This device) for this chat. It shows here within half a minute.').waitFor({ timeout: 5000 }))
+  await step('a chat the feed does not carry yet is asked for', () => page.getByText('Asking One for this chat. It shows here within half a minute.').waitFor({ timeout: 5000 }))
   await page.goto(base + '/m/hermes/me')
-  await step('my-hermes, never heard from, says so and offers no send', async () => {
-    await page.getByText("my-hermes is not answering: its connector has never been heard from.").waitFor({ timeout: 5000 })
+  await step('Hermes on the VM, with no connector yet, says so and offers no send', async () => {
+    await page.locator('#view h2', { hasText: /^Hermes$/ }).waitFor({ timeout: 5000 })
+    await page.getByText('The connector on the VM is not installed yet.').waitFor({ timeout: 5000 })
     if (await page.getByLabel('Start a new chat').count()) throw new Error('a composer while it is off')
   })
   await page.getByRole('link', { name: 'Board' }).click()
@@ -264,6 +309,9 @@ const base = `http://localhost:${port}`
     manifest.body.start_url === '/m/decisions'
   if (!mOk) failed++
   console.log(mOk ? 'PASS manifest served: Hermes, opening on Decisions' : 'FAIL manifest ' + JSON.stringify(manifest))
+  const sawOwn = shownNames.length === 0
+  if (!sawOwn) failed++
+  console.log(sawOwn ? 'PASS every request names the gateways me and one, never Hermes or One' : 'FAIL shown names sent: ' + shownNames.join(' | '))
   if (errors.length) failed++
   console.log(errors.length ? 'FAIL page errors: ' + errors.join(' | ') : 'PASS no page errors')
   await browser.close()

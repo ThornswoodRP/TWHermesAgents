@@ -214,7 +214,16 @@ class Auth:
         if p.kind != "patrick":
             raise CoreError(403, "not_patrick", f"{p.label} is not Patrick")
         if fresh and not p.fresh:
+            if p.method == "pairing" and not self.has_passkey(p.workspace_id):
+                # The 5 minutes after a pairing ran out before the first passkey was added: there is no
+                # passkey to sign in again with, so the way on is a new pairing code.
+                raise CoreError(403, "setup_expired", "setting up this phone ran out: a pairing gives 5 minutes "
+                                "to add the first passkey; pair again with a new code and add it straight after")
             raise CoreError(403, "sign_in_again", "this needs a fresh sign-in")
+
+    def has_passkey(self, workspace_id: str) -> bool:
+        return self.s.db.execute("SELECT 1 FROM passkeys WHERE workspace_id = ? AND revoked_at IS NULL LIMIT 1",
+                                 (workspace_id,)).fetchone() is not None
 
     # ── wrong tries ───────────────────────────────────────────────────────
 

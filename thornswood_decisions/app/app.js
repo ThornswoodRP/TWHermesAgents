@@ -1,9 +1,10 @@
 // The Hermes phone app (07 sections 4, 5 and 8; step 3 read only, step 4
-// answers and chat, step 5 alerts). Its tabs: Bramble, Bots, Rooms, Board and
-// Decisions (first named Room, Work and Needs you; those paths still open).
-// The Bots tab holds the three gateways Desktop's picker shows (Patrick, 1 Nov):
-// thornswood-bots with its Bots, and his own Hermes, my-hermes on the VM and
-// his Hermes on One, each with its own chats.
+// answers and chat, step 5 alerts). Its tabs: Bots, Rooms, Board and Decisions
+// (first named Room, Work and Needs you, and Bramble had a tab; those paths
+// still open). The Bots tab is one list, Thornswood Bots (Patrick's mock-up
+// answer, 1 Nov): his own Hermes on the VM and his Hermes on One, named Hermes
+// and One, then the six Bots. The grouping is presentation only: each keeps
+// its own gateway, chats, permissions and sign-in rules.
 //
 // Plain script, no framework, no inline code (the page's CSP allows only this
 // file). Everything shown from the core is set with textContent, never as
@@ -72,6 +73,7 @@ const SAID = {
   already_answered: 'This card was already answered.',
   expired: 'This card ran out. Bramble opens a new one if it still matters.',
   no_chat: 'There is no such chat.',
+  setup_expired: 'Setting up this phone ran out: a pairing gives 5 minutes to add the first passkey. Get a new code, pair again and add the passkey straight after.',
   passkey_unavailable: 'Passkeys are not set up on the core yet.',
   no_origin: 'The core does not know its address yet, so passkeys cannot work.',
   offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.'
@@ -174,39 +176,110 @@ function keyFor(name) {
   return k
 }
 
-function signInView(note) {
-  document.getElementById('tabs').hidden = true
-  document.getElementById('settings').hidden = true
-  const status = el('p', { class: 'quiet' }, note || '')
+// What gets a pairing code, for Patrick's Hermes to run on One.
+const PAIR_COMMAND = 'ssh thornswood-bots "sudo -u tw-decide /opt/thornswood-hermes/bin/tw-decide ' +
+  '--db /srv/tw/decide/core.db pair --workspace thornswood --kind phone --label \'Pixel 9a\'"'
+
+// Registers a passkey on this phone. The core allows it only in a fresh
+// session: within 5 minutes of a pairing, or 5 minutes of a passkey sign-in.
+async function addPasskey(label) {
+  const o = await call('POST', '/passkeys/register/options')
+  if (o.status !== 200) return { ok: false, message: said(o.body) }
+  let cred
+  try {
+    cred = await navigator.credentials.create({ publicKey: creationOptions(o.body) })
+  } catch (err) {
+    // InvalidStateError: this phone already holds one of the passkeys the core lists.
+    return { ok: false, message: err && err.name === 'InvalidStateError'
+      ? 'This phone already has a passkey for Hermes. Nothing changed.'
+      : 'No passkey was added. Nothing changed.' }
+  }
+  const done = await call('POST', '/passkeys/register', { credential: credentialJSON(cred), label })
+  return done.status === 200 ? { ok: true } : { ok: false, message: said(done.body) }
+}
+
+// Paired, but the passkey was not added: the way on, said plainly.
+function pairedView(message) {
+  const status = el('p', { class: 'warn', role: 'status' }, message)
+  show(el('div', { class: 'card' },
+    el('h2', {}, 'This phone is paired'),
+    status,
+    el('p', { class: 'quiet' }, 'Add the passkey within 5 minutes of pairing. After that, pair again with a new code.'),
+    el('button', { class: 'primary', type: 'button', onclick: async () => {
+      status.textContent = ''
+      const k = await addPasskey('This phone')
+      if (k.ok) return route()
+      status.textContent = k.message
+    } }, 'Add a passkey'),
+    el('button', { class: 'secondary', type: 'button', onclick: () => route() }, 'Go on without a passkey')))
+}
+
+// The three steps on one screen, so the passkey is added inside the 5 minutes.
+function setupPart(status) {
   const code = el('input', { autocomplete: 'off', inputmode: 'text', placeholder: 'XXXX-XXXX', 'aria-label': 'Code' })
+  return [
+    el('ol', { class: 'steps' },
+      el('li', {}, 'Get a code. Your Hermes can run this:', el('pre', { class: 'artifact' }, PAIR_COMMAND)),
+      el('li', {}, 'Type it here within 10 minutes.', code),
+      el('li', {}, 'Add your passkey. The prompt opens by itself once the code works.')),
+    el('button', { class: 'primary', type: 'button', onclick: async () => {
+      status.textContent = ''
+      const r = await call('POST', '/pair', { code: code.value.trim() })
+      if (r.status !== 200) { status.textContent = said(r.body); return }
+      csrf = r.body.csrf
+      const k = await addPasskey('This phone')
+      if (k.ok) return route()
+      pairedView(k.message)
+    } }, 'Pair and add a passkey')
+  ]
+}
+
+function recoveryPart(done) {
   const recovery = el('input', { autocomplete: 'off', placeholder: 'Recovery code', 'aria-label': 'Recovery code' })
   const label = el('input', { autocomplete: 'off', placeholder: 'This phone', 'aria-label': 'Name for this phone' })
+  return [
+    el('p', { class: 'quiet' }, 'A recovery code signs in once and makes this phone a new device. Add a passkey right after.'),
+    recovery, label,
+    el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      done(await call('POST', '/recovery-sign-in', { code: recovery.value.trim(), label: label.value.trim() }))
+    } }, 'Sign in with a recovery code')
+  ]
+}
+
+// The core says only whether a passkey exists. With one: one button, the other
+// ways folded away. Without one: setting up this phone.
+async function signInView(note) {
+  document.getElementById('tabs').hidden = true
+  document.getElementById('settings').hidden = true
+  const st = await call('GET', '/sign-in/state')
+  const hasKey = st.status === 200 ? st.body.passkeys === true : null
+  const status = el('p', { class: 'warn', role: 'status' }, note || (st.status === 200 ? '' : said(st.body)))
   async function done(r) {
     if (r.status !== 200) { status.textContent = said(r.body); return }
     csrf = r.body.csrf
     route()
   }
+  if (hasKey === false) {
+    return show(
+      el('h2', {}, 'Set up this phone'),
+      el('p', { class: 'quiet' }, 'No passkey is set up yet, or setting one up ran out. A pairing gives 5 minutes ' +
+        'to add the first passkey, so the app asks for it straight after.'),
+      setupPart(status), status,
+      el('details', { class: 'fold' }, el('summary', {}, 'Lost your passkey: a recovery code'),
+        el('div', { class: 'card' }, recoveryPart(done))))
+  }
   show(
-    el('h2', {}, 'Sign in'),
+    el('h2', {}, 'Welcome back'),
+    el('p', { class: 'quiet' }, hasKey ? 'Your passkey is set up.' : 'Sign in with your passkey, or set up this phone below.'),
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
       done(await passkeySignIn())
     } }, 'Sign in with your passkey'),
-    el('div', { class: 'card' },
-      el('h2', {}, 'First time on this phone'),
-      el('p', { class: 'quiet' }, 'Type the one-time code the VM or your Desktop gave you. It works once, for 10 minutes.'),
-      code,
-      el('button', { class: 'secondary', type: 'button', onclick: async () => {
-        done(await call('POST', '/pair', { code: code.value.trim() }))
-      } }, 'Pair this phone')),
-    el('div', { class: 'card' },
-      el('h2', {}, 'Lost your passkey'),
-      el('p', { class: 'quiet' }, 'A recovery code signs in once and makes this phone a new device. Add a passkey right after.'),
-      recovery, label,
-      el('button', { class: 'secondary', type: 'button', onclick: async () => {
-        done(await call('POST', '/recovery-sign-in', { code: recovery.value.trim(), label: label.value.trim() }))
-      } }, 'Sign in with a recovery code')),
-    status)
+    status,
+    el('details', { class: 'fold', open: hasKey === null },
+      el('summary', {}, 'Other ways in: a pairing code, or a recovery code'),
+      el('div', { class: 'card' }, el('h2', {}, 'Pair this phone'), setupPart(status)),
+      el('div', { class: 'card' }, el('h2', {}, 'Lost your passkey'), recoveryPart(done))))
 }
 
 // ── the views ─────────────────────────────────────────────────────────────
@@ -358,6 +431,12 @@ async function boardView() {
 }
 
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
+// What each Bot does, as the Thornswood Bots list says it, in the list's order.
+const WHAT = {
+  bramble: 'router, merges', rift: 'collection, load order', sprocket: 'launcher, installer',
+  echo: 'site, Discord, voice', magpie: 'GitHub, CI, runners', wisp: 'gamemode, game UI'
+}
+const ORDER = Object.keys(WHAT)
 const STATE = {
   queued: 'Waiting to send',
   leased: 'Sending',
@@ -368,33 +447,65 @@ const STATE = {
 }
 let drafts = {}
 
-// Patrick's own Hermes: the gateway's name as Desktop's picker shows it.
-const GATEWAY = { me: 'my-hermes', one: 'One (This device)' }
+// Patrick's own Hermes, by the names he gave them (1 Nov). The ids stay me and one.
+const GATEWAY = { me: 'Hermes', one: 'One' }
+const GATEWAY_WHAT = { me: 'your own Hermes on the VM', one: 'your Hermes on One' }
+
+function at(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return isNaN(d) ? iso : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+// The gateway's state in a few words for the list, and in a sentence for its
+// own screen. One reads as off only when the tailnet says the machine is.
+function stateWords(g) {
+  const one = g.gateway === 'one'
+  const since = g.since ? ` at ${at(g.since)}` : ''
+  switch (g.state) {
+    case 'ready': return ['On', 'On.']
+    case 'machine_off': return ['One is off', `One is off, since ${at(g.since)}. (Tailscale says the machine is offline.)`]
+    case 'connector_stopped': return ['Connector stopped', one
+      ? `One is on, but its connector stopped${since}.`
+      : `Its connector on the VM stopped${since}.`]
+    case 'not_heard': return ['Not heard from', `One's connector has not been heard from since ${at(g.since)}, ` +
+      'and the tailnet has not said yet whether One is on.']
+    case 'gateway_down': return ['Gateway offline', `${one ? 'Hermes on One' : 'Hermes on the VM'} is not running. ` +
+      `The connector is.${g.why ? ` (${g.why})` : ''}`]
+    case 'check_failed': return ['Check failed', `The connector runs, but its check of Hermes failed: ${g.why || 'it gave no reason'}.`]
+    case 'missing': return ['Connector missing', `The connector on ${one ? 'One' : 'the VM'} is not installed yet.`]
+    case 'turned_off': return ['Turned off', 'Chat with your own Hermes is turned off on the core.']
+    default: return [g.online ? 'On' : 'Off', g.online ? 'On.' : 'Not answering.']
+  }
+}
 
 function gatewayLine(g) {
-  if (g.online) return el('span', { class: 'rec' }, 'On')
-  return el('span', { class: 'rec off' }, g.gateway === 'one' ? 'One is off' : 'Off')
+  return el('span', { class: g.state === 'ready' ? 'rec' : 'rec off' }, stateWords(g)[0])
 }
 
 async function botsView() {
   setTab('bots')
   const [r, own] = await Promise.all([call('GET', '/chat'), call('GET', '/own')])
   if (refused(r)) return
-  const others = r.body.bots.filter(b => b.bot !== 'bramble')
-  // In the order Desktop's picker shows them: This device (One), my-hermes, then thornswood-bots.
-  const gateways = own.status === 200 ? ['one', 'me'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
+  const rank = b => (ORDER.indexOf(b.bot) + 1) || ORDER.length + 1
+  const bots = r.body.bots.slice().sort((a, b) => rank(a) - rank(b))
+  // Hermes, then One, then the six Bots (Patrick's mock-up answer, 1 Nov).
+  const gateways = own.status === 200 ? ['me', 'one'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
   show(
-    gateways.map(g => el('button', { class: 'row', type: 'button', onclick: () => go('/m/hermes/' + g.gateway) },
-      el('strong', {}, GATEWAY[g.gateway] || g.name), gatewayLine(g),
+    el('h2', { class: 'section' }, 'Thornswood Bots'),
+    gateways.map(g => el('button', { class: 'row', type: 'button', 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) },
+      el('strong', {}, GATEWAY[g.gateway]), gatewayLine(g),
       g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null,
+      el('div', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
       el('div', { class: 'quiet' }, g.last ? `${g.last.title || 'Untitled chat'}: ${g.last.preview.slice(0, 100)}`
         : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')))),
-    el('h2', { class: 'section' }, 'thornswood-bots'),
-    el('p', { class: 'quiet' }, `Each Bot's own Bot Chat, as of ${when(r.body.as_of) || 'nothing yet'}.`),
-    others.map(b => el('button', { class: 'row', type: 'button', onclick: () => go('/m/bots/' + b.bot) },
+    own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
+    bots.map(b => el('button', { class: 'row', type: 'button', 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) },
       el('strong', {}, NAMES[b.bot] || b.bot),
       b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null,
-      el('div', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.'))))
+      WHAT[b.bot] ? el('div', { class: 'what' }, WHAT[b.bot]) : null,
+      el('div', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.'))),
+    el('p', { class: 'quiet' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
 }
 
 // Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
@@ -418,7 +529,7 @@ function signInPart(v, status, existing) {
     } }, 'Sign in with your passkey'))
 }
 
-function composer(key, label, send, status) {
+function composer(key, label, send, status, gw) {
   const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
   const box = el('textarea', { rows: '3', 'aria-label': label, placeholder: label })
   box.value = draft.text
@@ -432,17 +543,18 @@ function composer(key, label, send, status) {
     const s = await send(text, draft.key)
     if (s.status === 200) { drafts[key] = null; return route() }
     if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
+    const d = s.body.detail || {}
     status.textContent = s.status === 0
       ? 'Could not reach the core. Sending again sends the same message, never a second one.'
-      : said(s.body) + (s.body.detail && s.body.detail.why ? ` (${s.body.detail.why})` : '')
+      : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
   } }, label)
   return [box, button]
 }
 
+// The state in a sentence, unless it is ready, or turned off (said by itself below).
 function offLine(v) {
-  if (v.online) return null
-  return el('p', { class: 'warn' }, (v.gateway === 'one' ? 'One is off' : 'my-hermes is not answering') +
-    (v.off_why ? `: ${v.off_why}.` : '.'))
+  if (v.state === 'ready' || v.state === 'turned_off') return null
+  return el('p', { class: 'warn', 'data-state': v.state }, stateWords(v)[1])
 }
 
 async function gatewayView(gw) {
@@ -462,7 +574,7 @@ async function gatewayView(gw) {
     if (v.sign_in_until) {
       parts.push(el('p', { class: 'quiet' }, 'A new chat has full power on every turn. Hermes names it.'),
         composer('new:' + gw, 'Start a new chat',
-          (text, key) => call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key }), status), status)
+          (text, key) => call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key }), status, gw), status)
     }
   } else if (!v.can_send) {
     parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
@@ -515,7 +627,7 @@ async function ownChatView(gw, sid) {
     parts.push(signInPart(v, status, true))
     if (v.sign_in_until) {
       parts.push(composer(`own:${gw}:${sid}`, 'Send to ' + name,
-        (text, key) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: key }), status), status)
+        (text, key) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: key }), status, gw), status)
     }
   } else if (!v.can_send) {
     parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
@@ -783,18 +895,9 @@ async function settingsView(note) {
     el('h2', {}, 'Passkeys'), list, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
-      const o = await call('POST', '/passkeys/register/options')
-      if (o.status !== 200) { status.textContent = said(o.body); return }
-      let cred
-      try {
-        cred = await navigator.credentials.create({ publicKey: creationOptions(o.body) })
-      } catch (err) {
-        status.textContent = 'No passkey was added. Nothing changed.'
-        return
-      }
-      const done = await call('POST', '/passkeys/register', { credential: credentialJSON(cred), label: name.value.trim() })
-      status.textContent = done.status === 200 ? 'Passkey added.' : said(done.body)
-      if (done.status === 200) settingsView('Passkey added.')
+      const k = await addPasskey(name.value.trim())
+      if (k.ok) return settingsView('Passkey added.')
+      status.textContent = k.message
     } }, 'Add a passkey on this phone'),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       const done = await call('POST', '/recovery-codes')
@@ -853,7 +956,7 @@ async function route() {
   if (room) return chatView(room[1], 'rooms')
   if (path === 'room') return chatView('room', 'rooms')
   if (path === 'rooms') return roomsView()
-  if (path === 'bramble') return chatView('bramble', 'bramble')
+  if (path === 'bramble') return chatView('bramble', 'bots')
   if (path === 'bots') return botsView()
   const own = path.match(/^hermes\/(me|one)(?:\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127}))?$/)
   if (own) return own[2] ? ownChatView(own[1], own[2]) : gatewayView(own[1])

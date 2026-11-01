@@ -15,6 +15,8 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   feed-token  print a new token for a feed (work, room, bots), the connector, the push worker
               or an own-Hermes connector (own-me, own-one) (replaces the old one)
   token-known whether the token on stdin is the core's for that name (the install checks its files with it)
+  peers       the tailnet's view of each machine an own-Hermes connector posts from (One): whether it is
+              online, from `tailscale status --json`, so the phone says "One is off" only when it is
   push-reset  forget the push worker's keys and every phone's alerts, when the worker's keys are lost
   selfcheck   a whole passkey ceremony and one sealed, encrypted push, with the installed libraries
   backup      make a consistent copy
@@ -190,6 +192,24 @@ def _push_selfcheck() -> str:
     return "sealed, encrypted and signed"
 
 
+def cmd_peers(store: Store, args) -> dict:
+    """Asks the VM's own tailnet client, read only, and keeps only Online and LastSeen (tw-decide-peers.timer)."""
+    import subprocess
+    try:
+        out = subprocess.run([args.tailscale, "status", "--json"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CoreError(503, "no_tailscale", f"could not ask {args.tailscale} ({type(exc).__name__})") from None
+    if out.returncode != 0:
+        raise CoreError(503, "no_tailscale", f"{args.tailscale} status --json stopped with exit code {out.returncode}")
+    try:
+        status = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        raise CoreError(503, "no_tailscale", f"{args.tailscale} status --json did not print JSON") from None
+    from .own import OwnChat
+    ws, _ = _workspace(store, args.workspace)
+    return {"written": OwnChat(store).peers(ws, status)}
+
+
 def cmd_push_reset(store: Store, args) -> dict:
     from .push import Push
     ws, _ = _workspace(store, args.workspace)
@@ -268,6 +288,9 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("token-known")
     p.add_argument("--workspace", required=True)
     p.add_argument("--name", choices=FEED_NAMES, required=True)
+    p = sub.add_parser("peers")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--tailscale", default="tailscale", help="the tailscale command (a stand-in in the tests)")
     p = sub.add_parser("push-reset")
     p.add_argument("--workspace", required=True)
     sub.add_parser("selfcheck")
@@ -282,7 +305,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"init": cmd_init, "bind-room": cmd_bind_room, "pair": cmd_pair, "flag": cmd_flag,
             "test-card": cmd_test_card, "serve": cmd_serve, "feed-token": cmd_feed_token, "selfcheck": cmd_selfcheck,
-            "token-known": cmd_token_known,
+            "token-known": cmd_token_known, "peers": cmd_peers,
             "push-reset": cmd_push_reset,
             "backup": cmd_backup, "verify": cmd_verify}
 

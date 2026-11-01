@@ -14,6 +14,7 @@ nothing reaches a real Hermes.
 from __future__ import annotations
 
 import json
+import re
 import os
 import sqlite3
 import sys
@@ -59,10 +60,11 @@ class Gateways:
         if write:
             on(w, "own_chat_write")
 
-    def hello(self, gw: str, ready: bool = True, why: str = "") -> dict:
+    def hello(self, gw: str, ready: bool = True, why: str = "", state: str | None = None,
+              forwarded_for: str | None = None) -> dict:
         """The connector says it is there; with own_chat_write off the core still notes it, and answers 423."""
         try:
-            return self.own.claim(self.w.ws, gw, self.tok[gw], 0, ready, why)
+            return self.own.claim(self.w.ws, gw, self.tok[gw], 0, ready, why, state, forwarded_for)
         except CoreError as exc:
             if exc.status != 423:
                 raise
@@ -113,18 +115,61 @@ class Sending(unittest.TestCase):
         self.refused("passkey_needed", p=self.w.patrick())
         self.assertEqual(self.send(p=passkey(self.w, minutes_ago=29))["status"], "queued")
 
-    def test_one_is_off(self):
+    def test_one_is_off_only_when_the_tailnet_says_so(self):
+        # Patrick, 1 Nov: "Show One as unavailable only when One is really off."
         on(self.w, "own_chat_write")
-        e = self.refused("one_off")
-        self.assertEqual(str(e), "One is off")
-        self.g.hello("one", ready=False, why="One's Hermes is absent")
-        e = self.refused("one_off")
-        self.assertEqual(e.detail["why"], "One's Hermes is absent")
-        self.g.hello("one")
+        e = self.refused("gateway_off")
+        self.assertEqual(e.detail["state"], "missing")
+        self.g.hello("one", ready=False, why="One's Hermes is absent", state="gateway_down",
+                     forwarded_for="100.101.102.103")
+        e = self.refused("gateway_off")
+        self.assertEqual((e.detail["state"], e.detail["why"]), ("gateway_down", "One's Hermes is absent"))
+        self.g.hello("one", state="ready", forwarded_for="100.101.102.103")
         self.assertEqual(self.send()["status"], "queued")
         self.w.clock.advance(minutes=2)
-        e = self.refused("one_off", key="own-key-0002")
+        # Silent, and the tailnet's view is not in: never "One is off" on a guess.
+        e = self.refused("gateway_off", key="own-key-0002")
+        self.assertEqual(e.detail["state"], "not_heard")
         self.assertEqual(e.detail["why"], "its connector has not been heard from in 2 minutes")
+        peer = {"TailscaleIPs": ["100.101.102.103"], "Online": True, "LastSeen": "0001-01-01T00:00:00Z"}
+        self.assertEqual(self.own.peers(self.w.ws, {"Self": {"TailscaleIPs": ["100.64.0.1"]}, "Peer": {"k": peer}}), 1)
+        e = self.refused("gateway_off", key="own-key-0003")
+        self.assertEqual(e.detail["state"], "connector_stopped")
+        peer.update(Online=False, LastSeen="2026-11-01T19:12:00Z")
+        self.own.peers(self.w.ws, {"Peer": {"k": peer}})
+        e = self.refused("one_off", key="own-key-0004")
+        self.assertEqual(str(e), "One is off")
+        self.assertEqual((e.detail["state"], e.detail["since"]), ("machine_off", "2026-11-01T19:12:00+00:00"))
+        # A view older than 3 minutes is no view.
+        self.w.clock.advance(minutes=4)
+        self.assertEqual(self.own.gateway_state(self.w.ws, "one")["state"], "not_heard")
+
+    def test_a_check_that_could_not_run_is_its_own_state(self):
+        on(self.w, "own_chat_write")
+        self.g.hello("one", ready=False, why="could not run the readiness check with Hermes's Python",
+                     state="check_failed")
+        st = self.own.gateway_state(self.w.ws, "one")
+        self.assertEqual((st["state"], st["why"]), ("check_failed", "could not run the readiness check with Hermes's Python"))
+        self.g.hello("one", ready=False, why="x", state="anything else")
+        self.assertEqual(self.own.gateway_state(self.w.ws, "one")["state"], "gateway_down")
+
+    def test_turned_off_and_the_vm_never_reads_as_off(self):
+        self.assertEqual(self.own.gateway_state(self.w.ws, "me")["state"], "turned_off")
+        on(self.w, "own_chat_write")
+        self.g.hello("me", state="ready")
+        self.w.clock.advance(minutes=3)
+        self.assertEqual(self.own.gateway_state(self.w.ws, "me")["state"], "connector_stopped")
+
+    def test_only_a_tailnet_address_is_kept_for_the_machine(self):
+        from thornswood_decisions.own import tailnet_ip
+        self.assertEqual(tailnet_ip("100.101.102.103"), "100.101.102.103")
+        self.assertEqual(tailnet_ip("fd7a:115c:a1e0::1"), "fd7a:115c:a1e0::1")
+        for bad in (None, "", "127.0.0.1", "192.135.112.23", "10.0.0.1", "not an address", "100.128.0.1"):
+            self.assertIsNone(tailnet_ip(bad), bad)
+        on(self.w, "own_chat_write")
+        self.g.hello("one", forwarded_for="100.101.102.103")
+        self.g.hello("one", forwarded_for=None)
+        self.assertEqual(self.own._gw_row(self.w.ws, "one")["peer_ip"], "100.101.102.103")
 
     def test_my_hermes_off_says_so(self):
         on(self.w, "own_chat_write")
@@ -608,7 +653,7 @@ class TheConnector(unittest.TestCase):
         self.round()
         self.assertEqual(len(self.turns()), 1)
 
-    def test_a_gateway_that_is_not_running_makes_one_off(self):
+    def test_a_gateway_that_is_not_running_is_said_as_that(self):
         os.environ["TW_FAKE_READY"] = "0"
         self.g.own.send(passkey(self.w), "one", "s_plan", None, "hello", "own-key-0001")
         self.round()
@@ -616,7 +661,8 @@ class TheConnector(unittest.TestCase):
         self.assertFalse(self.g.own.online(self.w.ws, "one"))
         with self.assertRaises(CoreError) as e:
             self.g.own.send(passkey(self.w), "one", "s_plan", None, "again", "own-key-0002")
-        self.assertEqual((str(e.exception), e.exception.detail["why"]), ("One is off", "One's Hermes is absent"))
+        self.assertEqual((e.exception.reason, e.exception.detail["state"], e.exception.detail["why"]),
+                         ("gateway_off", "gateway_down", "One's Hermes is absent"))
 
     def test_off_it_waits_and_copies_nothing(self):
         self.w.store.set_flag(self.w.ws, "own_chat_write", False, by="tests")
@@ -653,7 +699,16 @@ class TheConnector(unittest.TestCase):
         self.assertEqual(cmd[:3], [sys.executable, "-I", "-c"])
         self.assertNotIn("hermes_cli.main", cmd[3])
         h = own_connector.Hermes([str(hermes)], cmd, self.dir, "One's Hermes")
-        self.assertEqual(h.ready(), (True, ""))
+        self.assertEqual(h.ready(), ("ready", ""))
+
+    def test_a_check_that_cannot_run_says_so_and_never_reads_as_gateway_down(self):
+        h = own_connector.Hermes(["hermes"], [str(self.dir / "no-such-python"), "-I", "x.py"], self.dir, "One's Hermes")
+        self.assertEqual(h.ready(), ("check_failed", "could not run the readiness check with Hermes's Python"))
+        h = own_connector.Hermes(["hermes"], [sys.executable, "-c", "print('[1]')"], self.dir, "One's Hermes")
+        self.assertEqual(h.ready()[0], "check_failed")
+        h = own_connector.Hermes(["hermes"], [sys.executable, "-c", "print('{\"ready\": false, \"reason\": \"no gateway\"}')"],
+                                 self.dir, "One's Hermes")
+        self.assertEqual(h.ready(), ("gateway_down", "no gateway"))
 
     @unittest.skipIf(os.name == "nt", "the stand-in launcher is a #! script")
     def test_an_older_launcher_falls_back_to_the_python_it_names(self):
@@ -734,6 +789,21 @@ class VmInstall(unittest.TestCase):
                               capture_output=True, text=True).stdout.split(" ")[0]
         self.assertEqual(mode, "100755")
 
+    def test_the_install_reads_the_tailnets_view_of_one_as_tw_decide_with_no_network(self):
+        from helpers import REPO
+        src = (REPO / "deploy/decisions/install.sh").read_text(encoding="utf-8")
+        units = re.search(r"for u in (.*?); do", src, re.S).group(1).split()
+        self.assertIn("tw-decide-peers.service", units)
+        self.assertIn("tw-decide-peers.timer", units)
+        self.assertIn("systemctl enable --quiet --now tw-decide-peers.timer", src)
+        unit = (REPO / "deploy/decisions/tw-decide-peers.service").read_text(encoding="utf-8")
+        self.assertIn("User=tw-decide", unit)
+        self.assertIn("IPAddressDeny=any", unit)
+        self.assertIn("RestrictAddressFamilies=AF_UNIX", unit)
+        self.assertIn("peers --workspace thornswood", unit)
+        timer = (REPO / "deploy/decisions/tw-decide-peers.timer").read_text(encoding="utf-8")
+        self.assertIn("OnUnitInactiveSec=60s", timer)
+
     def test_the_install_makes_its_token_for_patrick_hermes_only_and_turns_nothing_on(self):
         from helpers import REPO
         src = (REPO / "deploy/decisions/install.sh").read_text(encoding="utf-8")
@@ -742,7 +812,8 @@ class VmInstall(unittest.TestCase):
         self.assertIn('tok="$oh/.config/thornswood/own-me.token"', src)
         self.assertIn("run feed-token --workspace thornswood --name own-me | runuser -u \"$own\" -- sh -c 'umask 077;",
                       src)
-        self.assertIn("tw-decide-own.service; do", src)
+        units = re.search(r"for u in (.*?); do", src, re.S).group(1).split()
+        self.assertIn("tw-decide-own.service", units)
         self.assertIn("tw-decide-connector tw-decide-push tw-decide-own; do", src)
         # A token the core no longer keeps (a downgrade past schema 7) is made again, not kept.
         self.assertIn('runuser -u "$own" -- cat "$tok" | run token-known --workspace thornswood --name own-me', src)
@@ -867,3 +938,84 @@ class OneInstall(unittest.TestCase):
         self.assertNotRegex(text, r"Register-ScheduledTask[^\n]*-Force")
         self.assertIn("runs something else; it is not replaced", text)
         self.assertIn("-LogonType Interactive -RunLevel Limited", text)
+
+
+class GatewayStatesOverHttp(unittest.TestCase):
+    """What the connector posts reaches the core's states as Tailscale Serve hands it on."""
+
+    def setUp(self):
+        self.s = Served(self)
+        self.tok = Feeds(self.s.w.store).new_token(self.s.w.ws, "own-one", by="tests")
+        on(self.s.w, "own_chat_write")
+
+    def claim(self, body, **headers):
+        return self.s.call("POST", "/own/one/claim", headers={"Authorization": f"Bearer {self.tok}", **headers},
+                           body=body)
+
+    def test_the_state_and_the_tailnet_address_are_kept(self):
+        status, _, _ = self.claim({"limit": 0, "ready": False, "why": "no gateway", "state": "gateway_down"},
+                                  **{"X-Forwarded-For": "100.101.102.103"})
+        self.assertEqual(status, 200)
+        own = OwnChat(self.s.w.store)
+        row = own._gw_row(self.s.w.ws, "one")
+        self.assertEqual((row["state"], row["peer_ip"]), ("gateway_down", "100.101.102.103"))
+        self.assertEqual(own.gateway_state(self.s.w.ws, "one")["state"], "gateway_down")
+
+    def test_an_address_from_outside_the_tailnet_is_not_kept(self):
+        self.claim({"limit": 0, "ready": True, "state": "ready"}, **{"X-Forwarded-For": "192.135.112.23"})
+        self.assertIsNone(OwnChat(self.s.w.store)._gw_row(self.s.w.ws, "one")["peer_ip"])
+
+
+@unittest.skipIf(os.name == "nt", "the stand-in tailscale is a #! script")
+class PeersCommand(unittest.TestCase):
+    """`tw-decide peers` asks the VM's tailnet client, read only, and keeps Online and LastSeen."""
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+        self.tok = Feeds(self.w.store).new_token(self.w.ws, "own-one", by="tests")
+        on(self.w, "own_chat_write")
+        OwnChat(self.w.store).claim(self.w.ws, "one", self.tok, 0, True, "", "ready", "100.101.102.103")
+        self.bin = Path(tempfile.mkdtemp())
+
+    def stand_in(self, out: str, code: int = 0) -> str:
+        path = self.bin / "tailscale"
+        (self.bin / "out.json").write_text(out, encoding="utf-8")
+        path.write_text(f"#!/bin/sh\n[ \"$1 $2\" = 'status --json' ] || exit 9\ncat '{self.bin / 'out.json'}'\nexit {code}\n",
+                        encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def run_cli(self, tailscale: str):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from thornswood_decisions import cli
+        self.w.close()
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["--db", str(self.w.path), "peers", "--workspace", "test", "--tailscale", tailscale])
+        return code, out.getvalue(), err.getvalue()
+
+    def row(self):
+        con = connect(self.w.path)
+        try:
+            return con.execute("SELECT peer_online, peer_seen, peer_checked FROM own_gateways "
+                               "WHERE gateway = 'one'").fetchone()
+        finally:
+            con.close()
+
+    def test_an_offline_one_is_written_with_when_it_was_last_seen(self):
+        peer = {"Peer": {"n1": {"TailscaleIPs": ["100.101.102.103"], "Online": False,
+                                "LastSeen": "2026-11-01T19:12:00Z", "HostName": "one"}}}
+        code, out, err = self.run_cli(self.stand_in(json.dumps(peer)))
+        self.assertEqual(code, 0, err)
+        self.assertIn('"written": 1', out)
+        online, seen, checked = self.row()
+        self.assertEqual((online, seen), (0, "2026-11-01T19:12:00+00:00"))
+        self.assertTrue(checked)
+
+    def test_a_tailscale_that_fails_writes_nothing_and_says_so(self):
+        code, _, err = self.run_cli(self.stand_in("{}", code=1))
+        self.assertEqual(code, 1)
+        self.assertIn("STOP no_tailscale", err)
+        self.assertEqual(self.row()[2], None)

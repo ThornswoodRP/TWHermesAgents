@@ -52,6 +52,7 @@ class Migrations(unittest.TestCase):
         5: "d36394b9f9ba7c25fc560c05a7834d52955de09312aed15256602e6a05ce1406",
         6: "720327f6d99e5e74175c44b603b525df3cdae7ae67c1a6aa56778e8d882c9b63",
         7: "3f7658050982a903a9df24690b2f1c2a4d4759c525f86af3b5d7855c222175e0",
+        8: "0451456cdb9ec93fba6391b472b3f5e04d6a8a84487e44fb9be54226b4e11404",
     }
 
     def test_merged_migrations_never_change(self):
@@ -93,6 +94,17 @@ class PasskeyCeremonies(unittest.TestCase):
         p = self.w.core.auth.authenticate(self.s.token)
         with self.assertRaises(CoreError) as cm:
             self.pk.register_options(p)
+        # No passkey yet, so no "sign in again with your passkey": the pairing's 5 minutes ran out.
+        self.assertEqual(cm.exception.reason, "setup_expired")
+
+    def test_adding_straight_after_pairing_works_and_then_the_old_words_hold(self):
+        self.assertFalse(self.w.core.auth.has_passkey(self.w.ws))
+        self.enrol()
+        self.assertTrue(self.w.core.auth.has_passkey(self.w.ws))
+        _, s, _ = phone(self.w)
+        self.w.clock.advance(minutes=6)
+        with self.assertRaises(CoreError) as cm:
+            self.pk.register_options(self.w.core.auth.authenticate(s.token))
         self.assertEqual(cm.exception.reason, "sign_in_again")
 
     def test_a_challenge_works_once(self):
@@ -233,6 +245,17 @@ class AppRoutes(unittest.TestCase):
         for path in ("/cards", "/work", "/room", "/changes?since=0"):
             status, _, body = s.call("GET", path, headers={"Cookie": cookie})
             self.assertEqual((status, body["error"]), (423, "mobile_read_off"), path)
+
+    def test_the_sign_in_screen_asks_only_whether_a_passkey_exists(self):
+        s = Served(self)
+        status, _, body = s.call("GET", "/sign-in/state")
+        self.assertEqual((status, body), (200, {"passkeys": False}))
+        s.w.store.db.execute("INSERT INTO passkeys(id, workspace_id, principal_id, credential_id, public_key, label, "
+                             "created_at) VALUES('pk1', ?, ?, 'cred', x'00', 'Pixel', 'now')", (s.w.ws, s.w.patrick_id))
+        status, _, body = s.call("GET", "/sign-in/state")
+        self.assertEqual((status, body), (200, {"passkeys": True}))
+        s.w.store.db.execute("UPDATE passkeys SET revoked_at = 'now'")
+        self.assertEqual(s.call("GET", "/sign-in/state")[2], {"passkeys": False})
 
     def test_passkey_routes_need_the_exact_origin(self):
         s = Served(self)
