@@ -61,7 +61,14 @@ if [[ -n "$origin" && ! "$origin" =~ ^https://[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$ ]
   stop "the origin is the VM's Tailscale address, like https://thornswood-bots.tail1234.ts.net, with no path."
 fi
 for tool in python3 systemd-run runuser; do command -v "$tool" >/dev/null || stop "$tool is not installed on the VM."; done
-python3 -c 'import ensurepip, venv' 2>/dev/null || stop "python3 cannot make a venv; install it with: sudo apt-get install -y python3-venv"
+# The venv needs Ubuntu's python3-venv, which the VM's image leaves out. Put it in
+# here, as deploy/install.sh does for rclone and quota, so a new VM needs no hand step.
+if ! python3 -c 'import ensurepip, venv' 2>/dev/null; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-venv >/dev/null \
+    || stop "apt-get could not install python3-venv: sudo apt-get install -y python3-venv shows why."
+  python3 -c 'import ensurepip, venv' 2>/dev/null || stop "python3 still cannot make a venv after installing python3-venv."
+  ok "python3-venv installed"
+fi
 id hermes >/dev/null 2>&1 || stop "the hermes user does not exist."
 # The hermes command the Bots' user runs, as its own login shell finds it.
 hermes_bin="$(runuser -l hermes -c 'command -v hermes' 2>/dev/null || true)"

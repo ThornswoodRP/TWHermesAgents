@@ -175,6 +175,12 @@ class Scripts(unittest.TestCase):
         self.assertNotIn("--patrick-switched", src)
         self.assertIn("readlink -f \"$opt/current\"", src)
 
+    def test_the_core_install_puts_python3_venv_in_itself(self):
+        src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("if ! python3 -c 'import ensurepip, venv' 2>/dev/null; then\n"
+                      "  DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-venv", src)
+        self.assertIn("python3 still cannot make a venv after installing python3-venv", src)
+
     def test_the_plugin_goes_only_in_patricks_hermes(self):
         src = (DEPLOY / "install-plugin.sh").read_text(encoding="utf-8")
         self.assertIn("owner=patrick-hermes", src)
