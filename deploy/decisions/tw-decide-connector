@@ -1,0 +1,8 @@
+#!/usr/bin/python3 -I
+# Carries Patrick's chat into the Bots' Hermes, as the hermes user, from the
+# root-owned copy. -I: only this copy's code is imported. Standard library only;
+# the room helper it starts runs with Hermes's own Python.
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_decisions.connector import main  # noqa: E402
+sys.exit(main(sys.argv[1:]))

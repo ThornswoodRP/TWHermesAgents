@@ -16,10 +16,11 @@
 # only); builds the core's venv from deploy/decisions/requirements.txt (exact
 # hashes, wheels only) and checks a whole passkey ceremony with it under the
 # unit's own limits; puts the launchers and units in place; makes the store with
-# every flag off the first time; makes the Work and Room feed tokens once, into
-# the hermes user's ~/.config/thornswood (0600); starts the core on
-# 127.0.0.1:9135 and the feeds once a minute; and checks the core answers on
-# loopback only. It changes no flag and makes no pairing code.
+# every flag off the first time; makes the Work, Room and Bot Chat feed tokens
+# and the connector's token once, into the hermes user's ~/.config/thornswood
+# (0600); starts the core on 127.0.0.1:9135, the feeds once a minute and the
+# connector (which does nothing while connector_effects is off); and checks the
+# core answers on loopback only. It changes no flag and makes no pairing code.
 set -euo pipefail
 umask 022
 
@@ -58,6 +59,10 @@ fi
 for tool in python3 systemd-run runuser; do command -v "$tool" >/dev/null || stop "$tool is not installed on the VM."; done
 python3 -c 'import ensurepip, venv' 2>/dev/null || stop "python3 cannot make a venv; install it with: sudo apt-get install -y python3-venv"
 id hermes >/dev/null 2>&1 || stop "the hermes user does not exist."
+# The hermes command the Bots' user runs, as its own login shell finds it.
+hermes_bin="$(runuser -l hermes -c 'command -v hermes' 2>/dev/null || true)"
+[[ "$hermes_bin" == /* && -x "$hermes_bin" ]] || stop "the hermes user's login shell does not find the hermes command."
+head -n1 "$hermes_bin" | grep -q '^#!/' || stop "$hermes_bin does not name its Python on its first line."
 
 # 1. The user. Nobody else is in its group, the Bots' user least of all.
 if ! id tw-decide >/dev/null 2>&1; then
@@ -70,13 +75,13 @@ ok "user tw-decide"
 # 2. The store's folder: tw-decide's only. The settings file: root's, no secrets.
 install -d -m 0755 -o root -g root /srv/tw /etc/thornswood
 install -d -m 0700 -o tw-decide -g tw-decide "$state"
-old_room=""; old_origin=""
+old_room=""; old_origin=""  # TW_HERMES_BIN is found again each time
 if [[ -f "$envfile" ]]; then
   old_room="$(sed -n 's/^TW_DECIDE_ROOM=//p' "$envfile")"
   old_origin="$(sed -n 's/^TW_DECIDE_ORIGIN=//p' "$envfile")"
 fi
 room="${room:-$old_room}"; origin="${origin:-$old_origin}"
-printf 'TW_DECIDE_ROOM=%s\nTW_DECIDE_ORIGIN=%s\n' "$room" "$origin" > "$envfile.new"
+printf 'TW_DECIDE_ROOM=%s\nTW_DECIDE_ORIGIN=%s\nTW_HERMES_BIN=%s\n' "$room" "$origin" "$hermes_bin" > "$envfile.new"
 chmod 0644 "$envfile.new"; mv "$envfile.new" "$envfile"
 ok "$state is 0700 tw-decide; room '${room:-not set}', origin '${origin:-not set}'"
 
@@ -97,10 +102,17 @@ ok "venv at $venv, requirements $want"
 
 # 4. The launchers and units, from this copy.
 install -d -m 0755 "$opt/bin"
-for f in tw-decide tw-decide-feed; do install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"; done
-for u in tw-decide.service tw-decide-feed.service tw-decide-feed.timer; do
+for f in tw-decide tw-decide-feed tw-decide-connector; do
+  install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
+done
+for u in tw-decide.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
+# The connector finds the gateway's control socket where the gateway's own unit puts it.
+install -d -m 0755 /etc/systemd/system/tw-decide-connector.service.d
+printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u hermes)" \
+  > /etc/systemd/system/tw-decide-connector.service.d/runtime.conf
+chmod 0644 /etc/systemd/system/tw-decide-connector.service.d/runtime.conf
 systemctl daemon-reload
 ok "launchers and units in place"
 
@@ -129,16 +141,17 @@ fi
 run verify >/dev/null || stop "the store's event chain does not hold: $opt/bin/tw-decide --db $db verify"
 ok "event chain holds"
 
-# 7. The feed tokens, once each, straight into the hermes user's files (0600).
+# 7. The feed tokens and the connector's, once each, straight into the hermes user's files (0600).
 hh="$(getent passwd hermes | cut -d: -f6)"
-for name in work room; do
-  tok="$hh/.config/thornswood/feed-$name.token"
+for name in work room bots connector; do
+  if [[ "$name" == connector ]]; then tok="$hh/.config/thornswood/connector.token"
+  else tok="$hh/.config/thornswood/feed-$name.token"; fi
   if ! runuser -u hermes -- test -s "$tok"; then
     runuser -u hermes -- sh -c 'umask 077; mkdir -p "$(dirname "$1")"' _ "$tok"
     run feed-token --workspace thornswood --name "$name" | runuser -u hermes -- sh -c 'umask 077; cat > "$1"' _ "$tok"
-    ok "feed token for $name made"
+    ok "token for $name made"
   else
-    ok "feed token for $name already there"
+    ok "token for $name already there"
   fi
 done
 
@@ -171,3 +184,11 @@ if [[ -n "$room" ]]; then
 else
   echo "The feeds wait for --room."
 fi
+
+# 10. The connector. While connector_effects is off it asks the core every half
+# minute and does nothing else. Only Patrick changes connector_effects.
+systemctl enable --quiet tw-decide-connector.service
+systemctl restart tw-decide-connector.service
+sleep 2
+systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
+ok "the connector runs (it waits while connector_effects is off)"

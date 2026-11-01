@@ -1,0 +1,42 @@
+# tw-decide-connector: carries Patrick's chat from the phone, and the "Bot
+# told" messages, from the decision core into the Bots' Hermes (step 4). It
+# runs as the hermes user because that is how Hermes takes a message into a
+# Bot Chat or the room on its own machine (contracts.json, bot_chat.local_send
+# and room.client). It does nothing while connector_effects is off.
+#
+# Not ProtectSystem=strict and not PrivateTmp: the `hermes` command it runs
+# writes to ~/.hermes and finds the gateway's control socket the gateway made
+# (in /run/user/<uid>, named from ~/.hermes). install.sh adds
+# XDG_RUNTIME_DIR in a drop-in, as the gateway's own unit has it.
+[Unit]
+Description=Thornswood decision core connector (phone chat into Hermes)
+After=tw-decide.service tw-hermes-gateway.service
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+EnvironmentFile=/etc/thornswood/tw-decide.env
+ExecStart=/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN}
+WorkingDirectory=~
+UMask=0077
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+MemoryMax=900M
+Restart=on-failure
+RestartSec=30s
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target

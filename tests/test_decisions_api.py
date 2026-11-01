@@ -213,15 +213,19 @@ class Phone(unittest.TestCase):
         status, _, body = s.call("GET", "/cards", headers={"Cookie": cookie})
         self.assertEqual(status, 200)
 
-    def test_phone_cannot_answer_in_step_2(self):
+    def test_phone_answers_like_desktop_since_step_4(self):
         s = Served(self)
         s.w.store.set_flag(s.w.ws, "mobile_read", True, by="tests")
         cookie, paired = s.phone()
         card = s.w.card()
-        status, _, body = s.call("POST", f"/cards/{card['id']}/answer",
-                                 headers={"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": paired["csrf"]},
-                                 body=answer_body(card))
-        self.assertEqual((status, body["error"]), (403, "phone_read_only"))
+        h = {"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": paired["csrf"]}
+        s.w.store.set_flag(s.w.ws, "decision_write", False, by="tests")
+        status, _, body = s.call("POST", f"/cards/{card['id']}/answer", headers=h, body=answer_body(card))
+        self.assertEqual((status, body["error"]), (423, "decision_write_off"))
+        s.w.store.set_flag(s.w.ws, "decision_write", True, by="tests")
+        status, _, body = s.call("POST", f"/cards/{card['id']}/answer", headers=h, body=answer_body(card))
+        self.assertEqual((status, body["option_key"]), (200, "a"))
+        self.assertEqual(body["device_id"], s.w.store.db.execute("SELECT id FROM devices WHERE kind = 'phone'").fetchone()[0])
 
     def test_a_cookie_write_needs_the_exact_origin(self):
         s = Served(self)

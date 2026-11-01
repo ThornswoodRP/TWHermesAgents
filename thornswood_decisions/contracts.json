@@ -26,7 +26,7 @@
     "methods_source": "tui_gateway/contracts/groups_bot_relay.py, handlers tui_gateway/methods_groups.py",
     "send": {
       "method": "groups.send",
-      "params": {"room_id": "string", "event_id": "client retry key, optional", "payload": {"text": "string", "thread_id": "optional"}},
+      "params": {"room_id": "string", "event_id": "client retry key, optional", "payload": {"text": "string", "thread_id": "required; Desktop sends the event id"}},
       "result": "{event: RoomEvent, client_event_id, accepted, driver_started}",
       "idempotency": "the gateway maps event_id to user:<sha256 of the key>, so the same key is the same event",
       "only_kind": "message.user; the actor is set by the gateway, never by the caller",
@@ -40,7 +40,9 @@
       "source": "tui_gateway/contracts/groups_bot_relay.py:38 RoomEvent, :275 GroupsLogParams; hosted_rooms.py:33 MAX_LOG_LIMIT"
     },
     "driver": "groups.capabilities answers driver:true only when the room driver can run turns; the core requires it before it shows the room as live",
-    "driver_source": "tui_gateway/methods_groups.py:238"
+    "driver_source": "tui_gateway/methods_groups.py:238",
+    "client": "The same user reaches the running gateway with hermes_cli.gateway_client.connect_gateway(endpoint=...) after hermes_cli.gateway_runtime.discover_gateway_endpoint (which never starts a gateway) and attachable(); groups.send's payload needs thread_id too (Desktop sends the event id), and its event id is user:<sha256 of the key>.",
+    "client_source": "hermes_cli/gateway_client.py:262 connect_gateway, gateway_runtime.py:53 attachable and :289 discover_gateway_endpoint, hermes_constants.py:296 get_default_hermes_root; gateway/hosted_room_discussion.py:199 validate_user_payload (text and thread_id required); apps/desktop/src/plugins/hermes-bots/canonical-group-send.ts:104"
   },
   "bot_chat": {
     "title": "Bot Chat",
@@ -56,7 +58,11 @@
     "send_source": "hermes_cli/subcommands/peer.py:312 _peer_run and :324",
     "status": "GET /p/<profile>/v1/runs/<run_id> and /v1/runs/<run_id>/events",
     "history": "GET /p/<profile>/api/sessions/<id>/messages",
-    "uncertain": "A timeout after the run was accepted means the message is already in the Bot Chat: never resend it. The core marks it effect.uncertain and reads the run back first (peer.py:355-366)."
+    "uncertain": "A timeout after the run was accepted means the message is already in the Bot Chat: never resend it. The core marks it effect.uncertain and reads the run back first (peer.py:355-366).",
+    "local_send": "On the Bots' own machine, Hermes's message_agent sends to a Bot Chat with `hermes -p <profile> chat --in ~ -c 'Bot Chat' --create-if-missing -Q --query-file <file>`, as the same user; no API_SERVER_KEY and no api_server listener. The connector (step 4) uses this, so nothing in the gateway's settings changes. Only exit 0 is a confirmed send; anything else is unclear and never resent.",
+    "local_send_source": "tools/bot_mode_dm.py:11-13 (transports), hermes_cli/_parser.py:237 --query-file and :285 --create-if-missing, hermes_cli/gateway_chat.py:374 (the query-file contract)",
+    "history_local": "Each profile's ~/.hermes/profiles/<id>/state.db: sessions (id, title, archived, started_at) and messages (session_id, role, content, timestamp, active). The Bot Chat is the session titled 'Bot Chat'; read only, roles user and assistant, active rows.",
+    "history_local_source": "hermes_state_common.py:461 (sessions), :531 (messages); hermes_state.py:180 state.db"
   },
   "desktop_plugin": {
     "layout": "~/.hermes/plugins/thornswood-decisions/ with dashboard/manifest.json {name, api: plugin_api.py}, dashboard/plugin_api.py (a FastAPI router), desktop/plugin.js",

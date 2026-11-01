@@ -1,7 +1,7 @@
 // The Thornswood app's service worker. It keeps the app shell for offline
 // opening and nothing else: never a card, an answer or any /api/ reply, and
 // never an offline queue of decisions (07 section 5). Push comes in step 5.
-const SHELL = 'tw-shell-v1'
+const SHELL = 'tw-shell-v2'
 const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/icon.svg',
   '/m/icon-192.png', '/m/icon-512.png']
 

@@ -1,9 +1,15 @@
-// The Thornswood phone app (07 sections 4 and 5, step 3: read only).
+// The Thornswood phone app (07 sections 4 and 5; step 3 read only, step 4
+// answers and chat).
 //
 // Plain script, no framework, no inline code (the page's CSP allows only this
 // file). Everything shown from the core is set with textContent, never as
 // markup. The session is an HttpOnly cookie the script never sees; the CSRF
 // token lives only in memory and is asked for again after a reload.
+//
+// An answer and a chat message each carry an idempotency key, kept in
+// sessionStorage only so that a retry after a lost reply is the same request.
+// The key is never authority: the core decides, and a failed save reads the
+// card back ("checking outcome") before it offers to try again.
 
 'use strict'
 
@@ -12,6 +18,7 @@ const POLL_MS = 15000
 let csrf = null
 let seq = 0
 let pollTimer = null
+let answering = false
 
 // ── small helpers ─────────────────────────────────────────────────────────
 
@@ -46,7 +53,13 @@ const SAID = {
   session_expired: 'Your sign-in ran out. Sign in again.',
   too_many_tries: 'Too many tries. Wait 15 minutes, then try again.',
   wrong_code: 'That code did not work.',
-  sign_in_again: 'This needs a fresh sign-in. Sign out, sign in again, then come back.',
+  sign_in_again: 'This needs a fresh sign-in with your passkey.',
+  decision_write_off: 'Answering is off for now. The report page is still where you answer.',
+  chat_write_off: 'Chat from the phone is off for now.',
+  stale_revision: 'This card changed since you opened it. Read it again before you answer.',
+  already_answered: 'This card was already answered.',
+  expired: 'This card ran out. Bramble opens a new one if it still matters.',
+  no_chat: 'There is no such chat.',
   passkey_unavailable: 'Passkeys are not set up on the core yet.',
   no_origin: 'The core does not know its address yet, so passkeys cannot work.',
   offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.'
@@ -124,6 +137,31 @@ function credentialJSON(cred) {
 
 // ── signing in ────────────────────────────────────────────────────────────
 
+async function passkeySignIn() {
+  const o = await call('POST', '/passkeys/sign-in/options')
+  if (o.status !== 200) return o
+  let cred
+  try {
+    cred = await navigator.credentials.get({ publicKey: requestOptions(o.body) })
+  } catch (err) {
+    return { status: -1, body: { message: 'The passkey did not sign in. Nothing changed.' } }
+  }
+  const r = await call('POST', '/passkeys/sign-in', { credential: credentialJSON(cred) })
+  if (r.status === 200) csrf = r.body.csrf
+  return r
+}
+
+function newKey() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID()
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function keyFor(name) {
+  let k = sessionStorage.getItem(name)
+  if (!k) { k = newKey(); sessionStorage.setItem(name, k) }
+  return k
+}
+
 function signInView(note) {
   document.getElementById('tabs').hidden = true
   document.getElementById('settings').hidden = true
@@ -140,16 +178,7 @@ function signInView(note) {
     el('h2', {}, 'Sign in'),
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
-      const o = await call('POST', '/passkeys/sign-in/options')
-      if (o.status !== 200) { status.textContent = said(o.body); return }
-      let cred
-      try {
-        cred = await navigator.credentials.get({ publicKey: requestOptions(o.body) })
-      } catch (err) {
-        status.textContent = 'The passkey did not sign in. Nothing changed.'
-        return
-      }
-      done(await call('POST', '/passkeys/sign-in', { credential: credentialJSON(cred) }))
+      done(await passkeySignIn())
     } }, 'Sign in with your passkey'),
     el('div', { class: 'card' },
       el('h2', {}, 'First time on this phone'),
@@ -195,12 +224,14 @@ async function needsYou() {
     el('div', { class: 'quiet' }, `${c.kind}${c.risk === 'high' ? ', high risk' : ''}, answer by ${when(c.expires_at)}`))))
 }
 
-async function cardView(id) {
+async function cardView(id, note) {
   setTab('needs-you')
   const r = await call('GET', '/cards/' + encodeURIComponent(id))
   if (refused(r)) return
   const c = r.body
   const a = await call('GET', '/cards/' + encodeURIComponent(id) + '/artifact')
+  const status = el('p', { class: 'warn', role: 'status' }, note || '')
+  const pending = c.status === 'pending'
   const parts = [
     el('h2', {}, c.title),
     el('p', { class: 'quiet' }, `${c.kind}, revision ${c.revision}, ${c.status}${c.risk === 'high' ? ', high risk' : ''}`),
@@ -208,16 +239,73 @@ async function cardView(id) {
     el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
     c.options.map(o => el('div', { class: 'option' },
       el('strong', {}, o.label), o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
-      el('div', { class: 'quiet' }, o.consequence)))
+      el('div', { class: 'quiet' }, o.consequence),
+      pending ? el('button', { class: o.key === c.recommendation ? 'primary' : 'secondary', type: 'button',
+        'data-option': o.key, onclick: () => choose(c, o, status) }, 'Choose: ' + o.label) : null))
   ]
-  if (c.receipt) parts.push(el('p', {}, `Answered ${c.receipt.option_key} at ${when(c.receipt.answered_at)}.`))
+  if (c.receipt) {
+    const picked = c.options.find(o => o.key === c.receipt.option_key)
+    parts.push(el('p', { class: 'receipt' }, `Answered "${picked ? picked.label : c.receipt.option_key}" at ` +
+      `${when(c.receipt.answered_at)} (revision ${c.receipt.revision}).`))
+  }
   if (c.superseded_by) {
     parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/decisions/' + c.superseded_by) },
       'This card was replaced. Open the new one'))
   }
-  if (c.status === 'pending') parts.push(el('p', { class: 'quiet' }, 'Answering from the phone comes next. Answer on Desktop for now.'))
+  parts.push(status)
   parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/needs-you') }, 'Back'))
   show(el('div', { class: 'card' }, parts))
+}
+
+// One option chosen: a high-risk card asks again on its own screen first.
+function choose(c, o, status) {
+  if (c.risk !== 'high') return answer(c, o, status)
+  show(el('div', { class: 'card' },
+    el('h2', {}, 'Check this answer'),
+    el('p', {}, `"${c.title}" is high risk. You are choosing:`),
+    el('p', {}, el('strong', {}, o.label)),
+    el('p', { class: 'quiet' }, o.consequence),
+    el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
+    el('p', { class: 'quiet' }, 'A high-risk answer needs a passkey sign-in from the last five minutes.'),
+    el('button', { class: 'primary', type: 'button', 'data-confirm': o.key, onclick: () => answer(c, o, status) },
+      'Yes, answer ' + o.label),
+    el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
+}
+
+async function answer(c, o, status) {
+  const name = `tw-answer:${c.id}:${c.revision}:${c.attention_revision}:${o.key}`
+  const body = { option_key: o.key, revision: c.revision, attention_revision: c.attention_revision,
+    artifact_sha256: c.artifact_sha256, idempotency_key: keyFor(name) }
+  status.textContent = 'Saving...'
+  answering = true
+  const r = await call('POST', '/cards/' + encodeURIComponent(c.id) + '/answer', body)
+  answering = false
+  if (r.status === 200) {
+    sessionStorage.removeItem(name)
+    return cardView(c.id, '')
+  }
+  if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+  if (r.status === 403 && r.body.error === 'sign_in_again') {
+    return show(el('div', { class: 'card' },
+      el('p', {}, said(r.body)),
+      el('button', { class: 'primary', type: 'button', onclick: async () => {
+        const s = await passkeySignIn()
+        if (s.status !== 200) return cardView(c.id, said(s.body))
+        answer(c, o, status)
+      } }, 'Sign in again and answer'),
+      el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
+  }
+  if (r.status === 0 || r.status >= 500) {
+    // The save may or may not have happened. Read the card back before offering anything.
+    status.textContent = 'Checking outcome...'
+    const back = await call('GET', '/cards/' + encodeURIComponent(c.id))
+    if (back.status === 200 && back.body.receipt) { sessionStorage.removeItem(name); return cardView(c.id, '') }
+    return cardView(c.id, back.status === 200
+      ? 'Not saved yet. Choosing again sends the same answer, never a second one.'
+      : 'Could not reach the core to check. Nothing is shown as answered until it says so.')
+  }
+  if (r.status === 409 || r.status === 410) sessionStorage.removeItem(name)
+  return cardView(c.id, said(r.body))
 }
 
 async function workView() {
@@ -234,25 +322,78 @@ async function workView() {
       : el('p', { class: 'quiet' }, 'No open tasks.'))
 }
 
-async function roomView() {
-  setTab('room')
-  const r = await call('GET', '/room')
+const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp',
+  room: 'the Workbench room' }
+const STATE = {
+  queued: 'Waiting to send',
+  leased: 'Sending',
+  sent: 'Sent',
+  uncertain: 'Not sure this got there. Look above before you send it again.',
+  dead: 'Not sent',
+  quarantined: 'Held back after a restore; not sent'
+}
+let drafts = {}
+
+async function botsView() {
+  setTab('bots')
+  const r = await call('GET', '/chat')
   if (refused(r)) return
-  if (!r.body.room) return show(el('p', { class: 'quiet' }, 'Nothing has come in from the Workbench room yet.'))
-  const events = r.body.room.events
+  const others = r.body.bots.filter(b => b.bot !== 'bramble')
   show(
-    el('p', { class: 'quiet' }, `The Workbench room as of ${when(r.body.as_of)}. Read only; what is said here is never an answer.`),
-    events.length ? events.map(e => el('div', { class: 'msg' },
-      el('div', { class: 'who' }, e.actor || 'someone', el('span', { class: 'quiet' }, '  ' + when(e.at))),
-      el('div', { class: 'text' }, e.text)))
-      : el('p', { class: 'quiet' }, 'The room is quiet.'))
+    el('p', { class: 'quiet' }, `Each Bot's own Bot Chat, as of ${when(r.body.as_of) || 'nothing yet'}.`),
+    others.map(b => el('button', { class: 'row', type: 'button', onclick: () => go('/m/bots/' + b.bot) },
+      el('strong', {}, NAMES[b.bot] || b.bot),
+      b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null,
+      el('div', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.'))))
 }
 
-function chatView(tab) {
+async function chatView(target, tab) {
   setTab(tab)
-  show(el('p', { class: 'quiet' }, tab === 'bramble'
-    ? 'Talking to Bramble from the phone comes in the next update.'
-    : 'The six Bot Chats come to the phone in the next update.'))
+  const r = await call('GET', '/chat/' + encodeURIComponent(target))
+  if (refused(r)) return
+  const v = r.body
+  const name = NAMES[target] || target
+  const asOf = v.as_of ? new Date(v.as_of) : null
+  const history = v.history.map(m => el('div', { class: 'msg' },
+    el('div', { class: 'who' }, m.who, el('span', { class: 'quiet' }, '  ' + when(m.at))),
+    el('div', { class: 'text' }, m.text)))
+  // My own messages, until the chat above shows them.
+  const mine = v.mine.filter(m => m.status !== 'sent' || !asOf || new Date(m.updated_at) > asOf)
+    .map(m => el('div', { class: 'msg mine', 'data-status': m.status },
+      el('div', { class: 'who' }, 'You', el('span', { class: 'quiet' }, '  ' + when(m.created_at))),
+      el('div', { class: 'text' }, m.text),
+      el('div', { class: m.status === 'dead' || m.status === 'uncertain' ? 'warn' : 'quiet' },
+        STATE[m.status] + (m.status === 'dead' && m.reason ? ': ' + m.reason : ''))))
+  const status = el('p', { class: 'warn', role: 'status' })
+  const parts = [
+    el('p', { class: 'quiet' }, target === 'room'
+      ? `The Workbench room as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
+      : `Your Bot Chat with ${name}, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+    history.length ? history : el('p', { class: 'quiet' }, 'Nothing here yet.'),
+    mine
+  ]
+  if (v.can_send) {
+    const draft = drafts[target] || (drafts[target] = { text: '', key: newKey() })
+    const box = el('textarea', { rows: '3', 'aria-label': 'Message to ' + name, placeholder: 'Message ' + name })
+    box.value = draft.text
+    box.addEventListener('input', () => {
+      if (box.value !== draft.text) { draft.text = box.value; draft.key = newKey() }
+    })
+    parts.push(box, el('button', { class: 'primary', type: 'button', onclick: async () => {
+      const text = box.value.trim()
+      if (!text) return
+      status.textContent = 'Sending...'
+      const s = await call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: draft.key })
+      if (s.status === 200) { drafts[target] = null; return chatView(target, tab) }
+      if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
+      status.textContent = s.status === 0
+        ? 'Could not reach the core. Sending again sends the same message, never a second one.'
+        : said(s.body)
+    } }, 'Send to ' + name), status)
+  } else {
+    parts.push(el('p', { class: 'quiet' }, said({ error: 'chat_write_off' })))
+  }
+  show(parts)
 }
 
 async function settingsView() {
@@ -331,19 +472,30 @@ async function route() {
   const card = path.match(/^decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card) return cardView(card[1])
   if (path === 'work') return workView()
-  if (path === 'room') return roomView()
-  if (path === 'bramble' || path === 'bots') return chatView(path)
+  const bot = path.match(/^bots\/([a-z0-9][a-z0-9_-]{0,63})$/)
+  if (bot) return chatView(bot[1], 'bots')
+  if (path === 'room') return chatView('room', 'room')
+  if (path === 'bramble') return chatView('bramble', 'bramble')
+  if (path === 'bots') return botsView()
   if (path === 'settings') return settingsView()
   return needsYou()
 }
 
 async function poll() {
-  if (!csrf || document.visibilityState !== 'visible') return
+  if (!csrf || document.visibilityState !== 'visible' || answering) return
+  const path = location.pathname
+  // A chat view reads itself again, unless something is being typed.
+  const box = document.querySelector('textarea')
+  if (/^\/m\/(bramble|room|bots\/)/.test(path)) {
+    if (!box || (!box.value && document.activeElement !== box)) route()
+    return
+  }
   const r = await call('GET', '/changes?since=' + seq)
   if (r.status !== 200 || r.body.seq === seq) return
   seq = r.body.seq
-  const path = location.pathname
-  if (path.endsWith('/needs-you') || path === '/m/' || path.startsWith('/m/decisions/')) route()
+  const card = path.match(/^\/m\/decisions\/([A-Za-z0-9_-]{1,64})$/)
+  if (card && r.body.changed.includes(card[1]) && !document.querySelector('[data-confirm]')) return route()
+  if (path.endsWith('/needs-you') || path === '/m/') route()
 }
 
 document.addEventListener('click', event => {

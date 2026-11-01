@@ -12,7 +12,7 @@ Until test T33 passes and Patrick says so, the Claude report page stays the only
 | 1 | The core: schema and migrations, idempotent answers, immutable artifacts, the hash-chained event log, outboxes, sign-in, backup and restore | `schema.py`, `store.py`, `core.py`, `auth.py`, `backup.py` |
 | 2 | The Desktop pane: the same cards, revision-checked answers, a polling fallback, pairing | `api.py`, `cli.py`, `plugins/thornswood-decisions/` |
 | 3 | The phone, read only: the app shell on the `ts.net` origin, sign-in, cards, the Work and Room views | `passkey.py`, `feeds.py`, `feed_reader.py`, `app/` |
-| 4 | Phone answers and chat: the same commands as Desktop, the six Bot Chats and the room | |
+| 4 | Phone answers and chat: the same commands as Desktop, the six Bot Chats and the room | `chat.py`, `connector.py`, `room_send.py`, `app/` |
 | 5 | Web Push: the outbox, the one quiet "Thornswood needs you", deep links, denial and revoke tests | |
 | 6 | The Main card | Waits for phase 7. Not built |
 
@@ -63,6 +63,19 @@ Against a remote Hermes, Desktop does not copy the plugin's desktop half from th
 
 `tests/decisions_phone_check.js` drives the app in headless Chromium with Chrome's virtual authenticator: pairing, a deep link, adding a passkey, signing in with it, the views and the service worker. It is not T10; T10 to T13 are Patrick's phone.
 
+## Phone answers and chat (step 4)
+
+The phone answers a card with the same command Desktop sends (`POST /cards/<id>/answer`, checked by `DecisionCore.answer`): the card revision, the attention revision and the hash Patrick saw, an idempotency key, the cookie, the CSRF token and the exact Origin. It needs `decision_write`. A high-risk card first shows its own check screen, and the answer needs a passkey sign-in from the last five minutes; the app offers that sign-in and then sends the same answer. A save that gets no clear reply reads the card back ("Checking outcome") before it offers to send again, and sending again uses the same key, so it is never a second answer.
+
+| File | What it holds |
+|---|---|
+| `chat.py` | Patrick's chat. A message is written to `chat_messages` with its command record in one commit (same key, same receipt; a changed body with the same key is refused). It needs `mobile_chat_write`, and only Patrick sends. The connector leases one message per Bot or room at a time; a lease that runs out is "uncertain" and never sent again by itself. A room message whose event the room feed shows is settled as sent, because its event id comes from the core's key. The same lease carries the "Bot told" message to the Bot that asked a card, and its confirmed receipt is that state. No message text goes into the event chain or a log |
+| `connector.py` | Runs on the VM as `hermes` (`tw-decide-connector.service`) with its own token, and does nothing while `connector_effects` is off. A Bot Chat message goes through `hermes -p <bot> chat --in ~ -c "Bot Chat" --create-if-missing -Q --query-file <file>`, the way Hermes's own message_agent sends one on its machine, after a check that the Bot's gateway is running. A room message goes through `room_send.py`. Only Hermes saying so is "sent", only nothing sent is "not sent", and everything else is "uncertain". At most three turns at once |
+| `room_send.py` | Run with Hermes's own Python: finds the running gateway without starting one and calls `groups.send` with the core's key as the event id and thread |
+| `feed_reader.py` | Now also sends the "bots" snapshot: each Bot's canonical Bot Chat, its last 40 messages from Patrick and the Bot, read only from `profiles/<id>/state.db`. Room events carry their event id |
+
+No API_SERVER_KEY, no api_server listener and no change to the gateway's settings: the connector uses the paths Hermes uses on its own machine (`contracts.json`, `bot_chat.local_send` and `room.client`). `api.py` adds `GET /chat` (the six Bots), `GET /chat/<bot or room>` (the snapshot, as of its time, and Patrick's own messages with their state), `POST /chat/<bot or room>`, and `POST /connector/claim` and `/connector/result` for the connector's token only, never a browser. The bottom bar's Bramble, Bots and Room now chat; each Bot has a deep link at `/m/bots/<bot>`. A chat message is never an answer to a card.
+
 ## Installing on the VM
 
 `deploy/decisions/` holds the install. It runs from the root-owned release that `scripts/install-on-oracle.sh` puts in `/opt/thornswood-hermes/releases/<commit>`, so run that first at the same commit.
@@ -72,8 +85,9 @@ Against a remote Hermes, Desktop does not copy the plugin's desktop half from th
 | `tw-decide` | The launcher, the core's venv Python with `-I`, from `/opt/thornswood-hermes/current` only |
 | `tw-decide.service` | The core as the `tw-decide` user, on 127.0.0.1:9135, with `TW_DECIDE_ORIGIN` from `/etc/thornswood/tw-decide.env`. systemd lets it reach loopback and nothing else, and write only `/srv/tw/decide` |
 | `requirements.txt` | py_webauthn and what it needs, each pinned by hash; installed as wheels only |
-| `tw-decide-feed`, `tw-decide-feed.service`, `.timer` | The Work and Room feed as `hermes`, once a minute, loopback only |
-| `install.sh <commit> [--room <id>] [--origin <url>]` | Makes the user and `/srv/tw/decide` (0700), builds the venv, runs a whole passkey ceremony under the unit's limits, puts the launchers and units in place, makes the store the first time with every flag off, binds the room, makes the two feed tokens into `hermes`'s `~/.config/thornswood` (0600), starts the core and the feeds, and checks the core answers on loopback only. It changes no flag and makes no pairing code |
+| `tw-decide-feed`, `tw-decide-feed.service`, `.timer` | The Work, Room and Bot Chat feeds as `hermes`, once a minute, loopback only |
+| `tw-decide-connector`, `tw-decide-connector.service` | The connector as `hermes`, loopback only, at most 900 MB. It runs `hermes` and finds the gateway's control socket, so it is not `ProtectSystem=strict`; the install adds `XDG_RUNTIME_DIR` as the gateway's own unit has it |
+| `install.sh <commit> [--room <id>] [--origin <url>]` | Makes the user and `/srv/tw/decide` (0700), builds the venv, runs a whole passkey ceremony under the unit's limits, puts the launchers and units in place, makes the store the first time with every flag off, binds the room, makes the three feed tokens and the connector's token into `hermes`'s `~/.config/thornswood` (0600), finds the `hermes` command as that user's login shell does, starts the core, the feeds and the connector, and checks the core answers on loopback only. It changes no flag and makes no pairing code |
 | `install-plugin.sh <commit>` | Links `plugins/thornswood-decisions` in Patrick's own Hermes (`patrick-hermes`) to the root-owned release. It never touches the Bots' Hermes and never edits a Hermes setting; Patrick turns the plugin on with `hermes plugins enable thornswood-decisions` |
 
 The order, after the merge, with the merged commit:
@@ -94,7 +108,7 @@ With every flag off the pane pairs and reads, and an answer is refused with "Ans
 - **Hermes v0.22.5** is upstream commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e` (tag `v0.22.5`, also `rc.3-v0.22.5`), the same commit the 29 Oct audit read.
 - **The six profile ids:** `bramble`, `rift`, `sprocket`, `echo`, `magpie`, `wisp`, each matching Hermes's `PROFILE_ID_RE`.
 - **The Workbench room** is a hosted room in the gateway's `shared-state.db`, reached through the `groups.*` methods. `groups.send` appends one `message.user` event with `{text, thread_id}`; its `event_id` is a retry key the gateway turns into a stable event id; `groups.log` pages events after a cursor, 500 at most.
-- **A Bot's DM** is its canonical, hidden "Bot Chat" session. It is found by exact title before anything is created, and a turn is sent through the api_server platform's `/p/<profile>/v1/runs` with an `Idempotency-Key`. A timeout after the run was accepted is never resent.
+- **A Bot's DM** is its canonical, hidden "Bot Chat" session. It is found by exact title before anything is created. From another machine a turn goes through the api_server platform's `/p/<profile>/v1/runs` with an `Idempotency-Key`; on the Bots' own machine (step 4) it goes through `hermes -p <profile> chat -c "Bot Chat" --query-file`, as Hermes's message_agent does, with no key and no listener. A timeout after a turn was taken is never resent.
 - **The Desktop pane** is a Hermes plugin with a `plugin_api.py` backend under `/api/plugins/thornswood-decisions/`. Its socket is a no-op on OAuth remotes, so the pane polls. A signed-in request carries a Hermes session or a token principal, never "Patrick" by itself, so Desktop pairs once with the core.
 
 The room's id is data on the VM, not in the source. `check-hermes-contract.py` reads it from the room store without writing and prints it; the core binds to that id.

@@ -375,4 +375,50 @@ CREATE TABLE feed_snapshots (
   PRIMARY KEY (workspace_id, name)
 );
 """,
+    # 4: chat from the phone (07 step 4). The feeds gain the Bot Chats'
+    # snapshot ("bots"), and the connector, which runs on the VM as the Bots'
+    # user, gets a token of its own ("connector"). SQLite cannot change a
+    # CHECK, so the two feed tables are rebuilt with their rows kept.
+    f"""
+CREATE TABLE feed_sources_4 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room', 'bots', 'connector')),
+  token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO feed_sources_4 SELECT workspace_id, name, token_hash, created_at FROM feed_sources;
+DROP TABLE feed_sources;
+ALTER TABLE feed_sources_4 RENAME TO feed_sources;
+
+CREATE TABLE feed_snapshots_4 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('work', 'room', 'bots')),
+  body TEXT NOT NULL,
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  source_time TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO feed_snapshots_4 SELECT workspace_id, name, body, sha256, source_time, received_at FROM feed_snapshots;
+DROP TABLE feed_snapshots;
+ALTER TABLE feed_snapshots_4 RENAME TO feed_snapshots;
+
+CREATE TABLE chat_messages (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  target TEXT NOT NULL,
+  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 8000),
+  send_key TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  status TEXT NOT NULL CHECK (status IN {_in(OUTBOX_STATES)}),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT
+);
+CREATE INDEX chat_messages_by_target ON chat_messages(workspace_id, target, created_at);
+""",
 ]

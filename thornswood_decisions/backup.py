@@ -3,8 +3,8 @@
 A backup is a consistent copy made with SQLite's online backup API while the
 core runs. Its event chain is checked before the copy is kept.
 
-A restore never replays the past: every queued, leased or uncertain push and
-connector message is quarantined, every session and open pairing code is
+A restore never replays the past: every queued, leased or uncertain push,
+connector message and chat message is quarantined, every session and open pairing code is
 revoked, and no answer given before the backup is sent anywhere again. The
 restore itself is the first new event. Encryption and the trip to One and
 Google Drive belong to the nightly archive (Phase 2's backup job), which
@@ -84,7 +84,7 @@ def restore(src: Path | str, db_path: Path | str, *, clock=None, by: str = "oper
     try:
         counts = {}
         with store.tx() as db:
-            for table in ("push_outbox", "connector_outbox"):
+            for table in ("push_outbox", "connector_outbox", "chat_messages"):
                 counts[table] = db.execute(
                     f"UPDATE {table} SET status = 'quarantined', reason = 'restored from a backup', updated_at = ? "
                     f"WHERE status IN {QUARANTINE_FROM}", (store.now(),)).rowcount

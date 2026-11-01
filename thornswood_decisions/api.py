@@ -2,7 +2,8 @@
 
 It listens on 127.0.0.1 only. Tailscale Serve puts the phone in front of it
 (step 3); Hermes Desktop reaches it through the thornswood-decisions plugin's
-backend, which runs in Patrick's Hermes on the same VM.
+backend, which runs in Patrick's Hermes on the same VM. The feeds and the
+connector, on the same VM, each carry a token that does only their one job.
 
 Two ways to carry a session, never both:
 - a cookie (the phone): every write needs the exact Origin of the app and the
@@ -28,6 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 
 from .auth import Principal
+from .chat import Chat
 from .core import DecisionCore
 from .feeds import MAX_FEED_BYTES, Feeds
 from .passkey import Passkeys
@@ -49,14 +51,15 @@ APP_FILES = {
     "icon-512.png": "image/png",
 }
 # The app's own views, each a deep link that loads the shell.
-APP_VIEWS = re.compile(r"^(|needs-you|work|room|bots|bramble|settings|decisions/[A-Za-z0-9_-]{1,64})$")
+APP_VIEWS = re.compile(r"^(|needs-you|work|room|bots|bramble|settings|decisions/[A-Za-z0-9_-]{1,64}|"
+                       r"bots/[a-z0-9][a-z0-9_-]{0,63})$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
            "manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 # The service worker's own policy: it fetches only this origin, to keep the shell.
 SW_CSP = "default-src 'none'; connect-src 'self'"
 # Data the phone reads only while mobile_read is on. Signing in, adding a
 # passkey and signing out work with it off, so the phone can be set up first.
-APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room")}
+APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat")}
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -166,10 +169,18 @@ class Api:
             return self._pair(core, headers, data, extra)
         if method not in ("GET", "POST"):
             raise CoreError(405, "method", "GET or POST only")
-        if method == "POST" and len(route) == 2 and route[0] == "feeds":
+        if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector"):
             if "cookie" in headers or headers.get("origin") is not None:
-                raise CoreError(403, "not_a_feed", "a feed comes from the VM, not a browser")
-            return 200, Feeds(core.s).put(self.ws, route[1], _bearer(headers.get("authorization", "")), data)
+                raise CoreError(403, "not_a_feed", "a feed or the connector comes from the VM, not a browser")
+            token = _bearer(headers.get("authorization", ""))
+            if route[0] == "feeds":
+                return 200, Feeds(core.s).put(self.ws, route[1], token, data)
+            if route[1] == "claim":
+                return 200, Chat(core.s).claim(self.ws, token, data.get("limit", 7))
+            if route[1] == "result":
+                return 200, Chat(core.s).result(self.ws, token, str(data.get("id", "")), str(data.get("outcome", "")),
+                                                str(data.get("ref", "")), str(data.get("reason", "")))
+            raise CoreError(404, "no_route", "no such route")
         if method == "POST" and route == ["passkeys", "sign-in", "options"]:
             self._exact_origin(headers)
             return 200, self._passkeys(core).sign_in_options(self.ws)
@@ -205,8 +216,7 @@ class Api:
             since = query.get("since", "0")
             return 200, self._changes(core, int(since) if since.isdigit() else 0)
         if method == "POST" and len(route) == 3 and route[0] == "cards" and route[2] == "answer":
-            if app:
-                raise CoreError(403, "phone_read_only", "the phone answers from step 4; answer on Desktop for now")
+            # The same command from Desktop and the phone (07 step 4): DecisionCore.answer checks it all.
             return 200, core.answer(
                 p, decision_id=route[1], option_key=str(data.get("option_key", "")),
                 revision=_int(data, "revision"), attention_revision=_int(data, "attention_revision"),
@@ -214,6 +224,12 @@ class Api:
                 idempotency_key=str(data.get("idempotency_key", "")), note=str(data.get("note", ""))[:2000])
         if method == "GET" and route in (["work"], ["room"]):
             return 200, Feeds(core.s).get(self.ws, route[0])
+        if method == "GET" and route == ["chat"]:
+            return 200, Chat(core.s).summary(p)
+        if len(route) == 2 and route[0] == "chat":
+            if method == "GET":
+                return 200, Chat(core.s).view(p, route[1])
+            return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"))
         if method == "POST" and route == ["csrf"]:
             if "cookie" not in headers:
                 raise CoreError(400, "not_the_app", "only the app's cookie session asks for a new CSRF token")

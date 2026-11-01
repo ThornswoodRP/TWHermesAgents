@@ -44,3 +44,7 @@ pre.artifact { white-space: pre-wrap; word-break: break-word; font: 14px/1.5 ui-
 .msg .text { white-space: pre-wrap; word-break: break-word; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+textarea { font: inherit; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); color: var(--fg); margin-top: 10px; resize: vertical; }
+.msg.mine { border-left: 3px solid var(--accent); padding-left: 8px; }
+.receipt { font-weight: 600; }

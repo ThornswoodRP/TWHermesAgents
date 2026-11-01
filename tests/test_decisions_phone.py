@@ -30,6 +30,7 @@ from thornswood_decisions.store import CoreError
 ORIGIN = "https://thornswood-bots.example.ts.net"
 RP_ID = "thornswood-bots.example.ts.net"
 ROOM = "54b3ad46-3419-4adb-b60d-c79cb347fcee"
+BOTS = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
 
 try:
     import cbor2  # noqa: F401
@@ -47,6 +48,7 @@ class Migrations(unittest.TestCase):
         1: "65f4ceb6d80118fd6da4be92a326909e3bfe7c6a8271899f2563bd4c8f423a63",
         2: "0410fe14fec9508e85fb8d9e40eb1887d2d5450309fadf59bcc2ff6c5c55ad61",
         3: "8a79c74a0938504cd8e43e758be0dbbe607cd53ca3e7bae273424c55ad3632da",
+        4: "7d599a7b92702912c989d590afdfb21235025cf7fda9f24dcc091fc11027c95c",
     }
 
     def test_merged_migrations_never_change(self):
@@ -385,10 +387,12 @@ class FeedReader(unittest.TestCase):
     def test_end_to_end_into_the_core(self):
         s = Served(self)
         s.w.core.bind_room(s.w.ws, ROOM, "Thornswood Workbench", by="tests")
+        for bot in BOTS:
+            s.w.core.bind_bot(s.w.ws, bot, bot, by="tests")
         tokens = self.dir / "tokens"
         tokens.mkdir()
         f = Feeds(s.w.store)
-        for name in ("work", "room"):
+        for name in ("work", "room", "bots"):
             path = tokens / f"feed-{name}.token"
             path.write_text(f.new_token(s.w.ws, name, by="tests"), encoding="utf-8")
             os.chmod(path, 0o600)

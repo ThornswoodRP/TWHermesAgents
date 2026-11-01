@@ -1,4 +1,4 @@
-"""Reads the Bots' Kanban and the Workbench room and sends the core a snapshot of each.
+"""Reads the Bots' Kanban, the Workbench room and the six Bot Chats, and sends the core a snapshot of each.
 
 Runs on the VM as the Bots' `hermes` user, once a minute from
 tw-decide-feed.timer:
@@ -6,10 +6,11 @@ tw-decide-feed.timer:
     python3 -I -m thornswood_decisions.feed_reader --room <room id>
 
 It opens Hermes's own stores read-only (`kanban.db` and `shared-state.db`
-under ~/.hermes, the tables named in contracts.json), keeps only what the
-phone's Work and Room views show, and sends each to the core on 127.0.0.1 with
-that feed's token (~/.config/thornswood/feed-<name>.token, 0600). It writes
-nothing to Hermes, holds no other credential and logs no message text.
+under ~/.hermes, and each Bot's `profiles/<id>/state.db`; the tables named in
+contracts.json), keeps only what the phone's Work, Room and Bot Chat views
+show, and sends each to the core on 127.0.0.1 with that feed's token
+(~/.config/thornswood/feed-<name>.token, 0600). It writes nothing to Hermes,
+holds no other credential and logs no message text.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from pathlib import Path
 
 CORE = "http://127.0.0.1:9135/api/v1"
 ROOM_KINDS = ("message.user", "message.member")
+BOT_CHAT_TITLE = "Bot Chat"
+BOT_MESSAGES = 40
 
 
 def _ro(path: Path) -> sqlite3.Connection:
@@ -58,7 +61,7 @@ def work_snapshot(kanban_db: Path, now: datetime) -> dict:
 def room_snapshot(state_db: Path, room_id: str, now: datetime) -> dict:
     con = _ro(state_db)
     try:
-        rows = con.execute("SELECT seq, kind, actor_json, payload_json, created_at FROM hosted_room_events "
+        rows = con.execute("SELECT seq, event_id, kind, actor_json, payload_json, created_at FROM hosted_room_events "
                            "WHERE room_id = ? AND kind IN (?, ?) ORDER BY seq DESC LIMIT 200",
                            (room_id, *ROOM_KINDS)).fetchall()
     finally:
@@ -72,9 +75,52 @@ def room_snapshot(state_db: Path, room_id: str, now: datetime) -> dict:
             continue
         name = actor.get("display_name") or actor.get("profile") or actor.get("id") or ""
         text = payload.get("text") if isinstance(payload, dict) else ""
-        events.append({"seq": int(r["seq"]), "kind": r["kind"], "actor": str(name),
+        events.append({"seq": int(r["seq"]), "event_id": str(r["event_id"]), "kind": r["kind"], "actor": str(name),
                        "text": text if isinstance(text, str) else "", "at": _iso(r["created_at"])})
     return {"source_time": now.isoformat(), "room_id": room_id, "events": events}
+
+
+def _text(content) -> str:
+    """A message's content as plain text: a string, or the text parts of a list of parts."""
+    if isinstance(content, str):
+        try:
+            parts = json.loads(content) if content.startswith("[") else None
+        except json.JSONDecodeError:
+            parts = None
+        if not isinstance(parts, list):
+            return content
+        content = parts
+    if isinstance(content, list):
+        return "\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def bot_chat(state_db: Path) -> dict | None:
+    """The canonical Bot Chat of one profile: its id and its last messages from Patrick and the Bot."""
+    if not state_db.exists():
+        return None
+    con = _ro(state_db)
+    try:
+        s = con.execute("SELECT id FROM sessions WHERE title = ? AND archived = 0 ORDER BY started_at DESC LIMIT 1",
+                        (BOT_CHAT_TITLE,)).fetchone()
+        if not s:
+            return None
+        rows = con.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? AND active = 1 "
+                           "AND role IN ('user', 'assistant') AND content IS NOT NULL AND content != '' "
+                           "ORDER BY id DESC LIMIT ?", (s["id"], BOT_MESSAGES)).fetchall()
+    finally:
+        con.close()
+    return {"session_id": s["id"], "messages": [
+        {"role": r["role"], "text": _text(r["content"]), "at": _iso(r["timestamp"])} for r in reversed(rows)]}
+
+
+def bots_snapshot(hermes_home: Path, bots: list[str], now: datetime) -> dict:
+    out = []
+    for bot in bots:
+        chat = bot_chat(hermes_home / "profiles" / bot / "state.db")
+        out.append({"bot": bot, "session_id": chat["session_id"] if chat else "",
+                    "messages": chat["messages"] if chat else []})
+    return {"source_time": now.isoformat(), "bots": out}
 
 
 def read_token(path: Path) -> str:
@@ -110,8 +156,11 @@ def main(argv: list[str]) -> int:
     hh, tokens = Path(args.hermes_home), Path(args.tokens)
     now = datetime.now(timezone.utc)
     bad = 0
+    from . import contracts
+    bots = contracts.load()["profiles"]["ids"]
     for name, make in (("work", lambda: work_snapshot(hh / "kanban.db", now)),
-                       ("room", lambda: room_snapshot(hh / "shared-state.db", args.room, now))):
+                       ("room", lambda: room_snapshot(hh / "shared-state.db", args.room, now)),
+                       ("bots", lambda: bots_snapshot(hh, bots, now))):
         try:
             body = make()
         except (sqlite3.Error, OSError) as exc:

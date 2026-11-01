@@ -64,6 +64,38 @@ class Unit(unittest.TestCase):
         self.assertEqual((s["User"], s["IPAddressDeny"], s["IPAddressAllow"]), ("hermes", "any", "localhost"))
         self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-feed --room ${TW_DECIDE_ROOM}")
 
+    def test_the_connector_runs_as_hermes_on_loopback_and_holds_no_secret(self):
+        cp = configparser.ConfigParser(strict=False, interpolation=None)
+        cp.optionxform = str
+        cp.read_string((DEPLOY / "tw-decide-connector.service").read_text(encoding="utf-8"))
+        s = cp["Service"]
+        self.assertEqual((s["User"], s["IPAddressDeny"], s["IPAddressAllow"]), ("hermes", "any", "localhost"))
+        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN}")
+        self.assertEqual((s["NoNewPrivileges"], s["CapabilityBoundingSet"]), ("yes", ""))
+        self.assertNotIn("ListenStream", s)
+        for key in s:
+            self.assertNotRegex(key + s[key], r"(?i)api_server_key|token=|secret")
+        lines = (DEPLOY / "tw-decide-connector").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "#!/usr/bin/python3 -I")
+        self.assertIn("from thornswood_decisions.connector import main  # noqa: E402", lines)
+
+    def test_the_connector_logs_each_line_at_once(self):
+        import io
+        from unittest import mock
+        from thornswood_decisions import connector
+        self.assertIs(connector.Connector.__init__.__defaults__[0], connector.say)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch.object(out, "flush") as flush:
+            connector.say("PASS x")
+        flush.assert_called()
+
+    def test_the_install_makes_the_connector_token_and_turns_no_effect_on(self):
+        src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("for name in work room bots connector; do", src)
+        self.assertIn('tok="$hh/.config/thornswood/connector.token"', src)
+        self.assertIn("runuser -l hermes -c 'command -v hermes'", src)
+        self.assertNotIn("connector_effects on", src)
+
     def test_the_venv_installs_only_hashed_wheels(self):
         src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
         self.assertIn("--require-hashes", src)

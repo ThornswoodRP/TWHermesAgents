@@ -11,7 +11,7 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   flag        turn one flag on or off
   test-card   open a test card as Bramble, in a test workspace only
   serve       answer the API on 127.0.0.1
-  feed-token  print a new token for the work or room feed (replaces the old one)
+  feed-token  print a new token for a feed (work, room, bots) or the connector (replaces the old one)
   selfcheck   a whole passkey ceremony against a scratch store, with the installed library
   backup      make a consistent copy
   verify      check the event chain
@@ -32,7 +32,7 @@ from . import backup as backup_mod
 from . import contracts
 from .api import DEFAULT_PORT, Api, make_server
 from .core import DecisionCore
-from .feeds import NAMES as FEED_NAMES
+from .feeds import TOKENS as FEED_NAMES
 from .feeds import Feeds
 from .schema import FLAGS
 from .store import CoreError, Store
