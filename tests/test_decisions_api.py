@@ -101,6 +101,18 @@ class LoopbackOnly(unittest.TestCase):
         with self.assertRaises(CoreError):
             Api(w.path, "not-there", clock=w.clock)
 
+    @unittest.skipUnless(os.path.isdir("/proc/self/fd"), "counts open files through /proc")
+    def test_requests_do_not_keep_files_open(self):
+        # The server answers each request on a thread of its own. The core on the
+        # VM stopped on "Too many open files" (1 Nov, 10:41 PM) because every
+        # request thread opened the store and nothing ever closed it again.
+        s = Served(self)
+        s.call("GET", "/me")
+        before = len(os.listdir("/proc/self/fd"))
+        for _ in range(200):
+            s.call("GET", "/me")
+        self.assertLessEqual(len(os.listdir("/proc/self/fd")) - before, 4)
+
     def test_every_answer_carries_the_safety_headers(self):
         s = Served(self)
         status, headers, _ = s.call("GET", "/me")

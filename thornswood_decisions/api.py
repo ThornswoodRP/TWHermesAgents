@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import re
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import parse_qs, urlsplit
 
 from pathlib import Path
@@ -82,29 +83,45 @@ class Api:
         self.workspace = workspace
         self.origin = origin
         self.clock = clock
-        self._local = threading.local()
-        self._stores: list[Store] = []
+        # The server answers each request on a new thread, so a connection belongs to
+        # a request, not to a thread: a request leases one and gives it back, and at
+        # most IDLE are kept open between requests. Keeping one per thread left every
+        # finished thread's connection open until the core ran out of files (1 Nov).
+        self._idle: list[DecisionCore] = []
         self._lock = threading.Lock()
-        core = self._core()
-        row = core.s.db.execute("SELECT id FROM workspaces WHERE name = ?", (workspace,)).fetchone()
+        self._closed = False
+        with self._lease() as core:
+            row = core.s.db.execute("SELECT id FROM workspaces WHERE name = ?", (workspace,)).fetchone()
         if not row:
+            self.close()
             raise CoreError(500, "no_workspace", f"no workspace named {workspace}; run the init command first")
         self.ws = row["id"]
 
-    def _core(self) -> DecisionCore:
-        core = getattr(self._local, "core", None)
+    IDLE = 4
+
+    @contextmanager
+    def _lease(self) -> Iterator[DecisionCore]:
+        with self._lock:
+            core = self._idle.pop() if self._idle else None
         if core is None:
-            store = Store(self.db_path, clock=self.clock)
+            core = DecisionCore(Store(self.db_path, clock=self.clock))
+        try:
+            yield core
+        finally:
             with self._lock:
-                self._stores.append(store)
-            core = self._local.core = DecisionCore(store)
-        return core
+                # A connection still inside a transaction is never handed to the next request.
+                keep = not self._closed and len(self._idle) < self.IDLE and not core.s.db.in_transaction
+                if keep:
+                    self._idle.append(core)
+            if not keep:
+                core.s.close()
 
     def close(self) -> None:
         with self._lock:
-            for s in self._stores:
-                s.close()
-            self._stores.clear()
+            self._closed = True
+            idle, self._idle = self._idle, []
+        for core in idle:
+            core.s.close()
 
     # ── one request ───────────────────────────────────────────────────────
 
@@ -143,10 +160,7 @@ class Api:
         return 200, headers, body
 
     def _passkeys(self, core: DecisionCore) -> Passkeys:
-        pk = getattr(self._local, "passkeys", None)
-        if pk is None:
-            pk = self._local.passkeys = Passkeys(core.s, self.origin)
-        return pk
+        return Passkeys(core.s, self.origin)
 
     def _exact_origin(self, headers: dict) -> None:
         if not self.origin or headers.get("origin") != self.origin:
@@ -168,7 +182,10 @@ class Api:
         return data
 
     def _route(self, method, route, query, headers, data, extra):
-        core = self._core()
+        with self._lease() as core:
+            return self._route_with(core, method, route, query, headers, data, extra)
+
+    def _route_with(self, core, method, route, query, headers, data, extra):
         if method == "POST" and route == ["pair"]:
             return self._pair(core, headers, data, extra)
         if method not in ("GET", "POST"):
