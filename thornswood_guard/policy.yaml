@@ -72,7 +72,11 @@ github_apps:
 # GitHub write a Bot asks for (push, pull request, comment, label, merge, run).
 # At the cutover Patrick sets this to bramble by a PR here, and Bramble takes
 # merge authority once. Nothing a Bot does can change it.
-executor: patrick-hermes
+# The cutover: Patrick, 1 Nov 2:33 PM Mountain, "Bramble can take operational
+# authority now"; 8 PM is the target for retiring Claude Code Projects, not a
+# gate on the handoff. From this merge on Bramble is the one executor, and
+# Patrick's Hermes and the Desk stop merging, releasing and deploying.
+executor: bramble
 
 merge:
   # The checks per repo that must each be a success on the exact head.
@@ -118,7 +122,12 @@ runs:
   ref: main
   repo: ThornswoodRP/Thornswood
   workflows:
+    # box-run.yml lives in the private Ops repository since the VPS runners
+    # moved there (Thornswood #4013, #4039): it checks out Thornswood's main
+    # and runs a verb of main's verbs.json, so the line is still checked
+    # against Thornswood's main, and the run starts on Ops's main.
     box-run.yml:
+      repo: ThornswoodRP/Thornswood-Ops
       verbs: scripts/vps/gate/verbs.json
     nexus-run.yml:
       verbs: scripts/release/nexus-verbs.json

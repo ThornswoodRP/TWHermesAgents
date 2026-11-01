@@ -76,7 +76,7 @@
       "may_merge": false
     }
   },
-  "executor": "patrick-hermes",
+  "executor": "bramble",
   "merge": {
     "required_checks": {
       "ThornswoodRP/Thornswood": [
@@ -116,6 +116,7 @@
     "repo": "ThornswoodRP/Thornswood",
     "workflows": {
       "box-run.yml": {
+        "repo": "ThornswoodRP/Thornswood-Ops",
         "verbs": "scripts/vps/gate/verbs.json"
       },
       "nexus-run.yml": {

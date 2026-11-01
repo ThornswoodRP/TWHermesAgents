@@ -67,6 +67,10 @@ class Policy:
         for bot, v in bots.items():
             if v.get("claim_label") != f"claimed: {v.get('name')}":
                 raise PolicyError(f"{bot}'s claim label must be 'claimed: {v.get('name')}'")
+        known = set(self.data["repos"].values())
+        for wf, spec in self.data["runs"]["workflows"].items():
+            if (spec or {}).get("repo", self.data["runs"]["repo"]) not in known:
+                raise PolicyError(f"runs.workflows.{wf}.repo must be one of the repos, not {spec.get('repo')!r}")
         if self.data.get("executor") not in EXECUTORS:
             raise PolicyError(f"executor must be one of {', '.join(EXECUTORS)}, not {self.data.get('executor')!r}")
         checks = self.data.get("merge", {}).get("required_checks") or {}

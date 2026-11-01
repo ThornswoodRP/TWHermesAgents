@@ -544,6 +544,54 @@ class Runs(unittest.TestCase):
             w.git.start_run("hermes", {"bot": "sprocket", "task": "t", "workflow": "ship.yml", "inputs": {"channel": "dev"}})
         self.assertEqual(w.fake.runs, [])
 
+    def lists(self, w: World) -> None:
+        for name, raw in (("scripts/vps/gate/verbs.json", FIXTURES / "verbs.json"),
+                          ("scripts/release/nexus-verbs.json", FIXTURES / "nexus-verbs.json")):
+            w.fake.contents[(APP, w.fake.ref(APP, "main"), name)] = raw.read_bytes()
+
+    def test_box_run_starts_in_ops_with_the_line_checked_against_thornswoods_main(self):
+        # box-run.yml lives in Ops since Thornswood #4013; a dispatch to
+        # Thornswood found no such workflow.
+        w = World()
+        w.fake.make_repo(OPS)
+        self.lists(w)
+        out = w.git.start_run("hermes", {"bot": "bramble", "task": "logs", "workflow": "box-run.yml", "ref": "main",
+                                         "inputs": {"line": "Get-Logs -Dev -Lines 2000"}})
+        self.assertTrue(out["done"], out)
+        self.assertEqual(out["commit"], w.fake.ref(APP, "main"))
+        self.assertEqual((out["repo"], out["repo_commit"]), (OPS, w.fake.ref(OPS, "main")))
+        self.assertEqual([r["workflow"] for r in w.fake.runs], ["box-run.yml"])
+        self.assertEqual(w.fake.runs[0]["head_sha"], w.fake.ref(OPS, "main"))
+        self.assertEqual(w.fake.writes("POST", f"/repos/{APP}/actions"), [], "nothing was dispatched to Thornswood")
+        self.assertEqual(len(w.fake.writes("POST", f"/repos/{OPS}/actions/workflows/box-run.yml/dispatches")), 1)
+
+    def test_box_run_still_refuses_a_line_outside_thornswoods_verbs(self):
+        w = World()
+        w.fake.make_repo(OPS)
+        self.lists(w)
+        with self.assertRaises(Refused) as e:
+            w.git.start_run("hermes", {"bot": "bramble", "task": "t", "workflow": "box-run.yml", "ref": "main",
+                                       "inputs": {"line": "Set-Anything -Now"}})
+        self.assertIn("gate would refuse", str(e.exception))
+        self.assertEqual(w.fake.runs, [])
+
+    def test_release_runs_still_start_in_thornswood(self):
+        w = World()
+        self.lists(w)
+        main = w.fake.ref(APP, "main")
+        out = w.git.start_run("hermes", {"bot": "bramble", "task": "tag", "workflow": "release-tag.yml", "ref": "main",
+                                         "inputs": {"tag": "v1.2.3", "commit": main}})
+        self.assertTrue(out["done"], out)
+        self.assertNotIn("repo", out)
+        self.assertEqual(w.fake.runs[0]["head_sha"], main)
+
+    def test_a_run_repo_outside_the_repos_is_a_broken_policy(self):
+        from thornswood_guard.policy import Policy, PolicyError
+        data = json.loads(json.dumps(policy().data))
+        data["runs"]["workflows"]["box-run.yml"]["repo"] = "someone/else"
+        with self.assertRaises(PolicyError):
+            Policy(data)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -559,11 +607,13 @@ class OneExecutor(unittest.TestCase):
         self.assertEqual(callers, {"hermes"})
         return handler("hermes", json.loads(json.dumps(args)))
 
-    def test_the_shipped_policy_names_patricks_hermes(self):
-        self.assertEqual(policy().data["executor"], "patrick-hermes")
+    def test_the_shipped_policy_names_bramble_since_the_cutover(self):
+        # Patrick, 1 Nov 2:33 PM Mountain: "Bramble can take operational authority now".
+        self.assertEqual(policy().data["executor"], "bramble")
 
     def test_every_write_is_refused_before_the_cutover(self):
         w = World()
+        w.git.policy.data["executor"] = "patrick-hermes"
         sha = w.green_pr()
         main = w.fake.ref(APP, "main")
         name, _ = w.bundle("sprocket", "sprocket/3561-other", {"x.txt": "x\n"})
@@ -642,6 +692,7 @@ class CanaryOneExecutor(unittest.TestCase):
     def test_before_the_cutover_the_rule_refuses_it(self):
         from thornswood_brokers.canary import executor_problem
         w = World()
+        w.git.policy.data["executor"] = "patrick-hermes"
         sha = w.green_pr()
         sock = self.serve(w)
         # Even a merge that would go through: the head is right and green.

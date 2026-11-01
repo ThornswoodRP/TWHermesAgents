@@ -163,11 +163,17 @@ class Core(unittest.TestCase):
         self.assertEqual(self.own.page(self.p, "one", "messages", chat=SID, before="50"), {"pending": True})
 
     def test_the_answer_comes_within_the_wait(self):
+        # The connector's requests come on a connection of their own, as each
+        # request does in api.py. One SQLite connection shared by two threads
+        # misreads rows (sqlite3 shares its cached statement between them),
+        # which once read own_chat_write as off here.
+        theirs = OwnChat(self.w.other().s)
+
         def connector():
             for _ in range(50):
-                reqs = self.hand()
+                reqs = theirs.claim(self.w.ws, "one", self.g.tok["one"], 0, True)["pages"]
                 if reqs:
-                    self.own.page_post(self.w.ws, "one", self.g.tok["one"], {"id": reqs[0]["id"], "page": {
+                    theirs.page_post(self.w.ws, "one", self.g.tok["one"], {"id": reqs[0]["id"], "page": {
                         "messages": [], "more": False}})
                     return
                 threading.Event().wait(0.05)
