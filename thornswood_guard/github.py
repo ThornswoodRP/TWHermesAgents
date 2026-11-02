@@ -50,6 +50,7 @@ class Issue:
     assignees: list[str]
     labels: list[str]
     open: bool = True
+    pull_request: bool = False   # an issue number GitHub says is a pull request
 
 
 class GitHubRules:
