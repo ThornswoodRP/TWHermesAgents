@@ -18,7 +18,8 @@ For each Bot it:
   3. checks the merged config can reach no route the Bot may not use;
   4. checks every .env by name against what may sit on the Oracle box;
   5. installs the guard plugin into plugins/thornswood_guard;
-  6. makes the Bot's working folder;
+  6. makes the Bot's working folder, and installs the skills this repository
+     owns for it (OWN_SKILLS: Bramble's bramble-duties);
   7. loads the installed plugin and checks it refuses what it must.
 
 The gateway's own profile (the hermes user's default profile, which
@@ -54,6 +55,11 @@ from thornswood_guard.routes import check_config, check_gateway_config, proxy_re
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
 SKILLS = ("thornswood-ops", "thornswood-guide")
+# Skills this repository owns and installs, by Bot, from skills/<name>/SKILL.md
+# into the profile's skills/thornswood/<name>/. 2 Nov: Bramble had merge
+# authority but nothing told it to merge, hand back a dropped pull request, or
+# run the Ops run notes, so fork #147 and Ops #200 and #201 sat green.
+OWN_SKILLS = {"bramble": ("bramble-duties",)}
 SKIP_SCAN = {"hermes-agent", "sessions", "logs", "cache", "image_cache", "audio_cache",
              "document_cache", "node_modules", "backups", "checkpoints"}
 
@@ -187,6 +193,17 @@ def install_guard(pdir: Path) -> None:
         shutil.rmtree(old)
 
 
+def install_skill(pdir: Path, name: str) -> None:
+    """The repository's skills/<name>/SKILL.md into the profile, whole, in one rename."""
+    target = pdir / "skills" / "thornswood" / name
+    target.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=target, prefix=".SKILL-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write((REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8"))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, target / "SKILL.md")
+
+
 def write_config(pdir: Path, cfg_path: Path, merged: dict, commit: str, stamp: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=pdir, prefix=".config-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -240,6 +257,9 @@ def main() -> int:
         for skill in SKILLS:
             if not (pdir / "skills" / "thornswood" / skill / "SKILL.md").is_file():
                 problems.append(f"{bot}: the {skill} skill is missing")
+        for skill in OWN_SKILLS.get(bot, ()):
+            if not (REPO / "skills" / skill / "SKILL.md").is_file():
+                problems.append(f"{bot}: this commit has no skills/{skill}/SKILL.md to install")
         cfg_path = pdir / "config.yaml"
         existing = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
         merged = merge_into(existing or {}, build(policy, bot))
@@ -294,6 +314,8 @@ def main() -> int:
         work.mkdir(parents=True, exist_ok=True)
         os.chmod(work, 0o700)
         install_guard(pdir)
+        for skill in OWN_SKILLS.get(bot, ()):
+            install_skill(pdir, skill)
         write_config(pdir, cfg_path, merged, a.expect, stamp)
     install_guard(home)
     write_config(home, gw_path, gw_merged, a.expect, stamp)

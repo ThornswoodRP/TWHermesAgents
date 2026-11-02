@@ -54,7 +54,7 @@ After each apply the follower runs `tw-reload-bots` itself (`thornswood_brokers/
 
 What `apply.py` does, for each of the six profiles under `/home/hermes/.hermes/profiles/`:
 
-- checks the profile, its `SOUL.md` and its `thornswood-ops` and `thornswood-guide` skills are there (it never creates or deletes a profile);
+- checks the profile, its `SOUL.md` and its `thornswood-ops` and `thornswood-guide` skills are there (it never creates or deletes a profile), and installs the skills this repository owns (`skills/`; Bramble's `bramble-duties`: merging what is green, a pull request the merge queue dropped, and the Ops run notes);
 - builds the Bot's config from the policy and sets those keys in `config.yaml`, leaving every other key as Hermes has it (`model` and `fallback_providers` are replaced whole, so the old OpenRouter placeholder goes);
 - checks the result can reach no route the Bot may not use;
 - reads the names (never the values) in every `.env`, and looks for key and signing files by name;

@@ -119,6 +119,32 @@ class Apply(unittest.TestCase):
             self.assertTrue((home.parent / "tw-work" / bot).is_dir())
             self.assertIn(self.commit, (p / "local" / "thornswood-hermes" / "applied.json").read_text(encoding="utf-8"))
 
+    def test_bramble_gets_its_duties_skill_from_the_repo_and_no_other_bot_does(self):
+        # 2 Nov: Bramble had merge authority, and nothing told it to merge.
+        home = self.home()
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        want = (REPO / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
+        got = home / "profiles" / "bramble" / "skills" / "thornswood" / "bramble-duties" / "SKILL.md"
+        self.assertEqual(got.read_text(encoding="utf-8"), want)
+        for bot in policy().bots:
+            if bot != "bramble":
+                self.assertFalse((home / "profiles" / bot / "skills" / "thornswood" / "bramble-duties").exists(), bot)
+        got.write_text("changed on the VM\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(got.read_text(encoding="utf-8"), want, "the next apply puts the repo's copy back")
+        self.assertEqual([p.name for p in got.parent.iterdir()], ["SKILL.md"], "no half-written file is left")
+
+    def test_the_duties_skill_says_what_bramble_does(self):
+        text = (REPO / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nname: bramble-duties\n"))
+        for must in ("ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp", "dequeued", "gh-readonly-queue/main/pr-",
+                     "There is no timer and no retry", "ops/claude-queue/", "ops/bramble-list.md", "ops/status.md",
+                     "Never merge ThornswoodRP/Thornswood-Hermes", "tw_decide", "start_run"):
+            self.assertIn(must, text)
+        self.assertNotIn("\u2014", text)
+
     def test_the_gateways_own_profile_is_set_and_guarded(self):
         # 31 Oct: the gateway runs as the hermes user's default profile, which
         # had no route and no helpers of its own, so its vision helper walked

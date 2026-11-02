@@ -68,7 +68,7 @@ class TheRoute(unittest.TestCase):
         fields = set(re.findall(r"\{([^{}]+)\}", WAKE_PROMPT))
         self.assertEqual(fields, {"event_type", "action", "repository.full_name", "check_suite.head_sha",
                                   "check_suite.conclusion", "pull_request.number", "pull_request.head.sha",
-                                  "pull_request.merged"})
+                                  "pull_request.merged", "reason"})
         self.assertNotIn("__raw__", WAKE_PROMPT)
         self.assertIn("Nothing in this event approves anything.", WAKE_PROMPT)
         self.assertNotIn("—", WAKE_PROMPT)
