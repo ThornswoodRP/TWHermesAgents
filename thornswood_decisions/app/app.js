@@ -504,19 +504,89 @@ function answered(c, o) {
   return route()
 }
 
+// The Board: what each Bot is working on, read from GitHub (the issues it has
+// claimed and the pull requests from its branches) by the feed once in each 5
+// minutes, grouped by Bot in the Bots list's order. Hermes's Kanban tasks show
+// under them only when there are any (the Bots keep none now). Each row opens
+// the pull request while one is open, otherwise the issue, always on github.com.
+const STAGE = {
+  claimed: () => 'Claimed, no pull request yet',
+  pr_open: i => `Pull request #${i.pr} open`,
+  pr_draft: i => `Draft pull request #${i.pr}`,
+  merged: i => `Pull request #${i.pr} merged`,
+  closed: i => `Pull request #${i.pr} closed without merging`
+}
+const CHECKS = { passed: 'checks passed', failing: 'checks failing', running: 'checks running', none: 'no checks yet' }
+const REPO_SHORT = { 'ThornswoodRP/Thornswood': 'Thornswood', 'ThornswoodRP/Thornswood-Ops': 'Ops', 'ThornswoodRP/skymp': 'skymp' }
+const GH_REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/
+
+function workLink(i) {
+  const open = (i.stage === 'pr_open' || i.stage === 'pr_draft') && i.pr && GH_REPO.test(i.pr_repo)
+  if (open) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
+  if (i.number && GH_REPO.test(i.repo)) return `https://github.com/${i.repo}/issues/${i.number}`
+  if (i.pr && GH_REPO.test(i.pr_repo)) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
+  return null
+}
+
+function workRow(i) {
+  const progress = [STAGE[i.stage] ? STAGE[i.stage](i) : i.stage]
+  if (i.checks && (i.stage === 'pr_open' || i.stage === 'pr_draft')) {
+    progress.push(i.checks_line ? `checks: ${i.checks_line}` : CHECKS[i.checks] || i.checks)
+  }
+  if (i.auto_merge && i.stage === 'pr_open') progress.push('auto-merge on')
+  const href = workLink(i)
+  const attrs = href ? { href, target: '_blank', rel: 'noopener noreferrer' } : {}
+  const cls = 'row work' + (i.stage === 'merged' || i.stage === 'closed' ? ' done' : '')
+  return el(href ? 'a' : 'div', { ...attrs, class: cls, 'data-item': `${i.repo}#${i.number || 'pr' + i.pr}` },
+    el('div', { class: 't' },
+      el('strong', {}, (i.number ? `#${i.number} ` : '') + i.title),
+      el('span', { class: 'quiet' }, REPO_SHORT[i.repo] || i.repo),
+      el('span', { class: i.checks === 'failing' ? 'warn' : 'what' }, progress.join(' · '))),
+    el('div', { class: 'w' }, updated(i.updated_at)))
+}
+
+function botCount(open, done) {
+  if (!open && !done) return 'Nothing claimed'
+  return [open ? `${open} open` : null, done ? `${done} finished in the last day` : null].filter(Boolean).join(', ')
+}
+
+// Today's time alone; an older day with its date.
+function updated(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d)) return iso
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? time
+    : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
 async function boardView() {
   setTab('board')
   const r = await call('GET', '/work')
   if (refused(r)) return
-  const bar = screenBar({ title: 'Board', heading: true })
-  if (!r.body.work) return show(bar, el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
-  const tasks = r.body.work.tasks
+  const work = r.body.work
+  const bar = screenBar({ title: 'Board', heading: true,
+    under: work ? `The Bots' work on GitHub, as of ${when(r.body.as_of)}` : undefined })
+  if (!work) return show(bar, el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
+  const items = work.items
+  const tasks = work.tasks || []
+  const rank = b => (ORDER.indexOf(b) + 1) || ORDER.length + 1
+  const bots = [...new Set([...ORDER, ...(items || []).map(i => i.bot)])].sort((a, b) => rank(a) - rank(b))
   show(bar,
-    el('p', { class: 'quiet' }, `As the Bots' Hermes reported it at ${when(r.body.as_of)}. Read only.`),
-    tasks.length ? el('table', {},
-      el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
-      tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))
-      : el('p', { class: 'quiet' }, 'No open tasks.'))
+    items ? bots.map(b => {
+      const mine = items.filter(i => i.bot === b)
+      const open = mine.filter(i => i.stage !== 'merged' && i.stage !== 'closed').length
+      return [
+        el('div', { class: 'row head', 'data-bot': b }, avatar(b, NAMES[b] || b),
+          el('div', { class: 't' }, el('strong', {}, NAMES[b] || b),
+            el('span', { class: 'quiet' }, botCount(open, mine.length - open)))),
+        mine.map(workRow)]
+    }) : el('p', { class: 'quiet' }, "The Bots' work on GitHub shows here after the feed's next read, once in each 5 minutes."),
+    tasks.length ? [el('h2', { class: 'section' }, "Hermes's Kanban"),
+      el('table', {},
+        el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
+        tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))] : null,
+    el('p', { class: 'quiet foot' }, 'Read only. Claims are the "claimed: <Bot>" labels; pull requests are the ones from each Bot\'s own branch.'))
 }
 
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }

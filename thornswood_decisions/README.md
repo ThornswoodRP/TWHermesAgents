@@ -57,7 +57,7 @@ Against a remote Hermes, Desktop does not copy the plugin's desktop half from th
 | `passkey.py` | Patrick's passkeys, checked by py_webauthn. A passkey is added only from a fresh session on a paired phone and belongs to it. Sign-in needs the phone's lock (user verification) and gives a fresh session on that phone. Challenges work once, for 5 minutes. Five failures in 15 minutes stop passkey sign-in for 15 minutes. Without the library every passkey route answers 503; nothing falls back |
 | `softkey.py` | A software passkey for the tests and the install's self-check, never for signing in |
 | `feeds.py` | The Work and Room views (now Board and Rooms): the latest snapshot of each, sent by the feed with its own token, kept to the fields shown and marked "as of". What the Bots' Hermes reports, never authority |
-| `feed_reader.py` | Runs as `hermes` once a minute: reads Hermes's `kanban.db` and the Workbench room's events read-only and sends the two snapshots |
+| `feed_reader.py` | Runs as `hermes` once a minute: reads Hermes's `kanban.db` and the Workbench room's events read-only and sends the two snapshots (the Board's GitHub half came later; see "The Board shows the Bots' work on GitHub") |
 
 `api.py` adds: `/m/` and its files; passkey sign-in and enrolment (exact Origin); a recovery code sign-in that makes the phone a new device; `POST /csrf`, which gives the app a new CSRF token after a reload (cookie and exact Origin, the one write without the old token); `GET /work` and `GET /room`; and `POST /feeds/<name>` for the feed's token only, never a browser. With `mobile_read` off the phone can pair, sign in and add a passkey, but reads no card, work or room.
 
@@ -335,3 +335,23 @@ Patrick's Pixel check: the app "looks very different" from the approved mock-up 
 - **The tabs carry the mock-up's line icons** over their names, with the count on Decisions as a gold badge.
 
 The browser check runs every screen at Pixel widths and with larger text, as before, and saves the screenshots it always did.
+
+## The Board shows the Bots' work on GitHub (2 Nov)
+
+Patrick: the Board tab showed nothing while the Bots worked, so he could not see which issues they were on or how far along they were. The cause, measured on the VM: the Board read only Hermes's Kanban (`kanban.db`, `tasks`), and the Bots keep no Kanban. Its table had no rows, so the feed sent `{"tasks": []}` every minute. The decision core's `task_assignments` was empty too. The Bots' work is on GitHub, recorded two ways the guard rails already enforce: a Bot's claim label on the issue (`claimed: <Bot>`, `policy.yaml` `claim_label`) and its branch, `<bot>/<issue>-<what>` (`branches.pattern`), which heads every pull request it opens.
+
+What the feed reads now (`feed_reader.github_work`), once in each 5 minutes:
+
+- the open issues with each Bot's claim label, in Thornswood and Thornswood-Ops (skymp has issues off);
+- the pull requests from a Bot's own branch in the three work repos, open or closed in the last day;
+- for each open one, its head's check runs, as one state (passed, running, failing, none) and a line like "18 of 20 passed, 2 failed".
+
+A Bot's pull request goes with the issue its branch names when that Bot has the issue claimed (a skymp branch names a Thornswood issue); an open pull request wins over a finished one. A Bot's pull request for an issue it has not claimed is its own item. Each item says the repo, the issue's number and title, which Bot has it, its stage (claimed with no pull request, pull request open or draft, merged, closed), the checks, whether auto-merge is on, and when it last changed.
+
+How it reads, and what it does not get: through tw-git's `read` op on `/run/tw/git/git.sock`, which `hermes` may already call (GETs inside the three work repos only, as the workers' App). It reads as Bramble, since tw-git names a Bot for each read. The feed gets no GitHub credential, its unit keeps its loopback-only network, and nothing is written to GitHub. Reading GitHub every minute would spend the workers' App's hourly limit, which five Bots share, so a run reads it only in the first 65 seconds of each 5 minutes (about 22 reads each time, under 300 an hour); between those the Board's last snapshot stands with its own "as of". If a read fails, nothing is sent and the last Board stays, with its time.
+
+The core keeps the items to these fields (`feeds.py` `_items`): a repo must be `owner/name`, a stage and a check state must be ones the Board knows, and numbers are numbers. The app builds every link itself, to `https://github.com/<repo>/pull/<n>` while a pull request is open and to the issue otherwise, so a feed can never put another link on the phone. The Board lists the six Bots in the Bots list's order, each with what it has open and what finished in the last day, or "Nothing claimed". Hermes's Kanban tasks still show under them when there are any.
+
+Not on the Board yet: the project board's Status and Order. Neither App tw-git holds can read the org's project (that needs Organization projects permission), and the App that can (thornswood-board) keeps its key off the VM. That is Patrick's choice to make; until then the stage above (which board.yml follows: an issue's board Status comes from its pull requests, #5185) stands in for Status.
+
+Tests: `test_decisions_phone.py` `GitHubWork` (claims and pull requests into items, the order, reads only inside the three repos, a failed read sends nothing, the 5-minute pace, tw-git's read op as Bramble, and the run that skips or keeps the Board) and `FeedsIn` (the fields kept and anything else cut). `decisions_phone_check.js` checks the Board in Chromium: each Bot's rows, the progress line and both kinds of link.

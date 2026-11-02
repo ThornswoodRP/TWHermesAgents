@@ -33,7 +33,9 @@ third = w.card(title="Move the backup to Sunday?", source_key="third-1")
 f = Feeds(w.store)
 tw = f.new_token(w.ws, "work", by="t"); tr = f.new_token(w.ws, "room", by="t"); tb = f.new_token(w.ws, "bots", by="t")
 f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}]}]})
-f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [{"id": "t1", "title": "Fix the <b>launcher</b> log", "assignee": "sprocket", "status": "running"}]})
+f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [{"id": "t1", "title": "Fix the <b>launcher</b> log", "assignee": "sprocket", "status": "running"}],
+                         "items": [{"repo": "ThornswoodRP/Thornswood", "number": 5033, "title": "The site hub says <i>which</i> page is open", "bot": "echo", "stage": "pr_open", "pr": 5367, "pr_repo": "ThornswoodRP/Thornswood", "pr_title": "The hub marks its open tab", "checks": "failing", "checks_line": "18 of 20 passed, 2 failed", "auto_merge": True, "updated_at": "2026-11-01T17:30:00+00:00"},
+                                   {"repo": "ThornswoodRP/Thornswood", "number": 5191, "title": "Generated content tables are built from their sources", "bot": "magpie", "stage": "claimed", "updated_at": "2026-11-01T17:00:00+00:00"}]})
 f.put(w.ws, "room", tr, {"source_time": "2026-11-01T18:00:00+00:00", "room_id": "54b3ad46-3419-4adb-b60d-c79cb347fcee", "events": [{"seq": 1, "kind": "message.member", "actor": "Bramble", "text": "<script>alert(1)</script> hello", "at": "2026-11-01T17:59:00+00:00"}]})
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from thornswood_decisions import push_worker, webpush

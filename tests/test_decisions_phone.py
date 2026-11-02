@@ -350,6 +350,32 @@ class FeedsIn(unittest.TestCase):
         self.put("work", {"source_time": "2026-11-01T18:01:00+00:00", "tasks": []})
         self.assertEqual(Feeds(self.w.store).get(self.w.ws, "work")["work"]["tasks"], [])
 
+    def test_the_bots_github_work_keeps_only_what_the_board_shows(self):
+        item = {"repo": "ThornswoodRP/Thornswood", "number": 5033, "title": "T" * 500, "bot": "echo", "stage": "pr_open",
+                "pr": 5367, "pr_repo": "ThornswoodRP/Thornswood", "pr_title": "P", "checks": "failing",
+                "checks_line": "18 of 20 passed, 2 failed", "auto_merge": True, "updated_at": "2026-11-01T17:30:00Z",
+                "body": "private", "url": "javascript:alert(1)"}
+        odd = {"repo": "ThornswoodRP/Thornswood-Ops", "number": "12", "title": "x", "bot": "rift", "stage": "shipped",
+               "pr": True, "pr_repo": "evil.example/../x", "checks": "green", "auto_merge": "yes"}
+        body = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [], "items": [item, odd]}
+        self.assertEqual(self.put("work", body)[0], 200)
+        got = Feeds(self.w.store).get(self.w.ws, "work")["work"]["items"]
+        self.assertEqual(set(got[0]), {"repo", "number", "title", "bot", "stage", "pr", "pr_repo", "pr_title", "checks",
+                                       "checks_line", "auto_merge", "updated_at"})
+        self.assertEqual((got[0]["stage"], got[0]["pr"], got[0]["checks"], got[0]["auto_merge"], len(got[0]["title"])),
+                         ("pr_open", 5367, "failing", True, 200))
+        # Anything not in the shapes the Board knows is cut back to nothing, never passed on.
+        self.assertEqual({k: got[1][k] for k in ("number", "stage", "pr", "pr_repo", "checks", "auto_merge")},
+                         {"number": 0, "stage": "claimed", "pr": 0, "pr_repo": "", "checks": "", "auto_merge": False})
+        for repo in ("javascript:alert(1)", "https://evil.example/x", "a/b/c", ""):
+            bad = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [], "items": [{**item, "repo": repo}]}
+            self.assertEqual(self.put("work", bad)[2]["error"], "bad_feed", repo)
+        many = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [], "items": [item] * 201}
+        self.assertEqual(self.put("work", many)[2]["error"], "bad_feed")
+        # A snapshot from before the GitHub items is still taken, without them.
+        self.put("work", {"source_time": "2026-11-01T18:05:00+00:00", "tasks": []})
+        self.assertNotIn("items", Feeds(self.w.store).get(self.w.ws, "work")["work"])
+
     def test_the_wrong_token_or_a_browser_is_refused(self):
         body = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": []}
         self.assertEqual(self.put("work", body, token=self.tokens["room"])[2]["error"], "bad_feed_token")
@@ -438,9 +464,12 @@ class FeedReader(unittest.TestCase):
             os.chmod(path, 0o600)
         out = []
         with mock.patch("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a)))):
-            code = feed_reader.main(["--room", ROOM, "--hermes-home", str(self.dir), "--tokens", str(tokens),
-                                     "--core", f"http://127.0.0.1:{s.port}/api/v1"])
+            with mock.patch.object(feed_reader, "broker_reader", lambda path: lambda repo, p: (
+                    {"check_runs": []} if "/check-runs" in p else [])):
+                code = feed_reader.main(["--room", ROOM, "--hermes-home", str(self.dir), "--tokens", str(tokens),
+                                         "--core", f"http://127.0.0.1:{s.port}/api/v1", "--github", "always"])
         self.assertEqual(code, 0, out)
+        self.assertEqual(Feeds(s.w.store).get(s.w.ws, "work")["work"]["items"], [])
         self.assertEqual(Feeds(s.w.store).get(s.w.ws, "room")["room"]["rooms"][0]["events"][0]["text"], "Starting #12")
 
     @unittest.skipIf(os.name == "nt", "file modes are POSIX")
@@ -450,6 +479,164 @@ class FeedReader(unittest.TestCase):
         os.chmod(path, 0o644)
         with self.assertRaises(SystemExit):
             feed_reader.read_token(path)
+
+
+def _pr(number, ref, *, repo="ThornswoodRP/Thornswood", state="open", draft=False, merged_at=None, closed_at=None,
+        auto=False, updated="2026-11-01T17:00:00Z", title=None):
+    return {"number": number, "title": title or f"PR {number}", "state": state, "draft": draft, "merged_at": merged_at,
+            "closed_at": closed_at, "auto_merge": {"merge_method": "squash"} if auto else None, "updated_at": updated,
+            "head": {"ref": ref, "sha": f"sha{number}", "repo": {"full_name": repo}}}
+
+
+def _issue(number, title, updated="2026-11-01T16:00:00Z", pr=False):
+    out = {"number": number, "title": title, "updated_at": updated}
+    if pr:
+        out["pull_request"] = {}
+    return out
+
+
+class GitHubWork(unittest.TestCase):
+    """The Board's GitHub half: the Bots' claims and pull requests, read the
+    way the guard rails record them (claim labels and <bot>/<issue>-<what>)."""
+
+    NOW = None
+
+    def setUp(self):
+        from datetime import datetime, timezone
+        from thornswood_guard.policy import Policy
+        self.now = datetime(2026, 11, 1, 18, 0, tzinfo=timezone.utc)
+        self.policy = Policy.load()
+        self.asked = []
+        app, ops, fork = "ThornswoodRP/Thornswood", "ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp"
+        self.answers = {
+            f"/repos/{app}/pulls?state=open&per_page=100": [
+                _pr(5367, "echo/5033-hub-current-page", auto=True, updated="2026-11-01T17:30:00Z"),
+                _pr(5400, "wisp/5343-gamemode-parts", draft=True),
+                _pr(5401, "rift/77-not-claimed", title="Rift's own fix"),
+                _pr(5434, "claude/project-thread-wdia3e"),                       # not a Bot's branch
+                _pr(5435, "magpie/5191-tables", repo="someone/Thornswood"),      # a fork's branch, not the Bot's
+                _pr(5436, "sprocket/BAD-name")],                                 # not the Bot branch pattern
+            f"/repos/{app}/pulls?state=closed&sort=updated&direction=desc&per_page=50": [
+                _pr(5300, "echo/5033-hub-first-try", state="closed", closed_at="2026-11-01T10:00:00Z"),
+                _pr(5299, "magpie/5291-push-checks", state="closed", merged_at="2026-11-01T12:00:00Z",
+                    closed_at="2026-11-01T12:00:00Z", updated="2026-11-01T12:00:00Z"),
+                _pr(5100, "magpie/5100-old", state="closed", merged_at="2026-10-30T12:00:00Z",
+                    closed_at="2026-10-30T12:00:00Z")],                          # more than a day ago
+            f"/repos/{ops}/pulls?state=open&per_page=100": [],
+            f"/repos/{ops}/pulls?state=closed&sort=updated&direction=desc&per_page=50": [],
+            f"/repos/{fork}/pulls?state=open&per_page=100": [_pr(148, "wisp/5343-engine-side", repo=fork)],
+            f"/repos/{fork}/pulls?state=closed&sort=updated&direction=desc&per_page=50": [],
+            f"/repos/{app}/commits/sha5367/check-runs?per_page=100": {"check_runs": [
+                {"status": "completed", "conclusion": "success"}, {"status": "completed", "conclusion": "skipped"},
+                {"status": "completed", "conclusion": "failure"}, {"status": "in_progress", "conclusion": None}]},
+            f"/repos/{app}/commits/sha5400/check-runs?per_page=100": {"check_runs": []},
+            f"/repos/{app}/commits/sha5401/check-runs?per_page=100": {"check_runs": [
+                {"status": "completed", "conclusion": "success"}]},
+            f"/repos/{fork}/commits/sha148/check-runs?per_page=100": {"check_runs": [
+                {"status": "queued", "conclusion": None}]},
+        }
+        for repo in (app, ops):
+            for bot in BOTS:
+                label = "claimed%3A%20" + bot.capitalize()
+                self.answers[f"/repos/{repo}/issues?state=open&labels={label}&per_page=100"] = []
+        self.answers[f"/repos/{app}/issues?state=open&labels=claimed%3A%20Echo&per_page=100"] = [
+            _issue(5033, "The site hub says which page is open"), _issue(5367, "a labelled PR", pr=True)]
+        self.answers[f"/repos/{app}/issues?state=open&labels=claimed%3A%20Magpie&per_page=100"] = [
+            _issue(5191, "Generated content tables are built from their sources", updated="2026-11-01T17:10:00Z"),
+            _issue(5291, "A push runs the parse and writing checks")]
+        self.answers[f"/repos/{app}/issues?state=open&labels=claimed%3A%20Wisp&per_page=100"] = [
+            _issue(5343, "The gamemode is written as TypeScript parts")]
+
+    def ask(self, repo, path):
+        self.asked.append((repo, path))
+        self.assertTrue(path.startswith(f"/repos/{repo}/"), path)
+        return self.answers[path]
+
+    def work(self):
+        return feed_reader.github_work(self.policy, self.ask, self.now)
+
+    def test_each_claim_and_bot_pr_is_one_item_with_its_progress(self):
+        got = {(i["bot"], i["number"]): i for i in self.work()}
+        echo = got[("echo", 5033)]
+        self.assertEqual((echo["stage"], echo["pr"], echo["checks"], echo["checks_line"], echo["auto_merge"]),
+                         ("pr_open", 5367, "failing", "2 of 4 passed, 1 failed, 1 running", True))
+        self.assertEqual(echo["updated_at"], "2026-11-01T17:30:00Z")      # the PR's, newer than the issue's
+        self.assertEqual(echo["title"], "The site hub says which page is open")
+        self.assertEqual((got[("magpie", 5191)]["stage"], got[("magpie", 5191)]["pr"]), ("claimed", 0))
+        self.assertEqual((got[("magpie", 5291)]["stage"], got[("magpie", 5291)]["pr"]), ("merged", 5299))
+        # An open PR beats a draft one; here Wisp's skymp PR is open and names a Thornswood issue.
+        wisp = got[("wisp", 5343)]
+        self.assertEqual((wisp["stage"], wisp["pr"], wisp["pr_repo"], wisp["checks"]),
+                         ("pr_open", 148, "ThornswoodRP/skymp", "running"))
+        # A Bot's PR for an issue it has not claimed is its own item.
+        rift = got[("rift", 77)]
+        self.assertEqual((rift["title"], rift["stage"], rift["pr"], rift["checks"]),
+                         ("Rift's own fix", "pr_open", 5401, "passed"))
+        # Not a Bot's branch, a fork's branch, a bad name, a labelled PR, a PR closed days ago: none of them.
+        self.assertEqual(set(got), {("echo", 5033), ("magpie", 5191), ("magpie", 5291), ("wisp", 5343), ("rift", 77)})
+
+    def test_items_go_in_the_bots_order_then_open_work_first(self):
+        order = [(i["bot"], i["number"]) for i in self.work()]
+        self.assertEqual(order, [("rift", 77), ("echo", 5033), ("magpie", 5191), ("magpie", 5291), ("wisp", 5343)])
+
+    def test_it_only_reads_and_only_inside_the_three_work_repos(self):
+        self.work()
+        repos = {r for r, _ in self.asked}
+        self.assertEqual(repos, {"ThornswoodRP/Thornswood", "ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp"})
+        self.assertFalse(any("/issues" in p for r, p in self.asked if r == "ThornswoodRP/skymp"))
+        self.assertLessEqual(len(self.asked), 30)
+
+    def test_a_refused_read_sends_nothing(self):
+        def ask(repo, path):
+            raise RuntimeError("tw-git is not answering")
+        kanban = Path(tempfile.mkdtemp()) / "kanban.db"
+        k = sqlite3.connect(kanban)
+        k.execute("CREATE TABLE tasks (id TEXT, title TEXT, assignee TEXT, status TEXT, priority INTEGER, "
+                  "created_at INTEGER, started_at INTEGER, completed_at INTEGER)")
+        k.commit()
+        k.close()
+        with self.assertRaises(feed_reader.GitHubUnread):
+            feed_reader.work_with_github(kanban, "/x", self.now, ask=ask, policy=self.policy)
+        body = feed_reader.work_with_github(kanban, "/x", self.now, ask=self.ask, policy=self.policy)
+        self.assertEqual((body["tasks"], len(body["items"])), ([], 5))
+
+    def test_github_is_read_once_in_each_five_minutes(self):
+        from datetime import datetime, timedelta, timezone
+        start = datetime(2026, 11, 1, 18, 0, 3, tzinfo=timezone.utc)
+        runs = [start + timedelta(seconds=62 * n) for n in range(60)]   # the timer's real pace
+        due = [r for r in runs if feed_reader.github_due(r)]
+        windows = {int(r.timestamp() // 300) for r in runs}
+        self.assertEqual({int(r.timestamp() // 300) for r in due}, windows)  # every window reads it at least once
+        self.assertLessEqual(len(due), 2 * len(windows))
+
+    def test_the_feed_reads_through_tw_gits_read_op_as_bramble(self):
+        fake = mock.Mock()
+        fake.call.return_value = {"body": [1]}
+        with mock.patch.dict(sys.modules, {"thornswood_brokers.wire": fake}), \
+                mock.patch("thornswood_brokers.wire", fake, create=True):
+            ask = feed_reader.broker_reader("/run/tw/git/git.sock")
+            self.assertEqual(ask("ThornswoodRP/Thornswood", "/repos/ThornswoodRP/Thornswood/pulls"), [1])
+        fake.call.assert_called_once_with("/run/tw/git/git.sock", "read", {
+            "bot": "bramble", "repo": "ThornswoodRP/Thornswood", "path": "/repos/ThornswoodRP/Thornswood/pulls"},
+            timeout=30)
+        self.assertEqual(feed_reader.GIT_SOCKET, self.policy.data["brokers"]["sockets"]["git"]["path"])
+
+    def test_main_skips_the_board_between_reads_and_keeps_the_last_one_on_a_failure(self):
+        sent = []
+        tokens = Path(tempfile.mkdtemp())
+        with mock.patch.object(feed_reader, "send", lambda core, name, token, body: sent.append(name) or 200), \
+                mock.patch.object(feed_reader, "read_token", lambda p: "t"), \
+                mock.patch.object(feed_reader, "rooms_snapshot", lambda *a: {}), \
+                mock.patch.object(feed_reader, "bots_snapshot", lambda *a: {}), \
+                mock.patch.object(feed_reader, "github_due", lambda now: False), \
+                mock.patch("builtins.print"):
+            self.assertEqual(feed_reader.main(["--room", ROOM, "--tokens", str(tokens)]), 0)
+            self.assertEqual(sent, ["room", "bots"])
+            sent.clear()
+            with mock.patch.object(feed_reader, "work_with_github",
+                                   mock.Mock(side_effect=feed_reader.GitHubUnread("Refused: no"))):
+                self.assertEqual(feed_reader.main(["--room", ROOM, "--tokens", str(tokens), "--github", "always"]), 1)
+            self.assertEqual(sent, ["room", "bots"])
 
 
 if __name__ == "__main__":
