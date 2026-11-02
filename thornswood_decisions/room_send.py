@@ -28,6 +28,36 @@ one JSON line:
                                          not running, or the gateway refused it);
     {"sent": null, "reason": "..."}      it may have been sent.
 
+A turn in a chat of Patrick's own Hermes (own_connector.py), with `hermes chat`'s own arguments in place
+of the request on stdin:
+
+    <hermes python> -I room_send.py chat -Q --format stream-json --query-file <file> [--resume <id> ...]
+
+runs Hermes's own `hermes chat` unchanged, through the same local gateway connection Desktop uses (a
+ticket from the gateway's own control socket on this machine; no new secret, nothing listens), except how
+a message is handed to a chat whose turn is already running: by the chat's busy-input setting, the way
+Desktop's message box does (Patrick's answer A on q-one-busy-chat, 2 Nov; apps/desktop
+use-composer-submit.ts submitDraft and steerDraft, busy-submit-state.ts, use-busy-input-mode.ts;
+contracts.json "busy"):
+
+- the setting is the gateway's own answer to `config.get busy` for that chat: the chat's own setting,
+  else Hermes's `display.busy_input_mode`, else Hermes's default;
+- steer: `session.steer`, so the running turn takes the words at its next step;
+- interrupt: `session.redirect`, so the running turn stops and goes on with these words;
+- queue: `prompt.submit`, so it runs next, and is shown queued at once;
+- a photo or file, a slash command, or a turn stopped at an approval or a question always queues
+  (Desktop: attachments cannot ride a steer, and a steer cannot reach a turn parked on a prompt);
+- a steer or redirect the gateway answers "rejected" (the turn ended meanwhile) is queued, the wire
+  contract's "not corrected, queue it as the next prompt", as Desktop does, so nothing is lost.
+
+A steered or redirected message has no turn of its own: the running turn answers it, so this follows
+that turn to its end and reports its result, as `hermes chat` reports its own. Besides Hermes's
+stream-json lines it prints how Hermes took the message, once it has, and again when a queued one starts:
+{"type": "admission", "status": "started" | "queued" | "steered" | "redirected"}. Before this, a message
+always went in with prompt.submit and waited behind the running turn, however the chat was set. This is
+in room_send.py, not a file of its own, because One's connector updates itself with the files its
+running copy names (own_connector.py UPDATE_FILES).
+
 `groups.send` with the same `event_id` is the same event (hosted_rooms.py:250),
 which is how the core settles an unclear send from the room feed afterwards.
 
@@ -236,6 +266,67 @@ def main() -> int:
     return 0
 
 
+def announce(status: str) -> None:
+    sys.stdout.write(json.dumps({"type": "admission", "status": status}) + "\n")
+    sys.stdout.flush()
+
+
+def steerable(text, has_file: bool) -> bool:
+    return isinstance(text, str) and bool(text.strip()) and not has_file and not text.lstrip().startswith("/")
+
+
+def follow_busy_setting(has_file: bool) -> None:
+    """Hermes's chat view, with the hand-over of a one-shot message changed as this file's words say."""
+    from hermes_cli import gateway_chat_view
+
+    base = gateway_chat_view.GatewayChatView
+
+    class BusyAware(base):
+        def _running(self):
+            # The admission running now, from the chat's snapshot (the resume this view was made from).
+            return next((r["admission_id"] for r in self.pending
+                         if isinstance(r, dict) and r.get("status") == "started"), None)
+
+        async def submit(self, text):
+            running = self._running() if self.finite else None
+            if running and not self.prompts and steerable(text, has_file):
+                mode = (await self.client.rpc("config.get", key="busy", session_id=self.session_id) or {}).get("value")
+                if mode in ("steer", "interrupt"):
+                    got = await self.client.rpc("session.steer" if mode == "steer" else "session.redirect",
+                                                session_id=self.session_id, text=text,
+                                                execution_generation=self.generation) or {}
+                    if got.get("voice_stopped") is True:
+                        return got
+                    if got.get("status") in ("queued", "redirected"):
+                        announce("steered" if mode == "steer" else "redirected")
+                        return {"admission_id": running}
+            receipt = await super().submit(text)
+            status = (receipt or {}).get("status")
+            if status in ("started", "queued"):
+                announce(status)
+                self._queued = (receipt.get("admission_id") if status == "queued" else None)
+            return receipt
+
+        def _session_info(self, admission, payload):
+            super()._session_info(admission, payload)
+            # Its turn left Hermes's queue and runs: said once, so "In queue" ends when it really does.
+            mine = getattr(self, "_queued", None)
+            if mine and any(isinstance(r, dict) and r.get("admission_id") == mine and r.get("status") == "started"
+                            for r in self.pending):
+                self._queued = None
+                announce("started")
+
+    gateway_chat_view.GatewayChatView = BusyAware
+
+
+def turn(args: list[str]) -> None:
+    """`hermes chat <args>` in this runtime, with the busy-input hand-over above. Exits as Hermes exits."""
+    follow_busy_setting("--image" in args)
+    sys.argv = ["hermes", *args]
+    import runpy
+    runpy.run_module("hermes_cli.main", run_name="__main__", alter_sys=True)
+
+
 def use_root(argv: list[str]) -> None:
     """--hermes-root <folder>: Hermes's source folder, put first on the path before any of Hermes is imported."""
     if "--hermes-root" not in argv:
@@ -260,4 +351,7 @@ def use_root(argv: list[str]) -> None:
 
 if __name__ == "__main__":
     use_root(sys.argv[1:])
+    rest = sys.argv[3:] if sys.argv[1:2] == ["--hermes-root"] else sys.argv[1:]
+    if rest[:1] == ["chat"]:
+        turn(rest)
     sys.exit(main())

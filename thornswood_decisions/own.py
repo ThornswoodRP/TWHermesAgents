@@ -389,7 +389,9 @@ def _release(here: Path | None = None) -> str | None:
 RELEASE = _release()
 
 
-DOING_STATES = ("thinking", "writing", "tool", "waiting")
+# "queued": in Hermes's queue behind the turn already running in that chat; "steered" and "redirected": handed
+# into that running turn, by the chat's busy-input setting (room_send.py's turn).
+DOING_STATES = ("thinking", "writing", "tool", "queued", "steered", "redirected")
 DOING_ID = re.compile(r"^own_[A-Za-z0-9_-]{1,40}$")
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
@@ -420,7 +422,9 @@ class _Connectors:
                     and t.get("state") in DOING_STATES and len(info["turns"]) < 10):
                 tool = t.get("tool") if t["state"] == "tool" else None
                 info["turns"][t["id"]] = {"state": t["state"],
-                                          "tool": tool if isinstance(tool, str) and TOOL_NAME.match(tool) else None}
+                                          "tool": tool if isinstance(tool, str) and TOOL_NAME.match(tool) else None,
+                                          "admitted": t.get("admitted") is True,
+                                          **({"taken": t["taken"]} if t.get("taken") in ("steered", "redirected") else {})}
         with self.lock:
             self.said[(ws, gw)] = info
 
@@ -428,6 +432,11 @@ class _Connectors:
         with self.lock:
             info = self.said.get((ws, gw))
         return info if info and now - info["at"] < ONLINE else None
+
+    def admitted(self, ws: str, gw: str, message_id: str, now: datetime) -> bool:
+        """Whether the connector last said Hermes has this message (room_send.py's turn said how it took it)."""
+        info = self.get(ws, gw, now)
+        return bool(info) and (info["turns"].get(message_id) or {}).get("admitted") is True
 
 
 CONNECTORS = _Connectors()
@@ -1070,7 +1079,14 @@ class OwnChat:
     def claim(self, workspace_id: str, gw: str, token: str | None, limit: int = MAX_CLAIM, ready=False,
               why: str = "", state: str | None = None, forwarded_for: str | None = None,
               doing: dict | None = None) -> dict:
-        """Lease the oldest waiting message of each chat that has nothing in flight, at most `limit`.
+        """Lease the oldest waiting message of each chat, at most `limit`.
+
+        A chat that has a message in flight gets its next one too, like Desktop's box while a turn runs
+        (Patrick's answer A on q-one-busy-chat, 2 Nov): room_send.py's turn then steers it into the running turn,
+        redirects that turn, or queues it, by the chat's own busy-input setting. Only once every message
+        before it in that chat is in Hermes (the connector says so), so Hermes gets them in the order he
+        sent them; and never in a new chat, which has no id to send a second message to until its first
+        turn made one.
 
         Every claim is also the connector saying it is there and whether that Hermes's gateway is running
         (`ready`, with `why` when it is not). A claim with limit 0 says only that, while every turn it may
@@ -1091,8 +1107,11 @@ class OwnChat:
             rows = db.execute("SELECT id, session_id, text, send_key, status FROM own_messages "
                               "WHERE workspace_id = ? AND gateway = ? AND status IN ('queued', 'leased') "
                               "ORDER BY created_at, rowid", (workspace_id, gw)).fetchall()
-            # One turn at a time in each chat; each new chat is a chat of its own.
-            busy = {r["session_id"] or r["id"] for r in rows if r["status"] == "leased"}
+            # In each chat, the next message only once every one before it is in Hermes; each new chat is a
+            # chat of its own, one message at a time.
+            seen_at = self.s.clock()
+            busy = {r["session_id"] or r["id"] for r in rows if r["status"] == "leased"
+                    and not (r["session_id"] and CONNECTORS.admitted(workspace_id, gw, r["id"], seen_at))}
             until = (self.s.clock() + LEASE).isoformat()
             now = self.s.now()
             for r in rows:

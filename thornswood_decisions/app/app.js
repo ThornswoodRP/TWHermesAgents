@@ -1874,12 +1874,22 @@ const TOOL_WORDS = {
 function doingWords(doing) {
   if (!doing) return 'Starting'
   if (doing.state === 'thinking') return 'Thinking'
-  // Hermes runs one turn at a time in a chat: this one waits for the turn Desktop is running in it.
-  if (doing.state === 'waiting') return 'Waiting for the turn already running in this chat'
   if (doing.state === 'writing') return 'Writing'
   const tool = doing.tool || ''
   return TOOL_WORDS[tool] || (tool.startsWith('browser') ? 'Using the browser' : tool ? `Using ${tool}` : 'Using a tool')
 }
+// How Hermes took a message sent into a chat whose turn was already running, by that chat's busy-input
+// setting, as Desktop says it under the message (Patrick, 2 Nov: "it should say in queue like it does on
+// Desktop"): in its queue, to run next; steered into the running turn; or the running turn interrupted
+// and going on with it. Any other message Hermes has is sent.
+const TAKEN = { queued: 'In queue', steered: 'Steered into the running turn', redirected: 'Interrupted the running turn' }
+function inQueue(m) { return m.status === 'leased' && !!m.doing && m.doing.state === 'queued' }
+function mineNote(m) {
+  if (m.status === 'leased' && m.doing && m.doing.admitted) return m.doing.taken ? TAKEN[m.doing.taken] : TAKEN[m.doing.state] || 'Sent'
+  return STATE[m.status]
+}
+// The message whose turn the chat's live line follows: the one being answered, never one in Hermes's queue.
+function beingAnswered(mine) { return mine.find(m => m.status === 'leased' && !inQueue(m)) }
 // The other side's typing bubble: three moving dots and what it is doing.
 function workingItem(name, agent, doing) {
   return el('div', { class: 'msg theirs working', role: 'status', 'aria-live': 'polite' },
@@ -1892,27 +1902,28 @@ function workingItem(name, agent, doing) {
 // same way, so the chat is drawn again the moment it is taken and its turn's line shows (2 Nov: it waited
 // for the next 15-second read). One watch at a time, ended by any new page.
 let turnWatch = null
-function watchTurn(path, seqNow, turnId, name, was = 'leased') {
+function watchTurn(path, seqNow, turnId, name, was = 'leased', queued = false) {
   clearTimeout(turnWatch)
   turnWatch = setTimeout(async () => {
     if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
     const r = await call('GET', path)
     if (seqNow !== viewSeq || r.status !== 200) return
     const m = r.body.mine.find(x => x.id === turnId)
-    if (!m || m.status !== was) {
+    // Taken from Hermes's queue to run: drawn again, so its line shows under it.
+    if (!m || m.status !== was || (was === 'leased' && inQueue(m) !== queued)) {
       const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
       if (!typing) return route()
     }
     const line = document.querySelector('#view .msg.working .doing')
-    if (line && m && was === 'leased') line.textContent = doingWords(m.doing)
-    watchTurn(path, seqNow, turnId, name, was)
+    if (line && m && was === 'leased' && !queued) line.textContent = doingWords(m.doing)
+    watchTurn(path, seqNow, turnId, name, was, queued)
   }, 2000)
 }
 
 function pendingItems(mine, readAt) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
     .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files,
-      note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
+      note: mineNote(m) + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
         + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
       warn: m.status === 'dead' || m.status === 'uncertain' }))
 }
@@ -2020,12 +2031,12 @@ async function ownChatView(gw, sid) {
       dock.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
     }
     // His message being answered now: the other side's live line under it, kept current while it runs.
-    const turn = v.mine.find(m => m.status === 'leased')
+    const turn = beingAnswered(v.mine)
     const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing)] : bubbles(items)
     if (seqNow === viewSeq) {
       showChat('own:' + key, top, list, dock, items)
-      const waits = turn || v.mine.find(m => m.status === 'queued')
-      if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status)
+      const waits = turn || v.mine.find(inQueue) || v.mine.find(m => m.status === 'queued')
+      if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status, inQueue(waits))
     }
   }
   render()

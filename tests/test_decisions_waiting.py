@@ -6,8 +6,8 @@ Hermes runs one turn at a time in a conversation: a new turn waits for the chat'
 (hermes_state_compression.py:683) in session_turn_leases. Checks:
 - turn_held reads that lease, read only: held before this turn started, by the chat or its compression
   ancestor, and not run out; a fork's own lease is its own; anything unreadable is "not known to wait";
-- a turn waiting on it says "waiting", and "thinking" once the lease is free, then what it does;
-- the core keeps "waiting" as a state of the live line.
+- a turn waiting on it says "queued", and "thinking" once the lease is free, then what it does;
+- the core keeps "queued" as a state of the live line.
 Everything runs in a scratch folder with a stand-in for `hermes`; nothing reaches a real Hermes.
 """
 
@@ -80,15 +80,15 @@ class Held(unittest.TestCase):
         h = own_connector.Hermes([sys.executable, str(self.dir / "hermes.py"), str(self.db)], [], self.dir, "One",
                                  state_db=self.db)
         said = []
-        outcome = h._run([*h.cmd], "s_plan", lambda state, tool: said.append(state))
+        outcome = h._run([*h.cmd], "s_plan", lambda state, tool, *_: said.append(state))
         self.assertEqual(outcome[0], "confirmed")
-        self.assertEqual(said[:2], ["thinking", "waiting"])
+        self.assertEqual(said[:2], ["thinking", "queued"])
         self.assertIn("thinking", said[2:])
         self.assertEqual(said[-1], "writing")
-        self.assertLess(said.index("waiting"), len(said) - 2)
+        self.assertLess(said.index("queued"), len(said) - 2)
 
     def test_the_core_keeps_waiting_as_a_state(self):
-        self.assertIn("waiting", DOING_STATES)
+        self.assertIn("queued", DOING_STATES)
 
 
 if __name__ == "__main__":
