@@ -252,7 +252,10 @@ class Api:
             return 200, {"passkeys": core.auth.has_passkey(self.ws)}
         if method == "POST" and route == ["passkeys", "sign-in", "options"]:
             self._exact_origin(headers)
-            return 200, self._passkeys(core).sign_in_options(self.ws)
+            key = data.get("phone_key")
+            if key is not None and not isinstance(key, str):
+                raise CoreError(400, "bad_field", "phone_key is a credential id")
+            return 200, self._passkeys(core).sign_in_options(self.ws, key)
         if method == "POST" and route == ["passkeys", "sign-in"]:
             self._exact_origin(headers)
             dev, sess = self._passkeys(core).sign_in(self.ws, data.get("credential"))
@@ -344,7 +347,7 @@ class Api:
             return 200, {"passkeys": self._passkeys(core).list(p)}
         if method == "POST" and route == ["passkeys", "register", "options"]:
             self._exact_origin(headers)
-            return 200, self._passkeys(core).register_options(p)
+            return 200, self._passkeys(core).register_options(p, on_phone=data.get("on_phone") is True)
         if method == "POST" and route == ["passkeys", "register"]:
             self._exact_origin(headers)
             return 200, self._passkeys(core).register(p, data.get("credential"), str(data.get("label", ""))[:80])

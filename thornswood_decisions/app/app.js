@@ -227,14 +227,94 @@ async function promptNow(button, status, then) {
   button.hidden = false
 }
 
+// ── the fingerprint on the phone (Patrick, 2 Nov) ─────────────────────────
+//
+// A sign-in that asks for any passkey lets Android hand it to the passkey
+// provider he chose (Bitwarden), which leaves the app, unlocks and comes back.
+// This phone's own key, made by its platform authenticator and named in the
+// sign-in request, is answered by the phone itself: its fingerprint sheet over
+// the app. The core checks it as it checks any passkey. A Desktop has no such
+// key and keeps the passkey.
+const PHONE_KEY = 'hermes.phoneKey.v1'
+
+function phoneKey() {
+  try {
+    const k = JSON.parse(localStorage.getItem(PHONE_KEY) || 'null')
+    return k && typeof k.credential_id === 'string' && typeof k.passkey_id === 'string' ? k : null
+  } catch (e) { return null }
+}
+
+function keepPhoneKey(k) {
+  try { localStorage.setItem(PHONE_KEY, JSON.stringify(k)); return true } catch (e) { return false }
+}
+
+function forgetPhoneKey() {
+  try { localStorage.removeItem(PHONE_KEY) } catch (e) {}
+}
+
+// The word for what signs in on this device.
+function signInWord() {
+  return phoneKey() ? 'fingerprint' : 'passkey'
+}
+
+// Whether this device can hold its own key: a paired phone whose platform
+// authenticator checks the person (fingerprint or screen lock).
+// Asked once a page load: neither changes while the app is open.
+let fingerprintable = null
+
+async function canUseFingerprint() {
+  if (fingerprintable !== null) return fingerprintable
+  try {
+    if (!window.PublicKeyCredential || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable ||
+        !(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) return (fingerprintable = false)
+  } catch (e) { return (fingerprintable = false) }
+  const me = await call('GET', '/me')
+  if (me.status !== 200) return false
+  return (fingerprintable = me.body.device_kind === 'phone')
+}
+
+// Adds this phone's own key. The core adds a key only in a fresh session, so
+// when this one is older than 5 minutes the passkey signs in first.
+async function addFingerprint() {
+  const me = await call('GET', '/me')
+  if (me.status !== 200) return { ok: false, message: said(me.body) }
+  if (!me.body.fresh) {
+    const s = await passkeySignIn()
+    if (s.status !== 200) return { ok: false, message: said(s.body) }
+  }
+  const o = await call('POST', '/passkeys/register/options', { on_phone: true })
+  if (o.status !== 200) return { ok: false, message: said(o.body) }
+  let cred
+  try {
+    cred = await navigator.credentials.create({ publicKey: creationOptions(o.body) })
+  } catch (err) {
+    return { ok: false, message: err && err.name === 'InvalidStateError'
+      ? 'This phone already holds a key for Hermes. Nothing changed.'
+      : 'The fingerprint was not added. Nothing changed.' }
+  }
+  const done = await call('POST', '/passkeys/register', { credential: credentialJSON(cred), label: 'Fingerprint on this phone' })
+  if (done.status !== 200) return { ok: false, message: said(done.body) }
+  if (!keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })) {
+    return { ok: false, message: 'This browser would not keep the fingerprint\'s name, so the app cannot ask for it. Remove it in Settings.' }
+  }
+  return { ok: true }
+}
+
 async function passkeySignIn() {
-  const o = await call('POST', '/passkeys/sign-in/options')
+  const key = phoneKey()
+  let o = await call('POST', '/passkeys/sign-in/options', key ? { phone_key: key.credential_id } : {})
+  if (key && o.status === 404 && o.body.error === 'no_phone_key') {
+    // The core no longer has this phone's key (it or the phone was removed): the passkey is the way in.
+    forgetPhoneKey()
+    o = await call('POST', '/passkeys/sign-in/options', {})
+  }
   if (o.status !== 200) return o
+  const word = o.body.allowCredentials && o.body.allowCredentials.length ? 'fingerprint' : 'passkey'
   let cred
   try {
     cred = await navigator.credentials.get({ publicKey: requestOptions(o.body) })
   } catch (err) {
-    return { status: -1, body: { message: 'The passkey did not sign in. Nothing changed.' } }
+    return { status: -1, body: { message: `The ${word} did not sign in. Nothing changed.` } }
   }
   const r = await call('POST', '/passkeys/sign-in', { credential: credentialJSON(cred) })
   if (r.status === 200) csrf = r.body.csrf
@@ -335,6 +415,7 @@ async function signInView(note) {
     csrf = r.body.csrf
     route()
   }
+  if (hasKey === false) forgetPhoneKey()
   if (hasKey === false) {
     return show(
       el('h2', {}, 'Set up this phone'),
@@ -347,12 +428,12 @@ async function signInView(note) {
   const button = el('button', { class: 'primary', type: 'button', onclick: async () => {
     status.textContent = ''
     done(await passkeySignIn())
-  } }, 'Sign in with your passkey')
+  } }, 'Sign in with your ' + signInWord())
   const auto = hasKey === true && askOnOpen
   askOnOpen = false
   show(
     el('h2', {}, 'Welcome back'),
-    el('p', { class: 'quiet' }, hasKey ? 'Your passkey is set up.' : 'Sign in with your passkey, or set up this phone below.'),
+    el('p', { class: 'quiet' }, hasKey ? `Your ${signInWord()} is set up.` : 'Sign in with your passkey, or set up this phone below.'),
     button,
     status,
     el('details', { class: 'fold', open: hasKey === null },
@@ -377,6 +458,33 @@ function refused(r) {
   return false
 }
 
+// On a phone with no fingerprint key yet, the Decisions list offers it once,
+// until it is added or put off; Settings always has it.
+const FINGERPRINT_LATER = 'hermes.fingerprintLater.v1'
+
+async function fingerprintOffer() {
+  let later = false
+  try { later = localStorage.getItem(FINGERPRINT_LATER) === '1' } catch (e) {}
+  if (later || phoneKey() || !(await canUseFingerprint())) return null
+  const note = el('p', { class: 'warn', role: 'status' })
+  const part = el('div', { class: 'card' },
+    el('p', {}, el('strong', {}, 'Sign in with your fingerprint')),
+    el('p', { class: 'quiet' }, 'The fingerprint opens right here, without going out to your passkey app. ' +
+      'When Android asks where to save it, pick Google Password Manager. Your passkey stays for a Desktop.'),
+    el('button', { class: 'primary', type: 'button', onclick: async () => {
+      note.textContent = ''
+      const k = await addFingerprint()
+      if (k.ok) { flash = 'Fingerprint sign-in is on for this phone.'; return route() }
+      note.textContent = k.message
+    } }, 'Use my fingerprint'),
+    el('button', { class: 'secondary', type: 'button', onclick: () => {
+      try { localStorage.setItem(FINGERPRINT_LATER, '1') } catch (e) {}
+      part.remove()
+    } }, 'Keep the passkey'),
+    note)
+  return part
+}
+
 async function decisionsView() {
   setTab('decisions')
   const r = await call('GET', '/cards')
@@ -391,6 +499,7 @@ async function decisionsView() {
   show(
     screenBar({ title: 'Decisions', heading: true }),
     note ? el('p', { class: 'receipt', role: 'status' }, note) : null,
+    await fingerprintOffer(),
     r.body.cards.length
       ? [el('h2', { class: 'section' }, `Waiting on you (${r.body.cards.length})`),
         r.body.cards.map(c => listRow({ onclick: () => go('/m/decisions/' + c.id) }, {
@@ -445,14 +554,14 @@ async function choose(c, o, status) {
   if (c.risk !== 'high') return answer(c, o, status)
   const note = el('p', { class: 'warn', role: 'status' })
   const button = el('button', { class: 'primary', type: 'button', 'data-confirm': o.key, onclick: () =>
-    promptNow(button, note, () => answer(c, o, status)) }, 'Answer ' + o.label + ' with your passkey')
+    promptNow(button, note, () => answer(c, o, status)) }, 'Answer ' + o.label + ' with your ' + signInWord())
   show(el('div', { class: 'card' },
     el('h2', {}, 'Check this answer'),
     el('p', {}, `"${c.title}" is high risk. You are choosing:`),
     el('p', {}, el('strong', {}, o.label)),
     el('p', { class: 'quiet' }, o.consequence),
     el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
-    el('p', { class: 'quiet' }, 'Your passkey answers it. Cancel the prompt to change your mind.'),
+    el('p', { class: 'quiet' }, `Your ${signInWord()} answers it. Cancel the prompt to change your mind.`),
     button, note,
     el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
   await promptNow(button, note, () => answer(c, o, status))
@@ -683,7 +792,7 @@ function signInPart(v, status) {
       const s = await passkeySignIn()
       if (s.status === 200) return route()
       status.textContent = said(s.body)
-    } }, 'Sign in with your passkey'))
+    } }, 'Sign in with your ' + signInWord()))
 }
 
 function composer(key, label, send, status, gw) {
@@ -1580,7 +1689,7 @@ function chatSheet(gw, sid, title, v) {
   }
   function confirmDelete() {
     fill(deleteWords(title, name),
-      signed ? null : el('p', { class: 'quiet' }, 'Deleting needs your passkey. Its prompt opens when you press Delete for good.'),
+      signed ? null : el('p', { class: 'quiet' }, `Deleting needs your ${signInWord()}. Its prompt opens when you press Delete for good.`),
       el('button', { class: 'danger', type: 'button', 'data-confirm': 'delete', onclick: remove }, 'Delete for good'),
       el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Keep it'),
       note)
@@ -1943,8 +2052,24 @@ async function settingsView(note) {
   }
   const name = el('input', { autocomplete: 'off', placeholder: 'This phone', 'aria-label': 'Passkey name' })
   const alerts = await alertsPart(status)
+  // This phone's fingerprint key: kept only while the core still lists it.
+  let held = phoneKey()
+  if (held && r.status === 200 && !r.body.passkeys.some(k => k.id === held.passkey_id)) { forgetPhoneKey(); held = null }
+  const finger = held
+    ? [el('p', { class: 'quiet' }, 'On. This phone signs in and answers high-risk cards with your fingerprint.')]
+    : (await canUseFingerprint())
+      ? [el('p', { class: 'quiet' }, 'Sign in with your fingerprint right here instead of going out to your passkey app. ' +
+          'When Android asks where to save it, pick Google Password Manager.'),
+        el('button', { class: 'primary', type: 'button', onclick: async () => {
+          status.textContent = ''
+          const k = await addFingerprint()
+          if (k.ok) return settingsView('Fingerprint sign-in is on for this phone.')
+          status.textContent = k.message
+        } }, 'Use my fingerprint')]
+      : null
   show(
     el('h2', {}, 'Alerts'), alerts,
+    finger ? [el('h2', {}, 'Fingerprint'), finger] : null,
     el('h2', {}, 'Passkeys'), list, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''

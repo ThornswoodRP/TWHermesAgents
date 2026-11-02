@@ -185,6 +185,107 @@ class PasskeyCeremonies(unittest.TestCase):
         self.assertIn(cm.exception.reason, ("passkey_exists", "passkey_refused"))
 
 
+
+def desktop(w: World):
+    """A paired Desktop and its fresh principal."""
+    code = w.core.auth.operator_pairing_code(w.ws, "desktop", "One", by="tests")["code"]
+    dev, s = w.core.auth.redeem_pairing_code(w.ws, code, hermes_principal="nous:patrick")
+    return dev, s, w.core.auth.authenticate(s.token, hermes_principal="nous:patrick")
+
+
+@NEEDS_LIB
+class PhoneFingerprint(unittest.TestCase):
+    """The phone's own key (Patrick, 2 Nov): made by its platform authenticator,
+    and named in the sign-in so the phone answers with its fingerprint sheet
+    instead of Android handing the request to a passkey app."""
+
+    def setUp(self):
+        from thornswood_decisions.softkey import SoftKey
+        self.SoftKey = SoftKey
+        self.w = World()
+        self.addCleanup(self.w.close)
+        self.dev, self.s, self.p = phone(self.w)
+        self.pk = Passkeys(self.w.store, ORIGIN)
+
+    def add(self, key):
+        return self.pk.register(self.p, key.create(self.pk.register_options(self.p, on_phone=True)),
+                                "Fingerprint on this phone")
+
+    def test_the_phone_key_asks_for_the_phone_itself_with_its_lock(self):
+        opts = self.pk.register_options(self.p, on_phone=True)
+        sel = opts["authenticatorSelection"]
+        self.assertEqual((sel["authenticatorAttachment"], sel["userVerification"]), ("platform", "required"))
+        self.assertEqual(opts["hints"], ["client-device"])
+        # The phone's passkey app holds its passkey; naming it would refuse the phone's own key.
+        self.pk.register(self.p, self.SoftKey(ORIGIN, RP_ID).create(self.pk.register_options(self.p)), "Bitwarden")
+        self.assertEqual(self.pk.register_options(self.p, on_phone=True).get("excludeCredentials", []), [])
+        plain = self.pk.register_options(self.p)
+        self.assertEqual(len(plain["excludeCredentials"]), 1)
+        self.assertNotIn("authenticatorAttachment", plain["authenticatorSelection"])
+        self.assertEqual(plain["authenticatorSelection"]["residentKey"], "required")
+        self.assertNotIn("hints", plain)
+
+    def test_a_desktop_keeps_its_passkey(self):
+        _, _, p = desktop(self.w)
+        with self.assertRaises(CoreError) as cm:
+            self.pk.register_options(p, on_phone=True)
+        self.assertEqual((cm.exception.status, cm.exception.reason), (403, "not_a_phone"))
+        self.pk.register_options(p)  # the passkey is still offered there
+
+    def test_a_sign_in_names_the_phone_key_and_is_checked_as_any_passkey(self):
+        key = self.SoftKey(ORIGIN, RP_ID)
+        added = self.add(key)
+        self.assertEqual(added["credential_id"], passkey.b64url(key.credential_id))
+        opts = self.pk.sign_in_options(self.w.ws, added["credential_id"])
+        self.assertEqual([c["id"] for c in opts["allowCredentials"]], [added["credential_id"]])
+        self.assertEqual(opts["allowCredentials"][0]["transports"], ["internal"])
+        self.assertEqual((opts["hints"], opts["userVerification"]), (["client-device"], "required"))
+        dev, s = self.pk.sign_in(self.w.ws, key.get(opts))
+        p = self.w.core.auth.authenticate(s.token)
+        self.assertEqual((dev, p.fresh, p.method), (self.dev, True, "passkey"))
+
+    def test_without_the_phone_key_any_passkey_may_answer(self):
+        opts = self.pk.sign_in_options(self.w.ws)
+        self.assertEqual(opts.get("allowCredentials", []), [])
+        self.assertNotIn("hints", opts)
+
+    def test_no_user_verification_is_refused_for_the_phone_key_too(self):
+        key = self.SoftKey(ORIGIN, RP_ID)
+        added = self.add(key)
+        key.verified = False
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in(self.w.ws, key.get(self.pk.sign_in_options(self.w.ws, added["credential_id"])))
+        self.assertEqual(cm.exception.reason, "passkey_refused")
+
+    def test_a_removed_or_unknown_phone_key_is_not_named(self):
+        key = self.SoftKey(ORIGIN, RP_ID)
+        added = self.add(key)
+        for cred in (passkey.b64url(b"\x01" * 16), "not base64 at all!"):
+            with self.assertRaises(CoreError) as cm:
+                self.pk.sign_in_options(self.w.ws, cred)
+            self.assertIn(cm.exception.reason, ("no_phone_key", "bad_credential"))
+        p = self.w.core.auth.authenticate(self.s.token)
+        self.pk.revoke(p, added["passkey_id"])
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in_options(self.w.ws, added["credential_id"])
+        self.assertEqual((cm.exception.status, cm.exception.reason), (404, "no_phone_key"))
+
+    def test_a_revoked_phone_is_not_named(self):
+        added = self.add(self.SoftKey(ORIGIN, RP_ID))
+        self.w.core.auth.revoke_device(self.p, self.dev)
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in_options(self.w.ws, added["credential_id"])
+        self.assertEqual(cm.exception.reason, "no_phone_key")
+
+    def test_a_desktop_passkey_is_never_named_as_a_phone_key(self):
+        _, _, p = desktop(self.w)
+        key = self.SoftKey(ORIGIN, RP_ID)
+        added = self.pk.register(p, key.create(self.pk.register_options(p)), "One")
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in_options(self.w.ws, added["credential_id"])
+        self.assertEqual(cm.exception.reason, "no_phone_key")
+
+
 class PasskeyWithoutLibraryOrOrigin(unittest.TestCase):
     def test_no_https_origin_means_no_passkeys(self):
         w = World()
@@ -245,6 +346,19 @@ class AppRoutes(unittest.TestCase):
         for path in ("/cards", "/work", "/room", "/changes?since=0"):
             status, _, body = s.call("GET", path, headers={"Cookie": cookie})
             self.assertEqual((status, body["error"]), (423, "mobile_read_off"), path)
+
+    @NEEDS_LIB
+    def test_the_phone_key_routes(self):
+        s = Served(self)
+        cookie, paired = s.phone()
+        h = {"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": paired["csrf"]}
+        status, _, body = s.call("POST", "/passkeys/register/options", headers=h, body={"on_phone": True})
+        self.assertEqual((status, body["authenticatorSelection"]["authenticatorAttachment"]), (200, "platform"))
+        status, _, body = s.call("POST", "/passkeys/sign-in/options", headers={"Origin": ORIGIN}, body={"phone_key": 5})
+        self.assertEqual((status, body["error"]), (400, "bad_field"))
+        status, _, body = s.call("POST", "/passkeys/sign-in/options", headers={"Origin": ORIGIN},
+                                 body={"phone_key": passkey.b64url(b"\x02" * 16)})
+        self.assertEqual((status, body["error"]), (404, "no_phone_key"))
 
     def test_the_sign_in_screen_asks_only_whether_a_passkey_exists(self):
         s = Served(self)
@@ -314,13 +428,17 @@ class AppFiles(unittest.TestCase):
         js = (Path(__file__).resolve().parent.parent / "thornswood_decisions" / "app" / "app.js").read_text(encoding="utf-8")
         for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
             self.assertNotIn(bad, js)
-        # The one thing kept in this browser's storage is the phone's copy of the chats it has shown
-        # (Patrick, 2 Nov: every open waited for One), under its one key, deleted at sign-out. Never a
-        # token, a key or the CSRF value.
+        # What this browser's storage keeps, each under its one key: the phone's copy of the chats it
+        # has shown (Patrick, 2 Nov: every open waited for One), deleted at sign-out; the public id of
+        # this phone's fingerprint key, which its sign-in names (an id the core sends in the open,
+        # never the private key, which never leaves the phone's authenticator); and whether he put
+        # the fingerprint offer off. Never a token, a private key or the CSRF value.
         uses = [ln.strip() for ln in js.splitlines() if "localStorage" in ln]
-        self.assertEqual(len(uses), 3, uses)
+        self.assertEqual(len(uses), 8, uses)
         for ln in uses:
-            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\(KEPT\b", ln)
+            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER)\b", ln)
+        self.assertIn("localStorage.setItem(PHONE_KEY, JSON.stringify(k))", js)
+        self.assertIn("keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })", js)
         self.assertIn("forgetKept()\n      csrf = null", js)
 
 
