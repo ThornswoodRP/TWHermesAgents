@@ -368,16 +368,42 @@ if systemctl start tw-decide-peers.service; then ok "the tailnet's view of One r
 fi
 
 # 14. Dictation, last, so every other part is running whatever it finds: Hermes's own local Whisper on a socket only the core may use.
-systemctl enable --quiet tw-decide-voice.service
-systemctl reset-failed tw-decide-voice.service
-systemctl restart tw-decide-voice.service
-for _ in $(seq 1 30); do [[ -S /run/tw/decide-voice/voice.sock ]] && break; sleep 0.5; done
-[[ -S /run/tw/decide-voice/voice.sock ]] || stop "dictation did not open its socket: journalctl -u tw-decide-voice -n 50"
-[[ "$(stat -c '%a %G' /run/tw/decide-voice/voice.sock)" == "660 tw-decide-voice" ]] \
-  || stop "dictation's socket is $(stat -c '%a %G' /run/tw/decide-voice/voice.sock), not 660 tw-decide-voice"
+start_voice() {
+  systemctl enable --quiet tw-decide-voice.service
+  systemctl reset-failed tw-decide-voice.service
+  systemctl restart tw-decide-voice.service
+  for _ in $(seq 1 30); do [[ -S /run/tw/decide-voice/voice.sock ]] && break; sleep 0.5; done
+  [[ -S /run/tw/decide-voice/voice.sock ]] || stop "dictation did not open its socket: journalctl -u tw-decide-voice -n 50"
+  [[ "$(stat -c '%a %G' /run/tw/decide-voice/voice.sock)" == "660 tw-decide-voice" ]] \
+    || stop "dictation's socket is $(stat -c '%a %G' /run/tw/decide-voice/voice.sock), not 660 tw-decide-voice"
+}
+# Asked as the core asks: Voice().check (which Whisper) or Voice().prepare (load its model).
+voice_ask() {
+  runuser -u tw-decide -g tw-decide -G tw-decide-voice -- /usr/bin/python3 -I -c \
+    "import sys; sys.path.insert(0, '/opt/thornswood-hermes/current'); from thornswood_decisions.voice import Voice; print(Voice().$1() or '')"
+}
+start_voice
 ok "dictation listens on /run/tw/decide-voice/voice.sock (660, tw-decide-voice)"
-whisper="$(runuser -u tw-decide -g tw-decide -G tw-decide-voice -- /usr/bin/python3 -I -c \
-  'import sys; sys.path.insert(0, "/opt/thornswood-hermes/current"); from thornswood_decisions.voice import Voice; print(Voice().check() or "")')" \
-  || stop "the core could not ask dictation which Whisper it has: journalctl -u tw-decide-voice -n 50"
-[[ -n "$whisper" ]] || stop "Hermes on this VM has no local Whisper (faster-whisper in Hermes's own runtime, or HERMES_LOCAL_STT_COMMAND), so dictation would answer nothing. Install it into Hermes, then run this again."
+whisper="$(voice_ask check)" || stop "the core could not ask dictation which Whisper it has: journalctl -u tw-decide-voice -n 50"
+if [[ -z "$whisper" ]]; then
+  # faster-whisper is Hermes's own optional extra, stt-whisper, pinned with its hashes in Hermes's
+  # uv.lock. Hermes's package manager installs it with the command Hermes itself names for it
+  # (pm/extras.py install_hint, pm/cli.py install --extra, at the pinned commit), run as the owner of
+  # Hermes's install, as Hermes asks. Free and local: no new service, nothing outside Hermes's lock.
+  # From 3:55 PM on 2 Nov the install only checked for it, so every install stopped here (#97).
+  hermes_dir="$(runuser -l hermes -c "$(printf '%q' "$hermes_bin") --version" 2>/dev/null \
+    | sed -n 's/^Install directory:[[:space:]]*//p' | head -n1)"
+  [[ -n "$hermes_dir" && -d "$hermes_dir" ]] || stop "hermes --version did not name Hermes's install directory, so its Whisper extra cannot be installed as its owner."
+  hermes_owner="$(stat -c %U "$hermes_dir")"
+  runuser -l "$hermes_owner" -c "$(printf '%q' "$hermes_bin") pm install --extra stt-whisper" \
+    || stop "Hermes did not install its stt-whisper extra (hermes pm install --extra stt-whisper, as $hermes_owner); what it printed is above."
+  ok "Hermes installed its own local Whisper (its stt-whisper extra) into $hermes_dir, as $hermes_owner"
+  start_voice
+  whisper="$(voice_ask check)" || stop "the core could not ask dictation which Whisper it has: journalctl -u tw-decide-voice -n 50"
+  [[ -n "$whisper" ]] || stop "Hermes installed its stt-whisper extra, but dictation still finds no local Whisper: journalctl -u tw-decide-voice -n 50"
+fi
 ok "dictation uses Hermes's local Whisper: $whisper"
+# The model Hermes's stt.local.model names, loaded now (downloaded the first time, from Whisper's own
+# model host, as Hermes's first transcription would), so the first recording does not wait on it.
+model="$(voice_ask prepare)" || stop "Whisper on the VM did not load its model: journalctl -u tw-decide-voice -n 50"
+ok "Whisper's model $model is loaded for dictation"
