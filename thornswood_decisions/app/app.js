@@ -580,8 +580,22 @@ function composer(key, label, send, status, gw) {
 
 // The state in a sentence, unless it is ready, or turned off (said by itself below).
 function offLine(v) {
-  if (v.state === 'ready' || v.state === 'turned_off') return null
+  if (v.state === 'ready' || v.state === 'turned_off') return connectorLine(v)
   return el('p', { class: 'warn', 'data-state': v.state }, stateWords(v)[1])
+}
+
+// Which copy a gateway's connector runs, when it is not the core's own release: updating itself,
+// an update it could not do, or an old copy that does not update itself.
+function connectorLine(v) {
+  const c = v.connector
+  if (!c || c.current) return null
+  const name = GATEWAY[v.gateway] || v.name
+  const short = x => (x || '').slice(0, 7)
+  const words = c.updating ? `${name}'s connector is updating itself to ${short(c.updating)}.`
+    : c.update_why ? `${name}'s connector ${c.update_why}.`
+    : c.commit ? `${name}'s connector runs ${short(c.commit)} and updates itself to ${short(c.release)} next.`
+    : `${name}'s connector is an old copy that does not update itself. It needs its one-time update.`
+  return el('p', { class: c.update_why || !c.commit ? 'warn' : 'quiet', 'data-connector': c.updating ? 'updating' : (c.commit ? 'behind' : 'old') }, words)
 }
 
 // ── the chat layout and Markdown (redesign step 1, plan Part 11) ──────────
@@ -976,6 +990,7 @@ async function ownPage(path) {
 function chatRow(gw, c) {
   return el('button', { class: 'row', type: 'button', 'data-chat': c.id, onclick: () => go(`/m/hermes/${gw}/${c.id}`) },
     el('strong', {}, c.title || 'Untitled chat'),
+    c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
     el('span', { class: 'quiet' }, '  ' + when(c.last_at)),
     el('div', { class: 'quiet' }, c.preview.slice(0, 120)))
 }
@@ -1089,7 +1104,8 @@ function historyPart(gw, sid, t, name) {
 function pendingItems(mine, readAt) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
     .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status,
-      note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''),
+      note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
+        + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
       warn: m.status === 'dead' || m.status === 'uncertain' }))
 }
 

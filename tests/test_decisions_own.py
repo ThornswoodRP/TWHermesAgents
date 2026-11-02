@@ -14,8 +14,8 @@ nothing reaches a real Hermes.
 from __future__ import annotations
 
 import json
-import re
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -592,11 +592,43 @@ class TheConnector(unittest.TestCase):
 
     def test_lists_chats_the_way_hermes_pickers_do(self):
         snap = own_connector.snapshot(self.db, ["s_tg"], datetime(2026, 11, 1, tzinfo=timezone.utc))
-        self.assertEqual([c["id"] for c in snap["chats"]], ["s_plan", "s_old2", "s_tg"])
-        self.assertEqual(snap["chats"][0]["preview"], "three things")
+        # His Bot Chat first (hidden from Hermes's pickers, listed here), then the pickers' own list.
+        self.assertEqual([c["id"] for c in snap["chats"]], ["s_bot", "s_plan", "s_old2", "s_tg"])
+        self.assertEqual(snap["chats"][1]["preview"], "three things")
         plan = next(o for o in snap["open"] if o["id"] == "s_plan")
         self.assertEqual([m["text"] for m in plan["messages"]], ["what is on", "three things"])
-        self.assertEqual(clean(snap)["chats"][2]["title"], "")
+        self.assertEqual(clean(snap)["chats"][3]["title"], "")
+        self.assertEqual([c.get("bot_chat", False) for c in clean(snap)["chats"]], [True, False, False, False])
+
+    def test_the_bot_chat_is_listed_first_by_the_id_it_goes_on_as(self):
+        con = sqlite3.connect(self.db)
+        # Hermes compressed it: the titled, hidden row ended with 'compression' and goes on as s_bot2.
+        con.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 's_bot'")
+        con.execute("INSERT INTO sessions VALUES('s_bot2', 'cli', NULL, 20, 950, NULL, 's_bot', NULL, 0, 1)")
+        con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bot2', 'assistant', "
+                    "'Rift: the load order is done', 951)")
+        # A visible chat merely named like it is an ordinary chat; an archived Bot Chat is retired.
+        con.execute("INSERT INTO sessions VALUES('s_named', 'cli', 'Bot Chat old', 5, 100, NULL, NULL, NULL, 0, 0)")
+        con.commit()
+        con.close()
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        first = snap["chats"][0]
+        self.assertEqual((first["id"], first["title"], first["preview"], first["bot_chat"]),
+                         ("s_bot2", "Bot Chat", "Rift: the load order is done", True))
+        self.assertEqual([c["id"] for c in snap["chats"]].count("s_bot2"), 1)
+        self.assertIn("s_bot2", [o["id"] for o in snap["open"]])
+        page = own_connector.chats_page(self.db, None, "")
+        self.assertEqual(page["chats"][0]["id"], "s_bot2")
+        self.assertEqual(own_connector.chats_page(self.db, None, "bot")["chats"][0]["id"], "s_bot2")
+        self.assertNotIn("s_bot2", [c["id"] for c in own_connector.chats_page(self.db, None, "plan")["chats"]])
+        later = own_connector.chats_page(self.db, page["chats"][-1]["last_at"], "")
+        self.assertNotIn("s_bot2", [c["id"] for c in later["chats"]])
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE sessions SET archived = 1 WHERE id = 's_bot'")
+        con.commit()
+        con.close()
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        self.assertFalse(any(c.get("bot_chat") for c in snap["chats"]))
 
     def test_the_feed_fits_under_the_cores_size(self):
         con = sqlite3.connect(self.db)
@@ -750,7 +782,7 @@ class TheConnector(unittest.TestCase):
     def test_it_imports_nothing_from_this_repository(self):
         src = Path(own_connector.__file__).read_text(encoding="utf-8")
         self.assertNotIn("from .", src)
-        self.assertNotIn("thornswood_decisions", src.split('"""', 2)[2])
+        self.assertIsNone(re.search(r"^\s*(from|import)\s+thornswood", src, re.M))
 
 
 if __name__ == "__main__":

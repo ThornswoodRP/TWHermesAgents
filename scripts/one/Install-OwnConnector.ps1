@@ -19,12 +19,21 @@ VM (1 Nov, answer A): nothing listens on One, and the VM never reaches in.
      %LOCALAPPDATA%\Thornswood\own-connector, with the commit they came from.
   4. It runs one round (--once) to check the token, the address and Hermes.
   5. It adds the task "Thornswood Own Hermes Connector" to Task Scheduler,
-     which starts the connector at every sign-in and again if it stops, and
-     starts it now.
+     which starts the connector at every sign-in, and starts it now. The task
+     runs it under --supervise, which starts it again a minute after any stop.
+
+After that the connector keeps itself current: the core names the release
+the VM runs (a commit of main that passed the whole suite on the VM), and
+the connector fetches main in this clone, takes its two files from that
+commit with git show, finishes the turns it is running and starts again on
+the new copy. Code comes from GitHub through this clone, never from the VM.
+The update does not touch this clone's working tree, so leave the clone
+where it is.
 
 While own_chat_write is off the connector asks the core every half minute,
 does nothing and copies nothing. It prints a PASS or FAIL line for each step
-and exits 1 when any fails. Run it again after an update to main.
+and exits 1 when any fails. It is run once; a copy installed before the
+self-update (2 Nov) needs this one run to get it.
 
 .EXAMPLE
 pwsh -NoProfile -File scripts\one\Install-OwnConnector.ps1 -Core https://hermes.<tailnet>.ts.net/api/v1
@@ -148,9 +157,13 @@ $line = ($out | Select-Object -Last 1)
 if ($code -ne 0) { Fail "one round did not work (exit $code): $line" }
 Pass "one round: $line"
 
-# 5. The task: at every sign-in, again a minute after it stops, never two at once.
+# 5. The task: at every sign-in, never two at once. --supervise starts the connector again a minute
+# after any stop and at once after it updates itself from this clone (--clone, with this git).
 if ($NoTask) { Pass 'no task made (-NoTask)'; exit 0 }
-$argLine = ($connArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
+$git = (Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+if (-not $git) { Fail 'git is not on PATH; the connector updates itself with it' }
+$taskArgs = @('-I', $script, '--supervise', '--clone', $here, '--git', $git.Source) + $connArgs[2..($connArgs.Count - 1)]
+$argLine = ($taskArgs | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } }) -join ' '
 $action = New-ScheduledTaskAction -Execute $runner -Argument $argLine -WorkingDirectory $HOME
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -172,4 +185,4 @@ Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 5
 $state = (Get-ScheduledTask -TaskName $taskName).State
 if ("$state" -ne 'Running') { Fail "the task '$taskName' is $state, not running; Task Scheduler's history for it says why" }
-Pass "the task '$taskName' runs the connector now and at every sign-in"
+Pass "the task '$taskName' runs the connector now and at every sign-in, and it keeps itself current from $here"

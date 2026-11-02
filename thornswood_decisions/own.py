@@ -35,6 +35,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .auth import Principal
 from . import reactions
@@ -140,6 +141,8 @@ def clean(body) -> dict:
             raise CoreError(400, "bad_feed", "each chat is an object")
         row = {k: _text(c.get(k), n) for k, n in CHAT_FIELDS.items()}
         row["id"] = _sid(row["id"])
+        if c.get("bot_chat") is True:
+            row["bot_chat"] = True
         out_chats.append(row)
     ids = [c["id"] for c in out_chats]
     if len(set(ids)) != len(ids):
@@ -248,6 +251,52 @@ class _Pages:
 PAGES = _Pages()
 
 
+def _release(here: Path | None = None) -> str | None:
+    """The commit the core runs: the VM installs each release in /opt/thornswood-hermes/releases/<commit>
+    after the whole suite passed there (thornswood_brokers/follow_main.py). None anywhere else."""
+    name = (here or Path(__file__).resolve().parent).parent.name
+    return name if re.match(r"^[0-9a-f]{40}$", name) else None
+
+
+RELEASE = _release()
+
+
+class _Connectors:
+    """What each own connector last said it was doing, in memory (each claim says it again within
+    seconds): its commit, how many turns it is running of how many at once and since when the oldest
+    runs, and an update it is on or could not do. It is how the phone says why a message waits."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.said: dict = {}
+
+    def seen(self, ws: str, gw: str, body: dict, now: datetime) -> None:
+        def count(v, top):
+            return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= top else 0
+        commit = body.get("commit")
+        updating = body.get("updating")
+        info = {"commit": commit if isinstance(commit, str) and re.match(r"^[0-9a-f]{40}$", commit) else None,
+                "busy": count(body.get("busy"), 100), "parallel": count(body.get("parallel"), 100),
+                "busy_for": count(body.get("busy_for"), 10 ** 7),
+                "updating": updating if isinstance(updating, str) and re.match(r"^[0-9a-f]{40}$", updating) else None,
+                "update_why": str(body.get("update_why") or "")[:200], "at": now}
+        with self.lock:
+            self.said[(ws, gw)] = info
+
+    def get(self, ws: str, gw: str, now: datetime) -> dict | None:
+        with self.lock:
+            info = self.said.get((ws, gw))
+        return info if info and now - info["at"] < ONLINE else None
+
+
+CONNECTORS = _Connectors()
+
+
+def _minutes(seconds: int) -> str:
+    m = seconds // 60
+    return "under a minute ago" if m < 1 else ("a minute ago" if m == 1 else f"{m} minutes ago")
+
+
 def fetch_page(key: tuple, wait, now: datetime) -> dict:
     """A page from memory, or asked for and waited on for at most `wait` seconds; {"pending": true} until then."""
     try:
@@ -307,6 +356,8 @@ def clean_page(kind: str, body) -> dict:
                 raise CoreError(400, "bad_page", "each chat is an object")
             row = {k: _text(c.get(k), n) for k, n in CHAT_FIELDS.items()}
             row["id"] = _sid(row["id"])
+            if c.get("bot_chat") is True:
+                row["bot_chat"] = True
             out.append(row)
         if len({c["id"] for c in out}) != len(out):
             raise CoreError(400, "bad_page", "the page names a chat twice")
@@ -489,6 +540,7 @@ class OwnChat:
     def _state(self, p: Principal, gw: str) -> dict:
         snap = Feeds(self.s).get(p.workspace_id, gw)
         return {"gateway": gw, "name": NAMES[gw], "online": self.online(p.workspace_id, gw),
+                "connector": self._connector(p.workspace_id, gw),
                 **self.gateway_state(p.workspace_id, gw),
                 "off_why": self._off_why(p.workspace_id, gw), "last_seen": self._last_seen(p.workspace_id, gw),
                 "as_of": snap["as_of"], "snap": snap[gw]}
@@ -519,6 +571,40 @@ class OwnChat:
         starting = [dict(r) for r in rows if r["made_session_id"] not in listed]
         return st | {"chats": snap.get("chats", []), "starting": starting, **self._can(p)}
 
+    def _connector(self, workspace_id: str, gw: str) -> dict | None:
+        """Which copy its connector runs against the core's release, and an update it is on or could not do."""
+        info = CONNECTORS.get(workspace_id, gw, self.s.clock())
+        if info is None:
+            return None
+        return {"commit": info["commit"], "release": RELEASE,
+                "current": RELEASE is None or info["commit"] == RELEASE,
+                "updating": info["updating"], "update_why": info["update_why"]}
+
+    def _waits(self, workspace_id: str, gw: str, mine: list[dict]) -> None:
+        """Why each message still waiting to send waits, in words, from what the connector last said."""
+        info = CONNECTORS.get(workspace_id, gw, self.s.clock())
+        name = NAMES[gw]
+        earlier = False
+        for m in mine:
+            if m["status"] == "leased":
+                earlier = True
+            if m["status"] != "queued":
+                continue
+            if earlier:
+                m["waits"] = f"{name} is still answering your earlier message in this chat; this one goes next"
+            elif info is None:
+                m["waits"] = f"{name}'s connector has not said what it is doing in the last 2 minutes"
+            elif info["updating"]:
+                m["waits"] = f"{name}'s connector is updating itself to {info['updating'][:7]}; it takes this next"
+            elif info["parallel"] and info["busy"] >= info["parallel"]:
+                m["waits"] = (f"{name} is still answering {info['busy']} earlier messages, the oldest started "
+                              f"{_minutes(info['busy_for'])}; this one goes when one ends")
+            elif info["commit"] is None and info["parallel"] == 0:
+                m["waits"] = (f"{name}'s connector is an old copy that does not say what it is doing and does not "
+                              "update itself; it needs its one-time update")
+            elif info["update_why"]:
+                m["waits"] = f"{name}'s connector {info['update_why']}"
+
     def view(self, p: Principal, gw: str, sid: str) -> dict:
         self._patrick(p)
         st = self._state(p, self._gateway(gw))
@@ -536,8 +622,10 @@ class OwnChat:
             "LIMIT ?", (p.workspace_id, gw, sid, sid, MINE)).fetchall()
         # His reactions in this chat that the phone has asked for, so it shows each one at once, and
         # how it went, until the chat's own page shows it.
+        mine = [dict(r) for r in reversed(rows)]
+        self._waits(p.workspace_id, gw, mine)
         return st | {"chat": chat or {"id": sid, "title": ""}, "loaded": opened is not None, "history": history,
-                     "mine": [dict(r) for r in reversed(rows)], "reactions": Reactions(self.s).shown(p.workspace_id, gw, sid),
+                     "mine": mine, "reactions": Reactions(self.s).shown(p.workspace_id, gw, sid),
                      **self._can(p)}
 
     def _unsettled(self, workspace_id: str, gw: str) -> int:
@@ -694,7 +782,8 @@ class OwnChat:
         return {"sha256": digest, "wanted": self._wanted(workspace_id, gw)}
 
     def claim(self, workspace_id: str, gw: str, token: str | None, limit: int = MAX_CLAIM, ready=False,
-              why: str = "", state: str | None = None, forwarded_for: str | None = None) -> dict:
+              why: str = "", state: str | None = None, forwarded_for: str | None = None,
+              doing: dict | None = None) -> dict:
         """Lease the oldest waiting message of each chat that has nothing in flight, at most `limit`.
 
         Every claim is also the connector saying it is there and whether that Hermes's gateway is running
@@ -707,6 +796,7 @@ class OwnChat:
         self._check_token(workspace_id, gw, token)
         self._seen(workspace_id, gw, ready, "" if ready else str(why)[:200], state if isinstance(state, str) else None,
                    tailnet_ip(forwarded_for))
+        CONNECTORS.seen(workspace_id, gw, doing if isinstance(doing, dict) else {}, self.s.clock())
         if not self.s.flag(workspace_id, "own_chat_write"):
             raise CoreError(423, "own_chat_off", "nothing goes to your own Hermes while own_chat_write is off")
         items = []
@@ -731,7 +821,7 @@ class OwnChat:
                               "send_key": r["send_key"], "lease_until": until})
             reactions = [{"session_id": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, gw)] if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
-                "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions}
+                "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "release": RELEASE}
 
     def reacted(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
         """What came of setting one reaction. An answer about an older wish than the newest is dropped,

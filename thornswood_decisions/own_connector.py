@@ -193,6 +193,13 @@ ORDER BY last_at DESC LIMIT ?
 """
 # A compressed chat goes on in a new session whose parent ended with 'compression'; only the newest
 # is listed, as Hermes's pickers show one row for it (hermes_state_sessions.py _expand_compression_lineage_ids).
+
+# His Bot Chat, the chat Bot Mode and every Bot's message to him land in. Hermes keeps it hidden from
+# its pickers, and its name is its identity: the canonical one is the hidden, unarchived row titled
+# exactly "Bot Chat" (hermes_state_titles.py CANONICAL_BOT_CHAT_TITLE; gateway/session_bot.py finds it
+# by that title, then goes on to its compression tip). The phone lists it first, by the id it goes on as.
+BOT_CHAT = "Bot Chat"
+BOT_CHAT_SQL = "SELECT id FROM sessions WHERE title = ? AND hidden = 1 AND archived = 0 ORDER BY started_at DESC LIMIT 1"
 MESSAGES_SQL = ("SELECT role, content, timestamp FROM messages WHERE session_id = ? AND active = 1 "
                 "AND role IN ('user', 'assistant') AND content IS NOT NULL AND content != '' "
                 "ORDER BY id DESC LIMIT ?")
@@ -208,9 +215,10 @@ def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = M
     """The chat list and the open chats' last messages, from Hermes's state.db, read only."""
     con = _ro(state_db)
     try:
-        rows = con.execute(LIST_SQL, (*NOT_LISTED, CHATS)).fetchall()
-        chats, previews = [], {}
-        for r in rows:
+        bot = bot_chat(con)
+        rows = [r for r in con.execute(LIST_SQL, (*NOT_LISTED, CHATS)).fetchall() if not bot or r["id"] != bot["id"]]
+        chats, previews = ([bot], {bot["id"]: bot["preview"]}) if bot else ([], {})
+        for r in rows[:CHATS - len(chats)]:
             last = con.execute(MESSAGES_SQL, (r["id"], 1)).fetchone()
             text = _text(last["content"]) if last else ""
             chats.append({"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]),
@@ -249,6 +257,20 @@ def _columns(con: sqlite3.Connection, table: str) -> set[str]:
     return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
 
 
+def bot_chat(con: sqlite3.Connection) -> dict | None:
+    """His Bot Chat as the phone lists it: the id it goes on as now, or None when this Hermes has none."""
+    row = con.execute(BOT_CHAT_SQL, (BOT_CHAT,)).fetchone()
+    if row is None:
+        return None
+    tip = con.execute(LINEAGE_SQL + "SELECT s.id, coalesce(s.last_activity_at, s.started_at) AS last_at "
+                      "FROM descendants d JOIN sessions s ON s.id = d.id ORDER BY d.depth DESC, s.started_at DESC "
+                      "LIMIT 1", (row["id"], row["id"])).fetchone()
+    last = con.execute(MESSAGES_SQL, (tip["id"], 1)).fetchone()
+    text = _text(last["content"]) if last else ""
+    return {"id": tip["id"], "title": BOT_CHAT, "last_at": _iso(tip["last_at"]), "preview": text[:200],
+            "bot_chat": True}
+
+
 def chat_exists(state_db: Path, session_id: str) -> bool:
     con = _ro(state_db)
     try:
@@ -270,15 +292,17 @@ def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS) 
     sql = sql.rstrip() + "".join(f"\n  AND {w}" for w in where) + "\nORDER BY last_at DESC, s.id LIMIT ?"
     con = _ro(state_db)
     try:
-        rows = con.execute(sql, (*args, n + 1)).fetchall()
-        chats = []
-        for r in rows[:n]:
+        bot = bot_chat(con)
+        rows = [r for r in con.execute(sql, (*args, n + 1)).fetchall() if not bot or r["id"] != bot["id"]]
+        # It heads the first page, and a search for its name finds it.
+        chats = [bot] if bot and not before and q.lower() in BOT_CHAT.lower() else []
+        for r in rows[:n - len(chats)]:
             last = con.execute(MESSAGES_SQL, (r["id"], 1)).fetchone()
             chats.append({"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]),
                           "preview": (_text(last["content"]) if last else "")[:200]})
     finally:
         con.close()
-    return {"chats": chats, "more": len(rows) > n}
+    return {"chats": chats, "more": len(rows) > n - (1 if chats and chats[0].get("bot_chat") else 0)}
 
 
 def messages_page(state_db: Path, session_id: str, before: int | None, n: int = PAGE_MESSAGES) -> dict:
@@ -464,6 +488,134 @@ class Hermes:
         return session_id
 
 
+# ── keeping One's copy current ────────────────────────────────────────────
+
+# The release the VM runs: a commit of main that passed the whole suite there before it was installed
+# (thornswood_brokers/follow_main.py). The core names it in every claim answer.
+RELEASE = re.compile(r"^[0-9a-f]{40}$")
+UPDATE_FILES = ("own_connector.py", "room_send.py")
+UPDATE_EXIT = 75         # "updated, start me again at once", for --supervise
+RESTART_SECONDS = 60     # how long --supervise waits after any other stop
+
+
+def own_commit(here: Path | None = None) -> str | None:
+    """The commit this copy came from: COMMIT beside it (One: written by its installer and by each update
+    since), or the release folder it runs from (the VM: /opt/thornswood-hermes/releases/<commit>)."""
+    here = here or Path(__file__).resolve().parent
+    try:
+        commit = (here / "COMMIT").read_text(encoding="ascii").strip()
+    except OSError:
+        commit = here.parent.name
+    return commit if RELEASE.match(commit) else None
+
+
+class Updater:
+    """Moves One's copy to the release the VM runs, the way the VM follows main by itself (#2862).
+
+    The VM names the commit; the code comes from GitHub, never from the VM: Patrick's own clone of
+    Thornswood-Hermes on One fetches main, the commit has to be on main, and its two files are taken
+    from that commit with `git show`, each checked to compile before either is put in place, then
+    COMMIT. The connector then finishes the turns it is running, takes no new one, and stops with
+    UPDATE_EXIT, which --supervise answers by starting the new copy at once. A failed update changes
+    nothing, is told to the core in words, and is tried again only for a newer release (or at the next
+    sign-in): never in a loop."""
+
+    def __init__(self, clone: Path, git: str, folder: Path, run=subprocess.run):
+        self.clone, self.git_bin, self.folder, self.run = clone, git, folder, run
+
+    def _git(self, *args: str) -> subprocess.CompletedProcess:
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+        return self.run([self.git_bin, "-C", str(self.clone), *args], capture_output=True, timeout=120,
+                        check=False, stdin=subprocess.DEVNULL, env=env)
+
+    def to(self, release: str) -> tuple[bool, str]:
+        """(done, why not)."""
+        if not RELEASE.match(release):
+            return False, "that is not a commit"
+        try:
+            got = self._git("fetch", "--quiet", "origin", "main")
+            if got.returncode != 0:
+                return False, f"git fetch in {self.clone.name} failed (exit {got.returncode})"
+            if self._git("merge-base", "--is-ancestor", release, "origin/main").returncode != 0:
+                return False, f"{release[:12]} is not on main"
+            files = {}
+            for name in UPDATE_FILES:
+                got = self._git("show", f"{release}:thornswood_decisions/{name}")
+                if got.returncode != 0:
+                    return False, f"{name} is not in {release[:12]}"
+                compile(got.stdout, name, "exec")
+                files[name] = got.stdout
+        except subprocess.TimeoutExpired:
+            return False, "git did not answer in two minutes"
+        except (OSError, SyntaxError, ValueError) as exc:
+            return False, f"the update stopped ({type(exc).__name__})"
+        for name, data in files.items():
+            part = self.folder / f"{name}.part"
+            part.write_bytes(data)
+            os.replace(part, self.folder / name)
+        part = self.folder / "COMMIT.part"
+        part.write_text(release, encoding="ascii")
+        os.replace(part, self.folder / "COMMIT")
+        return True, ""
+
+
+def supervise(argv: list[str], run=subprocess.Popen, sleep=time.sleep, rounds: int | None = None,
+              contain: bool = True) -> int:
+    """--supervise, as One's task runs it: the connector in a process of its own, started again at once
+    when it stops to load an update, and a minute after any other stop. On Windows the connector is in
+    a job object that ends with this process, so stopping the task never leaves a connector behind."""
+    child = [sys.executable, "-I", str(Path(__file__).resolve()), *[a for a in argv if a != "--supervise"]]
+    job = _job() if WINDOWS and contain else None
+    n = 0
+    while rounds is None or n < rounds:
+        n += 1
+        proc = run(child, stdin=subprocess.DEVNULL)
+        if job is not None:
+            _in_job(job, proc)
+        if proc.wait() != UPDATE_EXIT:
+            sleep(RESTART_SECONDS)
+    return 0
+
+
+def _job():
+    """A job object whose processes end when its last handle closes (this process ending)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Basic(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_uint64 * 6),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    job = k32.CreateJobObjectW(None, None)
+    info = Extended()
+    # KILL_ON_JOB_CLOSE, and BREAKAWAY_OK so a process Hermes starts to outlive its caller still can.
+    info.BasicLimitInformation.LimitFlags = 0x2000 | 0x800
+    if not job or not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        raise SystemExit(f"STOP: could not make the connector's job object ({ctypes.get_last_error()})")
+    return (k32, job)
+
+
+def _in_job(job, proc) -> None:
+    k32, handle = job
+    if not k32.AssignProcessToJobObject(handle, int(proc._handle)):
+        proc.kill()
+        raise SystemExit("STOP: could not put the connector in its job object")
+
+
 # ── the core ──────────────────────────────────────────────────────────────
 
 class Core:
@@ -491,8 +643,13 @@ class Core:
 
 
 class OwnConnector:
-    def __init__(self, core: Core, hermes: Hermes, state_db: Path, say=say, clock=time.monotonic):
+    def __init__(self, core: Core, hermes: Hermes, state_db: Path, say=say, clock=time.monotonic,
+                 commit: str | None = None, updater: Updater | None = None):
         self.core, self.hermes, self.state_db, self.say, self.clock = core, hermes, state_db, say, clock
+        self.commit, self.updater = commit, updater
+        self.tried: str | None = None       # the release an update was last tried for
+        self.update_why = ""                # why that update did not happen
+        self.leaving: str | None = None     # the release this copy was replaced with: finish, then stop
         self.unsaid: list[dict] = []
         self.running: list[threading.Thread] = []
         self.wanted: list[str] = []
@@ -607,15 +764,39 @@ class OwnConnector:
             self.say(f"FAIL feed: the core answered {status}")
         return status
 
+    def busy(self) -> dict:
+        """What it is doing, for the phone's words about a message that waits: how many turns are running,
+        of how many at once, since when the oldest runs, its commit, and an update it is on or could not do."""
+        now = self.clock()
+        started = [getattr(t, "started_at", now) for t in self.running]
+        return {"commit": self.commit, "busy": len(self.running), "parallel": PARALLEL,
+                "busy_for": int(now - min(started)) if started else 0,
+                "updating": self.leaving, "update_why": self.update_why}
+
+    def _update(self, release) -> None:
+        if (self.updater is None or self.leaving or not isinstance(release, str) or not RELEASE.match(release)
+                or release == self.commit or release == self.tried):
+            return
+        self.tried = release
+        done, why = self.updater.to(release)
+        if done:
+            self.leaving, self.update_why = release, ""
+            self.say(f"PASS updated to {release[:12]}; stopping once the running turns end")
+        else:
+            self.update_why = f"could not update to {release[:12]}: {why}"[:200]
+            self.say(f"FAIL {self.update_why}")
+
     def once(self) -> int:
         """One round. Returns how many turns it started, or -1 when the core said to wait."""
         self._report()
         self.running = [t for t in self.running if t.is_alive()]
+        if self.leaving and not self.running:
+            raise SystemExit(UPDATE_EXIT)
         state, why = self.ready()
         ready = state == "ready"
-        free = PARALLEL - len(self.running)
+        free = 0 if self.leaving else PARALLEL - len(self.running)
         status, body = self.core.post("claim", {"limit": free if ready else 0, "ready": ready, "why": why,
-                                                "state": state})
+                                                "state": state, **self.busy()})
         self.last_claim = status
         if status == 401:
             raise SystemExit("STOP: the core refused this connector's token")
@@ -623,6 +804,7 @@ class OwnConnector:
             return -1
         if status != 200:
             return 0
+        self._update(body.get("release"))
         wanted = [w for w in body.get("wanted", []) if isinstance(w, str)]
         if wanted != self.wanted:
             self.wanted, self.feed_now = wanted, True
@@ -635,6 +817,7 @@ class OwnConnector:
         items = body.get("items", [])
         for item in items:
             t = threading.Thread(target=self._deliver, args=(item,), daemon=True)
+            t.started_at = self.clock()
             t.start()
             self.running.append(t)
         now = self.clock()
@@ -659,7 +842,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--token", help="this connector's token file")
     ap.add_argument("--core", default=LOCAL_CORE, help="the core's API: loopback on the VM, the VM's ts.net on One")
     ap.add_argument("--once", action="store_true", help="one round, then stop")
+    ap.add_argument("--clone", help="One: Patrick's clone of Thornswood-Hermes, which this copy updates itself from")
+    ap.add_argument("--git", default="git", help="the git command for --clone")
+    ap.add_argument("--supervise", action="store_true",
+                    help="One's task: run the connector in its own process and start it again after an update")
     args = ap.parse_args(argv)
+    if args.supervise:
+        return supervise(argv)
     if not (args.core.startswith("https://") or args.core.startswith("http://127.0.0.1:")):
         raise SystemExit("STOP: the core is reached over https, or on 127.0.0.1 on the VM itself")
     if args.token:
@@ -671,7 +860,10 @@ def main(argv: list[str]) -> int:
     home = Path(args.hermes_home) if args.hermes_home else hermes_home()
     hermes = Hermes([args.hermes], helper_command(args.hermes, python=args.hermes_python), Path.home(),
                     GATEWAYS[args.gateway])
-    conn = OwnConnector(Core(args.core, args.gateway, read_token(token)), hermes, home / "state.db")
+    here = Path(__file__).resolve().parent
+    updater = Updater(Path(args.clone), args.git, here) if args.clone else None
+    conn = OwnConnector(Core(args.core, args.gateway, read_token(token)), hermes, home / "state.db",
+                        commit=own_commit(here), updater=updater)
     if args.once:
         n = conn.once()
         for t in conn.running:

@@ -211,7 +211,9 @@ class Api:
                 # Tailscale Serve sets X-Forwarded-For to the tailnet address the connector posts from
                 # (and replaces any it was sent); the core reads the tailnet's view of that machine.
                 return 200, own.claim(self.ws, route[1], token, data.get("limit", 3), data.get("ready", False),
-                                      str(data.get("why", "")), data.get("state"), headers.get("x-forwarded-for"))
+                                      str(data.get("why", "")), data.get("state"), headers.get("x-forwarded-for"),
+                                      {k: data.get(k) for k in ("commit", "busy", "parallel", "busy_for", "updating",
+                                                                "update_why")})
             return 200, own.result(self.ws, route[1], token, str(data.get("id", "")), str(data.get("outcome", "")),
                                    str(data.get("ref", "")), str(data.get("reason", "")), data.get("session_id"))
         if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector", "push-worker"):
