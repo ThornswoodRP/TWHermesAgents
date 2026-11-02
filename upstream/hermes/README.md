@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Six causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Seven causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
@@ -10,7 +10,7 @@ Hermes release.
 Apply them in order on a checkout of that commit:
 
 ```
-git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch 0005-desktop-relay-local-source-once-it-signals.patch
+git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch 0005-desktop-relay-local-source-once-it-signals.patch 0006-desktop-scheduled-jobs-every-gateway.patch
 scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py
 ```
 
@@ -128,6 +128,48 @@ npm ci --ignore-scripts
 npx vitest run src/plugins/hermes-bots/ src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
 ```
 
+## 0006: the Scheduled jobs list shows every connected gateway's jobs, and each job's buttons go to its own gateway
+
+Cause: the Scheduled jobs page and the sidebar's Cron jobs section asked
+only the connection in front (`getCronJobs` in
+apps/desktop/src/api/cron.ts is `connectionScoped()`). Seen 2 Nov on One:
+the Desktop is in Advanced mode, so Simple mode hides nothing; while Patrick's
+own Hermes is in front, the list goes to that connection, which has no
+jobs. Bramble's 5 jobs are on thornswood-bots, so they showed only with
+Bramble in front on the Bots tab. Every per-job call (runs, edit, pause,
+resume, run now, delete) also went to the connection in front, so a job
+from another gateway could not be worked even once listed.
+
+The fix: the all-profiles list (`GET /api/cron/jobs` with no profile or
+`profile=all`) now joins every connected registry gateway's jobs in the
+main process, the way the unified Sessions list joins their chats
+(electron/cron-job-union.ts). Only already-pooled backends are read, so a
+refresh never dials one; a gateway already listed (the same connection, or
+the same install_id) is read once; a dead one adds nothing; an error from
+the connection in front is never hidden. Each job from another gateway
+carries the `connection_id` that served it, every per-job call goes to that
+connection under the job's own profile, and its runs are stamped with that
+connection. Rows are keyed by (connection, id), since two gateways can hold
+one id. A list for one named profile is unchanged.
+
+Check it with the Desktop's own tests:
+
+```
+cd apps/desktop
+npm ci --ignore-scripts
+npx vitest run electron/cron-job-union.test.ts src/api/cron-job-owner.test.ts src/store/cron.test.ts src/app/cron src/app/chat/sidebar
+```
+
+The subagents frame on One is a separate cause and is not in 0006. Its
+measurement so far: the Desktop holds two saved owners for This device's
+Bot Chat, `{my-hermes, remote}` and `{local, local}`, so it treats the
+owner as unknown. One's `desktop.log` rules out the Bots roster as the
+writer (every roster snapshot with This device in front lists `local/default`
+on its own row, and no line says MISROUTED), and the id is not the Bot Chat
+id One's own gateway would mint for `bot-chat:default` (generations 0 to
+5). Which step wrote the my-hermes owner is still open; no fix is written
+for it until that is measured.
+
 ## Test results so far
 
 - Windows (One, Python 3.14, 1 Nov), 0001 and 0002: test_tool_result_storage
@@ -146,3 +188,9 @@ npx vitest run src/plugins/hermes-bots/ src/app/session/hooks/use-session-action
   two voice-prefs tests, and they fail the same way on v0.22.5 without any
   of these patches. `tsc -p . --noEmit` and eslint on the changed files are
   clean.
+- 0006 (Linux, Node 26, 2 Nov, on 0001 to 0005): the five suites above, 57
+  files, 447 passed, 0 failed (the new cron-job-owner test fails 8 of 9
+  without the fix); `tsc -p . --noEmit`, `tsc -p tsconfig.electron.json
+  --noEmit` and eslint on the changed files are clean. The same change on
+  upstream main (5351ed71d4, which also has Stop for a running job): 62 files,
+  478 passed, 0 failed, both tsc runs and eslint clean.
