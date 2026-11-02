@@ -63,13 +63,13 @@ ON_THE_VM = unittest.skipIf(os.name == "nt" or not hasattr(socket, "SO_PEERCRED"
 class Running:
     """A voice worker on a socket in a scratch folder, served on a thread."""
 
-    def __init__(self, test, transcriber=None, allow_uid=None, whisper=lambda: "faster-whisper"):
+    def __init__(self, test, transcriber=None, allow_uid=None, whisper=lambda: "faster-whisper", prepare=lambda: "base"):
         self.dir = Path(tempfile.mkdtemp(prefix="tw-voice-test-"))
         test.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.path = str(self.dir / "voice.sock")
         self.t = transcriber or Transcriber()
         self.worker = voice_worker.Worker(self.t, allow_uid=os.getuid() if allow_uid is None else allow_uid,
-                                          scratch=self.dir / "scratch", whisper=whisper)
+                                          scratch=self.dir / "scratch", whisper=whisper, prepare=prepare)
         test.addCleanup(self.worker.close)
         threading.Thread(target=self._serve, daemon=True).start()
         for _ in range(500):  # until it takes a connection
@@ -133,6 +133,15 @@ class TheWorker(unittest.TestCase):
     def test_check_says_which_whisper(self):
         self.assertEqual(self.r.raw(b'{"op": "check"}\n'), {"whisper": "faster-whisper"})
 
+    def test_prepare_loads_hermess_model_and_says_which(self):
+        self.assertEqual(self.r.raw(b'{"op": "prepare"}\n'), {"model": "base"})
+
+        def no_model():
+            raise RuntimeError("Hermes has no faster-whisper to load a model with")
+        r = Running(self, prepare=no_model)
+        self.assertEqual(r.raw(b'{"op": "prepare"}\n'),
+                         {"error": "whisper_failed", "reason": "RuntimeError: Hermes has no faster-whisper to load a model with"})
+
     def test_every_bad_request_is_answered_and_none_reaches_whisper(self):
         cases = [
             (b"not json\n", "bad_request"),
@@ -194,6 +203,25 @@ class HermessOwnWhisper(unittest.TestCase):
         with self.fake_tools(_HAS_FASTER_WHISPER=False, _has_local_command=lambda: False):
             self.assertIsNone(voice_worker.hermes_whisper())
 
+    def test_prepare_is_hermess_own_model_load_with_its_stt_local_settings(self):
+        loaded = []
+        common = types.ModuleType("tools.transcription_common")
+        common.DEFAULT_LOCAL_MODEL = "base"
+        local = {"model": "Small", "device": "cpu"}
+        with self.fake_tools(_HAS_FASTER_WHISPER=True, _load_stt_config=lambda: {"local": local},
+                             _normalize_local_model=lambda m: m.lower(),
+                             _get_or_load_local_model=lambda name, cfg: loaded.append((name, cfg))), \
+                mock.patch.dict(sys.modules, {"tools.transcription_common": common}):
+            self.assertEqual(voice_worker.hermes_prepare(), "small")
+        self.assertEqual(loaded, [("small", local)])
+        with self.fake_tools(_HAS_FASTER_WHISPER=True, _load_stt_config=lambda: {}, _normalize_local_model=lambda m: m,
+                             _get_or_load_local_model=lambda name, cfg: loaded.append((name, cfg))), \
+                mock.patch.dict(sys.modules, {"tools.transcription_common": common}):
+            self.assertEqual(voice_worker.hermes_prepare(), "base")
+        with self.fake_tools(_HAS_FASTER_WHISPER=False), mock.patch.dict(sys.modules, {"tools.transcription_common": common}):
+            with self.assertRaises(RuntimeError):
+                voice_worker.hermes_prepare()
+
 
 @ON_THE_VM
 class TheCoresSide(unittest.TestCase):
@@ -210,6 +238,7 @@ class TheCoresSide(unittest.TestCase):
         self.assertEqual(self.v.transcribe(patrick(), "audio/webm;codecs=opus", AUDIO),
                          {"text": "hey hermes what is on the board"})
         self.assertEqual(self.v.check(), "faster-whisper")
+        self.assertEqual(self.v.prepare(), "base")
 
     def test_only_patrick_and_only_a_recording(self):
         bot = types.SimpleNamespace(kind="service", label="Bramble")
@@ -373,8 +402,22 @@ class TheDeploy(unittest.TestCase):
         self.assertIn("tw-decide-live.service tw-decide-voice.service", sh)  # stopped with the core's workers
         self.assertIn('[[ "$members" == tw-decide ]]', sh)
         self.assertIn('"660 tw-decide-voice"', sh)
-        self.assertIn("Voice().check()", sh)
-        self.assertIn("has no local Whisper", sh)
+        self.assertIn("Voice().$1()", sh)
+        self.assertIn("voice_ask check", sh)
+
+    def test_the_install_puts_hermess_own_whisper_in_when_it_is_missing_and_loads_its_model(self):
+        """3:55 PM, 2 Nov: the install only checked for a local Whisper, so with none every install stopped."""
+        sh = self.read("install.sh")
+        step = sh[sh.index("# 14. Dictation"):]
+        # Only when dictation finds none, with Hermes's own package manager, as its install's owner.
+        self.assertIn('if [[ -z "$whisper" ]]; then', step)
+        self.assertIn('runuser -l "$hermes_owner" -c "$(printf \'%q\' "$hermes_bin") pm install --extra stt-whisper"', step)
+        self.assertIn('hermes_owner="$(stat -c %U "$hermes_dir")"', step)
+        self.assertNotIn("pip install", step)
+        self.assertNotIn("uv pip", step)
+        self.assertLess(step.index("pm install --extra stt-whisper"), step.index('ok "dictation uses Hermes\'s local Whisper'))
+        self.assertIn("still finds no local Whisper", step)
+        self.assertIn('model="$(voice_ask prepare)"', step)
 
 
 class TheApp(unittest.TestCase):

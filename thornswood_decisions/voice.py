@@ -18,16 +18,18 @@ SOCKET = "/run/tw/decide-voice/voice.sock"
 MAX_AUDIO = 4 * 1024 * 1024
 TYPES = ("audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav", "audio/x-wav", "audio/aac")
 TIMEOUT = 90
+PREPARE_TIMEOUT = 900  # a first model download on the VM's line
 
 
 class Voice:
     def __init__(self, path: str = SOCKET):
         self.path = path
 
-    def _ask(self, head: dict, body: bytes = b"") -> dict:
+    def _ask(self, head: dict, body: bytes = b"", timeout: float | None = None) -> dict:
+        timeout = TIMEOUT if timeout is None else timeout
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.settimeout(TIMEOUT)
+                s.settimeout(timeout)
                 s.connect(self.path)
                 try:
                     s.sendall(json.dumps(head).encode("utf-8") + b"\n")
@@ -44,7 +46,7 @@ class Voice:
         except (FileNotFoundError, ConnectionRefusedError):
             raise CoreError(503, "voice_off", "dictation is not running on the VM (tw-decide-voice)") from None
         except socket.timeout:
-            raise CoreError(504, "voice_slow", "Whisper on the VM did not answer in 90 seconds") from None
+            raise CoreError(504, "voice_slow", f"Whisper on the VM did not answer in {timeout:g} seconds") from None
         except OSError as exc:
             raise CoreError(503, "voice_off", f"dictation on the VM could not be reached ({type(exc).__name__})") from None
         try:
@@ -58,6 +60,14 @@ class Voice:
     def check(self) -> str | None:
         """Which local Whisper the voice worker found in Hermes, or None: for the install's line."""
         return self._ask({"op": "check"}).get("whisper")
+
+    def prepare(self, timeout: float | None = None) -> str:
+        """Has the worker load Hermes's local Whisper model now (the first time, a download of about
+        150 MB for "base"): for the install, so the first recording does not wait on it."""
+        out = self._ask({"op": "prepare"}, timeout=PREPARE_TIMEOUT if timeout is None else timeout)
+        if "model" not in out:
+            raise CoreError(502, "voice_failed", f"Whisper on the VM did not load its model: {out.get('reason') or 'no reason'}"[:300])
+        return str(out["model"])
 
     def transcribe(self, p, mime: str, body: bytes) -> dict:
         if p.kind != "patrick":
