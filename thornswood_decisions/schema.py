@@ -659,6 +659,11 @@ CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway,
     # so this cannot happen again; this puts back what it did. Same rows only: dead of a readiness
     # check, every receipt that failure, the card still answered.
     _REQUEUE_NOT_READY,
+    # 13: a message to his own Hermes that answers one message there (redesign step 4, reply style A):
+    # Hermes's own id of the message it answers. The quoted words are in the text itself, as sent.
+    """
+ALTER TABLE own_messages ADD COLUMN reply_to INTEGER;
+""",
 ]
 
 
@@ -760,4 +765,9 @@ ALTER TABLE flags_9 RENAME TO flags;
     11: ([], "", ""),
     # The same data step as 11.
     12: ([], "", ""),
+    # The quoted words stay in each message's text; only the link back to what it answers would go.
+    13: ([("SELECT count(*) FROM own_messages WHERE reply_to IS NOT NULL",
+           "messages to his own Hermes that answer one message, with the link back to it")], """
+ALTER TABLE own_messages DROP COLUMN reply_to;
+""", ""),
 }

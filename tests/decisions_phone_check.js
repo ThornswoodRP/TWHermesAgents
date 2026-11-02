@@ -500,6 +500,47 @@ const base = `http://localhost:${port}`
     await page.getByText('Rift: load order is clean').first().waitFor({ timeout: 8000 })
     if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('chat actions on his Bot Chat')
   })
+  // A reply to one message (redesign step 4, reply style A): the quote goes at the top of the message as
+  // sent, and the core keeps which message it answers.
+  const replyBody = []
+  page.on('request', q => { if (q.method() === 'POST' && /\/own\/one\/send$/.test(q.url())) replyBody.push(JSON.parse(q.postData())) })
+  await page.goto(base + '/m/hermes/one/s_long')
+  const last = page.locator('#view .msg.theirs', { hasText: 'message 119' })
+  await last.waitFor({ timeout: 15000 })
+  const lastMid = Number(await last.getAttribute('data-mid'))
+  await last.locator('.bub').click()
+  await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
+  await step('Reply shows the words it quotes above the box, and Cancel takes it away', async () => {
+    await page.locator('#view .replying', { hasText: 'Replying to One' }).waitFor({ timeout: 8000 })
+    await page.locator('#view .replying', { hasText: 'message 119' }).waitFor({ timeout: 1000 })
+    await page.getByRole('button', { name: 'Cancel the reply' }).click()
+    await page.locator('#view .replying').waitFor({ state: 'detached', timeout: 8000 })
+  })
+  await last.locator('.bub').click()
+  await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
+  await page.locator('#view .replying').waitFor({ timeout: 8000 })
+  await page.getByLabel('Message to One').fill('Thanks, that was the last one.')
+  await page.getByRole('button', { name: 'Send to One' }).click()
+  await step('a reply asks for exactly that message and those words, and shows the quote at the top', async () => {
+    await page.locator('#view .msg.mine .quote', { hasText: 'message 119' }).first().waitFor({ timeout: 5000 })
+    const b = replyBody[replyBody.length - 1] || {}
+    if (b.reply_to !== lastMid || b.quote !== 'message 119' || b.text !== 'Thanks, that was the last one.' || b.session_id !== 's_long') throw new Error(JSON.stringify(b))
+    if (await page.locator('#view .replying').count()) throw new Error('the reply preview stayed after sending')
+  })
+  await step("One's own copy of the reply keeps the quote, and the quote goes back to the message it answers", async () => {
+    await again('/m/hermes/one/s_long', () => page.locator('#view .msg.mine[data-mid]:not([data-status]) .quote.linked').count())
+    const copy = page.locator('#view .msg.mine[data-mid]:not([data-status])', { hasText: 'Thanks, that was the last one.' })
+    await copy.locator('.quote.linked', { hasText: 'message 119' }).click()
+    await page.locator(`#view .msg.flash[data-mid="${lastMid}"]`).waitFor({ timeout: 3000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-reply.png' })
+  await page.goto(base + '/m/bots/bramble')
+  await page.locator('#view .msg[data-mid="70"] .bub').click()
+  await step('a Bot Chat offers no reply: Hermes has none there', async () => {
+    await page.getByRole('dialog', { name: 'Message actions' }).waitFor({ timeout: 3000 })
+    if (await page.getByRole('dialog').getByRole('button', { name: 'Reply' }).count()) throw new Error('Reply in a Bot Chat')
+    await page.keyboard.press('Escape')
+  })
   await page.goto(base + '/m/bots/bramble')
   await step('a Bot Chat has no chat actions', async () => {
     await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })

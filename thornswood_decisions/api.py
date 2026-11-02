@@ -338,7 +338,8 @@ class Api:
                                               data.get("emoji"))
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
             return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
-                                             data.get("text"), data.get("idempotency_key"))
+                                             data.get("text"), data.get("idempotency_key"),
+                                             data.get("reply_to"), data.get("quote"), data.get("quote_by"))
         if method == "POST" and route == ["csrf"]:
             if "cookie" not in headers:
                 raise CoreError(400, "not_the_app", "only the app's cookie session asks for a new CSRF token")

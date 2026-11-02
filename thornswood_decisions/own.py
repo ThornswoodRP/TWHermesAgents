@@ -149,6 +149,31 @@ def _newest(chats: list) -> dict | None:
     return max(chats, key=_when) if chats else None
 
 
+MAX_QUOTE = 2000
+QUOTE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _quote(value) -> str:
+    """The words a reply quotes, as they are in the message it answers (Hermes quotes the whole message
+    rather than a preview, so nothing of a list or code is lost)."""
+    if not isinstance(value, str):
+        raise CoreError(400, "bad_quote", "a reply quotes the words of the message it answers")
+    value = value.replace("\r\n", "\n").strip()
+    if not value or QUOTE_CONTROL.search(value):
+        raise CoreError(400, "bad_quote", "a reply quotes the words of the message it answers, as text")
+    if len(value) > MAX_QUOTE:
+        raise CoreError(400, "bad_quote", f"a reply quotes at most {MAX_QUOTE} characters")
+    return value
+
+
+def reply_pointer(quote: str, by: str) -> str:
+    """Hermes's own reply pointer, the line its gateway puts at the top of a message that replies to
+    another on a messaging app (contracts.json "replies"): "your previous message" when the message
+    answered is Hermes's own."""
+    who = " your previous message" if by == "hermes" else ""
+    return f'[Replying to{who}: "{quote}"]\n\n'
+
+
 def clean(body) -> dict:
     """Only what the phone shows of one Hermes's chats, each field cut to size."""
     if not isinstance(body, dict):
@@ -665,7 +690,7 @@ class OwnChat:
         history = [{"who": "Patrick" if m["role"] == "user" else "Hermes", "role": m["role"], "text": m["text"],
                     "at": m["at"]} for m in (opened or {}).get("messages", [])]
         rows = self.s.db.execute(
-            "SELECT id, text, status, reason, created_at, updated_at FROM own_messages WHERE workspace_id = ? "
+            "SELECT id, text, status, reason, created_at, updated_at, reply_to FROM own_messages WHERE workspace_id = ? "
             "AND gateway = ? AND (session_id = ? OR made_session_id = ?) ORDER BY created_at DESC, rowid DESC "
             "LIMIT ?", (p.workspace_id, gw, sid, sid, MINE)).fetchall()
         # His reactions in this chat that the phone has asked for, so it shows each one at once, and
@@ -681,9 +706,16 @@ class OwnChat:
         return self.s.db.execute("SELECT count(*) FROM own_messages WHERE workspace_id = ? AND gateway = ? "
                                  "AND status IN ('queued', 'leased', 'uncertain')", (workspace_id, gw)).fetchone()[0]
 
-    def send(self, p: Principal, gw: str, session_id, new, text, idempotency_key) -> dict:
+    def send(self, p: Principal, gw: str, session_id, new, text, idempotency_key, reply_to=None, quote=None,
+             quote_by=None) -> dict:
         """One message to one chat (session_id), or the first message of a new chat (new: true), which
-        Hermes names itself, as it does any chat."""
+        Hermes names itself, as it does any chat.
+
+        A reply (reply style A, redesign step 4) names the message it answers by Hermes's own id
+        (reply_to), the words it quotes and whose they are (quote_by: hermes or patrick). Hermes keeps
+        no reply link, so the message Hermes gets opens with Hermes's own reply pointer, the line its
+        gateway writes for a reply on a messaging app, in plain sight, exactly as Patrick sees it, and
+        the core keeps the link back."""
         self._patrick(p)
         gw = self._gateway(gw)
         if not self.s.flag(p.workspace_id, "own_chat_write"):
@@ -695,11 +727,19 @@ class OwnChat:
         if not isinstance(text, str) or not text.strip():
             raise CoreError(400, "bad_text", "a message has some text")
         text = text.strip()
+        if reply_to is not None or quote is not None or quote_by is not None:
+            if session_id is None:
+                raise CoreError(400, "bad_reply", "a reply goes to the chat its message is in, not to a new chat")
+            if quote_by not in ("hermes", "patrick"):
+                raise CoreError(400, "bad_reply", "a reply says whose message it answers: hermes or patrick")
+            reply_to, quote = reactions.message_id(reply_to), _quote(quote)
+            text = reply_pointer(quote, quote_by) + text
         if len(text) > MAX_TEXT:
             raise CoreError(400, "bad_text", f"a message is at most {MAX_TEXT} characters")
         if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 200:
             raise CoreError(400, "bad_key", "a message carries an idempotency key of 8 to 200 characters")
-        body_sha = sha256_hex(canonical({"gateway": gw, "session_id": session_id, "text": text}))
+        body_sha = sha256_hex(canonical({"gateway": gw, "session_id": session_id, "text": text}
+                                        | ({"reply_to": reply_to} if reply_to is not None else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -715,11 +755,13 @@ class OwnChat:
             now = self.s.now()
             mid = new_id("own")
             db.execute("INSERT INTO own_messages(id, workspace_id, gateway, session_id, text, send_key, "
-                       "principal_id, device_id, status, created_at, updated_at) "
-                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?)",
-                       (mid, p.workspace_id, gw, session_id, text, f"tw-own.{mid}", p.id, p.device_id, now, now))
+                       "principal_id, device_id, status, created_at, updated_at, reply_to) "
+                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                       (mid, p.workspace_id, gw, session_id, text, f"tw-own.{mid}", p.id, p.device_id, now, now,
+                        reply_to))
             self.s.event(db, p.workspace_id, "own.queued", mid, "patrick",
-                         {"gateway": gw, "new_chat": session_id is None, "device": p.device_id})
+                         {"gateway": gw, "new_chat": session_id is None, "device": p.device_id}
+                         | ({"reply": True} if reply_to is not None else {}))
             receipt = {"message_id": mid, "gateway": gw, "session_id": session_id, "status": "queued",
                        "created_at": now}
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "

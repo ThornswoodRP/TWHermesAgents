@@ -110,6 +110,13 @@ class ChatSend(unittest.TestCase):
 
 
 class ConnectorSide(unittest.TestCase):
+    def at_schema(self, n):
+        """The store as an older release left it at schema n: the stored version, and no column a later
+        migration adds (13: own_messages.reply_to), so this release's migrations run on it as they would."""
+        if n < 13:
+            self.w.store.db.execute("ALTER TABLE own_messages DROP COLUMN reply_to")
+        self.w.store.db.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(n),))
+
     def setUp(self):
         self.w = World()
         self.addCleanup(self.w.close)
@@ -292,7 +299,7 @@ class ConnectorSide(unittest.TestCase):
         self.chat.claim(self.w.ws, self.tok)
         self.chat.result(self.w.ws, self.tok, m, "failed", reason="could not check the Bots' gateway")
         # The store as the release before this one left it: schema 10, then this release opens it.
-        self.w.store.db.execute("UPDATE meta SET value = '10' WHERE key = 'schema_version'")
+        self.at_schema(10)
         self.assertEqual(migrate(self.w.store.db), len(MIGRATIONS))
         not_ready = [died["could not check the Bots' gateway"][1], died["the Bots' gateway is stopped"][1]]
         for cx in not_ready:
@@ -325,7 +332,7 @@ class ConnectorSide(unittest.TestCase):
         real = self.answered(key="key-00000111", title="Pick B")
         rx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
         self.chat.result(self.w.ws, self.tok, rx, "failed", reason="could not start the hermes command")
-        self.w.store.db.execute("UPDATE meta SET value = '10' WHERE key = 'schema_version'")
+        self.at_schema(10)
         with mock.patch.object(store_mod, "MIGRATIONS", MIGRATIONS[:11]):
             self.assertEqual(migrate(self.w.store.db), 11)
         self.assertEqual(self.outbox(cx)["status"], "queued")
@@ -355,7 +362,7 @@ class ConnectorSide(unittest.TestCase):
         cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
         self.chat.result(self.w.ws, self.tok, cx, "confirmed", "turn finished")
         before = dict(self.outbox(cx))
-        self.w.store.db.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
+        self.at_schema(11)
         self.assertEqual(migrate(self.w.store.db), len(MIGRATIONS))
         self.assertEqual(dict(self.outbox(cx)), before)
 

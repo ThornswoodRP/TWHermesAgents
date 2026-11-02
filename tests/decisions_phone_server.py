@@ -170,6 +170,26 @@ def one_session(o, r):
     c.close()
     one_feed(o)
     o.session_done(w.ws, "one", to, {"id": r["id"], "outcome": "done"})
+def one_replies(o):
+    """A reply Patrick sends is taken as One's connector takes a message, and lands in the scratch
+    state.db as Hermes keeps a user message: its text exactly as sent. Only replies: every other
+    message here stays waiting, as the checks before expect."""
+    from datetime import timedelta
+    rows = o.s.db.execute("SELECT id, session_id, text FROM own_messages WHERE gateway = 'one' "
+                          "AND reply_to IS NOT NULL AND status = 'queued'").fetchall()
+    for r in rows:
+        with o.s.tx() as db:
+            db.execute("UPDATE own_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                       ((w.clock() + timedelta(minutes=2)).isoformat(), r["id"]))
+        c = sqlite3.connect(sdb)
+        c.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES(?, 'user', ?, ?)",
+                  (r["session_id"], r["text"], epoch("2026-11-01T17:45:00+00:00")))
+        c.commit()
+        c.close()
+        o.result(w.ws, "one", to, r["id"], "confirmed")
+        # The core's clock here stands still; let the 20 seconds pass after which the core asks One for
+        # the chat's newest page again, as they would while One answers.
+        w.clock.advance(seconds=21)
 def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
@@ -177,6 +197,7 @@ def one_pages():
             got = o.claim(w.ws, "one", to, 0, True)
             for r in got.get("sessions", []):
                 one_session(o, r)
+            one_replies(o)
             for r in got.get("reactions", []):
                 o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],
                                             "version": r["version"], "outcome": set_reaction(r)})

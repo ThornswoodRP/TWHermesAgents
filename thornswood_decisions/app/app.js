@@ -1144,9 +1144,16 @@ function bubbles(items) {
     const attrs = { class: 'msg ' + (m.mine ? 'mine' : 'theirs') }
     if (m.mid !== undefined && m.mid !== null) attrs['data-mid'] = String(m.mid)
     if (m.status) attrs['data-status'] = m.status
-    // His own messages show what he wrote, with a chip for each file Hermes attached to it.
-    const own = m.mine ? authored(m.text) : null
-    const bub = el('div', { class: 'bub' }, own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
+    // A reply starts with Hermes's own reply pointer; the quote shows above what he wrote, and his own
+    // words show with a chip for each file Hermes attached to them.
+    const ptr = m.mine ? String(m.text || '').match(POINTER) : null
+    const own = m.mine ? authored(ptr ? m.text.slice(ptr[0].length) : m.text) : null
+    const bub = el('div', { class: 'bub' },
+      ptr ? el('div', { class: 'quote' },
+        el('div', { class: 'qwho' }, ptr[1] ? 'Replying to ' + (m.agent || m.who || 'Hermes') : 'Replying to your message'),
+        el('div', { class: 'qtext' }, ptr[2])) : null,
+      own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
+    if (ptr && m.replyTo) replyLink(bub, m.replyTo)
     if (m.mid !== undefined && m.mid !== null && !m.status) {
       // Tapping a message (not a link or a button in it, and not while selecting text) opens its actions.
       bub.tabIndex = 0
@@ -1175,6 +1182,43 @@ function bubbles(items) {
     last = { by }
   }
   return out
+}
+
+// Hermes's own reply pointer, the line its gateway puts at the top of a message that replies to another
+// (contracts.json "replies"). A reply from the phone opens with it too (reply style A), so it shows as
+// the quote it is, from his own messages only.
+const POINTER = /^\[Replying to( your previous message)?: "([\s\S]*?)"\]\n\n/
+
+// The core keeps which message a reply answers, so its quote goes back to that message, or says where
+// it is when it is not loaded yet.
+function replyLink(bub, mid) {
+  const q = bub.querySelector('.quote')
+  if (!q) return
+  q.classList.add('linked')
+  q.tabIndex = 0
+  q.setAttribute('role', 'button')
+  q.setAttribute('aria-label', 'Go to the message this answers')
+  const note = el('div', { class: 'meta', role: 'status' })
+  const go = e => {
+    e.stopPropagation()
+    const n = document.querySelector(`#view .msg[data-mid="${CSS.escape(String(mid))}"]`)
+    if (!n) { note.textContent = 'That message is further up. Older messages, at the top, loads it.'; q.after(note); return }
+    note.remove()
+    n.scrollIntoView({ block: 'center' })
+    n.classList.remove('flash')
+    void n.offsetWidth
+    n.classList.add('flash')
+  }
+  q.addEventListener('click', go)
+  q.addEventListener('keydown', e => { if (e.key === 'Enter') go(e) })
+}
+
+// The words a reply quotes: the whole message, as Hermes quotes it (a preview would lose the rest of a
+// list or code), without the pointer it opened with, cut at the core's 2000 characters.
+function quoteOf(text) {
+  const t = String(text || '')
+  const body = t.replace(POINTER, '').trim() || t.trim()
+  return body.length <= 2000 ? body : body.slice(0, 1997) + '...'
 }
 
 // The reactions the phone offers; the core takes only these (own.py REACTIONS).
@@ -1210,6 +1254,7 @@ function messageSheet(m) {
         : el('p', { class: 'quiet' }, m.noReact || 'This message takes no reaction.'),
       m.react && mineNow ? el('button', { class: 'secondary', type: 'button', onclick: () => choose(null) },
         'Take my reaction off') : null,
+      m.reply ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); m.reply() } }, 'Reply') : null,
       copy,
       el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'),
       note))
@@ -1234,6 +1279,16 @@ function chatBar(back, backLabel, title, under, agent, label, more) {
 // chat redraws. Enter is a new line; the button sends.
 function chatComposer(key, label, buttonLabel, send, status, gw) {
   const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
+  // A reply being written shows the words it quotes, which open the message as sent.
+  const replying = draft.reply ? el('div', { class: 'replying' },
+    el('div', { class: 'rq' },
+      el('strong', {}, 'Replying to ' + draft.reply.who),
+      el('div', { class: 'qtext' }, draft.reply.quote)),
+    el('button', { class: 'back', type: 'button', 'aria-label': 'Cancel the reply', onclick: () => {
+      draft.reply = null
+      draft.key = newKey()
+      route()
+    } }, icon('x'))) : null
   const box = el('textarea', { rows: '1', 'aria-label': label, placeholder: label, enterkeyhint: 'enter' })
   box.value = draft.text
   const fit = () => { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight + 2, 160) + 'px' }
@@ -1247,7 +1302,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
     if (!text) { status.textContent = 'Type a message first.'; return }
     status.textContent = 'Sending...'
     button.disabled = true
-    const s = await send(text, draft.key)
+    const s = await send(text, draft.key, draft.reply)
     button.disabled = false
     if (s.status === 200) { drafts[key] = null; chatPlace.toEnd = true; return route() }
     if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
@@ -1256,7 +1311,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
       ? 'Could not reach the core. Sending again sends the same message, never a second one.'
       : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
   } }, icon('send'))
-  return el('div', { class: 'composer' }, box, button)
+  return [replying, el('div', { class: 'composer' }, box, button)]
 }
 
 // Where a chat is scrolled. Opening a chat, or sending, goes to the newest
@@ -1511,7 +1566,7 @@ function historyPart(gw, sid, t, name, feed) {
 // What Patrick sent from the phone, until the chat itself shows it.
 function pendingItems(mine, readAt) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
-    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status,
+    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to,
       note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
         + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
       warn: m.status === 'dead' || m.status === 'uncertain' }))
@@ -1570,7 +1625,24 @@ async function ownChatView(gw, sid) {
     const canReact = v.can_send && v.online && !h.gone && !t.error
     withReactions(h.items, v.reactions, pageAt, canReact ? (mid, emoji) => reactTo(`/own/${gw}/react`, { session_id: sid }, mid, emoji, status) : null,
       `${name} is not answering, so a reaction cannot be set now.`)
-    const items = h.items.concat(pendingItems(v.mine, readAt))
+    // Reply style A: Hermes's own copy of a reply he sent shows its link back, from the core's record of
+    // exactly what was sent (Hermes has no reply link of its own).
+    const links = v.mine.filter(m => m.reply_to && m.status === 'sent').map(m => ({ text: m.text.trim(), to: m.reply_to }))
+    for (const it of h.items) {
+      if (!it.mine) continue
+      const k = links.findIndex(l => l.text === String(it.text).trim())
+      if (k >= 0) { it.replyTo = links[k].to; links.splice(k, 1) }
+    }
+    const draftKey = `own:${gw}:${sid}`
+    for (const it of h.items) {
+      it.reply = canReact ? () => {
+        const d = drafts[draftKey] || (drafts[draftKey] = { text: '', key: newKey() })
+        d.reply = { mid: it.mid, quote: quoteOf(it.text), who: it.mine ? 'yourself' : name, by: it.mine ? 'patrick' : 'hermes' }
+        d.key = newKey()
+        route().then(() => { const b = document.querySelector('#view .composer textarea'); if (b) b.focus() })
+      } : null
+    }
+    const items = h.items.concat(pendingItems(v.mine, readAt).map(m => ({ ...m, who: name })))
     // A rename, hide or delete asked for here: how it stands, and once a hide or a delete is done, so it says.
     const o = lastOp(v.ops, sid)
     const ended = o && o.status === 'done' && (o.op === 'delete' || o.op === 'archive') ? o.op : null
@@ -1592,8 +1664,9 @@ async function ownChatView(gw, sid) {
       // Nothing sent here would reach a chat that is gone or hidden.
     } else if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
-        dock.push(signInPart(v, status), chatComposer(`own:${gw}:${sid}`, 'Message to ' + name, 'Send to ' + name,
-          (text, k) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k }), status, gw), status)
+        dock.push(signInPart(v, status), chatComposer(draftKey, 'Message to ' + name, 'Send to ' + name,
+          (text, k, reply) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
+            ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}) }), status, gw), status)
       } else {
         dock.push(signInPart(v, status), status)
       }

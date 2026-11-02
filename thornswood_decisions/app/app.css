@@ -249,3 +249,22 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
   padding: 10px 14px; width: 100%; margin: 6px 0; }
 .sheet .search input { min-width: 0; }
 .row p.receipt, .row p.warn { margin: 6px 0 0; }
+
+/* Replies (redesign step 4, style A): the words a reply quotes, above the box
+   while it is written, and in the sent bubble as a quote that goes back. */
+.replying { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 8px; padding: 6px 4px 6px 10px;
+  border-left: 3px solid var(--accent); background: var(--raised); border-radius: 0 8px 8px 0; }
+.replying .rq { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.replying .rq strong { display: block; font-size: 12.5px; color: var(--accent-hot); }
+.replying .back { flex: 0 0 36px; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent;
+  color: var(--fg); display: inline-flex; align-items: center; justify-content: center; }
+.chat .bub .quote { margin: 0 0 6px; padding: 4px 8px; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+  background: rgba(0, 0, 0, .22); font-size: 13.5px; }
+.chat .bub .quote .qwho { font-size: 12px; font-weight: 600; color: var(--accent-hot); }
+.qtext { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4;
+  -webkit-box-orient: vertical; overflow: hidden; color: var(--muted); }
+.chat .bub .quote.linked { cursor: pointer; }
+.chat .bub .quote.linked:hover { background: rgba(0, 0, 0, .32); }
+.chat .msg.flash .bub { animation: flash 1.6s ease-out; }
+@keyframes flash { from { box-shadow: 0 0 0 3px var(--accent-hot); } to { box-shadow: 0 0 0 3px transparent; } }
+@media (prefers-reduced-motion: reduce) { .chat .msg.flash .bub { animation: none; outline: 2px solid var(--accent-hot); } }
