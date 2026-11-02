@@ -1,0 +1,61 @@
+From 3e0672ff6812cf1ff724d9d78741a3eba4f64c3e Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 00:33:03 +0000
+Subject: [PATCH] fix(spill): the sandbox fallback path is POSIX on every host
+
+STORAGE_DIR, the in-environment path a result is written to when the
+environment names no temp dir, came from the host's tempfile.gettempdir().
+On Windows that is a backslash path: shlex.quote wraps it in quotes and the
+environment's POSIX shell cannot use it, which is why
+test_tool_use_id_cannot_escape_storage_dir failed on Windows only. It is now
+/tmp/hermes-results, BaseEnvironment.get_temp_dir()'s own default.
+---
+ tests/tools/test_tool_result_storage.py | 6 ++++++
+ tools/tool_result_storage.py            | 7 +++++--
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/tests/tools/test_tool_result_storage.py b/tests/tools/test_tool_result_storage.py
+index 4b11bc2b..f3cbe38a 100644
+--- a/tests/tools/test_tool_result_storage.py
++++ b/tests/tools/test_tool_result_storage.py
+@@ -178,6 +178,12 @@ class TestResolveStorageDir:
+     def test_defaults_to_storage_dir_without_env(self):
+         assert _resolve_storage_dir(None) == STORAGE_DIR
+ 
++    def test_fallback_is_a_sandbox_posix_path_on_every_host(self):
++        # The fallback is written through the environment's POSIX shell, so it must not follow the
++        # host's temp dir: on Windows that was a quoted backslash path the sandbox could not use.
++        assert STORAGE_DIR == "/tmp/hermes-results"  # no-tmp: ok — asserting the sandbox-side default
++        assert _resolve_storage_dir(None) == STORAGE_DIR
++
+     def test_uses_env_temp_dir_when_available(self):
+         env = MagicMock()
+         env.get_temp_dir.return_value = "/var/host/tmp"
+diff --git a/tools/tool_result_storage.py b/tools/tool_result_storage.py
+index 15f1d78a..77deacc4 100644
+--- a/tools/tool_result_storage.py
++++ b/tools/tool_result_storage.py
+@@ -13,7 +13,6 @@ import os
+ import re
+ import shlex
+ import sqlite3
+-import tempfile
+ import threading
+ import time
+ 
+@@ -22,7 +21,11 @@ from tools.budget_config import DEFAULT_PREVIEW_SIZE_CHARS, BudgetConfig, DEFAUL
+ logger = logging.getLogger(__name__)
+ PERSISTED_OUTPUT_TAG = "<persisted-output>"
+ PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
+-STORAGE_DIR = os.path.join(tempfile.gettempdir(), "hermes-results")
++# Where an oversized result is written INSIDE the terminal environment when that environment names
++# no temp dir of its own: a path for the environment's POSIX shell, BaseEnvironment.get_temp_dir()'s
++# own default, never the host's tempfile.gettempdir() (on Windows that is a backslash path the
++# sandbox's shell cannot use, and shlex.quote wraps it in quotes).
++STORAGE_DIR = "/tmp/hermes-results"  # no-tmp: ok — sandbox-side default, same as BaseEnvironment.get_temp_dir
+ SPILLOVER_SUBDIR = "cache/spillover"
+ # Fallback spillover age only (unreadable config); the real default is the session
+ # retention window — see _spillover_retention_hours().
+-- 
+2.43.0
+
