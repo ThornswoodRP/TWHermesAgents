@@ -88,6 +88,11 @@ class Policy:
                     or not all(isinstance(n, str) and n for n in names)
                     or len(set(names)) != len(names)):
                 raise PolicyError(f"the merge rule names no required checks for {repo}")
+        auto = self.data.get("merge", {}).get("auto_merge")
+        if (not isinstance(auto, dict) or set(auto) != set(self.data.get("merge", {}).get("base", {}))
+                or not all(isinstance(v, list) and all(isinstance(n, str) and n for n in v) for v in auto.values())):
+            raise PolicyError("merge.auto_merge names, for each repo the merge rule names, the checks GitHub's "
+                              "branch rules must require (empty where GitHub's auto-merge does not merge)")
 
     # Bots
 
@@ -125,44 +130,23 @@ class Policy:
     def lane_branch(self, branch: str) -> bool:
         return any(branch.startswith(p) for p in self.data["hands_off"]["lanes"]["branch_prefixes"])
 
-    # Paths
-
-    def patrick_path(self, path: str, verb_scripts: set[str] = frozenset()) -> bool:
-        path = path.lstrip("/")
-        if path in verb_scripts:
-            return True
-        return any(glob_match(path, pat) for pat in self.data["merge"]["patrick_paths"])
-
     def required_checks(self, repo: str) -> list[str]:
         return list(self.data["merge"]["required_checks"][repo])
 
+    def auto_merge(self, repo: str) -> bool:
+        """Whether GitHub's auto-merge, not Bramble, merges in this repo."""
+        return bool(self.data["merge"]["auto_merge"].get(repo))
 
-def glob_match(path: str, pattern: str) -> bool:
-    """Match a repo path against a pattern where ** crosses folders and * does not."""
-    regex = ""
-    i = 0
-    while i < len(pattern):
-        if pattern.startswith("**", i):
-            regex += ".*"
-            i += 2
-        elif pattern[i] == "*":
-            regex += "[^/]*"
-            i += 1
-        else:
-            regex += re.escape(pattern[i])
-            i += 1
-    return re.fullmatch(regex, path) is not None
+    def robot_author(self, login: str) -> bool:
+        """A robot's pull request (Dependabot, the pin robot): no person or
+        thread owns it, so Bramble puts it on auto-merge like a Bot's."""
+        return login in (self.data["merge"].get("robot_authors") or [])
+
+    def rule_checks(self, repo: str) -> list[str]:
+        """The checks GitHub's rules on the base branch must require before
+        auto-merge is turned on there."""
+        return list(self.data["merge"]["auto_merge"].get(repo) or [])
 
 
 def name_matches(name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(name.upper(), p.upper()) for p in patterns)
-
-
-def verb_scripts(verb_lists: list[dict]) -> set[str]:
-    """Every script a gate or Nexus verb list names, read from main's copy."""
-    scripts = set()
-    for listing in verb_lists:
-        for verb in (listing.get("verbs") or {}).values():
-            if verb.get("script"):
-                scripts.add(verb["script"].lstrip("/"))
-    return scripts

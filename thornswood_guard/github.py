@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from .decisions import DecisionStore
 from .gate_line import GateLineError, parse_request
-from .policy import Policy, Verdict, verb_scripts
+from .policy import Policy, Verdict
 
 SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -121,8 +121,12 @@ class GitHubRules:
         return Verdict.no(f"{self.policy.bot_name(bot)} edits only its own pull requests")
 
     def merge(self, bot: str, pr: PullRequest, sha: str, method: str,
-              checks: list[CheckRun], *, base_verb_lists: list[dict],
-              decision_id: str | None = None, card_revision: int | None = None) -> Verdict:
+              checks: list[CheckRun], *, branch_checks: set[str] | None = None) -> Verdict:
+        """Bramble's merge. Where the policy has GitHub's auto-merge do it
+        (merge.auto_merge), a yes here turns auto-merge on at this head and
+        GitHub merges once the checks its branch rules require pass:
+        branch_checks is that list, read from GitHub just before. Elsewhere
+        (Ops) a yes is the merge itself, once every required check passed."""
         p = self.policy
         if not p.is_router(bot):
             return Verdict.no(f"only Bramble merges; {p.bot_name(bot) if p.is_bot(bot) else bot} never does, its own work included")
@@ -146,18 +150,30 @@ class GitHubRules:
         want_method = p.data["merge"]["method"].get(pr.repo)
         if method != want_method:
             return Verdict.no(f"{pr.repo} merges with {want_method}, not {method}")
+        if p.auto_merge(pr.repo):
+            return self._auto_merge(pr, sha, checks, branch_checks)
         verdict = self.check_green(pr, checks)
         if not verdict.allowed:
             return verdict
-        scripts = verb_scripts(base_verb_lists)
-        gated = sorted(f for f in pr.files if p.patrick_path(f, scripts))
-        if gated and pr.repo == p.data["repos"]["app"]:
-            yes = self.decisions.check(decision_id, kind="box-change", repo=pr.repo,
-                                       commit=pr.head_sha, pr=pr.number, revision=card_revision)
-            if not yes.allowed:
-                return Verdict.no(f"PR {pr.number} changes what runs on the live box ({', '.join(gated[:5])}); {yes.reason}")
-            return Verdict.yes(f"green on {sha[:12]} and {yes.reason}")
         return Verdict.yes(f"green on {sha[:12]}: {', '.join(p.required_checks(pr.repo))}")
+
+    def _auto_merge(self, pr: PullRequest, sha: str, checks: list[CheckRun],
+                    branch_checks: set[str] | None) -> Verdict:
+        p = self.policy
+        if pr.author_bot is None and not p.robot_author(pr.author_login):
+            return Verdict.no(f"PR {pr.number} is not a Bot's or a robot's; in {pr.repo} its owner puts it on "
+                              "auto-merge, and Bramble never merges it")
+        rule = p.rule_checks(pr.repo)
+        missing = [n for n in rule if n not in (branch_checks or set())]
+        if branch_checks is None or missing:
+            return Verdict.no(f"{pr.base_ref}'s rules in {pr.repo} do not require {', '.join(missing or rule)}, "
+                              "so auto-merge would not wait for them; the rules are fixed, not stepped around")
+        for name in p.required_checks(pr.repo):
+            runs = [c for c in checks if c.name == name and c.head_sha == pr.head_sha]
+            if runs and runs[-1].status == "completed" and runs[-1].conclusion != "success":
+                return Verdict.no(f"'{name}' is {runs[-1].conclusion} on {pr.head_sha[:12]}; red goes back to "
+                                  "its owner and is fixed at its cause, never put on auto-merge")
+        return Verdict.yes(f"auto-merge on at {sha[:12]}: GitHub merges once {', '.join(rule)} pass there")
 
     def check_green(self, pr: PullRequest, checks: list[CheckRun]) -> Verdict:
         """Every required check of the repo is a success on the exact head."""

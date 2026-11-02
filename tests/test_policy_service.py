@@ -394,10 +394,10 @@ class Decisions(unittest.TestCase):
     def test_21_a_restore_kills_main_records(self):
         s = service()
         self.record(s)
-        self.record(s, id="d2", kind="box-change")
-        self.assertEqual(s.mark_restored("root", {})["killed"], 1)
+        self.record(s, id="d2", kind="cutover")
+        self.assertEqual(s.mark_restored("root", {})["killed"], 2)
         self.assertIn("restored", s.check_decision("d1", kind="main", repo=APP, commit=HEAD).reason)
-        self.assertTrue(s.check_decision("d2", kind="box-change", repo=APP, commit=HEAD).allowed)
+        self.assertIn("restored", s.check_decision("d2", kind="cutover", repo=APP, commit=HEAD).reason)
 
 
 class Routes(unittest.TestCase):

@@ -52,6 +52,16 @@ SEEN_EVERY = timedelta(seconds=20)   # how often a connector's poll is written d
 SIGN_IN = timedelta(minutes=30)
 LEASE = timedelta(minutes=20)        # the connector gives a turn 15 minutes
 MAX_TEXT = 8000
+# Files and photos on a message (the + in the box, 2 Nov): each at most 20 MB, at most 10 on a message, and
+# at most 100 MB and 20 files uploaded and not yet sent at once for each signed-in phone, so an upload that
+# is never sent cannot fill the store. An upload not sent in a day is dropped.
+MAX_ATTACHMENT = 20 * 1024 * 1024
+MAX_ATTACHMENTS = 10
+MAX_UNSENT_BYTES = 100 * 1024 * 1024
+MAX_UNSENT = 20
+UNSENT_FOR = timedelta(days=1)
+ATTACH_ID = re.compile(r"^att_[A-Za-z0-9_-]{8,64}$")
+MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}$")
 MAX_CLAIM = 3
 MAX_CHATS = 50
 MAX_OPEN = 8
@@ -147,6 +157,82 @@ def _newest(chats: list) -> dict | None:
     """The chat last written in. Not simply the first: the connector lists his Bot Chat first however
     long ago it was written in."""
     return max(chats, key=_when) if chats else None
+
+
+MAX_QUOTE = 2000
+QUOTE_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+# Hermes reads "@<kind>:<value>", "@diff" and "@staged" anywhere in a message it is given as a file, folder,
+# git, url or plugin reference and attaches what it names (agent/context_references.py, REFERENCE_PATTERN and
+# _PLUGIN_REFERENCE_PATTERN), and it puts what it attached under "--- Attached Context ---". A quote is words
+# Patrick saw, never a request for a file: on 2 Nov a quote that held a paste's reference attached the paste a
+# second time, and one cut inside a reference asked for a file that does not exist.
+ATTACHED = re.compile(r"(?:^|\n)--- Attached Context ---[ \t]*\n.*\Z", re.S)
+WARNINGS = re.compile(r"(?:^|\n)--- Context Warnings ---.*\Z", re.S)
+QUOTED_REF = re.compile(r"""(?<![\w/])@([a-zA-Z][a-zA-Z0-9_-]*):("[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)""")
+SIMPLE_REF = re.compile(r"(?<![\w/])@(diff|staged)\b")
+PASTE = re.compile(r"(?:^|[\\/])pasted_content_[\w-]+\.txt$")
+
+
+def _ref_label(m: re.Match) -> str:
+    kind, target, after = m.group(1), m.group(2), ""
+    if len(target) > 1 and target[0] in "\"'`" and target[-1] == target[0]:
+        target = target[1:-1]
+    else:
+        # As Hermes reads a bare one, the punctuation after it is the sentence's, not the reference's.
+        bare = target.rstrip(",.;!?)]}")
+        target, after = bare or target, target[len(bare):] if bare else ""
+    if kind == "file" and PASTE.search(target):
+        return "[pasted text]" + after
+    if kind == "url":
+        return target + after
+    name = re.split(r"[\\/]", target.rstrip("\\/"))[-1] or target
+    return f"[{kind}: {name}]" + after
+
+
+def inert(text: str) -> str:
+    """Words with nothing Hermes would read as a reference: the context Hermes attached is left out, each
+    reference becomes its name in brackets, and "@diff" or "@staged" gets a word joiner after the "@"."""
+    text = WARNINGS.sub("", ATTACHED.sub("", text))
+    return SIMPLE_REF.sub(lambda m: "@\u2060" + m.group(1), QUOTED_REF.sub(_ref_label, text))
+
+
+def _quote(value) -> str:
+    """The words a reply quotes, as they are in the message it answers (Hermes quotes the whole message
+    rather than a preview, so nothing of a list or code is lost), with every file or other reference in
+    them made plain words (inert)."""
+    if not isinstance(value, str):
+        raise CoreError(400, "bad_quote", "a reply quotes the words of the message it answers")
+    value = inert(value.replace("\r\n", "\n")).strip()
+    if not value or QUOTE_CONTROL.search(value):
+        raise CoreError(400, "bad_quote", "a reply quotes the words of the message it answers, as text")
+    if len(value) > MAX_QUOTE:
+        raise CoreError(400, "bad_quote", f"a reply quotes at most {MAX_QUOTE} characters")
+    return value
+
+
+def reply_pointer(quote: str, by: str) -> str:
+    """Hermes's own reply pointer, the line its gateway puts at the top of a message that replies to
+    another on a messaging app (contracts.json "replies"): "your previous message" when the message
+    answered is Hermes's own."""
+    who = " your previous message" if by == "hermes" else ""
+    return f'[Replying to{who}: "{quote}"]\n\n'
+
+
+def file_name(name) -> str:
+    """A file's name as it is kept and given to Hermes: its last part only, without control characters or
+    the characters Windows refuses in a name, at most 120 characters, its extension kept."""
+    if not isinstance(name, str):
+        raise CoreError(400, "bad_name", "a file has a name")
+    name = re.split(r"[\\/]", name.strip())[-1]
+    name = re.sub(r'[\x00-\x1f\x7f<>:"|?*]', "_", name).strip(" .")
+    if not name:
+        raise CoreError(400, "bad_name", "a file has a name")
+    if len(name) > 120:
+        stem, dot, ext = name.rpartition(".")
+        name = (stem[:110] + "." + ext[:9]) if dot and len(ext) <= 9 else name[:120]
+    return name
 
 
 def clean(body) -> dict:
@@ -294,10 +380,17 @@ def _release(here: Path | None = None) -> str | None:
 RELEASE = _release()
 
 
+DOING_STATES = ("thinking", "writing", "tool")
+DOING_ID = re.compile(r"^own_[A-Za-z0-9_-]{1,40}$")
+TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
 class _Connectors:
     """What each own connector last said it was doing, in memory (each claim says it again within
     seconds): its commit, how many turns it is running of how many at once and since when the oldest
-    runs, and an update it is on or could not do. It is how the phone says why a message waits."""
+    runs, an update it is on or could not do, and what each running turn is doing now (thinking,
+    writing, or a tool by its name, from Hermes's own stream). It is how the phone says why a message
+    waits, and the live line under a message being answered."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -312,7 +405,13 @@ class _Connectors:
                 "busy": count(body.get("busy"), 100), "parallel": count(body.get("parallel"), 100),
                 "busy_for": count(body.get("busy_for"), 10 ** 7),
                 "updating": updating if isinstance(updating, str) and re.match(r"^[0-9a-f]{40}$", updating) else None,
-                "update_why": str(body.get("update_why") or "")[:200], "at": now}
+                "update_why": str(body.get("update_why") or "")[:200], "at": now, "turns": {}}
+        for t in body.get("turns") or [] if isinstance(body.get("turns"), list) else []:
+            if (isinstance(t, dict) and isinstance(t.get("id"), str) and DOING_ID.match(t["id"])
+                    and t.get("state") in DOING_STATES and len(info["turns"]) < 10):
+                tool = t.get("tool") if t["state"] == "tool" else None
+                info["turns"][t["id"]] = {"state": t["state"],
+                                          "tool": tool if isinstance(tool, str) and TOOL_NAME.match(tool) else None}
         with self.lock:
             self.said[(ws, gw)] = info
 
@@ -636,6 +735,9 @@ class OwnChat:
         for m in mine:
             if m["status"] == "leased":
                 earlier = True
+                # What its turn is doing now, as the connector said it seconds ago.
+                if info is not None and m["id"] in info["turns"]:
+                    m["doing"] = info["turns"][m["id"]]
             if m["status"] != "queued":
                 continue
             if earlier:
@@ -665,12 +767,16 @@ class OwnChat:
         history = [{"who": "Patrick" if m["role"] == "user" else "Hermes", "role": m["role"], "text": m["text"],
                     "at": m["at"]} for m in (opened or {}).get("messages", [])]
         rows = self.s.db.execute(
-            "SELECT id, text, status, reason, created_at, updated_at FROM own_messages WHERE workspace_id = ? "
+            "SELECT id, text, status, reason, created_at, updated_at, reply_to FROM own_messages WHERE workspace_id = ? "
             "AND gateway = ? AND (session_id = ? OR made_session_id = ?) ORDER BY created_at DESC, rowid DESC "
             "LIMIT ?", (p.workspace_id, gw, sid, sid, MINE)).fetchall()
         # His reactions in this chat that the phone has asked for, so it shows each one at once, and
         # how it went, until the chat's own page shows it.
         mine = [dict(r) for r in reversed(rows)]
+        files = self._files(p.workspace_id, [m["id"] for m in mine])
+        for m in mine:
+            if m["id"] in files:
+                m["files"] = files[m["id"]]
         self._waits(p.workspace_id, gw, mine)
         return st | {"chat": chat or {"id": sid, "title": ""}, "loaded": opened is not None, "history": history,
                      "mine": mine, "reactions": Reactions(self.s).shown(p.workspace_id, gw, sid),
@@ -681,9 +787,16 @@ class OwnChat:
         return self.s.db.execute("SELECT count(*) FROM own_messages WHERE workspace_id = ? AND gateway = ? "
                                  "AND status IN ('queued', 'leased', 'uncertain')", (workspace_id, gw)).fetchone()[0]
 
-    def send(self, p: Principal, gw: str, session_id, new, text, idempotency_key) -> dict:
+    def send(self, p: Principal, gw: str, session_id, new, text, idempotency_key, reply_to=None, quote=None,
+             quote_by=None, attachments=None) -> dict:
         """One message to one chat (session_id), or the first message of a new chat (new: true), which
-        Hermes names itself, as it does any chat."""
+        Hermes names itself, as it does any chat.
+
+        A reply (reply style A, redesign step 4) names the message it answers by Hermes's own id
+        (reply_to), the words it quotes and whose they are (quote_by: hermes or patrick). Hermes keeps
+        no reply link, so the message Hermes gets opens with Hermes's own reply pointer, the line its
+        gateway writes for a reply on a messaging app, in plain sight, exactly as Patrick sees it, and
+        the core keeps the link back."""
         self._patrick(p)
         gw = self._gateway(gw)
         if not self.s.flag(p.workspace_id, "own_chat_write"):
@@ -692,14 +805,24 @@ class OwnChat:
             raise CoreError(400, "bad_chat", "a message goes to one chat: its session_id, or new: true for a new one")
         if session_id is not None:
             session_id = _sid(session_id)
-        if not isinstance(text, str) or not text.strip():
-            raise CoreError(400, "bad_text", "a message has some text")
+        files = self._wanted_files(attachments)
+        if not isinstance(text, str) or not (text.strip() or files):
+            raise CoreError(400, "bad_text", "a message has some text or a file")
         text = text.strip()
+        if reply_to is not None or quote is not None or quote_by is not None:
+            if session_id is None:
+                raise CoreError(400, "bad_reply", "a reply goes to the chat its message is in, not to a new chat")
+            if quote_by not in ("hermes", "patrick"):
+                raise CoreError(400, "bad_reply", "a reply says whose message it answers: hermes or patrick")
+            reply_to, quote = reactions.message_id(reply_to), _quote(quote)
+            text = reply_pointer(quote, quote_by) + text
         if len(text) > MAX_TEXT:
             raise CoreError(400, "bad_text", f"a message is at most {MAX_TEXT} characters")
         if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 200:
             raise CoreError(400, "bad_key", "a message carries an idempotency key of 8 to 200 characters")
-        body_sha = sha256_hex(canonical({"gateway": gw, "session_id": session_id, "text": text}))
+        body_sha = sha256_hex(canonical({"gateway": gw, "session_id": session_id, "text": text}
+                                        | ({"reply_to": reply_to} if reply_to is not None else {})
+                                        | ({"attachments": files} if files else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -715,17 +838,106 @@ class OwnChat:
             now = self.s.now()
             mid = new_id("own")
             db.execute("INSERT INTO own_messages(id, workspace_id, gateway, session_id, text, send_key, "
-                       "principal_id, device_id, status, created_at, updated_at) "
-                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?)",
-                       (mid, p.workspace_id, gw, session_id, text, f"tw-own.{mid}", p.id, p.device_id, now, now))
+                       "principal_id, device_id, status, created_at, updated_at, reply_to) "
+                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                       (mid, p.workspace_id, gw, session_id, text, f"tw-own.{mid}", p.id, p.device_id, now, now,
+                        reply_to))
+            for fid in files:
+                done = db.execute("UPDATE own_attachments SET message_id = ? WHERE id = ? AND workspace_id = ? "
+                                  "AND gateway = ? AND principal_id = ? AND message_id IS NULL AND body IS NOT NULL",
+                                  (mid, fid, p.workspace_id, gw, p.id)).rowcount
+                if not done:
+                    raise CoreError(409, "no_attachment", "a file on this message is not one uploaded here for "
+                                    "this Hermes, or it went with another message; add it again")
             self.s.event(db, p.workspace_id, "own.queued", mid, "patrick",
-                         {"gateway": gw, "new_chat": session_id is None, "device": p.device_id})
+                         {"gateway": gw, "new_chat": session_id is None, "device": p.device_id}
+                         | ({"reply": True} if reply_to is not None else {})
+                         | ({"files": len(files)} if files else {}))
             receipt = {"message_id": mid, "gateway": gw, "session_id": session_id, "status": "queued",
                        "created_at": now}
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
                        "result_json, created_at) VALUES(?,?,?,?,?,?,?)",
                        (p.workspace_id, p.id, idempotency_key, "own.send", body_sha, canonical(receipt), now))
         return receipt
+
+    @staticmethod
+    def _wanted_files(attachments) -> list[str]:
+        if attachments is None:
+            return []
+        if (not isinstance(attachments, list) or len(attachments) > MAX_ATTACHMENTS
+                or not all(isinstance(a, str) and ATTACH_ID.match(a) for a in attachments)
+                or len(set(attachments)) != len(attachments)):
+            raise CoreError(400, "bad_attachments", f"attachments are up to {MAX_ATTACHMENTS} ids of files uploaded here")
+        return list(attachments)
+
+    def attach(self, p: Principal, gw: str, name, mime, body: bytes) -> dict:
+        """One file or photo for a message to this Hermes, uploaded on its own before the message is sent.
+        Nothing reaches Hermes until a message names it."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        name = file_name(name)
+        mime = (mime or "").split(";")[0].strip().lower() or "application/octet-stream"
+        if not MIME.match(mime):
+            mime = "application/octet-stream"
+        if not isinstance(body, (bytes, bytearray)) or not body:
+            raise CoreError(400, "bad_file", "a file has some bytes")
+        if len(body) > MAX_ATTACHMENT:
+            raise CoreError(413, "too_big", f"a file is at most {MAX_ATTACHMENT // (1024 * 1024)} MB")
+        now = self.s.now()
+        with self.s.tx() as db:
+            # Uploads never sent go after a day.
+            db.execute("DELETE FROM own_attachments WHERE workspace_id = ? AND message_id IS NULL AND created_at < ?",
+                       (p.workspace_id, (self.s.clock() - UNSENT_FOR).isoformat()))
+            n, total = db.execute("SELECT count(*), coalesce(sum(size), 0) FROM own_attachments WHERE workspace_id = ? "
+                                  "AND principal_id = ? AND message_id IS NULL", (p.workspace_id, p.id)).fetchone()
+            if n >= MAX_UNSENT or total + len(body) > MAX_UNSENT_BYTES:
+                raise CoreError(429, "too_many_files", "too many files are waiting to be sent; send or take some off first")
+            fid = new_id("att")
+            digest = sha256_hex(bytes(body))
+            db.execute("INSERT INTO own_attachments(id, workspace_id, gateway, principal_id, name, mime, size, sha256, "
+                       "body, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (fid, p.workspace_id, gw, p.id, name, mime, len(body), digest, bytes(body), now))
+        return {"id": fid, "name": name, "mime": mime, "size": len(body), "sha256": digest}
+
+    def unattach(self, p: Principal, gw: str, fid) -> dict:
+        """Takes off a file uploaded and not sent."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not isinstance(fid, str) or not ATTACH_ID.match(fid):
+            raise CoreError(404, "no_attachment", "no such file")
+        with self.s.tx() as db:
+            gone = db.execute("DELETE FROM own_attachments WHERE id = ? AND workspace_id = ? AND gateway = ? "
+                              "AND principal_id = ? AND message_id IS NULL", (fid, p.workspace_id, gw, p.id)).rowcount
+        if not gone:
+            raise CoreError(404, "no_attachment", "no such file waiting to be sent")
+        return {"id": fid, "removed": True}
+
+    def _files(self, workspace_id: str, mids: list[str]) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        if not mids:
+            return out
+        q = ",".join("?" * len(mids))
+        for r in self.s.db.execute(f"SELECT id, message_id, name, mime, size FROM own_attachments WHERE workspace_id = ? "
+                                   f"AND message_id IN ({q}) ORDER BY rowid", (workspace_id, *mids)).fetchall():
+            out.setdefault(r["message_id"], []).append({"id": r["id"], "name": r["name"], "mime": r["mime"],
+                                                        "size": r["size"]})
+        return out
+
+    def attachment(self, workspace_id: str, gw: str, token: str | None, fid) -> tuple[str, bytes]:
+        """A file's bytes, for that gateway's connector, only while the message it goes with is leased."""
+        self._check_token(workspace_id, gw, token)
+        if not isinstance(fid, str) or not ATTACH_ID.match(fid):
+            raise CoreError(404, "no_attachment", "no such file")
+        row = self.s.db.execute("SELECT a.mime, a.body FROM own_attachments a JOIN own_messages m ON m.id = a.message_id "
+                                "WHERE a.id = ? AND a.workspace_id = ? AND a.gateway = ? AND m.status = 'leased' "
+                                "AND a.body IS NOT NULL", (fid, workspace_id, gw)).fetchone()
+        if not row:
+            raise CoreError(404, "no_attachment", "no such file on a message being sent")
+        with self.s.tx() as db:
+            db.execute("UPDATE own_attachments SET fetched_at = coalesce(fetched_at, ?) WHERE id = ?", (self.s.now(), fid))
+        return row["mime"], bytes(row["body"])
 
     def react(self, p: Principal, gw: str, session_id, message_id, emoji) -> dict:
         """Patrick's reaction on one message of one chat: exactly this emoji, or none (null).
@@ -882,8 +1094,12 @@ class OwnChat:
                 db.execute("UPDATE own_messages SET status = 'leased', lease_until = ?, attempts = attempts + 1, "
                            "updated_at = ? WHERE id = ?", (until, now, r["id"]))
                 self.s.event(db, workspace_id, "own.leased", r["id"], f"own connector ({gw})", {})
+                files = [dict(f) for f in db.execute(
+                    "SELECT id, name, mime, size, sha256 FROM own_attachments WHERE message_id = ? ORDER BY rowid",
+                    (r["id"],)).fetchall()]
                 items.append({"id": r["id"], "session_id": r["session_id"], "text": r["text"],
-                              "send_key": r["send_key"], "lease_until": until})
+                              "send_key": r["send_key"], "lease_until": until}
+                             | ({"attachments": files} if files else {}))
             reactions = [{"session_id": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, gw)] if ready else []
             sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
@@ -907,6 +1123,7 @@ class OwnChat:
                 db.execute("UPDATE own_messages SET status = 'uncertain', lease_until = NULL, reason = ?, "
                            "updated_at = ? WHERE id = ?",
                            ("the connector stopped before it said what happened", self.s.now(), r["id"]))
+                db.execute("UPDATE own_attachments SET body = NULL WHERE message_id = ?", (r["id"],))
                 self.s.event(db, workspace_id, "own.uncertain", r["id"], "core", {"reason": "lease ran out"})
 
     def result(self, workspace_id: str, gw: str, token: str | None, item_id: str, outcome: str, ref: str = "",
@@ -930,4 +1147,7 @@ class OwnChat:
                        "made_session_id = coalesce(made_session_id, ?) WHERE id = ?",
                        (state, reason or None, self.s.now(), made if row["session_id"] is None else None, item_id))
             self.s.event(db, workspace_id, f"own.{state}", item_id, f"own connector ({gw})", {"ref": ref})
+            # The files are in that Hermes's own folders now, or the message did not go: either way the core
+            # keeps only their names.
+            db.execute("UPDATE own_attachments SET body = NULL WHERE message_id = ?", (item_id,))
         return {"id": item_id, "status": state}

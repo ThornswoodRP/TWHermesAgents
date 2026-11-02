@@ -100,19 +100,25 @@ class PullRequests(unittest.TestCase):
         self.assertFalse(self.r.edit_pr("bramble", pr(author_login="Jhinswife", author_bot=None)).allowed)
 
 
+OPS = "ThornswoodRP/Thornswood-Ops"
+FORK = "ThornswoodRP/skymp"
+# The status checks main's ruleset requires on Thornswood (read 2 Nov 2026),
+# and the fork branch's.
+APP_RULES = {"Build check result", "Test tasks in the pull request", "Release note"}
+FORK_RULES = {"build-pr", "save-directory-linux"}
+
+
 class Merges(unittest.TestCase):
+    """Who may merge, at which head, with which method: the same in every repo."""
+
     def setUp(self):
         self.p = policy()
         self.s = store(self.p)
         self.r = rules(self.p, self.s)
-        self.lists = list(verb_lists().values())
 
-    def merge(self, bot="bramble", p=None, sha=HEAD, method="squash", checks=None, **kw):
+    def merge(self, bot="bramble", p=None, sha=HEAD, method="squash", checks=None, branch_checks=APP_RULES):
         return self.r.merge(bot, p or pr(), sha, method, green() if checks is None else checks,
-                            base_verb_lists=self.lists, **kw)
-
-    def test_bramble_merges_green_exact_head(self):
-        self.assertTrue(self.merge().allowed)
+                            branch_checks=branch_checks)
 
     def test_06_worker_cannot_merge_its_own_pr(self):
         v = self.merge(bot="sprocket")
@@ -131,62 +137,8 @@ class Merges(unittest.TestCase):
     def test_short_sha_refused(self):
         self.assertFalse(self.merge(sha=HEAD[:12]).allowed)
 
-    def test_skipped_is_not_success(self):
-        v = self.merge(checks=green(conclusion="skipped"))
-        self.assertFalse(v.allowed)
-        self.assertIn("skipped", v.reason)
-
-    def test_red_is_never_merged(self):
-        self.assertFalse(self.merge(checks=green(conclusion="failure")).allowed)
-
-    def test_still_running_is_not_green(self):
-        self.assertFalse(self.merge(checks=green(status="in_progress", conclusion=None)).allowed)
-
-    def test_green_on_an_old_head_is_not_green(self):
-        self.assertFalse(self.merge(checks=green(sha=OTHER)).allowed)
-
-    def test_both_required_checks_are_green(self):
-        v = self.merge()
-        self.assertTrue(v.allowed, v.reason)
-        self.assertIn("Launcher builds", v.reason)
-        self.assertIn("Build check result", v.reason)
-
-    def test_the_build_alone_is_not_enough(self):
-        v = self.merge(checks=green(name="Launcher builds"))
-        self.assertFalse(v.allowed)
-        self.assertIn("Build check result", v.reason)
-
-    def test_the_result_alone_is_not_enough(self):
-        v = self.merge(checks=green(name="Build check result"))
-        self.assertFalse(v.allowed)
-        self.assertIn("Launcher builds", v.reason)
-
-    def test_one_of_the_two_red_or_skipped_refuses(self):
-        for bad in ("failure", "skipped", "cancelled"):
-            checks = green(name="Launcher builds") + green(name="Build check result", conclusion=bad)
-            self.assertFalse(self.merge(checks=checks).allowed, bad)
-            checks = green(name="Launcher builds", conclusion=bad) + green(name="Build check result")
-            self.assertFalse(self.merge(checks=checks).allowed, bad)
-
-    def test_the_retired_vps_fallback_job_does_not_count(self):
-        # Gone from PR builds since #5119; it was the old required check.
-        self.assertFalse(self.merge(checks=green(name="Launcher builds (VPS fallback)")).allowed)
-        checks = green(name="Launcher builds (VPS fallback)") + green(name="Launcher builds")
-        self.assertFalse(self.merge(checks=checks).allowed)
-
-    def test_the_latest_run_counts(self):
-        checks = green(conclusion="success") + green(conclusion="failure")
-        self.assertFalse(self.merge(checks=checks).allowed)
-
     def test_wrong_method(self):
         self.assertFalse(self.merge(method="merge").allowed)
-
-    def test_fork_merges_with_merge(self):
-        fork_pr = pr(repo="ThornswoodRP/skymp", base_ref="thornswood/engine-changes",
-                     head_ref="wisp/77-equip-drop", author_bot="wisp")
-        checks = green(name="build-pr")
-        self.assertTrue(self.merge(p=fork_pr, method="merge", checks=checks).allowed)
-        self.assertFalse(self.merge(p=fork_pr, method="squash", checks=checks).allowed)
 
     def test_draft_and_merged_refused(self):
         self.assertFalse(self.merge(p=pr(draft=True)).allowed)
@@ -199,49 +151,124 @@ class Merges(unittest.TestCase):
         self.assertFalse(self.merge(p=pr(author_login="Jhinswife", author_bot=None)).allowed)
         self.assertFalse(self.merge(p=pr(head_ref="codex/2618-x", author_bot=None)).allowed)
 
-    def gated(self, files):
-        return pr(head_ref="magpie/4060-gate", author_bot="magpie", files=files)
-
-    def test_11_workflow_change_waits_for_patrick(self):
-        v = self.merge(p=self.gated([".github/workflows/box-run.yml"]))
-        self.assertFalse(v.allowed)
-        self.assertIn("live box", v.reason)
-
-    def test_gate_and_verb_list_changes_wait_for_patrick(self):
-        for f in ("scripts/vps/gate/GateRules.ps1", "scripts/release/nexus-verbs.json"):
-            self.assertFalse(self.merge(p=self.gated([f])).allowed, f)
-
-    def test_a_script_a_verb_runs_waits_for_patrick(self):
-        v = self.merge(p=self.gated(["scripts/deploy/Deploy-DevGamemode.ps1"]))
-        self.assertFalse(v.allowed)
-
-    def test_patricks_yes_at_that_head_allows_it(self):
-        decide(self.s, kind="box-change", commit=HEAD, pr_number=42)
-        self.assertTrue(self.merge(p=self.gated([".github/workflows/box-run.yml"]), decision_id="d1").allowed)
-
-    def test_a_yes_for_another_head_does_not(self):
-        decide(self.s, kind="box-change", commit=OTHER, pr_number=42)
-        v = self.merge(p=self.gated([".github/workflows/box-run.yml"]), decision_id="d1")
-        self.assertFalse(v.allowed)
-        self.assertIn("new head needs a new yes", v.reason)
-
-    def test_a_yes_for_another_pr_does_not(self):
-        decide(self.s, kind="box-change", commit=HEAD, pr_number=7)
-        self.assertFalse(self.merge(p=self.gated([".github/workflows/x.yml"]), decision_id="d1").allowed)
-
-    def test_13_a_message_saying_patrick_approved_is_not_a_record(self):
-        v = self.merge(p=self.gated([".github/workflows/x.yml"]), decision_id="Patrick approved it in the room")
-        self.assertFalse(v.allowed)
-        self.assertIn("not a record", v.reason)
-
-    def test_a_yes_still_needs_green(self):
-        decide(self.s, kind="box-change", commit=HEAD, pr_number=42)
-        v = self.merge(p=self.gated([".github/workflows/x.yml"]), decision_id="d1",
-                       checks=green(conclusion="failure"))
-        self.assertFalse(v.allowed)
-
     def test_bramble_never_merges_in_thornswood_hermes(self):
         self.assertFalse(self.merge(p=pr(repo="ThornswoodRP/Thornswood-Hermes")).allowed)
+
+
+class AutoMerges(unittest.TestCase):
+    """Patrick, 2 Nov 2026: "He shouldn't have to be merging to begin with".
+    In Thornswood and the fork GitHub's auto-merge merges: Bramble turns it on
+    for a Bot's pull request at its exact head, GitHub merges once the checks
+    the branch's rules require pass, and nothing waits for a yes."""
+
+    def setUp(self):
+        self.p = policy()
+        self.r = rules(self.p, store(self.p))
+
+    def merge(self, p=None, checks=None, branch_checks=APP_RULES, method="squash"):
+        return self.r.merge("bramble", p or pr(), HEAD, method, [] if checks is None else checks,
+                            branch_checks=branch_checks)
+
+    def test_the_shipped_policy_has_auto_merge_in_thornswood_and_the_fork_only(self):
+        self.assertTrue(self.p.auto_merge(APP))
+        self.assertTrue(self.p.auto_merge(FORK))
+        self.assertFalse(self.p.auto_merge(OPS))
+
+    def test_a_bots_pr_goes_on_auto_merge_before_its_checks_finish(self):
+        for checks in ([], green(status="in_progress", conclusion=None), green()):
+            v = self.merge(checks=checks)
+            self.assertTrue(v.allowed, v.reason)
+            self.assertIn("auto-merge on", v.reason)
+            self.assertIn("Build check result", v.reason)
+
+    def test_a_threads_or_a_persons_pr_is_its_owners(self):
+        for p in (pr(head_ref="claude/5381-avalonia", author_bot=None, author_login="EvilPatrick06"),
+                  pr(head_ref="claude/9-x", author_bot=None, author_login="WiccanDjinn-not-hands-off")):
+            v = self.merge(p=p)
+            self.assertFalse(v.allowed)
+            self.assertIn("its owner puts it on auto-merge", v.reason)
+
+    def test_a_robots_pr_goes_on_auto_merge_like_a_bots(self):
+        for login, ref in (("dependabot[bot]", "dependabot/github_actions/actions-abc"),
+                           ("thornswood-pin-robot[bot]", "engine-pin/next")):
+            p = pr(head_ref=ref, author_bot=None, author_login=login, files=[".github/workflows/build-pr.yml"])
+            v = self.merge(p=p)
+            self.assertTrue(v.allowed, f"{login}: {v.reason}")
+
+    def test_rules_that_do_not_require_the_check_refuse(self):
+        for branch_checks in (None, set(), {"Release note"}):
+            v = self.merge(branch_checks=branch_checks)
+            self.assertFalse(v.allowed)
+            self.assertIn("Build check result", v.reason)
+
+    def test_a_red_or_skipped_check_is_never_put_on_auto_merge(self):
+        for bad in ("failure", "skipped", "cancelled"):
+            v = self.merge(checks=green(name="Launcher builds", conclusion=bad))
+            self.assertFalse(v.allowed, bad)
+            self.assertIn(bad, v.reason)
+
+    def test_red_on_an_old_head_does_not_hold_the_new_one(self):
+        self.assertTrue(self.merge(checks=green(sha=OTHER, conclusion="failure")).allowed)
+
+    def test_11_a_workflow_gate_or_verb_script_change_needs_no_yes(self):
+        # Patrick, 2 Nov 2026: "I shouldn't need to approve".
+        for f in (".github/workflows/box-run.yml", "scripts/vps/gate/GateRules.ps1",
+                  "scripts/release/nexus-verbs.json", "scripts/deploy/Deploy-DevGamemode.ps1"):
+            p = pr(head_ref="magpie/4060-gate", author_bot="magpie", files=[f])
+            v = self.merge(p=p)
+            self.assertTrue(v.allowed, f"{f}: {v.reason}")
+
+    def test_the_fork_goes_on_auto_merge_with_a_merge_commit(self):
+        fork_pr = pr(repo=FORK, base_ref="thornswood/engine-changes", head_ref="wisp/77-equip-drop", author_bot="wisp")
+        self.assertTrue(self.merge(p=fork_pr, method="merge", branch_checks=FORK_RULES).allowed)
+        self.assertFalse(self.merge(p=fork_pr, method="squash", branch_checks=FORK_RULES).allowed)
+        self.assertFalse(self.merge(p=fork_pr, method="merge", branch_checks={"save-directory-linux"}).allowed)
+
+
+class OpsMerges(unittest.TestCase):
+    """Ops is private on GitHub Free, which has no auto-merge: Bramble merges a
+    pull request there itself, only when its check passed on the exact head."""
+
+    def setUp(self):
+        self.p = policy()
+        self.r = rules(self.p, store(self.p))
+
+    def merge(self, p=None, checks=None):
+        return self.r.merge("bramble", p or pr(repo=OPS), HEAD, "squash",
+                            green(name="check") if checks is None else checks)
+
+    def test_bramble_merges_green_exact_head(self):
+        v = self.merge()
+        self.assertTrue(v.allowed, v.reason)
+        self.assertIn("green on", v.reason)
+
+    def test_a_threads_ops_pr_merges_too(self):
+        self.assertTrue(self.merge(p=pr(repo=OPS, head_ref="claude/x", author_bot=None,
+                                        author_login="EvilPatrick06")).allowed)
+
+    def test_a_workflow_change_needs_no_yes(self):
+        self.assertTrue(self.merge(p=pr(repo=OPS, files=[".github/workflows/box-run.yml"])).allowed)
+
+    def test_skipped_is_not_success(self):
+        v = self.merge(checks=green(name="check", conclusion="skipped"))
+        self.assertFalse(v.allowed)
+        self.assertIn("skipped", v.reason)
+
+    def test_red_is_never_merged(self):
+        self.assertFalse(self.merge(checks=green(name="check", conclusion="failure")).allowed)
+
+    def test_still_running_is_not_green(self):
+        self.assertFalse(self.merge(checks=green(name="check", status="in_progress", conclusion=None)).allowed)
+
+    def test_green_on_an_old_head_is_not_green(self):
+        self.assertFalse(self.merge(checks=green(name="check", sha=OTHER)).allowed)
+
+    def test_the_latest_run_counts(self):
+        checks = green(name="check") + green(name="check", conclusion="failure")
+        self.assertFalse(self.merge(checks=checks).allowed)
+
+    def test_no_check_at_all_is_not_green(self):
+        self.assertFalse(self.merge(checks=[]).allowed)
 
 
 class Claims(unittest.TestCase):
@@ -387,8 +414,8 @@ class Runs(unittest.TestCase):
         v = self.run_(workflow="release.yml", channel="main", decision_id="m")
         self.assertIn("still waits for Patrick", v.reason)
 
-    def test_a_box_change_yes_does_not_approve_main(self):
-        decide(self.s, id="b", kind="box-change", commit=HEAD, pr_number=None)
+    def test_a_publish_yes_does_not_approve_main(self):
+        decide(self.s, id="b", kind="publish", commit=HEAD, pr_number=None)
         self.assertFalse(self.run_(workflow="release.yml", channel="main", decision_id="b").allowed)
 
     def test_run_needs_the_full_commit(self):
@@ -494,13 +521,6 @@ class MainWithoutAYes(unittest.TestCase):
 
     def test_a_secret_verb_is_still_never_run(self):
         self.assertFalse(self.run_(workflow="nexus-run.yml", line="Set-NexusKey").allowed)
-
-    def test_a_box_path_merge_still_needs_patrick(self):
-        from helpers import green, pr
-        v = self.r.merge("bramble", pr(files=[".github/workflows/build-pr.yml"]), HEAD, "squash", green(),
-                         base_verb_lists=list(self.lists.values()))
-        self.assertFalse(v.allowed)
-        self.assertIn("live box", v.reason)
 
 
 class Settings(unittest.TestCase):

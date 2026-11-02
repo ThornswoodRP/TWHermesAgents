@@ -263,7 +263,9 @@ TW_GIT_SCHEMA = {
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
         "guard rails before the write. Ops: base (get the base branch for a new tree), push (push your branch from "
         "the bundle tw_files made), open_pr, edit_pr, comment, label (add or remove), claim_labels (Bramble only: "
-        "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only), "
+        "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only: "
+        "in Thornswood and the fork it turns GitHub's auto-merge on for a Bot's pull request at its exact head, and "
+        "GitHub merges once the required checks pass; in Ops, where GitHub has no auto-merge, it merges a green one), "
         "start_run (Bramble only), read (a GET inside one repo), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
@@ -277,7 +279,7 @@ TW_GIT_SCHEMA = {
             "number": {"type": "integer"}, "sha": {"type": "string"},
             "title": {"type": "string"}, "body": {"type": "string"}, "draft": {"type": "boolean"},
             "label": {"type": "string"}, "action": {"type": "string", "enum": ["add", "remove"]},
-            "decision_id": {"type": "string"}, "card_revision": {"type": "integer"},
+            "decision_id": {"type": "string"},
             "workflow": {"type": "string"}, "inputs": {"type": "object"}, "channel": {"type": "string"},
             "path": {"type": "string"}, "event": {"type": "string"}, "issue": {"type": "integer"},
             "release": {"type": "string"}, "note": {"type": "string"},

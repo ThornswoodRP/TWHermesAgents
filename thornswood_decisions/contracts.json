@@ -13,7 +13,9 @@
     "id_pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
     "id_pattern_source": "hermes_constants.py:395 PROFILE_ID_RE",
     "home": "~/.hermes/profiles/<id>/",
-    "ids": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"]
+    "ids": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"],
+    "states": "Each Bot's gateway state for the phone's online dots is Hermes's own RuntimeState of that profile's gateway (absent, starting, ready, draining, incompatible, inaccessible, conflict), found the way the readiness check finds it and never started (room_send.py op states).",
+    "states_source": "gateway/runtime_contract.py:6 RuntimeState; hermes_cli/gateway_runtime.py:289 discover_gateway_endpoint"
   },
   "room": {
     "name": "Thornswood Workbench",

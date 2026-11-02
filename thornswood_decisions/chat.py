@@ -38,13 +38,15 @@ or a log.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+import re
+import threading
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .auth import Principal
 from .core import DecisionCore
 from .feeds import Feeds, room_events
-from .own import PAGE_TEXT, PAGES, _page_mid, clean_page, fetch_page, page_kind
+from .own import DOING_STATES, PAGE_TEXT, PAGES, TOOL_NAME, _page_mid, clean_page, fetch_page, page_kind
 from .reactions import Reactions
 from .reactions import emoji as _emoji
 from .reactions import message_id as _message_id
@@ -67,7 +69,17 @@ MINE = 50
 MAX_CLAIM = 7  # the six Bots and the rooms, at most this many at once
 ROOM_PAGE = 50
 ROOM_KINDS = ("message.user", "message.member")
+DOING_ID = re.compile(r"^msg_[A-Za-z0-9_-]{1,40}$")
+DOING_STALE = timedelta(seconds=60)  # the connector says it at least every 20 s while a turn runs
 PAGES_GW = "bots"   # the Bots' gateway, in the page store and the reactions beside Patrick's own two
+# Each Bot's gateway state, as the Bots' connector last read it from Hermes (room_send.py op states), for the
+# phone's online dots. Held in the core's memory only, like the pages: it is what is true now, and after a
+# restart the phone says "not heard from" until the connector's next report, half a minute at most.
+GATEWAY_STATES = ("absent", "starting", "ready", "draining", "incompatible", "inaccessible", "conflict",
+                  "check_failed")  # Hermes's RuntimeState (gateway/runtime_contract.py), and a check that raised
+LIVE_STALE = timedelta(seconds=120)  # four of the connector's reports missed: it is not heard from
+_LIVE: dict[str, dict] = {}
+_LIVE_LOCK = threading.Lock()
 
 
 def clean_room_page(body) -> dict:
@@ -117,6 +129,44 @@ def settle_from_room(store: Store, db, workspace_id: str, room_id: str, events: 
             store.event(db, workspace_id, "chat.sent", r["id"], "room feed", {"seen_in_room": True})
             n += 1
     return n
+
+
+class _Turns:
+    """What each Bot Chat turn running now is doing, as the Bots' connector last said it (thinking, writing,
+    or a tool by its plain name, from Hermes's own stream), in memory only, like the pages. Each post is
+    the whole set of turns running now, so a turn that ended is gone with the next one; one not said
+    again in DOING_STALE is gone too, so the phone never shows a line nobody is keeping current."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.said: dict[str, dict] = {}
+
+    def put(self, ws: str, turns: list, now: datetime) -> int:
+        kept = {}
+        for t in turns[:10]:
+            if (isinstance(t, dict) and isinstance(t.get("id"), str) and DOING_ID.match(t["id"])
+                    and t.get("state") in DOING_STATES):
+                tool = t.get("tool") if t["state"] == "tool" else None
+                kept[t["id"]] = {"state": t["state"],
+                                 "tool": tool if isinstance(tool, str) and TOOL_NAME.match(tool) else None}
+        with self.lock:
+            self.said[ws] = {"at": now, "turns": kept}
+        return len(kept)
+
+    def get(self, ws: str, item_id: str, now: datetime) -> dict | None:
+        with self.lock:
+            got = self.said.get(ws)
+        if not got or now - got["at"] >= DOING_STALE:
+            return None
+        return got["turns"].get(item_id)
+
+    def done(self, ws: str, item_id: str) -> None:
+        with self.lock:
+            if ws in self.said:
+                self.said[ws]["turns"].pop(item_id, None)
+
+
+TURNS = _Turns()
 
 
 class Chat:
@@ -218,9 +268,12 @@ class Chat:
                                  "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                                  (workspace_id, *targets, MINE)).fetchall()
         mine = [dict(r) for r in reversed(rows)]
+        now = self.s.clock()
         for m in mine:
             if m["status"] == "queued" and (m["reason"] or "").startswith((WAITS, HELPER_FAILED)):
                 m["waits"] = m["reason"]
+            if m["status"] == "leased" and (doing := TURNS.get(workspace_id, m["id"], now)):
+                m["doing"] = doing  # the live line under a message being answered
         return mine
 
     def _unsettled(self, workspace_id: str, target: str) -> int:
@@ -252,7 +305,8 @@ class Chat:
             kind, name = "bot", target.capitalize()
         return {"target": target, "kind": kind, "name": name, "as_of": snap["as_of"], "history": history,
                 "mine": self._mine(p.workspace_id, target), "can_send": self.s.flag(p.workspace_id, "mobile_chat_write"),
-                "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target) if kind == "bot" else []}
+                "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target) if kind == "bot" else [],
+                "live": self.live_states(p.workspace_id).get(target) if kind == "bot" else None}
 
     def summary(self, p: Principal) -> dict:
         self._patrick(p)
@@ -260,10 +314,11 @@ class Chat:
         snap = feeds.get(p.workspace_id, "bots")
         chats = {b["bot"]: b for b in (snap["bots"] or {}).get("bots", [])}
         out = []
+        live = self.live_states(p.workspace_id)
         for bot in self.bots(p.workspace_id):
             msgs = chats.get(bot, {}).get("messages", [])
             out.append({"bot": bot, "last": msgs[-1] if msgs else None,
-                        "unsettled": self._unsettled(p.workspace_id, bot)})
+                        "unsettled": self._unsettled(p.workspace_id, bot), "live": live.get(bot)})
         room_snap = feeds.get(p.workspace_id, "room")
         rooms = []
         for r in self.rooms(p.workspace_id):
@@ -274,6 +329,39 @@ class Chat:
                           if last else None, "unsettled": self._unsettled(p.workspace_id, r["room_id"])})
         return {"as_of": snap["as_of"], "bots": out, "rooms_as_of": room_snap["as_of"], "rooms": rooms,
                 "room": bool(rooms)}
+
+    # ── each Bot's gateway, for the phone's dots ──────────────────────────
+
+    def live(self, workspace_id: str, token: str | None, body) -> dict:
+        """The Bots' connector's report of each Bot's gateway state. Reading only, so it is taken while
+        mobile_read is on, whatever connector_effects says. Answers with the Bots to check next time."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not self.s.flag(workspace_id, "mobile_read"):
+            raise CoreError(423, "mobile_read_off", "the phone reads nothing while mobile_read is off")
+        bots = self.bots(workspace_id)
+        states = body.get("states") if isinstance(body, dict) else None
+        if not isinstance(states, dict) or any(k not in bots or v not in GATEWAY_STATES for k, v in states.items()):
+            raise CoreError(400, "bad_states", "states names bound Bots, each with one of Hermes's gateway states")
+        why = body.get("why")
+        if states or why is not None:
+            if why is not None and not isinstance(why, str):
+                raise CoreError(400, "bad_states", "why is words")
+            with _LIVE_LOCK:
+                _LIVE[workspace_id] = {"at": self.s.clock(), "states": dict(states), "why": (why or "")[:200]}
+        return {"bots": bots}
+
+    def live_states(self, workspace_id: str) -> dict:
+        """Each Bot's state for the phone: Hermes's own word for its gateway and when it was read; "not_heard"
+        when the connector has not reported in LIVE_STALE, and "check_failed" when it could not run the check."""
+        with _LIVE_LOCK:
+            got = _LIVE.get(workspace_id)
+        if got is None or self.s.clock() - got["at"] > LIVE_STALE:
+            return {b: {"state": "not_heard", "since": got["at"].isoformat() if got else None}
+                    for b in self.bots(workspace_id)}
+        at = got["at"].isoformat()
+        if got["why"] and not got["states"]:
+            return {b: {"state": "check_failed", "since": at, "why": got["why"]} for b in self.bots(workspace_id)}
+        return {b: {"state": got["states"].get(b, "not_heard"), "since": at} for b in self.bots(workspace_id)}
 
     # ── the connector's side ──────────────────────────────────────────────
 
@@ -430,9 +518,22 @@ class Chat:
             raise CoreError(400, "bad_result", "a result names the Bot, the message and the version it set")
         return Reactions(self.s).answered(workspace_id, PAGES_GW, body["bot"], body, "connector")
 
+    def doing(self, workspace_id: str, token: str | None, body) -> dict:
+        """What each Bot Chat turn running now is doing, from the Bots' connector, for the live line under
+        the message it answers. Reading only (nothing reaches Hermes), so it is taken while mobile_read is
+        on, whatever connector_effects says."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not self.s.flag(workspace_id, "mobile_read"):
+            raise CoreError(423, "mobile_read_off", "the phone reads nothing while mobile_read is off")
+        turns = body.get("turns") if isinstance(body, dict) else None
+        if not isinstance(turns, list):
+            raise CoreError(400, "bad_turns", "turns is a list of what each running turn is doing")
+        return {"kept": TURNS.put(workspace_id, turns, self.s.clock())}
+
     def result(self, workspace_id: str, token: str | None, item_id: str, outcome: str, ref: str = "",
                reason: str = "") -> dict:
         Feeds(self.s).check_token(workspace_id, "connector", token)
+        TURNS.done(workspace_id, item_id)
         if outcome not in OUTCOMES:
             raise CoreError(400, "bad_outcome", "an outcome is confirmed, failed, uncertain or not_ready")
         ref, reason = str(ref)[:128], str(reason)[:200]

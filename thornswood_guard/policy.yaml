@@ -98,16 +98,29 @@ merge:
     ThornswoodRP/Thornswood: main
     ThornswoodRP/Thornswood-Ops: main
     ThornswoodRP/skymp: thornswood/engine-changes
-  # A PR touching any of these runs on the live box once merged, so Bramble
-  # merges it only after Patrick's yes on a card for that PR at its exact head.
-  patrick_paths:
-    - ".github/workflows/**"
-    - "scripts/vps/gate/**"
-    - "scripts/release/nexus-verbs.json"
-  # The scripts these verb lists name are Patrick paths too.
-  verb_lists:
-    - scripts/vps/gate/verbs.json
-    - scripts/release/nexus-verbs.json
+  # Where GitHub's own auto-merge does the merging (Patrick, 2 Nov 2026,
+  # 12:33 PM: "He should just merge if he absolutely has to himself I
+  # shouldn't need to approve" and "He shouldn't have to be merging to begin
+  # with"), with the checks the base branch's rules must make GitHub wait
+  # for. In these repos tw_git merge turns auto-merge on at the exact head and
+  # GitHub merges once those checks pass (Thornswood's main through its merge
+  # queue). It does so only for a Bot's own pull request, and only when
+  # GitHub's rules on the branch, read just before, require every check
+  # listed here. Thornswood's "Build check result" passes only when
+  # "Launcher builds" did (build-pr.yml), and main's ruleset requires it. A
+  # person's or a thread's pull request is its owner's to put on auto-merge.
+  # Ops is private on GitHub Free, which has no auto-merge and no rules, so
+  # its list is empty and Bramble merges an Ops pull request itself once its
+  # check passed.
+  auto_merge:
+    ThornswoodRP/Thornswood: ["Build check result"]
+    ThornswoodRP/Thornswood-Ops: []
+    ThornswoodRP/skymp: ["build-pr"]
+  # The robots' pull requests have no person or thread behind them, so
+  # Bramble reviews them and turns auto-merge on as for a Bot's: Dependabot's
+  # version bumps and the pin robot's engine pin (engine-pin.yml, where
+  # Bramble already merged them under the merge rule).
+  robot_authors: ["dependabot[bot]", "thornswood-pin-robot[bot]"]
 
 # What Bramble's release tooling may start. Nothing else, on main only.
 runs:
@@ -115,11 +128,15 @@ runs:
   # "temporarily allow main releases without asking me"; again 1 Nov 01:19Z,
   # main releases unlimited for now; and 1 Nov 8:06 PM, no yes for each step
   # of agreed work). Bramble starts a main run on the exact commit of main
-  # like a dev one. Publishing a collection revision still needs his record,
-  # and so does every merge that changes what runs on the box. Patrick sets
-  # this false by a PR here to need his word for each main release again.
+  # like a dev one. Publishing a collection revision still needs his record.
+  # Patrick sets this false by a PR here to need his word for each main
+  # release again.
   main_without_patrick: true
   ref: main
+  # The verb lists a run's gate line is checked against, read from main.
+  verb_lists:
+    - scripts/vps/gate/verbs.json
+    - scripts/release/nexus-verbs.json
   repo: ThornswoodRP/Thornswood
   workflows:
     # box-run.yml lives in the private Ops repository since the VPS runners
@@ -351,7 +368,7 @@ secrets:
 
 notifications:
   # Push only for a real decision, and only once per card revision.
-  push_kinds: [decision, main-approval, box-change]
+  push_kinds: [decision, main-approval]
   lock_screen_text: "Thornswood needs you"
   link: "/cards/{card_id}?rev={revision}"
 

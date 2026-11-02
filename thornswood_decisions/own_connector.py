@@ -46,6 +46,7 @@ copies nothing. It logs no message text, no chat title and no token.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -64,6 +65,7 @@ from pathlib import Path
 LOCAL_CORE = "http://127.0.0.1:9135/api/v1"
 GATEWAYS = {"me": "my-hermes", "one": "One's Hermes"}
 POLL_SECONDS = 5
+TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 FEED_SECONDS = 20
 READY_SECONDS = 60       # how often a running gateway is checked again
 NOT_READY_SECONDS = 15   # and one that was not running
@@ -505,6 +507,35 @@ def fitted(state_db: Path, wanted: list[str], now: datetime) -> bytes:
 
 # ── running a turn ────────────────────────────────────────────────────────
 
+def follow_turn(stream, seen: dict, tell) -> None:
+    """Hermes's stream-json events of one turn, read as they come (hermes_cli/stream_json.py). The start and
+    the end are kept in `seen` without their text (the session id and the exit code are all that is read
+    from them), and `tell(state, tool)` hears each change of what the turn is doing, once: "thinking" (the
+    start, and after each tool's result), "writing" (the reply's text), or "tool" with the tool's name
+    when it is a plain name (else None). Never the words, a tool's input or its output. The Bots'
+    connector reads its Bot Chat turns with this too (connector.py)."""
+    now = None
+    for line in stream:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("type")
+        if kind in ("system", "result"):
+            ev.pop("text", None)
+            seen[kind] = ev
+        state = {"system": ("thinking", None), "tool_result": ("thinking", None),
+                 "text": ("writing", None)}.get(kind)
+        if kind == "tool_use":
+            name = ev.get("name")
+            state = ("tool", name if isinstance(name, str) and TOOL_NAME.match(name) else None)
+        if state and state != now:
+            now = state
+            tell(*state)
+
+
 class Hermes:
     def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str):
         self.cmd, self.ready_cmd, self.home_dir, self.name = list(hermes_cmd), list(ready_cmd), home_dir, name
@@ -570,8 +601,10 @@ class Hermes:
         reason = got.get("reason") if isinstance(got, dict) else None
         return "failed", str(reason or "not done")[:200]
 
-    def turn(self, session_id: str | None, text: str) -> tuple[str, str, str, str | None]:
-        """(outcome, ref, reason, session id) for one message."""
+    def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None) -> tuple[str, str, str, str | None]:
+        """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
+        `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
+        tool by its name."""
         if session_id is not None and not SESSION_ID.match(session_id):
             return "failed", "", "that is not a chat id Hermes gives", None
         with tempfile.TemporaryDirectory(prefix="tw-own-") as folder:
@@ -582,24 +615,20 @@ class Hermes:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
             argv = [*self.cmd, "chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
+            if image is not None:
+                argv += ["--image", str(image)]
             if session_id:
                 argv += ["--resume", session_id]
             else:
                 argv += ["--yolo", "--source", "cli", "--in", str(self.home_dir)]
-            return self._run(argv, session_id)
+            return self._run(argv, session_id, doing)
 
-    def _run(self, argv: list[str], session_id: str | None) -> tuple[str, str, str, str | None]:
+    def _run(self, argv: list[str], session_id: str | None, doing=None) -> tuple[str, str, str, str | None]:
         seen: dict = {}
+        tell = doing or (lambda state, tool: None)
 
         def read(stream):
-            for line in stream:
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(ev, dict) and ev.get("type") in ("system", "result"):
-                    seen[ev["type"]] = ev  # only the session id and the end are kept, never the text
-                    seen[ev["type"]].pop("text", None)
+            follow_turn(stream, seen, tell)
 
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **quiet(),
@@ -792,6 +821,55 @@ class Core:
         except (urllib.error.URLError, OSError, ValueError):
             return 0, {}
 
+    def fetch(self, op: str, body: dict) -> tuple[int, bytes]:
+        """An answer that is bytes (a file Patrick attached), not JSON."""
+        req = urllib.request.Request(f"{self.base}/own/{self.gateway}/{op}", data=json.dumps(body).encode("utf-8"),
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "Authorization": f"Bearer {self.token}"})
+        try:
+            with self.opener.open(req, timeout=120) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            return exc.code, b""
+        except (urllib.error.URLError, OSError, ValueError):
+            return 0, b""
+
+
+# Files and photos Patrick attached on the phone go where Hermes Desktop puts what is dropped or pasted into
+# its box: images in Hermes's own images folder, every other file in its attachments folder (the staging
+# folders Hermes's file and vision tools are given, tools/credential_files.py _CACHE_DIRS), each message's
+# in a folder of its own. The first photo goes to Hermes as the turn's image (`--image`), and each other file
+# as an @file: reference in the message, as Desktop attaches a file.
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
+REF_NEEDS_QUOTES = re.compile(r"""[\s()\[\]{}<>"'`]""")
+MESSAGE_ID = re.compile(r"^own_[A-Za-z0-9_-]{4,64}$")
+BAD_NAME = re.compile(r'[\\/\x00-\x1f\x7f<>:"|?*]')
+
+
+def file_ref(path: Path) -> str:
+    """A path as Hermes reads an @file: reference back whole (agent/context_references.py quote_value)."""
+    value = str(path)
+    return "@file:" + (f'"{value}"' if REF_NEEDS_QUOTES.search(value) else value)
+
+
+def save_attachment(root: Path, message_id: str, f: dict, body: bytes) -> Path:
+    """Writes one attached file under root/<images or attachments>/phone/<message id>/<its name>, readable
+    by this user only. The name is the core's (own.file_name): one part, no path, nothing Windows refuses."""
+    kind = "images" if f.get("mime") in IMAGE_TYPES else "attachments"
+    name = str(f.get("name") or "")
+    if not MESSAGE_ID.match(message_id) or not name or name in (".", "..") or BAD_NAME.search(name):
+        raise ValueError("an attachment's name or message is not one the core gives")
+    folder = root / kind / "phone" / message_id
+    folder.mkdir(parents=True, exist_ok=True)
+    if not WINDOWS:
+        os.chmod(folder, 0o700)
+    path = folder / name
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(body)
+    return path
+
 
 class OwnConnector:
     def __init__(self, core: Core, hermes: Hermes, state_db: Path, say=say, clock=time.monotonic,
@@ -803,6 +881,7 @@ class OwnConnector:
         self.leaving: str | None = None     # the release this copy was replaced with: finish, then stop
         self.unsaid: list[dict] = []
         self.running: list[threading.Thread] = []
+        self.doing: dict[str, dict] = {}    # message id -> what its turn is doing now (state, tool)
         self.wanted: list[str] = []
         self._lock = threading.Lock()
         self._ready = ("check_failed", "not checked yet")
@@ -860,17 +939,55 @@ class OwnConnector:
                 self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": "that chat is gone"})
                 self.feed_now = True
             return
+        def doing(state, tool):
+            with self._lock:
+                self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool}
+        text, image = item["text"], None
+        files = item.get("attachments") or []
+        if files:
+            try:
+                paths = self._files(item["id"], files)
+            except ValueError as exc:
+                # Nothing was handed to Hermes, so the message did not go: Patrick sees why and can send again.
+                with self._lock:
+                    self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": str(exc)[:200]})
+                    self.feed_now = True
+                return
+            image = next((pth for f, pth in paths if f.get("mime") in IMAGE_TYPES), None)
+            refs = [file_ref(pth) for _, pth in paths if pth != image]
+            text = "\n\n".join(x for x in (text, " ".join(refs)) if x) or f"[Patrick attached {image.name}]"
         try:
-            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), item["text"])
+            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image)
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
                                          item.get("session_id"))
+        finally:
+            with self._lock:
+                self.doing.pop(item["id"], None)
         r = {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
         if not item.get("session_id") and sid:
             r["session_id"] = sid
         with self._lock:
             self.unsaid.append(r)
             self.feed_now = True
+
+    def _files(self, message_id: str, files: list) -> list[tuple[dict, Path]]:
+        """Each attached file, fetched from the core, checked against its size and SHA-256, and saved."""
+        root = self.state_db.parent
+        out = []
+        for f in files[:10]:
+            if not isinstance(f, dict) or not isinstance(f.get("id"), str):
+                raise ValueError("an attachment the core named is not well formed")
+            status, body = self.core.fetch("attachment", {"id": f["id"]})
+            if status != 200:
+                raise ValueError(f"could not fetch {f.get('name')} from the core (it answered {status or 'nothing'})")
+            if len(body) != f.get("size") or hashlib.sha256(body).hexdigest() != f.get("sha256"):
+                raise ValueError(f"{f.get('name')} came from the core changed or cut short")
+            try:
+                out.append((f, save_attachment(root, message_id, f, body)))
+            except OSError as exc:
+                raise ValueError(f"could not save {f.get('name')} into Hermes's folder ({type(exc).__name__})") from None
+        return out
 
     def react(self, wanted: list) -> int:
         """The reactions the core handed over, each set in Hermes one after another (each is one quick
@@ -950,9 +1067,11 @@ class OwnConnector:
         of how many at once, since when the oldest runs, its commit, and an update it is on or could not do."""
         now = self.clock()
         started = [getattr(t, "started_at", now) for t in self.running]
+        with self._lock:
+            turns = list(self.doing.values())[:PARALLEL]
         return {"commit": self.commit, "busy": len(self.running), "parallel": PARALLEL,
                 "busy_for": int(now - min(started)) if started else 0,
-                "updating": self.leaving, "update_why": self.update_why}
+                "updating": self.leaving, "update_why": self.update_why, "turns": turns}
 
     def _update(self, release) -> None:
         if (self.updater is None or self.leaving or not isinstance(release, str) or not RELEASE.match(release)

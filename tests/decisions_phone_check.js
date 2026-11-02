@@ -2,7 +2,7 @@ const { chromium } = require('playwright')
 // The phone app in headless Chromium with a virtual passkey (Chrome's WebAuthn
 // testing API): setting up the phone (pairing and its first passkey on one
 // screen), a deep link, adding a passkey, signing in with it,
-// answering a card (it leaves Decisions for Answered), a high-risk card's own
+// answering a card (it leaves Decisions for good), a high-risk card's own
 // check screen, the four tabs, the Thornswood Bots list (Hermes, One, then the
 // six Bots) and a chat with Patrick's own Hermes on One (as text, a new chat,
 // Hermes on the VM with no connector yet, and reactions: Hermes's own, setting
@@ -113,15 +113,18 @@ const base = `http://localhost:${port}`
   })
   await page.getByText('Turn on the nightly backup check?').click()
   await page.getByRole('button', { name: 'Choose: Do it' }).click()
-  await step('an answered card leaves Decisions at once, for Answered', async () => {
-    await page.getByText('Answered "Turn on the nightly backup check?": Do it. It is under Answered below.').waitFor({ timeout: 5000 })
+  await step('an answered card leaves Decisions at once and for good: only cards waiting on him are listed', async () => {
+    await page.getByText('Answered "Turn on the nightly backup check?": Do it.', { exact: true }).waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/decisions')) throw new Error('url ' + page.url())
-    await page.getByRole('heading', { name: 'Answered' }).waitFor({ timeout: 3000 })
-    await page.getByText('You chose Do it, ').waitFor({ timeout: 3000 })
+    if (await page.getByRole('heading', { name: 'Answered' }).count()) throw new Error('an Answered section')
+    if (await page.getByRole('button', { name: /^Turn on the nightly backup check\?/ }).count()) throw new Error('the answered card is still listed')
     if ((await page.textContent('#badge')) !== '2') throw new Error('badge is not 2')
+    await page.reload()
+    await page.getByRole('heading', { name: /^Waiting on you/ }).waitFor({ timeout: 5000 })
+    if (await page.getByText('Turn on the nightly backup check?').count()) throw new Error('the answered card is back after a reload')
   })
-  await page.getByRole('button', { name: /^Turn on the nightly backup check\?/ }).click()
-  await step('an answered card opened from Answered has its receipt', () => page.getByText(/^Answered "Do it" at /).waitFor({ timeout: 5000 }))
+  await page.goto(base + '/m/decisions/' + card)
+  await step('an answered card opened by its link has its receipt', () => page.getByText(/^Answered "Do it" at /).waitFor({ timeout: 5000 }))
   await step('an answered card offers no more choices', async () => {
     if (await page.getByRole('button', { name: /^Choose: / }).count()) throw new Error('choices on an answered card')
   })
@@ -142,7 +145,7 @@ const base = `http://localhost:${port}`
   await page.getByRole('button', { name: 'Go back to the card' }).click()
   await page.getByRole('button', { name: 'Choose: Wait' }).click()
   await step('then the passkey prompt opens by itself and answers it, with no button', async () => {
-    await page.getByText('Answered "Delete the old test branches?": Wait. It is under Answered below.').waitFor({ timeout: 8000 })
+    await page.getByText('Answered "Delete the old test branches?": Wait.', { exact: true }).waitFor({ timeout: 8000 })
   })
   await step('four tabs: Bots, Rooms, Board and Decisions', async () => {
     const tabs = (await page.locator('#tabs a').allTextContents()).map(t => t.replace(/\s*\d*\s*$/, '').trim())
@@ -164,12 +167,29 @@ const base = `http://localhost:${port}`
     if ((await tag('one')) !== 'On') throw new Error('One: ' + (await tag('one')))
     if ((await tag('me')) !== 'Connector missing') throw new Error('Hermes: ' + (await tag('me')))
   })
+  await step('each one shows online or offline from what is running: a dot on its avatar, and words', async () => {
+    const got = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#view > button.row')].map(r => [
+      r.dataset.bot || r.dataset.gateway,
+      [(r.querySelector('.avwrap .dot') || {}).className, (r.querySelector('.avwrap .dot') || { getAttribute: () => null }).getAttribute('aria-label'),
+        (r.querySelector('.rec.live') || {}).textContent || null]])))
+    const want = { one: ['dot on', 'On', null], me: ['dot off', 'Connector missing', null],
+      bramble: ['dot on', 'On', 'On'], rift: ['dot off', 'Offline', 'Offline'], sprocket: ['dot wait', 'Starting', 'Starting'],
+      echo: ['dot wait', 'Not heard from', 'Not heard from'], wisp: ['dot wait', 'Not heard from', 'Not heard from'] }
+    for (const [k, v] of Object.entries(want)) {
+      if (JSON.stringify(got[k]) !== JSON.stringify(v)) throw new Error(`${k}: ${JSON.stringify(got[k])}`)
+    }
+  })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-bots.png', fullPage: true })
   await page.getByText('Bramble', { exact: true }).click()
   await step("Bramble's Bot Chat, as text, under Bots", async () => {
     await page.getByText('All green <i>tonight</i>.').waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/bots/bramble')) throw new Error('url ' + page.url())
     if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Bots') throw new Error('not on the Bots tab')
+  })
+  await step("the Bot Chat's bar shows Bramble is on by its dot, with no line of words under it", async () => {
+    if (await page.locator('#view .chatbar .t span').count()) throw new Error(await page.locator('#view .chatbar .t span').first().textContent())
+    const d = page.locator('#view .chatbar .avwrap .dot')
+    if ((await d.getAttribute('class')) !== 'dot on' || (await d.getAttribute('aria-label')) !== 'On') throw new Error('no green dot')
   })
   await page.getByLabel('Message to Bramble').fill('Thanks, and look at the launcher log next.')
   await page.getByRole('button', { name: 'Send to Bramble' }).click()
@@ -230,6 +250,23 @@ const base = `http://localhost:${port}`
   await step('a message to One waits for its connector', async () => {
     await page.getByText('Add the backup check.').waitFor({ timeout: 5000 })
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
+  })
+  await step('the + in the box offers a photo, his photos and his files, and a picked file goes with the message', async () => {
+    await page.getByRole('button', { name: 'Add photos or files' }).click()
+    const sheet = page.getByRole('dialog', { name: 'Add photos or files' })
+    for (const name of ['Take a photo', 'Photos', 'Files']) await sheet.getByRole('button', { name }).waitFor({ timeout: 3000 })
+    const chooser = page.waitForEvent('filechooser')
+    await sheet.getByRole('button', { name: 'Files' }).click()
+    await (await chooser).setFiles({ name: 'build notes.txt', mimeType: 'text/plain', buffer: Buffer.from('the backup ran at 3 AM\n') })
+    await page.locator('.files .file.ok', { hasText: 'build notes.txt' }).waitFor({ timeout: 5000 })
+    const sent = page.waitForRequest(q => q.method() === 'POST' && /\/own\/one\/send$/.test(q.url()))
+    await page.getByRole('button', { name: 'Send to One' }).click()
+    const body = JSON.parse((await sent).postData())
+    if (body.text !== '' || !Array.isArray(body.attachments) || body.attachments.length !== 1) {
+      throw new Error('send body ' + JSON.stringify(body))
+    }
+    await page.locator('#view .msg.mine .att', { hasText: 'build notes.txt' }).waitFor({ timeout: 5000 })
+    if (await page.locator('.files').count()) throw new Error('the picked file stayed above the box after sending')
   })
   await step("Hermes's own reaction shows on the message it is on", () =>
     page.locator('#view .msg[data-mid="1"] .react[aria-label="Hermes\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
@@ -368,6 +405,18 @@ const base = `http://localhost:${port}`
     await chip.locator('summary').click()
     await page.getByText(/^Step 1\. gh pr merge 55/).waitFor({ timeout: 3000 })
   })
+  await step("a reply to a paste quotes the paste's words, drawn as they are, and never its file reference", async () => {
+    const mine = page.locator('#view .msg.mine', { hasText: 'Here is the plan' })
+    if (await page.locator('.sheet-back').count()) throw new Error("opening the chip opened the message's actions too")
+    await mine.locator('.bub .md').click()
+    await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
+    const quote = page.locator('#view .replying .qtext')
+    await quote.waitFor({ timeout: 8000 })
+    const words = await quote.textContent()
+    if (/@file:|Attached Context|pasted_content/.test(words) || !words.includes('Here is the plan')) throw new Error(words)
+    await page.getByRole('button', { name: 'Cancel the reply' }).click()
+    await page.locator('#view .replying').waitFor({ state: 'detached', timeout: 8000 })
+  })
   await step('a long command in a code block wraps on the phone, and Copy still copies it whole', async () => {
     const fit = await page.locator('#view .msg.theirs .md-code pre').evaluate(n => ({ s: n.scrollWidth, c: n.clientWidth }))
     if (fit.s > fit.c + 1) throw new Error(JSON.stringify(fit))
@@ -382,6 +431,23 @@ const base = `http://localhost:${port}`
   await page.goto(base + '/m/hermes/one/s_never')
   await step('a chat One never listed does not open', () =>
     page.getByText('One has not listed this chat, so it does not open here.').waitFor({ timeout: 5000 }))
+  await page.goto(base + '/m/hermes/one/s_work')
+  await step('a message being answered shows one live line saying what its turn is doing', async () => {
+    const live = page.locator('#view .msg.working')
+    await live.waitFor({ timeout: 15000 })
+    if (await live.getAttribute('role') !== 'status') throw new Error('the live line is not a status')
+    if (await live.locator('.dots').count() !== 1) throw new Error('no working dots')
+    if (await live.locator('.doing').textContent() !== 'Running a command') throw new Error('doing: ' + await live.locator('.doing').textContent())
+    if (await page.locator('#view .msg.working').count() !== 1) throw new Error('more than one live line')
+  })
+  await page.goto(base + '/m/bots/wisp')
+  await step("a Bot answering his message shows the same live line in its Bot Chat", async () => {
+    const live = page.locator('#view .msg.working')
+    await live.waitFor({ timeout: 15000 })
+    if (await live.locator('.who').textContent() !== 'Wisp') throw new Error('the line is not from Wisp')
+    if (await live.locator('.doing').textContent() !== 'Writing') throw new Error('doing: ' + await live.locator('.doing').textContent())
+    if (await page.locator('#view .msg.working').count() !== 1) throw new Error('more than one live line')
+  })
   await page.goto(base + '/m/hermes/one/s_md')
   await step("Markdown is drawn: bold, italic, code, lists, a link, a code block, a table and a quote", async () => {
     const msg = page.locator('#view .msg[data-mid]').first()
@@ -500,6 +566,61 @@ const base = `http://localhost:${port}`
     await page.getByText('Rift: load order is clean').first().waitFor({ timeout: 8000 })
     if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('chat actions on his Bot Chat')
   })
+  // A reply to one message (redesign step 4, reply style A): the quote goes at the top of the message as
+  // sent, and the core keeps which message it answers.
+  const replyBody = []
+  page.on('request', q => { if (q.method() === 'POST' && /\/own\/one\/send$/.test(q.url())) replyBody.push(JSON.parse(q.postData())) })
+  await page.goto(base + '/m/hermes/one/s_long')
+  const last = page.locator('#view .msg.theirs', { hasText: 'message 119' })
+  await last.waitFor({ timeout: 15000 })
+  const lastMid = Number(await last.getAttribute('data-mid'))
+  await last.locator('.bub').click()
+  await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
+  await step('Reply shows the words it quotes above the box, and Cancel takes it away', async () => {
+    await page.locator('#view .replying', { hasText: 'Replying to One' }).waitFor({ timeout: 8000 })
+    await page.locator('#view .replying', { hasText: 'message 119' }).waitFor({ timeout: 1000 })
+    await page.getByRole('button', { name: 'Cancel the reply' }).click()
+    await page.locator('#view .replying').waitFor({ state: 'detached', timeout: 8000 })
+  })
+  await last.locator('.bub').click()
+  await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
+  await page.locator('#view .replying').waitFor({ timeout: 8000 })
+  await page.getByLabel('Message to One').fill('Thanks, that was the last one.')
+  await page.getByRole('button', { name: 'Send to One' }).click()
+  await step('a reply asks for exactly that message and those words, and shows the quote at the top', async () => {
+    await page.locator('#view .msg.mine .quote', { hasText: 'message 119' }).first().waitFor({ timeout: 5000 })
+    const b = replyBody[replyBody.length - 1] || {}
+    if (b.reply_to !== lastMid || b.quote !== 'message 119' || b.text !== 'Thanks, that was the last one.' || b.session_id !== 's_long') throw new Error(JSON.stringify(b))
+    if (await page.locator('#view .replying').count()) throw new Error('the reply preview stayed after sending')
+  })
+  await step('the chat reads itself again while its box has the focus, and the box and what is in it stay', async () => {
+    // Patrick, 2 Nov: "Waiting to send" stayed on a message long after it had gone, because a chat was not
+    // read again while its box had the focus, and putting the keyboard away leaves the focus there.
+    const box = page.getByLabel('Message to One')
+    await box.focus()
+    await box.pressSequentially('half a thought')
+    const handle = await box.elementHandle()
+    await page.locator('#view .msg.mine[data-mid]:not([data-status])', { hasText: 'Thanks, that was the last one.' })
+      .waitFor({ timeout: 45000 })
+    if (!(await handle.evaluate(n => n.isConnected && n === document.activeElement && n.value === 'half a thought'))) {
+      throw new Error('the box was drawn again under him')
+    }
+    await box.fill('')
+  })
+  await step("One's own copy of the reply keeps the quote, and the quote goes back to the message it answers", async () => {
+    await again('/m/hermes/one/s_long', () => page.locator('#view .msg.mine[data-mid]:not([data-status]) .quote.linked').count())
+    const copy = page.locator('#view .msg.mine[data-mid]:not([data-status])', { hasText: 'Thanks, that was the last one.' })
+    await copy.locator('.quote.linked', { hasText: 'message 119' }).click()
+    await page.locator(`#view .msg.flash[data-mid="${lastMid}"]`).waitFor({ timeout: 3000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-reply.png' })
+  await page.goto(base + '/m/bots/bramble')
+  await page.locator('#view .msg[data-mid="70"] .bub').click()
+  await step('a Bot Chat offers no reply: Hermes has none there', async () => {
+    await page.getByRole('dialog', { name: 'Message actions' }).waitFor({ timeout: 3000 })
+    if (await page.getByRole('dialog').getByRole('button', { name: 'Reply' }).count()) throw new Error('Reply in a Bot Chat')
+    await page.keyboard.press('Escape')
+  })
   await page.goto(base + '/m/bots/bramble')
   await step('a Bot Chat has no chat actions', async () => {
     await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
@@ -535,11 +656,23 @@ const base = `http://localhost:${port}`
     await page.getByText('Second test room', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('Bramble: <script>alert(1)</script> hello').waitFor({ timeout: 3000 })
   })
-  await step("a list line is the message's plain words, cut at a whole word", async () => {
-    await page.getByText(/^magpie: @bramble/).waitFor({ timeout: 3000 })
-    const line = await page.getByText(/^magpie: @bramble/).textContent()
-    const want = "magpie: @bramble it'll show up on #5367, and it'll run, not skip. Why it isn't there yet: Launcher builds has needs: pick and…"
-    if (line !== want) throw new Error(JSON.stringify(line))
+  await step("a list line is the message drawn the way it is, its sender apart, cut by lines", async () => {
+    // Patrick, 2 Nov: "it should render properly everywhere in the app", not raw text and not plain words.
+    const line = page.locator('#view .row', { hasText: 'Second test room' }).locator('.snip')
+    await line.waitFor({ timeout: 3000 })
+    if ((await line.locator('.sender').textContent()) !== 'Magpie: ') throw new Error('the sender: ' + await line.locator('.sender').textContent())
+    if (await line.locator('.mention').textContent() !== '@Bramble') throw new Error('the mention')
+    if (await line.locator('strong').textContent() !== "Why it isn't there yet:") throw new Error('the bold words')
+    if ((await line.locator('code').allTextContents()).join('|') !== 'Launcher builds|needs: pick') throw new Error('the code')
+    if (await line.locator('a').count() || await line.locator('.lnk').textContent() !== 'the guide') throw new Error('a link in a row is words, not a link')
+    const text = await line.textContent()
+    if (/\*\*|`|##|\]\(|^magpie/.test(text)) throw new Error('raw marks: ' + text)
+    const clamp = await line.evaluate(n => getComputedStyle(n).webkitLineClamp)
+    if (clamp !== '2') throw new Error('cut by lines: ' + clamp)
+  })
+  await step('no tab carries a line of explanation under its title', async () => {
+    if (await page.locator('#view .bar .t > span').count()) throw new Error(await page.locator('#view .bar .t > span').first().textContent())
+    if (/ as of |never an answer/.test(await page.locator('#view').textContent())) throw new Error('clutter')
   })
   await page.getByText('Second test room', { exact: true }).click()
   await step('a room opens on its own deep link', async () => {
@@ -642,7 +775,7 @@ const base = `http://localhost:${port}`
   })
   await page.goto(base + '/m/needs-you')
   await step("the old Needs you path opens Decisions", async () => {
-    await page.getByText('Answered', { exact: true }).waitFor({ timeout: 5000 })
+    await page.getByRole('heading', { name: /^Waiting on you/ }).waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/decisions')) throw new Error('url ' + page.url())
   })
   await page.getByRole('button', { name: 'Not now' }).click()
@@ -704,7 +837,7 @@ const base = `http://localhost:${port}`
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
   // Each signed-in view gets one in every kind of text it shows, at Pixel widths and with larger text.
   const LONG = 'https://github.com/ThornswoodRP/Thornswood-Hermes/pull/44/commits/2e308db923bf40880adae89d38fedb307c18aa46'
-  for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3]]) {
+  for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3], [1440, 1]]) {
     await page.setViewportSize({ width, height: 860 })
     for (const view of ['/m/bots', '/m/rooms', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',
       '/m/hermes/one', '/m/hermes/one/s_plan', '/m/hidden/one', '/m/bots/bramble', '/m/room']) {
@@ -724,6 +857,72 @@ const base = `http://localhost:${port}`
       })
     }
   }
+  // The desktop (2 Nov: One showed the phone's one column, in a browser and installed). The layout follows the
+  // window's width alone: from 1000 the rail, the chat list and the chat; from 1360 Decisions on the right too.
+  const layout = () => page.evaluate(() => {
+    const shown = id => { const e = document.getElementById(id); return !!e && !e.hidden && getComputedStyle(e).display !== 'none' }
+    const tabs = document.getElementById('tabs').getBoundingClientRect()
+    return { list: shown('list'), side: shown('side'), agents: getComputedStyle(document.getElementById('agents')).display !== 'none',
+      people: document.querySelectorAll('#agents .agent').length, railWidth: Math.round(tabs.width), railLeft: tabs.left,
+      current: [...document.querySelectorAll('#list .row[aria-current]')].map(r => r.dataset.chat || r.dataset.bot || r.dataset.room),
+      agent: (document.querySelector('#agents .agent[aria-current]') || {}).title || null,
+      sideText: (document.getElementById('side').textContent || ''), view: document.getElementById('view').textContent,
+      wider: document.documentElement.scrollWidth > document.documentElement.clientWidth }
+  })
+  await page.setViewportSize({ width: 1600, height: 900 })
+  await step('a wide screen gets the desktop: the rail, the chat list with the open chat marked, the chat, and Decisions', async () => {
+    await page.goto(base + '/m/hermes/one/s_plan')
+    await page.locator('#list .row[data-chat="s_plan"][aria-current]').waitFor({ timeout: 5000 })
+    await page.locator('#side').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+    const got = await layout()
+    if (!got.list || !got.side || !got.agents || got.people !== 8) throw new Error(JSON.stringify(got))
+    if (got.railLeft !== 0 || got.railWidth > 100) throw new Error('the tabs are not a rail on the left: ' + JSON.stringify(got))
+    if (got.agent !== 'One') throw new Error('the rail marks ' + got.agent)
+    if (!got.view.includes('Plan the week') || got.wider) throw new Error(JSON.stringify(got))
+  })
+  await step("the rail opens a Bot's chat, and the list beside it marks that Bot", async () => {
+    await page.goto(base + '/m/bots')
+    await page.locator('#view').getByText('Pick Hermes, One or a Bot on the left.').waitFor({ timeout: 5000 })
+    await page.locator('#agents .agent[title="Bramble"]').click()
+    await page.waitForURL(base + '/m/bots/bramble')
+    await page.locator('#list .row[data-bot="bramble"][aria-current]').waitFor({ timeout: 5000 })
+    const got = await layout()
+    if (got.agent !== 'Bramble' || got.current.join() !== 'bramble') throw new Error(JSON.stringify(got))
+  })
+  await step('the chat list and Decisions each fold away from the rail, and come back', async () => {
+    await page.goto(base + '/m/hermes/one/s_plan')
+    await page.locator('#list .row[data-chat="s_plan"]').waitFor({ timeout: 5000 })
+    await page.getByRole('button', { name: 'Hide the chat list' }).click()
+    await page.getByRole('button', { name: 'Show the chat list' }).waitFor({ timeout: 5000 })
+    await page.getByRole('button', { name: 'Hide Decisions' }).first().click()
+    await page.getByRole('button', { name: 'Show Decisions' }).waitFor({ timeout: 5000 })
+    let got = await layout()
+    if (got.list || got.side || !got.view.includes('Plan the week')) throw new Error(JSON.stringify(got))
+    await page.getByRole('button', { name: 'Show the chat list' }).click()
+    await page.getByRole('button', { name: 'Show Decisions' }).click()
+    await page.locator('#side').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+    got = await layout()
+    if (!got.list || !got.side) throw new Error(JSON.stringify(got))
+  })
+  await step('Decisions is not shown twice: on its own tab it is the middle, with no pane on the right', async () => {
+    await page.goto(base + '/m/decisions')
+    await page.locator('#view').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+    const got = await layout()
+    if (got.side || got.list) throw new Error(JSON.stringify(got))
+  })
+  await step('a narrower desktop window keeps the chat list and drops the right pane', async () => {
+    await page.setViewportSize({ width: 1200, height: 800 })
+    await page.goto(base + '/m/hermes/one/s_plan')
+    await page.locator('#list .row[data-chat="s_plan"][aria-current]').waitFor({ timeout: 5000 })
+    const got = await layout()
+    if (!got.list || got.side || got.wider) throw new Error(JSON.stringify(got))
+  })
+  await step('narrowing the window to a phone redraws the phone layout, with the tabs at the foot', async () => {
+    await page.setViewportSize({ width: 412, height: 860 })
+    await page.waitForFunction(() => document.getElementById('list').hidden)
+    const got = await layout()
+    if (got.list || got.side || got.agents || got.railWidth < 400 || !got.view.includes('Plan the week')) throw new Error(JSON.stringify(got))
+  })
   await page.setViewportSize({ width: 412, height: 860 })
   const sw = await page.evaluate(async () => { const r = await Promise.race([navigator.serviceWorker.ready, new Promise(ok => setTimeout(() => ok(null), 5000))]); return r ? r.scope : null })
   if (!sw) failed++

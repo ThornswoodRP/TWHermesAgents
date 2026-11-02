@@ -25,7 +25,7 @@ def now_utc() -> datetime:
 @dataclass
 class Decision:
     id: str
-    kind: str            # "box-change" (a Patrick-path merge), "main", "publish", "cutover"
+    kind: str            # "main", "publish", "cutover"
     repo: str
     commit: str          # the exact head or build commit the yes is for
     revision: int        # the card revision Patrick answered

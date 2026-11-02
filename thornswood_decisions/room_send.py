@@ -6,6 +6,7 @@ way Desktop does (contracts.json "room"):
 
     <hermes python> -I room_send.py < {"op": "send", "room_id", "event_id", "text"}
     <hermes python> -I room_send.py < {"op": "ready", "profile": "<bot or empty>", "name": "<optional>"}
+    <hermes python> -I room_send.py < {"op": "states", "profiles": ["<bot>", ...]}
     <hermes python> -I room_send.py < {"op": "react", "profile": "<bot or empty>", "session_id",
                                        "message_id", "emoji": "<one of the phone's, or null>"}
 
@@ -53,6 +54,12 @@ title, is already hidden or shown, or is already gone is done. It prints
 hidden chat titled exactly "Bot Chat", with every part Hermes compressed it
 into) is never changed. It needs no gateway.
 
+`states` asks the same question of each Bot at once, for the phone's online
+dots: Hermes's own runtime state of each one's gateway (absent, starting,
+ready, draining, incompatible, inaccessible or conflict, gateway/runtime_contract.py),
+found the same way and never started. It prints {"states": {"<bot>": "<state>"}},
+with "check_failed" for a Bot whose check itself raised.
+
 When Hermes is not installed into the Python that runs this (Hermes's own
 launcher keeps its source in a folder it puts first on the path itself), the
 connector names that folder, and this puts it first on the path, and runs
@@ -71,6 +78,8 @@ import asyncio
 import json
 import re
 import sys
+
+PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def _found(profile: str):
@@ -184,6 +193,19 @@ def main() -> int:
     req = json.loads(sys.stdin.read() or "{}")
     op = req.get("op")
     profile = req.get("profile") or ""
+    if op == "states":
+        names = req.get("profiles")
+        if not (isinstance(names, list) and len(names) <= 16 and all(isinstance(n, str) and PROFILE.match(n) for n in names)):
+            print(json.dumps({"states": None, "reason": "bad request"}))
+            return 2
+        states = {}
+        for name in names:
+            try:
+                states[name] = str(_found(name)[1])
+            except Exception:  # this one's check could not run; the others still answer
+                states[name] = "check_failed"
+        print(json.dumps({"states": states}))
+        return 0
     if op not in ("send", "ready", "react", "session") or not isinstance(profile, str):
         print(json.dumps({"sent": False, "reason": "bad request"}))
         return 2
