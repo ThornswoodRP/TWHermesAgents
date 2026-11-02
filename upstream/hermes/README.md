@@ -81,6 +81,43 @@ test_auxiliary_client.py: the first version passed `model=None` to every
 pick, and stand-in pools written as `select(self)` refused it. Unscoped picks
 are back to `select()`, and the Codex stand-ins take `model`.
 
+## 0007: a coalesced webhook delivery survives a gateway restart
+
+Made against upstream main `f0d94882` (2 Nov 2026), in `on-main/`.
+
+Cause, measured on the VM (gateway.log line 2032, 1 Nov 10:31:12 PM, during
+the #72 install's gateway stop): two GitHub deliveries on the coalesced
+`github-checks` route were lost. A coalesced delivery is answered
+`202 coalesced` before any admission, and GitHub does not resend an
+answered delivery, so the coalescer's buffer is its only copy. On a stop,
+`drain_gateway_runtime` withdraws every adapter's message handler before the
+adapters disconnect. The webhook adapter's disconnect flush then admitted
+each pending group against the withdrawn ingress: `producer_scope` found no
+runner and raised `RuntimeStoreError('not_found')`, the group was logged
+"was not admitted", and it was gone. A hard kill lost the buffer outright.
+
+The fix keeps each pending group in a spool in the gateway's home
+(`webhook_coalesce_pending.json`, 0600, written atomically) until its
+admission commits. The route's config is never written (it can hold the
+HMAC secret); it is read back from the live routes. While ingress is
+withdrawn, a settled group is not tried and stays spooled. When the next run's
+listener is up and its ingress is wired, every spooled group is buffered
+again and admitted as usual. A route that is gone is dropped and named, and
+an unreadable spool is set aside. A refusal by a serving gateway behaves as
+before.
+
+Tests: four new ones in `tests/gateway/test_webhook_coalescing.py` (drain
+then next run, admitted and refused, a newer event during admission, a gone
+route and a bad spool); the existing helper's runner now has a session
+authority, as `producer_scope` requires. The coalescer's own spool logic
+passed a stand-alone run here; the gateway tests need upstream's test
+environment, so run them before the pull request is opened:
+
+```
+git am on-main/0007-webhook-coalesce-survives-restart.patch
+scripts/run_tests.sh tests/gateway/test_webhook_coalescing.py tests/gateway/test_webhook_adapter.py tests/gateway/test_webhook_authority.py
+```
+
 ## On upstream main
 
 The pull requests go to upstream main, not to v0.22.5. On 2 Nov, main was
