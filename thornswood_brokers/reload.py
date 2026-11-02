@@ -156,6 +156,9 @@ def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep,
         ok = False
         say(f"FAIL: tw-policy did not take back the ended turns' tickets ({e}); they go back after ten minutes "
             f"of silence, and the next turns wait until then")
+    # The gateway allows 3 starts in 15 minutes so a crash loop stops; a reload
+    # is not a crash, so its own start does not count toward that (install.sh).
+    run(["systemctl", "reset-failed", GATEWAY])
     r = run(["systemctl", "start", GATEWAY])
     if r.returncode != 0:
         say(f"STOP: systemctl start {GATEWAY} failed: {r.stderr.strip()}")

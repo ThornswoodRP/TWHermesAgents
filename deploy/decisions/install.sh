@@ -212,6 +212,7 @@ fi
 
 # 8. Start the core and check it answers on loopback, and only there.
 systemctl enable --quiet tw-decide.service
+systemctl reset-failed tw-decide.service
 systemctl restart tw-decide.service
 answer=""
 for _ in $(seq 1 20); do
@@ -233,6 +234,7 @@ fi
 # 8b. The Bots' route (#49), on its socket only: a Bot files cards and reads
 # Patrick's answers through it, as itself, with no token.
 systemctl enable --quiet tw-decide-bots.service
+systemctl reset-failed tw-decide-bots.service
 systemctl restart tw-decide-bots.service
 for _ in $(seq 1 20); do [[ -S /run/tw/decide-bots/bots.sock ]] && break; sleep 0.5; done
 [[ -S /run/tw/decide-bots/bots.sock ]] || stop "the Bots' route did not open its socket: journalctl -u tw-decide-bots -n 50"
@@ -253,6 +255,7 @@ fi
 # 10. The connector. While connector_effects is off it asks the core every half
 # minute and does nothing else. Only Patrick changes connector_effects.
 systemctl enable --quiet tw-decide-connector.service
+systemctl reset-failed tw-decide-connector.service
 systemctl restart tw-decide-connector.service
 sleep 2
 systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
@@ -263,6 +266,7 @@ ok "the connector runs (it waits while connector_effects is off)"
 # asks every half minute and sends nothing. Only Patrick changes push_send.
 if [[ -n "$origin" ]]; then
   systemctl enable --quiet tw-decide-push.service
+  systemctl reset-failed tw-decide-push.service
   systemctl restart tw-decide-push.service
   sleep 3
   systemctl is-active --quiet tw-decide-push.service || stop "the push worker did not start: journalctl -u tw-decide-push -n 20"
@@ -299,6 +303,7 @@ if id "$own" >/dev/null 2>&1; then
   chmod 0644 /etc/systemd/system/tw-decide-own.service.d/runtime.conf
   systemctl daemon-reload
   systemctl enable --quiet tw-decide-own.service
+  systemctl reset-failed tw-decide-own.service
   systemctl restart tw-decide-own.service
   sleep 2
   systemctl is-active --quiet tw-decide-own.service || stop "my-hermes's connector did not start: journalctl -u tw-decide-own -n 20"

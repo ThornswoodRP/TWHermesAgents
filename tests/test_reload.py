@@ -56,7 +56,7 @@ class FakeHost:
             self._ended_rows = getattr(self, "_ended_rows", {})
             self._ended_rows[argv[2]] = self.rows.pop(argv[2])
             return subprocess.CompletedProcess(argv, 0, "", "")
-        if argv[:2] in (["systemctl", "stop"], ["systemctl", "start"]):
+        if argv[:2] in (["systemctl", "stop"], ["systemctl", "start"], ["systemctl", "reset-failed"]):
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0 if self.gateway_after == "active" else 3, self.gateway_after + "\n", "")
@@ -84,6 +84,7 @@ class Reload(unittest.TestCase):
         verbs = [c for c in host.calls if c[1] != "list-sessions"]
         self.assertEqual(verbs, [["systemctl", "stop", GATEWAY],
                                  ["loginctl", "terminate-session", "3"], ["loginctl", "terminate-session", "7"],
+                                 ["systemctl", "reset-failed", GATEWAY],
                                  ["systemctl", "start", GATEWAY], ["systemctl", "is-active", GATEWAY]])
         self.assertIn("ended 2 hermes login sessions", said[0])
 

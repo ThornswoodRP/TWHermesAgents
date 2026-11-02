@@ -362,6 +362,12 @@ systemctl enable --quiet tw-limits-check.service
 systemctl restart tw-limits-check.service
 systemctl enable --quiet --now tw-checks.socket tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
   tw-offsite.timer tw-offsite.path tw-follow-main.timer
+# Each broker allows 3 starts in 15 minutes (StartLimitBurst), so a crash loop
+# stops. An install's restart is not a crash: four installs inside 15 minutes
+# (2 Nov, 10:06 PM) hit the limit, the brokers stayed down and the put-back's
+# own restart was refused too. reset-failed clears the count for this restart
+# only; a broker that then fails by itself still meets the limit.
+systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
 systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
 ok "units in place and started"
 
@@ -494,6 +500,7 @@ if (( stale > 0 )); then
   fi
   systemctl start "user@$hermes_uid.service"
   if [[ "$gateway_was" == enabled ]]; then
+    systemctl reset-failed tw-hermes-gateway.service
     systemctl restart tw-hermes-gateway.service
     sleep 5
     systemctl is-active --quiet tw-hermes-gateway.service || stop "tw-hermes-gateway did not come back after the sessions ended: journalctl -u tw-hermes-gateway -n 50"
