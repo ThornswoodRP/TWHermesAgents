@@ -39,7 +39,8 @@ class Lines(unittest.TestCase):
         self.assertEqual(line("Read @file:docs/plan.md please"), "Read please")
         self.assertEqual(line("@file:\"C:/My Files/notes.txt\""), "notes.txt")
         self.assertEqual(line("hi\n\n--- Context Warnings ---\n- @file:x: not expanded"), "hi")
-        self.assertEqual(line("two\n\nlines   here"), "two lines here")
+        self.assertEqual(line("two\n\nlines   here"), "two\nlines here")
+        self.assertEqual(line("Done.\n- **Why:** `x`"), "Done.\n- **Why:** `x`")
         self.assertEqual(line(""), "")
 
 

@@ -1067,14 +1067,39 @@ function authored(text) {
 // an untitled chat (chat-runtime.ts sessionTitle). The connector sends `first`
 // only for a chat with no title.
 function chatName(c) {
-  return (c && (c.title || c.first)) || 'Untitled chat'
+  return (c && (c.title || (c.first && preview(c.first, 80)))) || 'Untitled chat'
 }
 
 // One line for a list: the words, else what was attached.
+// A list line is plain words. Markdown's marks are for a message shown whole; in a line cut short they
+// show as stray stars and backticks. So a line drops them, then is cut at the last whole word, with "…".
+// The core cuts what it sends longer than any line here (200 and 120), so this cut is the one shown.
+function plain(text) {
+  return String(text || '')
+    .replace(/^[ \t]*(```|~~~).*$/gm, '')                                  // code fences
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/gm, '') // a table's rule
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')                              // an image: its words
+    .replace(/\[([^\]]+)\]\((?:[^()]|\([^)]*\))*\)/g, '$1')                // a link: its words
+    .replace(/<(https?:[^>\s]+)>/g, '$1')
+    .replace(/^[ \t]{0,3}(#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+\[[ xX]\][ \t]+|[-*+][ \t]+|\d{1,9}[.)][ \t]+)/gm, '') // heading, quote, list
+    .replace(/^[ \t]{0,3}([-*_][ \t]*){3,}$/gm, '')                         // a rule
+    .replace(/\*\*|__|~~|`+/g, '')                                          // bold, strike, code
+    .replace(/(^|[\s(\[])[*_](?=\S)([^*_\n]*?\S)[*_](?=$|[\s).,!?:;\]])/gm, '$1$2') // italics
+    .replace(/^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$/gm, '')                       // a table row's outer bars
+    .replace(/[ \t]*\|[ \t]*/g, ' · ')                                     // and the bars between its cells
+}
+
+function clip(line, n) {
+  if (line.length <= n) return line
+  const cut = line.slice(0, n)
+  const at = cut.search(/\s\S*$/)
+  return (at > n / 2 ? cut.slice(0, at) : cut).replace(/[\s.,;:!?·–-]+$/, '') + '…'
+}
+
 function preview(text, n = 120) {
   const a = authored(text)
-  const line = a.words || a.files.map(f => f.label).join(', ')
-  return line.replace(/\s+/g, ' ').trim().slice(0, n)
+  const line = plain(a.words).replace(/\s+/g, ' ').trim() || a.files.map(f => f.label).join(', ')
+  return clip(line, n)
 }
 
 function fileChips(files) {

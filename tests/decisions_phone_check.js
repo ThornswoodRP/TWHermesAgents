@@ -535,6 +535,12 @@ const base = `http://localhost:${port}`
     await page.getByText('Second test room', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('Bramble: <script>alert(1)</script> hello').waitFor({ timeout: 3000 })
   })
+  await step("a list line is the message's plain words, cut at a whole word", async () => {
+    await page.getByText(/^magpie: @bramble/).waitFor({ timeout: 3000 })
+    const line = await page.getByText(/^magpie: @bramble/).textContent()
+    const want = "magpie: @bramble it'll show up on #5367, and it'll run, not skip. Why it isn't there yet: Launcher builds has needs: pick and…"
+    if (line !== want) throw new Error(JSON.stringify(line))
+  })
   await page.getByText('Second test room', { exact: true }).click()
   await step('a room opens on its own deep link', async () => {
     await page.getByLabel('Message to Second test room').waitFor({ timeout: 5000 })

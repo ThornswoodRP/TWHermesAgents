@@ -273,7 +273,9 @@ def line_of(text: str) -> str:
     words = _WARNINGS.sub("", text[:cut.start()] if cut else text)
     labels = [_ref_label(m.group(1), m.group(2)) for m in _REF.finditer(words)]
     words = _REF.sub("", words)
-    line = " ".join(words.split())
+    # Its line breaks stay: the phone reads Markdown's marks (a list item, a heading) at the start of a
+    # line, so it can show plain words. Flattened first, "- **Why:**" showed as it is (2 Nov).
+    line = "\n".join(" ".join(part.split()) for part in words.splitlines() if part.strip())
     return line or ", ".join(dict.fromkeys(labels))
 
 
