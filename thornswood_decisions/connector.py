@@ -12,7 +12,7 @@ in ~/.config/thornswood/connector.token, 0600) and hands each to Hermes the
 way Hermes itself does:
 
 - a Bot Chat: `hermes -p <bot> chat --in ~ -c "Bot Chat" --create-if-missing
-  -Q --query-file <file>`, the local transport of Hermes's own message_agent
+  -Q --format stream-json --query-file <file>`, the local transport of Hermes's own message_agent
   (tools/bot_mode_dm.py:11), so the message lands in that Bot's one canonical
   Bot Chat, the same one Desktop shows. The text goes in a 0600 file in a 0700
   folder, never on a command line, and the file is gone when the turn ends.
@@ -40,6 +40,10 @@ from shared-state.db, both read only, 50 messages at a time.
 The same claim hands it Patrick's reactions on Bot Chat messages: each is set in
 that Bot's own store with `room_send.py` op `react` (Hermes's SessionDB), and
 what came of it goes to `POST /api/v1/connector/reacted`.
+While a Bot Chat turn runs, what it is doing (thinking, writing, or a tool by its
+plain name, read from Hermes's stream with own_connector.follow_turn, never the
+words) goes to `POST /api/v1/connector/doing` when it changes, for the phone's
+live line under the message.
 For each message, it tells the core what came of it (`POST /api/v1/connector/result`):
 confirmed only when Hermes said so, failed only when nothing was sent, and
 uncertain for everything else. An uncertain message is never sent again by
@@ -51,6 +55,12 @@ gateway's readiness check says ready, once each round, and the message goes
 then. A result the core did not take is kept and offered again until it
 lands; that resends the record, never the message. Nothing here logs message
 text or a token, holds a GitHub credential or listens on any port.
+
+Every half minute, whatever connector_effects says, it also tells the core each
+Bot's gateway state for the phone's online dots (`POST /api/v1/connector/live`):
+Hermes's own runtime state, from `room_send.py` op `states`, which finds each
+gateway the way the readiness check does and never starts one. The core names
+the Bots to check in its answer.
 """
 
 from __future__ import annotations
@@ -70,13 +80,18 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .own_connector import follow_turn
+
 CORE = "http://127.0.0.1:9135/api/v1"
 POLL_SECONDS = 5
 TURN_SECONDS = 15 * 60
 CHECK_SECONDS = 60
+LIVE_SECONDS = 30  # how often each Bot's gateway state goes to the core, for the phone's dots
 # At most this many `hermes` turns at once: each is a whole Hermes process, and
 # the unit's MemoryMax holds them all.
 PARALLEL = 3
+DOING_SECONDS = 2    # while turns run, what each is doing goes to the core this often when it changed
+DOING_KEEP = 20      # and at least this often, so the core knows the line is current (chat.py DOING_STALE)
 BOT_CHAT = "Bot Chat"
 PAGE_BYTES = 480 * 1024  # under the core's 512 KB
 HELPER = Path(__file__).with_name("room_send.py")
@@ -197,6 +212,15 @@ class Hermes:
         state, why = self.check(profile)
         return state == "ready", why
 
+    def states(self, profiles: list[str]) -> dict[str, str] | None:
+        """Each Bot's gateway state as Hermes names it (ready, starting, absent, ...), in one helper run, or
+        None when the helper could not run or answer."""
+        got = self._helper({"op": "states", "profiles": profiles}, CHECK_SECONDS)
+        states = (got or {}).get("states")
+        if not isinstance(states, dict):
+            return None
+        return {k: v for k, v in states.items() if k in profiles and isinstance(v, str)}
+
     def to_room(self, room_id: str, send_key: str, text: str) -> tuple[str, str, str]:
         got = self._helper({"op": "send", "room_id": room_id, "event_id": send_key, "text": text}, CHECK_SECONDS)
         if got is None:
@@ -224,7 +248,9 @@ class Hermes:
             return "set", ""
         return "failed", str(got.get("reason") or "not set")[:200]
 
-    def to_bot(self, bot: str, text: str) -> tuple[str, str, str]:
+    def to_bot(self, bot: str, text: str, doing=None) -> tuple[str, str, str]:
+        """(outcome, ref, reason) for one message to a Bot's Bot Chat. `doing(state, tool)` hears what the
+        turn is doing as Hermes's stream says it (own_connector.follow_turn): thinking, writing, or a tool."""
         state, why = self.check(bot)
         if state != "ready":
             # Nothing was sent: the message waits, with why (the gateway, or the helper's own failure).
@@ -236,17 +262,28 @@ class Hermes:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
             argv = [*self.cmd, "-p", bot, "chat", "--in", str(self.home), "-c", BOT_CHAT, "--create-if-missing",
-                    "-Q", "--query-file", str(path)]
+                    "-Q", "--format", "stream-json", "--query-file", str(path)]
             try:
-                done = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                      timeout=TURN_SECONDS, cwd=str(self.home), check=False)
-            except subprocess.TimeoutExpired:
-                return "uncertain", "", "no end to the Bot's turn in 15 minutes; it may have the message"
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, cwd=str(self.home), text=True,
+                                        encoding="utf-8", errors="replace")
             except OSError:
                 return "failed", "", "could not start the hermes command"
-        if done.returncode == 0:
+            reader = threading.Thread(target=follow_turn, args=(proc.stdout, {}, doing or (lambda s, t: None)),
+                                      daemon=True)
+            reader.start()
+            try:
+                code = proc.wait(timeout=TURN_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                return "uncertain", "", "no end to the Bot's turn in 15 minutes; it may have the message"
+            finally:
+                reader.join(30)
+                proc.stdout.close()
+        if code == 0:
             return "confirmed", "turn finished", ""
-        return "uncertain", "", f"hermes stopped with exit code {done.returncode}; it may have the message"
+        return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
 
 
 class Core:
@@ -284,13 +321,39 @@ class Connector:
         self.unsaid: list[dict] = []  # results the core has not taken yet
         self.waiting: dict[str, str] = {}  # gateways (by profile, "" for the room) found not ready: why
         self._lock = threading.Lock()
+        self.doing: dict[str, dict] = {}    # each Bot Chat turn running now: what it is doing
+        self.live_bots: list[str] = []      # the Bots the core asked about last time
+        self.live_at: float | None = None
 
     def deliver(self, item: dict) -> dict:
         if item["target"] == "room":
             outcome, ref, reason = self.hermes.to_room(item["room_id"], item["send_key"], item["text"])
         else:
-            outcome, ref, reason = self.hermes.to_bot(item["target"], item["text"])
+            def doing(state, tool):
+                with self._lock:
+                    self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool}
+            try:
+                outcome, ref, reason = self.hermes.to_bot(item["target"], item["text"], doing)
+            finally:
+                with self._lock:
+                    self.doing.pop(item["id"], None)
         return {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
+
+    def say_doing(self, threads: list, clock=time.monotonic, wait=DOING_SECONDS) -> None:
+        """While the round's turns run: what each Bot Chat turn is doing, to the core every `wait` seconds
+        when it changed and at least every DOING_KEEP, for the phone's live line. Reading only: the core
+        takes it while mobile_read is on, whatever connector_effects says."""
+        said, said_at = None, None
+        while any(t.is_alive() for t in threads):
+            with self._lock:
+                now_doing = sorted(self.doing.values(), key=lambda d: d["id"])
+            if now_doing and (now_doing != said or clock() - said_at >= DOING_KEEP):
+                # Said once per change whatever the answer: a refusal (mobile_read off) is not asked again
+                # every two seconds, only with the next change or after DOING_KEEP.
+                self.core.post("/connector/doing", {"turns": now_doing})
+                said, said_at = now_doing, clock()
+            for t in threads:
+                t.join(wait / max(len(threads), 1))
 
     def _report(self) -> None:
         keep = []
@@ -375,6 +438,7 @@ class Connector:
         threads = [threading.Thread(target=run, args=(i,), daemon=True) for i in items]
         for t in threads:
             t.start()
+        self.say_doing(threads)
         for t in threads:
             t.join()
         gateway = {i["id"]: "" if i["target"] == "room" else i["target"] for i in items}
@@ -392,6 +456,28 @@ class Connector:
         self.unsaid.extend(results)
         self._report()
         return len(items)
+
+    def live(self, clock=time.monotonic) -> bool:
+        """Each Bot's gateway state to the core, every LIVE_SECONDS. The first post carries none: the core's
+        answer names the Bots to check. Returns whether it posted."""
+        now = clock()
+        if self.live_at is not None and now - self.live_at < LIVE_SECONDS:
+            return False
+        self.live_at = now
+        asked = list(self.live_bots)
+        states = self.hermes.states(asked) if asked else {}
+        body = {"states": states} if states is not None else {"states": {}, "why": "could not run Hermes's check"}
+        status, out = self.core.post("/connector/live", body)
+        if status == 200 and isinstance(out.get("bots"), list):
+            self.live_bots = [b for b in out["bots"] if isinstance(b, str) and PROFILE_ID.match(b)]
+            if not asked and self.live_bots:
+                # The first answer named the Bots: their states go at once, not half a minute later.
+                self.live_at = None
+                return self.live(clock)
+            return True
+        if status not in (200, 423):
+            self.say(f"FAIL live: the core answered {status}")
+        return status == 200
 
     def pages(self) -> int:
         """The pages the phone asked for: each Bot Chat or room read from Hermes's own stores, read only, and
@@ -428,6 +514,7 @@ class Connector:
         claim_at = 0.0
         while True:
             self.pages()
+            self.live()
             if time.monotonic() >= claim_at:
                 n = self.once()
                 claim_at = time.monotonic() + (POLL_SECONDS * 6 if n < 0 else 0)

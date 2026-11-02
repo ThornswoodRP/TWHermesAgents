@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -432,11 +433,12 @@ class AppFiles(unittest.TestCase):
         # has shown (Patrick, 2 Nov: every open waited for One), deleted at sign-out; the public id of
         # this phone's fingerprint key, which its sign-in names (an id the core sends in the open,
         # never the private key, which never leaves the phone's authenticator); and whether he put
-        # the fingerprint offer off. Never a token, a private key or the CSRF value.
+        # the fingerprint offer off; and whether "Hey Hermes" is on for this phone (2 Nov). Never a token, a
+        # private key or the CSRF value.
         uses = [ln.strip() for ln in js.splitlines() if "localStorage" in ln]
-        self.assertEqual(len(uses), 8, uses)
+        self.assertEqual(len(uses), 11, uses)
         for ln in uses:
-            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER)\b", ln)
+            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER|WAKE_KEY)\b", ln)
         self.assertIn("localStorage.setItem(PHONE_KEY, JSON.stringify(k))", js)
         self.assertIn("keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })", js)
         self.assertIn("forgetKept()\n      csrf = null", js)
@@ -447,6 +449,8 @@ class FeedsIn(unittest.TestCase):
         self.s = Served(self)
         self.w = self.s.w
         self.w.core.bind_room(self.w.ws, ROOM, "Thornswood Workbench", by="tests")
+        for bot in BOTS:
+            self.w.core.bind_bot(self.w.ws, bot, bot, by="tests")
         f = Feeds(self.w.store)
         self.tokens = {n: f.new_token(self.w.ws, n, by="tests") for n in ("work", "room")}
 
@@ -456,46 +460,47 @@ class FeedsIn(unittest.TestCase):
 
     def test_a_snapshot_replaces_the_last_and_keeps_only_what_is_shown(self):
         body = {"source_time": "2026-11-01T18:00:00+00:00", "secret": "x",
-                "tasks": [{"id": "t1", "title": "A" * 500, "assignee": "rift", "status": "running", "body": "private",
-                           "priority": 3}]}
+                "doing": [{"bot": "rift", "title": "A" * 500, "state": "tool", "tool": "terminal",
+                           "since": "2026-11-01T17:58:00+00:00", "platform": "cron", "session_id": "s1",
+                           "args": "private"}]}
         self.assertEqual(self.put("work", body)[0], 200)
         snap = Feeds(self.w.store).get(self.w.ws, "work")
         self.assertEqual(snap["as_of"], "2026-11-01T18:00:00+00:00")
-        task = snap["work"]["tasks"][0]
-        self.assertEqual(set(task), {"id", "title", "assignee", "status", "updated_at", "priority"})
-        self.assertEqual(len(task["title"]), 200)
+        row = snap["work"]["doing"][0]
+        self.assertEqual(set(row), {"bot", "title", "state", "tool", "since", "platform"})
+        self.assertEqual((len(row["title"]), row["state"], row["tool"]), (200, "tool", "terminal"))
         self.assertNotIn("secret", snap["work"])
-        self.put("work", {"source_time": "2026-11-01T18:01:00+00:00", "tasks": []})
-        self.assertEqual(Feeds(self.w.store).get(self.w.ws, "work")["work"]["tasks"], [])
+        self.put("work", {"source_time": "2026-11-01T18:01:00+00:00", "doing": []})
+        self.assertEqual(Feeds(self.w.store).get(self.w.ws, "work")["work"]["doing"], [])
 
-    def test_the_bots_github_work_keeps_only_what_the_board_shows(self):
-        item = {"repo": "ThornswoodRP/Thornswood", "number": 5033, "title": "T" * 500, "bot": "echo", "stage": "pr_open",
-                "pr": 5367, "pr_repo": "ThornswoodRP/Thornswood", "pr_title": "P", "checks": "failing",
-                "checks_line": "18 of 20 passed, 2 failed", "auto_merge": True, "updated_at": "2026-11-01T17:30:00Z",
-                "body": "private", "url": "javascript:alert(1)"}
-        odd = {"repo": "ThornswoodRP/Thornswood-Ops", "number": "12", "title": "x", "bot": "rift", "stage": "shipped",
-               "pr": True, "pr_repo": "evil.example/../x", "checks": "green", "auto_merge": "yes"}
-        body = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [], "items": [item, odd]}
-        self.assertEqual(self.put("work", body)[0], 200)
-        got = Feeds(self.w.store).get(self.w.ws, "work")["work"]["items"]
-        self.assertEqual(set(got[0]), {"repo", "number", "title", "bot", "stage", "pr", "pr_repo", "pr_title", "checks",
-                                       "checks_line", "auto_merge", "updated_at"})
-        self.assertEqual((got[0]["stage"], got[0]["pr"], got[0]["checks"], got[0]["auto_merge"], len(got[0]["title"])),
-                         ("pr_open", 5367, "failing", True, 200))
-        # Anything not in the shapes the Board knows is cut back to nothing, never passed on.
-        self.assertEqual({k: got[1][k] for k in ("number", "stage", "pr", "pr_repo", "checks", "auto_merge")},
-                         {"number": 0, "stage": "claimed", "pr": 0, "pr_repo": "", "checks": "", "auto_merge": False})
-        for repo in ("javascript:alert(1)", "https://evil.example/x", "a/b/c", ""):
-            bad = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [], "items": [{**item, "repo": repo}]}
-            self.assertEqual(self.put("work", bad)[2]["error"], "bad_feed", repo)
-        many = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [], "items": [item] * 201}
-        self.assertEqual(self.put("work", many)[2]["error"], "bad_feed")
-        # A snapshot from before the GitHub items is still taken, without them.
-        self.put("work", {"source_time": "2026-11-01T18:05:00+00:00", "tasks": []})
-        self.assertNotIn("items", Feeds(self.w.store).get(self.w.ws, "work")["work"])
+    def test_the_board_keeps_only_its_shapes(self):
+        odd = {"bot": "echo", "state": "tool", "tool": "<b>x</b>", "since": 5}
+        self.assertEqual(self.put("work", {"source_time": "2026-11-01T18:00:00+00:00", "doing": [odd]})[0], 200)
+        row = Feeds(self.w.store).get(self.w.ws, "work")["work"]["doing"][0]
+        # A tool name not in the shape Hermes uses is dropped, and the row says thinking.
+        self.assertEqual((row["tool"], row["state"], row["since"]), ("", "thinking", "5"))
+        for bad in ({"source_time": "2026-11-01T18:00:00+00:00"},
+                    {"source_time": "2026-11-01T18:00:00+00:00", "doing": [odd] * 61},
+                    {"source_time": "2026-11-01T18:00:00+00:00", "doing": ["rift"]},
+                    {"source_time": "2026-11-01T18:00:00+00:00", "tasks": []}):
+            self.assertEqual(self.put("work", bad)[2]["error"], "bad_feed", bad)
+        # Only the workspace's own Bots; one Bot may run several turns at once.
+        status, _, out = self.put("work", {"source_time": "2026-11-01T18:00:00+00:00",
+                                           "doing": [{"bot": "patrick", "state": "thinking"}]})
+        self.assertEqual((status, out["error"]), (409, "not_the_bots"))
+        two = {"source_time": "2026-11-01T18:00:00+00:00", "doing": [{"bot": "rift", "state": "thinking"}] * 2}
+        self.assertEqual(self.put("work", two)[0], 200)
+
+    def test_the_board_says_whether_it_is_live(self):
+        self.put("work", {"source_time": "2026-11-01T18:00:00+00:00", "doing": []})
+        self.assertTrue(Feeds(self.w.store).get(self.w.ws, "work")["live"])
+        later = self.w.store.clock() + timedelta(seconds=91)
+        with mock.patch.object(self.w.store, "clock", lambda: later):
+            self.assertFalse(Feeds(self.w.store).get(self.w.ws, "work")["live"])
+        self.assertNotIn("live", Feeds(self.w.store).get(self.w.ws, "room"))
 
     def test_the_wrong_token_or_a_browser_is_refused(self):
-        body = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": []}
+        body = {"source_time": "2026-11-01T18:00:00+00:00", "doing": []}
         self.assertEqual(self.put("work", body, token=self.tokens["room"])[2]["error"], "bad_feed_token")
         status, _, out = self.put("work", body, headers={"Origin": ORIGIN})
         self.assertEqual((status, out["error"]), (403, "not_a_feed"))
@@ -508,8 +513,6 @@ class FeedsIn(unittest.TestCase):
         self.assertEqual((status, out["error"]), (409, "not_the_room"))
 
     def test_sizes(self):
-        many = {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [{"id": str(i)} for i in range(501)]}
-        self.assertEqual(self.put("work", many)[2]["error"], "bad_feed")
         big = {"source_time": "2026-11-01T18:00:00+00:00", "room_id": ROOM,
                "events": [{"seq": i + 1, "text": "x" * 1900} for i in range(150)]}
         self.assertEqual(self.put("room", big)[0], 200)  # about 290 KB: over the 64 KB limit for everything else
@@ -527,15 +530,6 @@ class FeedsIn(unittest.TestCase):
 class FeedReader(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
-        k = sqlite3.connect(self.dir / "kanban.db")
-        k.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, assignee TEXT, "
-                  "status TEXT NOT NULL, priority INTEGER DEFAULT 0, created_at INTEGER NOT NULL, "
-                  "started_at INTEGER, completed_at INTEGER)")
-        k.executemany("INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)", [
-            ("t1", "Fix the log", "private body", "sprocket", "running", 2, 1761998400, 1761998500, None),
-            ("t2", "Old", None, None, "archived", 0, 1761990000, None, None)])
-        k.commit()
-        k.close()
         r = sqlite3.connect(self.dir / "shared-state.db")
         r.execute("CREATE TABLE hosted_room_events (room_id TEXT, seq INTEGER, event_id TEXT, kind TEXT, "
                   "actor_json TEXT, authority_epoch INTEGER, payload_json TEXT, created_at REAL)")
@@ -551,9 +545,6 @@ class FeedReader(unittest.TestCase):
     def test_snapshots_hold_only_what_the_views_show(self):
         from datetime import datetime, timezone
         now = datetime(2026, 11, 1, 18, 0, tzinfo=timezone.utc)
-        work = feed_reader.work_snapshot(self.dir / "kanban.db", now)
-        self.assertEqual([t["id"] for t in work["tasks"]], ["t1"])
-        self.assertNotIn("body", work["tasks"][0])
         room = feed_reader.room_snapshot(self.dir / "shared-state.db", ROOM, now)
         self.assertEqual([(e["seq"], e["actor"], e["text"]) for e in room["events"]], [(1, "Bramble", "Starting #12")])
         both = feed_reader.rooms_snapshot(self.dir / "shared-state.db", [ROOM, "other"], now)
@@ -563,7 +554,6 @@ class FeedReader(unittest.TestCase):
     def test_it_never_writes_to_hermes(self):
         before = {p.name: p.read_bytes() for p in self.dir.iterdir()}
         from datetime import datetime, timezone
-        feed_reader.work_snapshot(self.dir / "kanban.db", datetime.now(timezone.utc))
         feed_reader.room_snapshot(self.dir / "shared-state.db", ROOM, datetime.now(timezone.utc))
         self.assertEqual({p.name: p.read_bytes() for p in self.dir.iterdir() if p.name in before}, before)
 
@@ -576,18 +566,16 @@ class FeedReader(unittest.TestCase):
         tokens = self.dir / "tokens"
         tokens.mkdir()
         f = Feeds(s.w.store)
-        for name in ("work", "room", "bots"):
+        for name in ("room", "bots"):
             path = tokens / f"feed-{name}.token"
             path.write_text(f.new_token(s.w.ws, name, by="tests"), encoding="utf-8")
             os.chmod(path, 0o600)
         out = []
         with mock.patch("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a)))):
-            with mock.patch.object(feed_reader, "broker_reader", lambda path: lambda repo, p: (
-                    {"check_runs": []} if "/check-runs" in p else [])):
-                code = feed_reader.main(["--room", ROOM, "--hermes-home", str(self.dir), "--tokens", str(tokens),
-                                         "--core", f"http://127.0.0.1:{s.port}/api/v1", "--github", "always"])
+            code = feed_reader.main(["--room", ROOM, "--hermes-home", str(self.dir), "--tokens", str(tokens),
+                                     "--core", f"http://127.0.0.1:{s.port}/api/v1"])
         self.assertEqual(code, 0, out)
-        self.assertEqual(Feeds(s.w.store).get(s.w.ws, "work")["work"]["items"], [])
+        self.assertIsNone(Feeds(s.w.store).get(s.w.ws, "work")["work"])
         self.assertEqual(Feeds(s.w.store).get(s.w.ws, "room")["room"]["rooms"][0]["events"][0]["text"], "Starting #12")
 
     @unittest.skipIf(os.name == "nt", "file modes are POSIX")
@@ -597,164 +585,6 @@ class FeedReader(unittest.TestCase):
         os.chmod(path, 0o644)
         with self.assertRaises(SystemExit):
             feed_reader.read_token(path)
-
-
-def _pr(number, ref, *, repo="ThornswoodRP/Thornswood", state="open", draft=False, merged_at=None, closed_at=None,
-        auto=False, updated="2026-11-01T17:00:00Z", title=None):
-    return {"number": number, "title": title or f"PR {number}", "state": state, "draft": draft, "merged_at": merged_at,
-            "closed_at": closed_at, "auto_merge": {"merge_method": "squash"} if auto else None, "updated_at": updated,
-            "head": {"ref": ref, "sha": f"sha{number}", "repo": {"full_name": repo}}}
-
-
-def _issue(number, title, updated="2026-11-01T16:00:00Z", pr=False):
-    out = {"number": number, "title": title, "updated_at": updated}
-    if pr:
-        out["pull_request"] = {}
-    return out
-
-
-class GitHubWork(unittest.TestCase):
-    """The Board's GitHub half: the Bots' claims and pull requests, read the
-    way the guard rails record them (claim labels and <bot>/<issue>-<what>)."""
-
-    NOW = None
-
-    def setUp(self):
-        from datetime import datetime, timezone
-        from thornswood_guard.policy import Policy
-        self.now = datetime(2026, 11, 1, 18, 0, tzinfo=timezone.utc)
-        self.policy = Policy.load()
-        self.asked = []
-        app, ops, fork = "ThornswoodRP/Thornswood", "ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp"
-        self.answers = {
-            f"/repos/{app}/pulls?state=open&per_page=100": [
-                _pr(5367, "echo/5033-hub-current-page", auto=True, updated="2026-11-01T17:30:00Z"),
-                _pr(5400, "wisp/5343-gamemode-parts", draft=True),
-                _pr(5401, "rift/77-not-claimed", title="Rift's own fix"),
-                _pr(5434, "claude/project-thread-wdia3e"),                       # not a Bot's branch
-                _pr(5435, "magpie/5191-tables", repo="someone/Thornswood"),      # a fork's branch, not the Bot's
-                _pr(5436, "sprocket/BAD-name")],                                 # not the Bot branch pattern
-            f"/repos/{app}/pulls?state=closed&sort=updated&direction=desc&per_page=50": [
-                _pr(5300, "echo/5033-hub-first-try", state="closed", closed_at="2026-11-01T10:00:00Z"),
-                _pr(5299, "magpie/5291-push-checks", state="closed", merged_at="2026-11-01T12:00:00Z",
-                    closed_at="2026-11-01T12:00:00Z", updated="2026-11-01T12:00:00Z"),
-                _pr(5100, "magpie/5100-old", state="closed", merged_at="2026-10-30T12:00:00Z",
-                    closed_at="2026-10-30T12:00:00Z")],                          # more than a day ago
-            f"/repos/{ops}/pulls?state=open&per_page=100": [],
-            f"/repos/{ops}/pulls?state=closed&sort=updated&direction=desc&per_page=50": [],
-            f"/repos/{fork}/pulls?state=open&per_page=100": [_pr(148, "wisp/5343-engine-side", repo=fork)],
-            f"/repos/{fork}/pulls?state=closed&sort=updated&direction=desc&per_page=50": [],
-            f"/repos/{app}/commits/sha5367/check-runs?per_page=100": {"check_runs": [
-                {"status": "completed", "conclusion": "success"}, {"status": "completed", "conclusion": "skipped"},
-                {"status": "completed", "conclusion": "failure"}, {"status": "in_progress", "conclusion": None}]},
-            f"/repos/{app}/commits/sha5400/check-runs?per_page=100": {"check_runs": []},
-            f"/repos/{app}/commits/sha5401/check-runs?per_page=100": {"check_runs": [
-                {"status": "completed", "conclusion": "success"}]},
-            f"/repos/{fork}/commits/sha148/check-runs?per_page=100": {"check_runs": [
-                {"status": "queued", "conclusion": None}]},
-        }
-        for repo in (app, ops):
-            for bot in BOTS:
-                label = "claimed%3A%20" + bot.capitalize()
-                self.answers[f"/repos/{repo}/issues?state=open&labels={label}&per_page=100"] = []
-        self.answers[f"/repos/{app}/issues?state=open&labels=claimed%3A%20Echo&per_page=100"] = [
-            _issue(5033, "The site hub says which page is open"), _issue(5367, "a labelled PR", pr=True)]
-        self.answers[f"/repos/{app}/issues?state=open&labels=claimed%3A%20Magpie&per_page=100"] = [
-            _issue(5191, "Generated content tables are built from their sources", updated="2026-11-01T17:10:00Z"),
-            _issue(5291, "A push runs the parse and writing checks")]
-        self.answers[f"/repos/{app}/issues?state=open&labels=claimed%3A%20Wisp&per_page=100"] = [
-            _issue(5343, "The gamemode is written as TypeScript parts")]
-
-    def ask(self, repo, path):
-        self.asked.append((repo, path))
-        self.assertTrue(path.startswith(f"/repos/{repo}/"), path)
-        return self.answers[path]
-
-    def work(self):
-        return feed_reader.github_work(self.policy, self.ask, self.now)
-
-    def test_each_claim_and_bot_pr_is_one_item_with_its_progress(self):
-        got = {(i["bot"], i["number"]): i for i in self.work()}
-        echo = got[("echo", 5033)]
-        self.assertEqual((echo["stage"], echo["pr"], echo["checks"], echo["checks_line"], echo["auto_merge"]),
-                         ("pr_open", 5367, "failing", "2 of 4 passed, 1 failed, 1 running", True))
-        self.assertEqual(echo["updated_at"], "2026-11-01T17:30:00Z")      # the PR's, newer than the issue's
-        self.assertEqual(echo["title"], "The site hub says which page is open")
-        self.assertEqual((got[("magpie", 5191)]["stage"], got[("magpie", 5191)]["pr"]), ("claimed", 0))
-        self.assertEqual((got[("magpie", 5291)]["stage"], got[("magpie", 5291)]["pr"]), ("merged", 5299))
-        # An open PR beats a draft one; here Wisp's skymp PR is open and names a Thornswood issue.
-        wisp = got[("wisp", 5343)]
-        self.assertEqual((wisp["stage"], wisp["pr"], wisp["pr_repo"], wisp["checks"]),
-                         ("pr_open", 148, "ThornswoodRP/skymp", "running"))
-        # A Bot's PR for an issue it has not claimed is its own item.
-        rift = got[("rift", 77)]
-        self.assertEqual((rift["title"], rift["stage"], rift["pr"], rift["checks"]),
-                         ("Rift's own fix", "pr_open", 5401, "passed"))
-        # Not a Bot's branch, a fork's branch, a bad name, a labelled PR, a PR closed days ago: none of them.
-        self.assertEqual(set(got), {("echo", 5033), ("magpie", 5191), ("magpie", 5291), ("wisp", 5343), ("rift", 77)})
-
-    def test_items_go_in_the_bots_order_then_open_work_first(self):
-        order = [(i["bot"], i["number"]) for i in self.work()]
-        self.assertEqual(order, [("rift", 77), ("echo", 5033), ("magpie", 5191), ("magpie", 5291), ("wisp", 5343)])
-
-    def test_it_only_reads_and_only_inside_the_three_work_repos(self):
-        self.work()
-        repos = {r for r, _ in self.asked}
-        self.assertEqual(repos, {"ThornswoodRP/Thornswood", "ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp"})
-        self.assertFalse(any("/issues" in p for r, p in self.asked if r == "ThornswoodRP/skymp"))
-        self.assertLessEqual(len(self.asked), 30)
-
-    def test_a_refused_read_sends_nothing(self):
-        def ask(repo, path):
-            raise RuntimeError("tw-git is not answering")
-        kanban = Path(tempfile.mkdtemp()) / "kanban.db"
-        k = sqlite3.connect(kanban)
-        k.execute("CREATE TABLE tasks (id TEXT, title TEXT, assignee TEXT, status TEXT, priority INTEGER, "
-                  "created_at INTEGER, started_at INTEGER, completed_at INTEGER)")
-        k.commit()
-        k.close()
-        with self.assertRaises(feed_reader.GitHubUnread):
-            feed_reader.work_with_github(kanban, "/x", self.now, ask=ask, policy=self.policy)
-        body = feed_reader.work_with_github(kanban, "/x", self.now, ask=self.ask, policy=self.policy)
-        self.assertEqual((body["tasks"], len(body["items"])), ([], 5))
-
-    def test_github_is_read_once_in_each_five_minutes(self):
-        from datetime import datetime, timedelta, timezone
-        start = datetime(2026, 11, 1, 18, 0, 3, tzinfo=timezone.utc)
-        runs = [start + timedelta(seconds=62 * n) for n in range(60)]   # the timer's real pace
-        due = [r for r in runs if feed_reader.github_due(r)]
-        windows = {int(r.timestamp() // 300) for r in runs}
-        self.assertEqual({int(r.timestamp() // 300) for r in due}, windows)  # every window reads it at least once
-        self.assertLessEqual(len(due), 2 * len(windows))
-
-    def test_the_feed_reads_through_tw_gits_read_op_as_bramble(self):
-        fake = mock.Mock()
-        fake.call.return_value = {"body": [1]}
-        with mock.patch.dict(sys.modules, {"thornswood_brokers.wire": fake}), \
-                mock.patch("thornswood_brokers.wire", fake, create=True):
-            ask = feed_reader.broker_reader("/run/tw/git/git.sock")
-            self.assertEqual(ask("ThornswoodRP/Thornswood", "/repos/ThornswoodRP/Thornswood/pulls"), [1])
-        fake.call.assert_called_once_with("/run/tw/git/git.sock", "read", {
-            "bot": "bramble", "repo": "ThornswoodRP/Thornswood", "path": "/repos/ThornswoodRP/Thornswood/pulls"},
-            timeout=30)
-        self.assertEqual(feed_reader.GIT_SOCKET, self.policy.data["brokers"]["sockets"]["git"]["path"])
-
-    def test_main_skips_the_board_between_reads_and_keeps_the_last_one_on_a_failure(self):
-        sent = []
-        tokens = Path(tempfile.mkdtemp())
-        with mock.patch.object(feed_reader, "send", lambda core, name, token, body: sent.append(name) or 200), \
-                mock.patch.object(feed_reader, "read_token", lambda p: "t"), \
-                mock.patch.object(feed_reader, "rooms_snapshot", lambda *a: {}), \
-                mock.patch.object(feed_reader, "bots_snapshot", lambda *a: {}), \
-                mock.patch.object(feed_reader, "github_due", lambda now: False), \
-                mock.patch("builtins.print"):
-            self.assertEqual(feed_reader.main(["--room", ROOM, "--tokens", str(tokens)]), 0)
-            self.assertEqual(sent, ["room", "bots"])
-            sent.clear()
-            with mock.patch.object(feed_reader, "work_with_github",
-                                   mock.Mock(side_effect=feed_reader.GitHubUnread("Refused: no"))):
-                self.assertEqual(feed_reader.main(["--room", ROOM, "--tokens", str(tokens), "--github", "always"]), 1)
-            self.assertEqual(sent, ["room", "bots"])
 
 
 if __name__ == "__main__":

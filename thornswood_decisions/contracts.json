@@ -13,7 +13,9 @@
     "id_pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
     "id_pattern_source": "hermes_constants.py:395 PROFILE_ID_RE",
     "home": "~/.hermes/profiles/<id>/",
-    "ids": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"]
+    "ids": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"],
+    "states": "Each Bot's gateway state for the phone's online dots is Hermes's own RuntimeState of that profile's gateway (absent, starting, ready, draining, incompatible, inaccessible, conflict), found the way the readiness check finds it and never started (room_send.py op states).",
+    "states_source": "gateway/runtime_contract.py:6 RuntimeState; hermes_cli/gateway_runtime.py:289 discover_gateway_endpoint"
   },
   "room": {
     "name": "Thornswood Workbench",
@@ -96,7 +98,9 @@
     "approvals": "A gateway-admitted -Q turn is a finite turn, so approvals follow approvals.single_query_mode (default deny): a step that needs an approval is refused unless --yolo was frozen into the chat, or the chat has /yolo on. Hardline and deny rules run before yolo either way.",
     "approvals_source": "tools/approval_context.py:198 _is_single_query_approval_context, :347 _binary_approval_mode; tools/approval.py:327 _yolo_active",
     "ready": "Whether that Hermes's gateway runs is asked without starting one, as for the Bots (room_send.py op ready, with profile empty).",
-    "ready_source": "hermes_cli/gateway_runtime.py:289 discover_gateway_endpoint"
+    "ready_source": "hermes_cli/gateway_runtime.py:289 discover_gateway_endpoint",
+    "busy": "A message into a chat whose turn runs is handed over as Desktop's box hands it: config.get {key: busy, session_id} answers the chat's busy_input_mode, else display.busy_input_mode, else interrupt (queue for the TUI); steer is session.steer and interrupt is session.redirect, each {session_id, text, execution_generation}, answered queued, redirected or rejected, rejected meaning queue it as the next prompt; queue, a file, a slash command or a turn parked on a prompt is prompt.submit, whose receipt is started or queued. A resume's snapshot gives pending (each admission's status, started for the running one), prompts and execution_generation, and session.info events replace pending. `hermes chat` builds its view as hermes_cli.gateway_chat_view.GatewayChatView at run time, so room_send.py's turn puts a view in its place that changes only submit, then runs hermes_cli.main as Hermes's own launcher does.",
+    "busy_source": "gateway/session_busy_controls.py:30 busy_config, :175 correct; gateway/session_controls.py:638 the resume snapshot, :690 submit; gateway/session_contract.py:53 AdmissionReceipt; gateway/session_authority.py:412 _publish_pending; hermes_cli/gateway_chat.py:163 the view's import; hermes_cli/gateway_chat_view.py:39 __init__, :218 _session_info, :301 submit, :496 run; apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts:276-298 and :439 steerDraft; apps/desktop/src/app/chat/composer/busy-submit-state.ts:35; apps/desktop/src/app/session/hooks/use-busy-input-mode.ts:57"
   },
   "reactions": {
     "store": "Hermes keeps reactions on a message row, in messages.display_metadata under \"reactions\": a list of {emoji, author, at, seen?}, author \"user\" or \"agent\". Older rows carry the JSON as a string inside a string.",

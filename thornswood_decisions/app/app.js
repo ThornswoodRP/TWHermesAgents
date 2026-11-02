@@ -49,9 +49,18 @@ function el(tag, attrs, ...children) {
 }
 
 function show(...nodes) {
-  const view = document.getElementById('view')
-  view.replaceChildren(...nodes.flat(Infinity).filter(Boolean))
-  if (pageTop) { pageTop = false; scrollTo({ top: 0 }) }
+  showIn('view', nodes)
+}
+
+// The desktop's panes (the chat list on the left, Decisions on the right) are
+// drawn by the same views as the phone's screens, each into its own pane. Only
+// the middle one moves the page; a pane keeps its own place in its list.
+function showIn(into, nodes) {
+  const pane = document.getElementById(into)
+  const keep = into === 'view' ? null : pane.scrollTop
+  pane.replaceChildren(...[nodes].flat(Infinity).filter(Boolean))
+  if (keep !== null) pane.scrollTop = keep
+  else if (pageTop) { pageTop = false; scrollTo({ top: 0 }) }
 }
 
 function when(iso) {
@@ -81,7 +90,11 @@ function avatar(id, label) {
 const ICON = {
   back: 'M15 18l-6-6 6-6', send: 'M4 12l16-8-6 16-3-7z', x: 'M6 6l12 12M18 6L6 18', plus: 'M12 5v14M5 12h14',
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
-  more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6'
+  more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6',
+  panel: 'M3 4h18v16H3zM9 4v16', file: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6',
+  image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', dec: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9',
+  mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3',
+  talk: 'M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4'
 }
 function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg'
@@ -97,19 +110,19 @@ function icon(name, size = 20) {
 // A screen's bar: back (when there is somewhere to go back to), the agent's
 // avatar, the title (a heading on a list screen) and a line under it, and
 // whatever goes on the right.
-function screenBar({ back, backLabel, agent, label, title, heading, under, right }) {
+function screenBar({ back, backLabel, agent, label, title, heading, under, right, live }) {
   return el('div', { class: 'bar' },
     back ? el('button', { class: 'ib', type: 'button', 'aria-label': backLabel, onclick: back }, icon('back')) : null,
-    agent !== undefined ? avatar(agent, label || title) : null,
+    agent !== undefined ? (live ? liveAvatar(agent, label || title, live) : avatar(agent, label || title)) : null,
     el('div', { class: 't' }, el(heading ? 'h2' : 'strong', {}, title), under ? el('span', {}, under) : null),
     right || null)
 }
 
 // A row of a list: avatar, title with its tags, the lines under it, and what
 // goes on the right (a state or a time).
-function listRow(attrs, { agent, label, title, tags, lines, right }) {
+function listRow(attrs, { agent, label, title, tags, lines, right, live }) {
   return el('button', { type: 'button', ...attrs, class: 'row' + (attrs.class ? ' ' + attrs.class : '') },
-    agent !== undefined ? avatar(agent, label || title) : null,
+    agent !== undefined ? (live ? liveAvatar(agent, label || title, live) : avatar(agent, label || title)) : null,
     el('div', { class: 't' }, el('strong', {}, title), tags || null, lines || null),
     right ? el('div', { class: 'w' }, right) : null)
 }
@@ -136,7 +149,9 @@ const SAID = {
   setup_expired: 'Setting up this phone ran out: a pairing gives 5 minutes to add the first passkey. Get a new code, pair again and add the passkey straight after.',
   passkey_unavailable: 'Passkeys are not set up on the core yet.',
   no_origin: 'The core does not know its address yet, so passkeys cannot work.',
-  offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.'
+  offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.',
+  voice_off: 'Dictation is not running on the VM.',
+  voice_slow: 'Whisper on the VM took too long with that. Try a shorter recording.'
 }
 
 function said(body) {
@@ -446,15 +461,15 @@ async function signInView(note) {
 // ── the views ─────────────────────────────────────────────────────────────
 
 function setTab(name) {
-  for (const a of document.querySelectorAll('#tabs a')) {
+  for (const a of document.querySelectorAll('#tabs a[data-tab]')) {
     if (a.dataset.tab === name) a.setAttribute('aria-current', 'page')
     else a.removeAttribute('aria-current')
   }
 }
 
-function refused(r) {
+function refused(r, into = 'view') {
   if (r.status === 401) { csrf = null; signInView(said(r.body)); return true }
-  if (r.status !== 200) { show(el('p', { class: 'warn' }, said(r.body))); return true }
+  if (r.status !== 200) { showIn(into, el('p', { class: 'warn' }, said(r.body))); return true }
   return false
 }
 
@@ -485,30 +500,29 @@ async function fingerprintOffer() {
   return part
 }
 
-async function decisionsView() {
-  setTab('decisions')
+async function decisionsView(into = 'view') {
+  const main = into === 'view'
+  if (main) setTab('decisions')
   const r = await call('GET', '/cards')
-  if (refused(r)) return
+  if (refused(r, into)) return
   seq = r.body.seq
   badge(r.body.cards.length)
   // Every alert of a card that no longer needs Patrick goes off the phone.
   toWorker({ pending: r.body.cards.map(c => c.id) })
-  const note = flash
-  flash = ''
-  const answered = r.body.answered || []
-  show(
-    screenBar({ title: 'Decisions', heading: true }),
+  const note = main ? flash : ''
+  if (main) flash = ''
+  showIn(into, [
+    screenBar({ title: 'Decisions', heading: true,
+      right: main ? null : el('button', { class: 'ib', type: 'button', 'aria-label': 'Hide Decisions', title: 'Hide Decisions',
+        onclick: () => fold('side') }, icon('x', 18)) }),
     note ? el('p', { class: 'receipt', role: 'status' }, note) : null,
-    await fingerprintOffer(),
+    main ? await fingerprintOffer() : null,
     r.body.cards.length
       ? [el('h2', { class: 'section' }, `Waiting on you (${r.body.cards.length})`),
         r.body.cards.map(c => listRow({ onclick: () => go('/m/decisions/' + c.id) }, {
-          title: c.title, tags: c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
+          title: inlineMd(c.title, true), tags: c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
           lines: el('span', { class: 'quiet' }, `${c.kind}, answer by ${when(c.expires_at)}`) }))]
-      : el('p', { class: 'quiet' }, 'Nothing needs you right now.'),
-    answered.length ? el('h2', { class: 'section' }, 'Answered') : null,
-    answered.map(c => listRow({ class: 'done', onclick: () => go('/m/decisions/' + c.id) }, {
-      title: c.title, lines: el('span', { class: 'quiet' }, `You chose ${c.option}, ${when(c.answered_at)}`) })))
+      : el('p', { class: 'quiet' }, 'Nothing needs you right now.')])
 }
 
 async function cardView(id, note) {
@@ -522,13 +536,13 @@ async function cardView(id, note) {
   const status = el('p', { class: 'warn', role: 'status' }, note || '')
   const pending = c.status === 'pending'
   const parts = [
-    el('h2', {}, c.title),
-    el('p', { class: 'quiet' }, `${c.kind}, revision ${c.revision}, ${c.status}${c.risk === 'high' ? ', high risk' : ''}`),
-    a.status === 200 ? el('pre', { class: 'artifact' }, a.body.body) : el('p', { class: 'warn' }, said(a.body)),
-    el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
+    el('h2', {}, inlineMd(c.title)),
+    c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
+    a.status === 200 ? el('div', { class: 'artifact' }, markdown(a.body.body)) : el('p', { class: 'warn' }, said(a.body)),
+    el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
     c.options.map(o => el('div', { class: 'option' },
-      el('strong', {}, o.label), o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
-      el('div', { class: 'quiet' }, o.consequence),
+      el('strong', {}, inlineMd(o.label)), o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
+      el('div', { class: 'quiet' }, inlineMd(o.consequence)),
       pending ? el('button', { class: o.key === c.recommendation ? 'primary' : 'secondary', type: 'button',
         'data-option': o.key, onclick: () => choose(c, o, status) }, 'Choose: ' + o.label) : null))
   ]
@@ -537,6 +551,8 @@ async function cardView(id, note) {
     parts.push(el('p', { class: 'receipt' }, `Answered "${picked ? picked.label : c.receipt.option_key}" at ` +
       `${when(c.receipt.answered_at)} (revision ${c.receipt.revision}).`))
   }
+  const alertLine = alertTimes(c)
+  if (alertLine) parts.push(alertLine)
   if (c.superseded_by) {
     parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/decisions/' + c.superseded_by) },
       'This card was replaced. Open the new one'))
@@ -544,6 +560,27 @@ async function cardView(id, note) {
   parts.push(status)
   parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/decisions') }, 'Back'))
   show(el('div', { class: 'card' }, parts))
+}
+
+// Where a card's alert spent its time (Patrick, 2 Nov: a card reached his phone minutes after it was
+// stored): when the card was stored, when the core's worker handed its alert to the push service, and
+// when this phone got it (the service worker keeps that time on the phone, sw.js). To the second, so a
+// late alert says which hop was slow without anyone being asked to measure it.
+function alertTimes(c) {
+  if (!c.alert) return null
+  const t = iso => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  const line = el('p', { class: 'quiet alert-times', 'data-alert': c.alert.status })
+  const say = shown => {
+    line.textContent = 'Alert: card ' + t(c.alert.queued_at) +
+      (c.alert.sent_at ? ', sent ' + t(c.alert.sent_at) : ', not sent (' + c.alert.status + ')') +
+      (shown ? ', on this phone ' + t(shown) : '')
+  }
+  say(null)
+  if ('caches' in window) {
+    caches.open('tw-alerts').then(k => k.match('/m/alerts/' + c.id)).then(r => r ? r.json() : null)
+      .then(j => { if (j && j.shown_at) say(j.shown_at) }).catch(() => {})
+  }
+  return line
 }
 
 // One option chosen: a high-risk card shows what is being approved on its own
@@ -558,9 +595,9 @@ async function choose(c, o, status) {
   show(el('div', { class: 'card' },
     el('h2', {}, 'Check this answer'),
     el('p', {}, `"${c.title}" is high risk. You are choosing:`),
-    el('p', {}, el('strong', {}, o.label)),
-    el('p', { class: 'quiet' }, o.consequence),
-    el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
+    el('p', {}, el('strong', {}, inlineMd(o.label))),
+    el('p', { class: 'quiet' }, inlineMd(o.consequence)),
+    el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
     el('p', { class: 'quiet' }, `Your ${signInWord()} answers it. Cancel the prompt to change your mind.`),
     button, note,
     el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
@@ -604,69 +641,36 @@ async function answer(c, o, status) {
   return cardView(c.id, said(r.body))
 }
 
-// An answered card leaves Decisions at once: its alert closes, and the list
-// says what was chosen and keeps the card under Answered for a day.
+// An answered card leaves Decisions at once and for good (Patrick, 2 Nov: "I only want things waiting for
+// me there"): its alert closes, and one line says what was chosen. The tab lists only cards waiting on him.
 function answered(c, o) {
   toWorker({ close: c.id })
-  flash = `Answered "${c.title}": ${o.label}. It is under Answered below.`
-  history.replaceState(null, '', '/m/decisions')
+  flash = `Answered "${c.title}": ${o.label}.`
+  // Answered from a Bot Chat: back to that chat, where the card has gone.
+  const back = answerBack
+  answerBack = null
+  if (back) badgeNow()
+  history.replaceState(null, '', back || '/m/decisions')
   return route()
 }
+let answerBack = null  // the Bot Chat a card was answered from
 
-// The Board: what each Bot is working on, read from GitHub (the issues it has
-// claimed and the pull requests from its branches) by the feed once in each 5
-// minutes, grouped by Bot in the Bots list's order. Hermes's Kanban tasks show
-// under them only when there are any (the Bots keep none now). Each row opens
-// the pull request while one is open, otherwise the issue, always on github.com.
-const STAGE = {
-  claimed: () => 'Claimed, no pull request yet',
-  pr_open: i => `Pull request #${i.pr} open`,
-  pr_draft: i => `Draft pull request #${i.pr}`,
-  merged: i => `Pull request #${i.pr} merged`,
-  closed: i => `Pull request #${i.pr} closed without merging`
-}
-const CHECKS = { passed: 'checks passed', failing: 'checks failing', running: 'checks running', none: 'no checks yet' }
-const REPO_SHORT = { 'ThornswoodRP/Thornswood': 'Thornswood', 'ThornswoodRP/Thornswood-Ops': 'Ops', 'ThornswoodRP/skymp': 'skymp' }
-const GH_REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/
+// The Board, live (Patrick, 2 Nov: "only what each is currently doing"): one row for each turn a Bot is
+// running now, in the Bots list's order, with the session's title, what the turn is doing and for how long.
+// A Bot with nothing running has no row, and nothing that ended stays. The VM sends it every 2 seconds while
+// it changes and the Board reads it again every 3 seconds while it is open. Its words are the Bot Chat's
+// live line (doingWords). When the VM has not sent it for a minute and a half, the Board says so instead of
+// showing what may have ended.
+const LIVE_MS = 3000
 
-function workLink(i) {
-  const open = (i.stage === 'pr_open' || i.stage === 'pr_draft') && i.pr && GH_REPO.test(i.pr_repo)
-  if (open) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
-  if (i.number && GH_REPO.test(i.repo)) return `https://github.com/${i.repo}/issues/${i.number}`
-  if (i.pr && GH_REPO.test(i.pr_repo)) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
-  return null
-}
-
-function workRow(i) {
-  const progress = [STAGE[i.stage] ? STAGE[i.stage](i) : i.stage]
-  if (i.checks && (i.stage === 'pr_open' || i.stage === 'pr_draft')) {
-    progress.push(i.checks_line ? `checks: ${i.checks_line}` : CHECKS[i.checks] || i.checks)
-  }
-  if (i.auto_merge && i.stage === 'pr_open') progress.push('auto-merge on')
-  const href = workLink(i)
-  const attrs = href ? { href, target: '_blank', rel: 'noopener noreferrer' } : {}
-  const cls = 'row work' + (i.stage === 'merged' || i.stage === 'closed' ? ' done' : '')
-  return el(href ? 'a' : 'div', { ...attrs, class: cls, 'data-item': `${i.repo}#${i.number || 'pr' + i.pr}` },
-    el('div', { class: 't' },
-      el('strong', {}, (i.number ? `#${i.number} ` : '') + i.title),
-      el('span', { class: 'quiet' }, REPO_SHORT[i.repo] || i.repo),
-      el('span', { class: i.checks === 'failing' ? 'warn' : 'what' }, progress.join(' · '))),
-    el('div', { class: 'w' }, updated(i.updated_at)))
-}
-
-function botCount(open, done) {
-  if (!open && !done) return 'Nothing claimed'
-  return [open ? `${open} open` : null, done ? `${done} finished in the last day` : null].filter(Boolean).join(', ')
-}
-
-// Today's time alone; an older day with its date.
-function updated(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (isNaN(d)) return iso
-  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  return d.toDateString() === new Date().toDateString() ? time
-    : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+// How long a turn has run: under a minute, then minutes, then hours and minutes.
+function forHowLong(iso) {
+  const t = new Date(iso)
+  if (isNaN(t)) return ''
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (s < 60) return 'just now'
+  const m = Math.floor(s / 60)
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`
 }
 
 async function boardView() {
@@ -674,28 +678,24 @@ async function boardView() {
   const r = await call('GET', '/work')
   if (refused(r)) return
   const work = r.body.work
-  const bar = screenBar({ title: 'Board', heading: true,
-    under: work ? `The Bots' work on GitHub, as of ${when(r.body.as_of)}` : undefined })
-  if (!work) return show(bar, el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
-  const items = work.items
-  const tasks = work.tasks || []
+  const bar = screenBar({ title: 'Board', heading: true })
+  if (!work || !Array.isArray(work.doing)) {
+    return show(bar, el('p', { class: 'quiet' }, 'The Board has not heard from the Bots yet.'))
+  }
+  if (!r.body.live) {
+    return show(bar, el('p', { class: 'warn', role: 'status' },
+      `The Board has not heard from the Bots since ${when(r.body.received_at)}, so it cannot say what they are doing.`))
+  }
   const rank = b => (ORDER.indexOf(b) + 1) || ORDER.length + 1
-  const bots = [...new Set([...ORDER, ...(items || []).map(i => i.bot)])].sort((a, b) => rank(a) - rank(b))
-  show(bar,
-    items ? bots.map(b => {
-      const mine = items.filter(i => i.bot === b)
-      const open = mine.filter(i => i.stage !== 'merged' && i.stage !== 'closed').length
-      return [
-        el('div', { class: 'row head', 'data-bot': b }, avatar(b, NAMES[b] || b),
-          el('div', { class: 't' }, el('strong', {}, NAMES[b] || b),
-            el('span', { class: 'quiet' }, botCount(open, mine.length - open)))),
-        mine.map(workRow)]
-    }) : el('p', { class: 'quiet' }, "The Bots' work on GitHub shows here after the feed's next read, once in each 5 minutes."),
-    tasks.length ? [el('h2', { class: 'section' }, "Hermes's Kanban"),
-      el('table', {},
-        el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
-        tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))] : null,
-    el('p', { class: 'quiet foot' }, 'Read only. Claims are the "claimed: <Bot>" labels; pull requests are the ones from each Bot\'s own branch.'))
+  const rows = [...work.doing].sort((a, b) => rank(a.bot) - rank(b.bot) || (a.since < b.since ? -1 : 1))
+  show(bar, rows.length ? rows.map(d => el('div', { class: 'row doing', 'data-bot': d.bot },
+    avatar(d.bot, NAMES[d.bot] || d.bot),
+    el('div', { class: 't' },
+      el('strong', {}, NAMES[d.bot] || d.bot),
+      d.title ? el('span', { class: 'quiet' }, d.title) : null,
+      el('span', { class: 'what', 'data-doing': d.state }, doingWords(d))),
+    el('div', { class: 'w' }, forHowLong(d.since))))
+    : el('p', { class: 'quiet' }, 'No Bot is working right now.'))
 }
 
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
@@ -751,29 +751,58 @@ function gatewayLine(g) {
   return el('span', { class: g.state === 'ready' ? 'rec' : 'rec off' }, stateWords(g)[0])
 }
 
-async function botsView() {
-  setTab('bots')
+// Online and offline, from what is really running (Patrick, 2 Nov: "the design had green and red circles
+// to indicate bots online or offline"). Green: its gateway is running. Red: it is not (or One's machine is
+// off). Amber: on its way up or down, or not heard from, so nobody is told it is up or down when that is
+// not known. A Bot's word is Hermes's own state of its gateway, read by the Bots' connector every half
+// minute; Hermes and One have theirs from their own connectors (stateWords).
+const BOT_STATE = {
+  ready: ['on', 'On'], draining: ['wait', 'Restarting'], starting: ['wait', 'Starting'],
+  absent: ['off', 'Offline'], incompatible: ['off', 'Wrong version'], inaccessible: ['off', 'Cannot be reached'],
+  conflict: ['off', 'Two gateways'], check_failed: ['wait', 'Check failed'], not_heard: ['wait', 'Not heard from']
+}
+const GATEWAY_DOT = { ready: 'on', machine_off: 'off', gateway_down: 'off', connector_stopped: 'off', missing: 'off',
+  turned_off: 'off' }
+function botLive(live) {
+  const [cls, words] = BOT_STATE[(live && live.state) || 'not_heard'] || BOT_STATE.not_heard
+  return { cls, words }
+}
+function gatewayLive(g) {
+  return { cls: GATEWAY_DOT[g.state] || 'wait', words: stateWords(g)[0] }
+}
+function dot(live) {
+  return el('span', { class: 'dot ' + live.cls, role: 'img', 'aria-label': live.words, title: live.words })
+}
+// An avatar with its dot on its corner.
+function liveAvatar(id, label, live) {
+  return el('div', { class: 'avwrap' }, avatar(id, label), live ? dot(live) : null)
+}
+function liveLine(live) {
+  return el('span', { class: 'rec live ' + live.cls }, live.words)
+}
+
+async function botsView(into = 'view') {
+  if (into === 'view') setTab('bots')
   const [r, own] = await Promise.all([call('GET', '/chat'), call('GET', '/own')])
-  if (refused(r)) return
+  if (refused(r, into)) return
   const rank = b => (ORDER.indexOf(b.bot) + 1) || ORDER.length + 1
   const bots = r.body.bots.slice().sort((a, b) => rank(a) - rank(b))
   // Hermes, then One, then the six Bots (Patrick's mock-up answer, 1 Nov).
   const gateways = own.status === 200 ? ['me', 'one'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
-  show(
+  showIn(into, [
     screenBar({ title: 'Thornswood Bots', heading: true }),
     gateways.map(g => listRow({ 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) }, {
-      agent: g.gateway, title: GATEWAY[g.gateway],
+      agent: g.gateway, title: GATEWAY[g.gateway], live: gatewayLive(g),
       lines: [el('span', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
-        el('span', { class: 'quiet' }, g.last ? `${chatName(g.last)}: ${preview(g.last.preview, 100)}`
-          : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.'))],
+        g.last ? snippet(g.last.preview, 2, el('b', { class: 'sender' }, chatName(g.last) + ': '))
+          : el('span', { class: 'quiet' }, g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')],
       right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })),
     own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
     bots.map(b => listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
-      agent: b.bot, title: NAMES[b.bot] || b.bot,
+      agent: b.bot, title: NAMES[b.bot] || b.bot, live: botLive(b.live),
       lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
-        el('span', { class: 'quiet' }, b.last ? preview(b.last.text) : 'No messages yet.')],
-      right: b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null })),
-    el('p', { class: 'quiet foot' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
+        b.last ? snippet(b.last.text) : el('span', { class: 'quiet' }, 'No messages yet.')],
+      right: [liveLine(botLive(b.live)), b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null] }))])
 }
 
 // Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
@@ -857,24 +886,40 @@ const INLINE = new RegExp([
   '(?<!\\w)__(?=\\S)([^\\n]+?)(?<=\\S)__(?!\\w)',                 // 6 bold
   '~~(?=\\S)([^\\n]+?)(?<=\\S)~~',                                // 7 struck
   '(?<![\\w*])\\*(?=[^\\s*])([^*\\n]+?)(?<=\\S)\\*(?![\\w*])',    // 8 italic
-  '(?<!\\w)_(?=[^\\s_])([^_\\n]+?)(?<=\\S)_(?!\\w)'               // 9 italic, never inside a_name
+  '(?<!\\w)_(?=[^\\s_])([^_\\n]+?)(?<=\\S)_(?!\\w)',              // 9 italic, never inside a_name
+  '(?<![\\w/])(@(?:file|folder|url|image|tool|terminal|git):(?:"[^"\\n]+"|\'[^\'\\n]+\'|`[^`\\n]+`|\\S+))', // 10 a reference
+  '(?<![\\w@/])@([A-Za-z][\\w-]{0,30})(?![\\w:@-])'               // 11 a mention
 ].join('|'), 'g')
+
+// Who a mention names, as the app names them, with their colour (app.css .a-<id>).
+const MENTIONED = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp',
+  hermes: 'Hermes', one: 'One', patrick: 'Patrick' }
 
 function link(text, href) {
   return el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, text)
 }
 
-function inlineMd(text) {
+// still: a link is drawn as one but is not one, for words inside something tapped as a whole (a list's row).
+function inlineMd(text, still = false) {
   const out = []
   let last = 0
+  text = String(text ?? '')
+  const to = (words, href) => still ? el('span', { class: 'lnk' }, words) : link(words, href)
   for (const m of text.matchAll(INLINE)) {
     if (m.index > last) out.push(text.slice(last, m.index))
     if (m[1] !== undefined) out.push(el('code', {}, m[1]))
-    else if (m[2] !== undefined) out.push(link(m[2], m[3]))
-    else if (m[4] !== undefined) out.push(link(m[4], m[4]))
-    else if (m[5] !== undefined || m[6] !== undefined) out.push(el('strong', {}, inlineMd(m[5] ?? m[6])))
-    else if (m[7] !== undefined) out.push(el('s', {}, inlineMd(m[7])))
-    else out.push(el('em', {}, inlineMd(m[8] ?? m[9])))
+    else if (m[2] !== undefined) out.push(to(m[2], m[3]))
+    else if (m[4] !== undefined) out.push(to(m[4], m[4]))
+    else if (m[5] !== undefined || m[6] !== undefined) out.push(el('strong', {}, inlineMd(m[5] ?? m[6], still)))
+    else if (m[7] !== undefined) out.push(el('s', {}, inlineMd(m[7], still)))
+    else if (m[8] !== undefined || m[9] !== undefined) out.push(el('em', {}, inlineMd(m[8] ?? m[9], still)))
+    // A file or other reference is its name, as plain text: it never opens, loads or attaches anything.
+    else if (m[10] !== undefined) out.push(el('span', { class: 'ref' }, refLabel(m[10])))
+    else {
+      const who = MENTIONED[m[11].toLowerCase()]
+      const id = who && (AGENT_BY_NAME[who] || (who === 'Patrick' ? 'patrick' : null))
+      out.push(el('span', { class: 'mention' + (id ? ' a-' + id : '') }, '@' + (who || m[11])))
+    }
     last = m.index + m[0].length
   }
   if (last < text.length) out.push(text.slice(last))
@@ -1102,6 +1147,38 @@ function preview(text, n = 120) {
   return clip(line, n)
 }
 
+// A message in a short space: a list's line, a reply's quote. It is drawn the way the message is (bold,
+// italic, code, links, mentions, a file as its name), and only its blocks are laid out as one run: a heading,
+// a list's bullet, a quote's mark, a code fence and a table's rule go, a table's cells are joined with " · ".
+// It is cut by lines, at a whole word, with "…" (app.css .snip), never in the middle of a mark. Patrick,
+// 2 Nov: the plain words were better than the raw text, "but I want the proper formatting", everywhere.
+function flatMd(text) {
+  return String(text || '').replace(/\r\n?/g, '\n')
+    .replace(/^[ \t]*(```|~~~).*$/gm, '')
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/gm, '')
+    .replace(/^[ \t]{0,3}([-*_][ \t]*){3,}$/gm, '')
+    .replace(/^[ \t]{0,3}(#{1,6}[ \t]+|>[ \t]?)/gm, '')
+    .replace(/^[ \t]*[-*+][ \t]+(\[[ xX]\][ \t]+)?/gm, '')
+    .replace(/^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$/gm, '')
+    .replace(/[ \t]*\|[ \t]*/g, ' · ')
+    .replace(/\s+/g, ' ').trim()
+}
+
+function snippet(text, lines = 2, sender) {
+  const a = authored(text)
+  const words = flatMd(a.words)
+  // The words, else what was attached (a line the core cut can end inside the attached text).
+  return el('span', { class: 'snip l' + lines },
+    sender || null,
+    words ? inlineMd(words, true) : a.files.map(f => el('span', { class: 'ref' }, f.label)))
+}
+
+// Who said a list's last line, the way a group chat shows it: the name, in its colour, then the words.
+function sender(who) {
+  const name = NAMES[who] || who
+  return el('b', { class: 'sender a-' + (AGENT_BY_NAME[name] || 'room') }, name + ': ')
+}
+
 function fileChips(files) {
   return files.map(f => {
     const what = f.tokens ? `${f.label} · ${f.tokens.toLocaleString()} tokens` : f.label
@@ -1151,7 +1228,8 @@ function bubbles(items) {
     const bub = el('div', { class: 'bub' },
       ptr ? el('div', { class: 'quote' },
         el('div', { class: 'qwho' }, ptr[1] ? 'Replying to ' + (m.agent || m.who || 'Hermes') : 'Replying to your message'),
-        el('div', { class: 'qtext' }, ptr[2])) : null,
+        el('div', { class: 'qtext' }, snippet(ptr[2], 3))) : null,
+      (m.sent || []).map(f => el('div', { class: 'att' }, el('span', {}, `${f.name} · ${sizeWords(f.size)}`))),
       own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
     if (ptr && m.replyTo) replyLink(bub, m.replyTo)
     if (m.mid !== undefined && m.mid !== null && !m.status) {
@@ -1159,7 +1237,8 @@ function bubbles(items) {
       bub.tabIndex = 0
       bub.title = 'Tap for reactions and copy'
       bub.addEventListener('click', e => {
-        if (e.target.closest('a, button') || String(getSelection())) return
+        // Opening a pasted file's chip opens the chip, not the actions too.
+        if (e.target.closest('a, button, summary') || String(getSelection())) return
         messageSheet(m)
       })
       bub.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === bub) messageSheet(m) })
@@ -1215,10 +1294,16 @@ function replyLink(bub, mid) {
 
 // The words a reply quotes: the whole message, as Hermes quotes it (a preview would lose the rest of a
 // list or code), without the pointer it opened with, cut at the core's 2000 characters.
+// A message that is only a paste quotes the paste's words. A file is never quoted as its reference (the
+// core makes any that is left plain words too, own.py inert): on 2 Nov a quote that held the paste's
+// reference made Hermes attach the paste again, and one cut inside a reference asked for a file that does
+// not exist. A long quote is cut at a whole word.
 function quoteOf(text) {
   const t = String(text || '')
-  const body = t.replace(POINTER, '').trim() || t.trim()
-  return body.length <= 2000 ? body : body.slice(0, 1997) + '...'
+  const a = authored(t.replace(POINTER, ''))
+  const body = a.words || a.files.map(f => f.body).filter(Boolean).join('\n\n').trim() ||
+    a.files.map(f => '[' + f.label + ']').join(' ')
+  return clip(body, 1999)
 }
 
 // The reactions the phone offers; the core takes only these (own.py REACTIONS).
@@ -1255,6 +1340,8 @@ function messageSheet(m) {
       m.react && mineNow ? el('button', { class: 'secondary', type: 'button', onclick: () => choose(null) },
         'Take my reaction off') : null,
       m.reply ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); m.reply() } }, 'Reply') : null,
+      canSpeak() && spoken(m) ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); readAloud(m) } },
+        'Read aloud') : null,
       copy,
       el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'),
       note))
@@ -1267,8 +1354,8 @@ function messageSheet(m) {
 
 // The bar on top of a chat: back, then the chat's name and where it lives.
 // More, when given, opens the chat's own actions.
-function chatBar(back, backLabel, title, under, agent, label, more) {
-  const bar = screenBar({ back, backLabel, agent, label, title, under,
+function chatBar(back, backLabel, title, under, agent, label, more, live) {
+  const bar = screenBar({ back, backLabel, agent, label, title, under, live,
     right: more ? el('button', { class: 'ib', type: 'button', 'aria-label': 'Chat actions', onclick: more }, icon('more')) : null })
   bar.classList.add('chatbar')
   return bar
@@ -1277,13 +1364,14 @@ function chatBar(back, backLabel, title, under, agent, label, more) {
 // The box at the foot of a chat. It grows with what is typed, up to six
 // lines, and keeps its draft (and the draft's idempotency key) while the
 // chat redraws. Enter is a new line; the button sends.
-function chatComposer(key, label, buttonLabel, send, status, gw) {
+function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) {
   const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
+  if (!draft.files) draft.files = []
   // A reply being written shows the words it quotes, which open the message as sent.
   const replying = draft.reply ? el('div', { class: 'replying' },
     el('div', { class: 'rq' },
       el('strong', {}, 'Replying to ' + draft.reply.who),
-      el('div', { class: 'qtext' }, draft.reply.quote)),
+      el('div', { class: 'qtext' }, snippet(draft.reply.quote, 3))),
     el('button', { class: 'back', type: 'button', 'aria-label': 'Cancel the reply', onclick: () => {
       draft.reply = null
       draft.key = newKey()
@@ -1297,21 +1385,203 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
     fit()
   })
   requestAnimationFrame(fit)
-  const button = el('button', { class: 'send', type: 'button', 'aria-label': buttonLabel, onclick: async () => {
+  // A message that answers a card (Patrick, 2 Nov: a chat should be an answer to a card): the line above
+  // the box says which card and which option his words name, and the x sends the words without it.
+  const answering = el('div', { class: 'answering', role: 'status', hidden: true })
+  const paint = () => {
+    if (!box.value.trim()) draft.noAnswer = false
+    const m = draft.noAnswer ? null : cardMatch(box.value, cards)
+    const was = draft.answer ? draft.answer.c.id + ':' + draft.answer.o.key : ''
+    if ((m ? m.c.id + ':' + m.o.key : '') !== was) draft.key = newKey()
+    draft.answer = m && m.c ? m : null
+    answering.replaceChildren(...(draft.answer ? [
+      el('div', { class: 'rq' }, el('strong', {}, 'Answers the card ' + (m.c.risk === 'high' ? '(high risk)' : '')),
+        el('span', {}, inlineMd(m.c.title, true), ': ', el('b', {}, inlineMd(m.o.label, true)))),
+      el('button', { class: 'back', type: 'button', 'aria-label': 'Send without answering the card', onclick: () => {
+        draft.noAnswer = true
+        paint()
+      } }, icon('x'))] : m ? [el('div', { class: 'rq' }, m.why)] : []))
+    answering.hidden = !m
+  }
+  box.addEventListener('input', paint)
+  paint()
+  const sendIt = async () => {
     const text = box.value.trim()
-    if (!text) { status.textContent = 'Type a message first.'; return }
+    const ready = draft.files.filter(f => f.id)
+    if (draft.files.some(f => f.state === 'up')) { status.textContent = 'Wait for the files to finish uploading.'; return }
+    if (!text && !ready.length) { status.textContent = 'Type a message first.'; return }
     status.textContent = 'Sending...'
     button.disabled = true
-    const s = await send(text, draft.key, draft.reply)
+    const a = draft.answer
+    const s = await send(text, draft.key, draft.reply, ready.map(f => f.id), a ? { decision_id: a.c.id,
+      option_key: a.o.key, revision: a.c.revision, attention_revision: a.c.attention_revision,
+      artifact_sha256: a.c.artifact_sha256 } : undefined)
     button.disabled = false
-    if (s.status === 200) { drafts[key] = null; chatPlace.toEnd = true; return route() }
+    if (s.status === 200) {
+      if (a) { toWorker({ close: a.c.id }); badgeNow() }
+      drafts[key] = null
+      chatPlace.toEnd = true
+      route()
+      return true
+    }
     if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
+    if (a && s.status === 403 && s.body.error === 'sign_in_again') {
+      // A high-risk card: the passkey is the yes, as on the card itself. Nothing is sent until it succeeds.
+      const again = el('button', { class: 'primary', type: 'button', 'data-confirm': a.o.key,
+        onclick: () => promptNow(again, status, sendIt) }, 'Answer ' + a.o.label + ' with your ' + signInWord())
+      status.replaceChildren(again)
+      return promptNow(again, status, sendIt)
+    }
     const d = s.body.detail || {}
     status.textContent = s.status === 0
       ? 'Could not reach the core. Sending again sends the same message, never a second one.'
       : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
-  } }, icon('send'))
-  return [replying, el('div', { class: 'composer' }, box, button)]
+  }
+  const button = el('button', { class: 'send', type: 'button', 'aria-label': buttonLabel, onclick: sendIt }, icon('send'))
+  const plus = attach ? el('button', { class: 'plus', type: 'button', 'aria-label': 'Add photos or files',
+    onclick: () => attachSheet(attach, draft, status) }, icon('plus')) : null
+  // The microphone: what he says is written down into the box by the VM's Whisper (dictate).
+  const speak = canRecord() ? el('button', { class: 'mic', type: 'button', 'aria-label': 'Speak instead of typing',
+    'aria-pressed': String(voice.mode === 'dictate' && voice.key === key), onclick: () => dictate(comp.voice) }, icon('mic')) : null
+  const comp = el('div', { class: 'composer', 'data-reply': draft.reply ? String(draft.reply.mid) : '',
+    'data-files': draft.files.map(f => f.local + ':' + f.state).join(' '),
+    'data-cards': (cards || []).map(c => c.id + ':' + c.revision + ':' + c.attention_revision).join(' ') },
+  plus, box, speak, button)
+  // What voice needs of this box: words added to it as typed, and sent as the send button sends them.
+  const put = words => {
+    box.value = (box.value.trim() ? box.value.replace(/\s+$/, '') + ' ' : '') + words
+    box.dispatchEvent(new Event('input'))
+  }
+  comp.voice = { key, name: label.replace(/^Message to /, ''), status, add: put,
+    send: async words => {
+      put(words)
+      if (draft.answer) return 'card'
+      return (await sendIt()) === true
+    } }
+  return [replying, answering, attach ? attachStrip(attach, draft, status) : null, comp]
+}
+
+// Which card and option his words answer: the words start with an option's label or key, as a whole
+// word or more. The longest name wins ("Yes, after 4 PM" over "Yes"); the same length on two options
+// answers nothing and says so, so he taps the one he means on its card. Never a guess past that.
+function cardMatch(text, cards) {
+  const t = text.trim().toLowerCase()
+  if (!t || !cards || !cards.length) return null
+  let best = [], len = 0
+  for (const c of cards) {
+    for (const o of c.options) {
+      const n = Math.max(...[o.label, o.key].map(w => {
+        const v = String(w || '').trim().toLowerCase()
+        return v && t.startsWith(v) && (t.length === v.length || !/[\p{L}\p{N}]/u.test(t[v.length])) ? v.length : 0
+      }))
+      if (n > len) { best = [{ c, o }]; len = n } else if (n && n === len) best.push({ c, o })
+    }
+  }
+  if (best.length === 1) return best[0]
+  return best.length ? { why: 'Those words fit options on more than one card. Tap the one you mean on its card.' } : null
+}
+
+// The cards a Bot asked that wait on Patrick, at the end of its Bot Chat: each with its options, so a tap
+// answers it here as on Decisions, and a message whose words name an option answers it too (chatComposer).
+function chatCards(cards, back) {
+  if (!cards || !cards.length) return null
+  const status = el('p', { class: 'warn', role: 'status' })
+  return el('div', { class: 'chat-cards' }, cards.map(c => el('div', { class: 'card', 'data-card': c.id },
+    el('div', { class: 'cardhead' },
+      el('a', { href: '/m/decisions/' + encodeURIComponent(c.id), onclick: e => { e.preventDefault(); go('/m/decisions/' + c.id) } },
+        el('strong', {}, inlineMd(c.title, true))),
+      c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null),
+    el('div', { class: 'opts' }, c.options.map(o => el('button', {
+      class: o.key === c.recommendation ? 'primary' : 'secondary', type: 'button', 'data-option': o.key,
+      onclick: () => { answerBack = back; return choose(c, o, status) } }, inlineMd(o.label, true)))))), status)
+}
+
+// Photos and files on a message to his own Hermes (Patrick, 2 Nov: "no way to add files or photos or
+// anything add a + button like Claude and Hermes have"). The + offers the camera, his photos and his
+// files; each is uploaded to the core as soon as it is picked, shows above the box while it goes, and
+// can be taken off before sending. The message names them, and his Hermes gets them in its own folders
+// (own_connector.py save_attachment): the first photo as the turn's image, every other file as an
+// @file: reference, as Hermes Desktop attaches them. Up to 10 a message, 20 MB each.
+const ATTACH_MAX = 20 * 1024 * 1024
+let localFile = 0
+
+function attachSheet(gw, draft, status) {
+  closeSheet()
+  const pick = (accept, capture) => {
+    closeSheet()
+    const input = el('input', { type: 'file', multiple: capture ? null : true, accept: accept || null,
+      capture: capture || null, hidden: true })
+    input.addEventListener('change', () => {
+      for (const file of [...input.files]) addFile(gw, draft, file, status)
+      input.remove()
+      route()
+    })
+    document.body.append(input)
+    input.click()
+  }
+  const back = el('div', { class: 'sheet-back' },
+    el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Add photos or files' },
+      el('button', { class: 'secondary pick-file', type: 'button', onclick: () => pick('image/*', 'environment') },
+        icon('camera'), 'Take a photo'),
+      el('button', { class: 'secondary pick-file', type: 'button', onclick: () => pick('image/*') }, icon('image'), 'Photos'),
+      el('button', { class: 'secondary pick-file', type: 'button', onclick: () => pick() }, icon('file'), 'Files'),
+      el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close')))
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  back.querySelector('button').focus()
+}
+
+async function addFile(gw, draft, file, status) {
+  if (draft.files.length >= 10) { status.textContent = 'A message takes up to 10 files.'; return }
+  const f = { local: ++localFile, name: file.name || 'photo.jpg', mime: file.type || '', size: file.size, state: 'up' }
+  draft.files.push(f)
+  draft.key = newKey()
+  if (file.size > ATTACH_MAX) {
+    Object.assign(f, { state: 'bad', why: 'over 20 MB' })
+    return
+  }
+  const headers = { 'Content-Type': file.type || 'application/octet-stream' }
+  if (csrf) headers['X-CSRF-Token'] = csrf
+  let r
+  try {
+    const resp = await fetch(`${API}/own/${gw}/attach?name=${encodeURIComponent(f.name)}`,
+      { method: 'POST', headers, credentials: 'same-origin', cache: 'no-store', body: file })
+    let out = {}
+    try { out = await resp.json() } catch (e) { out = {} }
+    r = { status: resp.status, body: out }
+  } catch (e) {
+    r = { status: 0, body: { error: 'offline' } }
+  }
+  if (!draft.files.includes(f)) {
+    // Taken off while it went up: take it off the core too.
+    if (r.status === 200) call('POST', `/own/${gw}/unattach`, { id: r.body.id })
+    return
+  }
+  if (r.status === 200) Object.assign(f, { state: 'ok', id: r.body.id, name: r.body.name, mime: r.body.mime })
+  else Object.assign(f, { state: 'bad', why: r.status === 0 ? 'could not reach the core' : said(r.body) })
+  draft.key = newKey()
+  route()
+}
+
+function sizeWords(n) {
+  return n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'
+}
+
+function attachStrip(gw, draft, status) {
+  if (!draft.files.length) return null
+  return el('div', { class: 'files', role: 'list', 'aria-label': 'Files on this message' }, draft.files.map(f =>
+    el('div', { class: 'file ' + f.state, role: 'listitem' },
+      icon(/^image\//.test(f.mime) ? 'image' : 'file', 18),
+      el('span', { class: 'fname' }, f.name),
+      el('span', { class: 'fstate' }, f.state === 'up' ? 'Uploading...' : f.state === 'bad' ? 'Not added: ' + f.why
+        : sizeWords(f.size)),
+      el('button', { class: 'ib', type: 'button', 'aria-label': 'Take off ' + f.name, onclick: () => {
+        draft.files = draft.files.filter(x => x !== f)
+        draft.key = newKey()
+        if (f.id) call('POST', `/own/${gw}/unattach`, { id: f.id })
+        route()
+      } }, icon('x', 16)))))
 }
 
 // Where a chat is scrolled. Opening a chat, or sending, goes to the newest
@@ -1366,7 +1636,23 @@ function showChat(key, top, list, dock, items) {
   const keep = chatPlace.keep
   const jump = el('button', { class: 'jump', type: 'button', onclick: toNewest })
   jump.hidden = true
-  show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), el('div', { class: 'dock' }, jump, dock)))
+  const fresh = el('div', { class: 'dock' }, jump, dock)
+  // While the box has the focus, the messages above it are drawn again and the box stays as it is, so
+  // the keyboard stays up and a word being typed is not lost. Patrick, 2 Nov: a message showed "Waiting
+  // to send" long after it had gone, because a chat was not read again while its box had the focus,
+  // and putting the keyboard away leaves the focus in the box.
+  const old = document.querySelector('#view > .chat')
+  const box = document.activeElement
+  const oldDock = old && chatPlace.key === key && box && box.matches('.dock .composer textarea') && old.contains(box)
+    ? box.closest('.dock') : null
+  const newBox = fresh.querySelector('.composer textarea')
+  const same = k => fresh.querySelector('.composer').dataset[k] === box.closest('.composer').dataset[k]
+  if (oldDock && newBox && newBox.value === box.value && same('reply') && same('files') && same('cards')) {
+    for (const n of [...old.childNodes]) if (n !== oldDock) n.remove()
+    oldDock.before(...[top].flat(Infinity).filter(Boolean), el('div', { class: 'msgs' }, list))
+  } else {
+    show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), fresh))
+  }
   chatPlace.key = key
   chatPlace.toEnd = false
   chatPlace.keep = null
@@ -1379,6 +1665,11 @@ function showChat(key, top, list, dock, items) {
     scrollTo({ top: document.documentElement.scrollHeight })
   }
   placeJump()
+  const c = openComposer()
+  if (c) c.chat = key
+  voiceButtons()
+  voiceSaw(key, items)
+  wakeCheck()
 }
 
 // ── full history of his own chats (step 2, plan Part 4) ────────────────────
@@ -1447,30 +1738,29 @@ function chatRow(gw, c, ops) {
   const o = ops ? lastOp(ops, c.id) : null
   return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
     title: chatName(c), tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
-    lines: [el('span', { class: 'quiet' }, preview(c.preview)), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
+    lines: [snippet(c.preview), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
     right: at(c.last_at) || when(c.last_at) })
 }
 
-async function gatewayView(gw) {
-  setTab('bots')
-  const seqNow = ++viewSeq
+async function gatewayView(gw, into = 'view') {
+  // In the desktop's chat list it goes with the chat beside it, so it takes that view's number, not a new one.
+  if (into === 'view') setTab('bots')
+  const seqNow = into === 'view' ? ++viewSeq : viewSeq
   const r = await call('GET', '/own/' + gw)
-  if (refused(r)) return
+  if (refused(r, into)) return
   const v = r.body
   const name = GATEWAY[gw]
   const pick = pickers[gw] || (pickers[gw] = { q: '', results: null, more: false, extra: [] })
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
-    screenBar({ back: () => go('/m/bots'), backLabel: 'All Thornswood Bots', agent: gw, title: name, heading: true,
-      under: GATEWAY_WHAT[gw], right: gatewayLine(v) }),
-    el('p', { class: 'quiet' }, `Your chats, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+    screenBar({ back: into === 'view' ? () => go('/m/bots') : null, backLabel: 'All Thornswood Bots', agent: gw, title: name, heading: true,
+      right: gatewayLine(v), live: gatewayLive(v) }),
     offLine(v)
   ]
   if (v.can_send && v.online) {
     parts.push(signInPart(v, status))
     if (v.sign_in_until) {
-      parts.push(el('p', { class: 'quiet' }, 'New chat is the only way a new conversation starts. It has full power on every turn, and Hermes names it.'),
-        composer('new:' + gw, 'Start a new chat',
+      parts.push(composer('new:' + gw, 'Start a new chat',
           (text, key) => call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key }), status, gw), status)
     }
   } else if (!v.can_send) {
@@ -1519,7 +1809,7 @@ async function gatewayView(gw) {
     hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(shown[shown.length - 1].last_at) }, 'Older chats') : null,
     note,
     el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats'))
-  if (seqNow === viewSeq) show(parts)
+  if (seqNow === viewSeq) showIn(into, parts)
 }
 
 // What Hermes holds of one of his own chats: notes to show above it, its
@@ -1564,10 +1854,76 @@ function historyPart(gw, sid, t, name, feed) {
 }
 
 // What Patrick sent from the phone, until the chat itself shows it.
+// The live line under a message being answered (Patrick, 2 Nov: "no typing or thinking indicators and no
+// like what they are currently doing"; "Those would be the same lines"). It says what the turn is doing now,
+// from Hermes's own stream as One's connector passed it on seconds ago: thinking, writing, or a tool by its
+// name. Never the words of the reply or what a tool was given.
+const TOOL_WORDS = {
+  terminal: 'Running a command', process_manage: 'Running a command', read_terminal: 'Reading a command\'s output',
+  close_terminal: 'Closing a command', execute_code: 'Running code', read_file: 'Reading a file',
+  write_file: 'Writing a file', patch: 'Editing a file', search_files: 'Searching files',
+  web_search: 'Searching the web', x_search: 'Searching X', web_extract: 'Reading a web page',
+  delegate_task: 'Handing work to a subagent', memory: 'Updating its memory', todo_list: 'Updating its to-do list',
+  skill_view: 'Reading a skill', skills_list: 'Looking through its skills', skill_manage: 'Updating a skill',
+  session_search: 'Searching past chats', clarify: 'Asking you something', cronjob_manage: 'Setting up a scheduled job',
+  vision_analyze: 'Looking at an image', image_generate: 'Making an image', video_analyze: 'Watching a video',
+  video_generate: 'Making a video', text_to_speech: 'Making audio', computer_use: 'Using the computer',
+  react_to_message: 'Reacting to a message', tw_git: 'Working on GitHub', tw_files: 'Working in its folder',
+  tw_decide: 'Asking you on a card', send_message: 'Sending a message'
+}
+function doingWords(doing) {
+  if (!doing) return 'Starting'
+  if (doing.state === 'thinking') return 'Thinking'
+  if (doing.state === 'writing') return 'Writing'
+  const tool = doing.tool || ''
+  return TOOL_WORDS[tool] || (tool.startsWith('browser') ? 'Using the browser' : tool ? `Using ${tool}` : 'Using a tool')
+}
+// How Hermes took a message sent into a chat whose turn was already running, by that chat's busy-input
+// setting, as Desktop says it under the message (Patrick, 2 Nov: "it should say in queue like it does on
+// Desktop"): in its queue, to run next; steered into the running turn; or the running turn interrupted
+// and going on with it. Any other message Hermes has is sent.
+const TAKEN = { queued: 'In queue', steered: 'Steered into the running turn', redirected: 'Interrupted the running turn' }
+function inQueue(m) { return m.status === 'leased' && !!m.doing && m.doing.state === 'queued' }
+function mineNote(m) {
+  if (m.status === 'leased' && m.doing && m.doing.admitted) return m.doing.taken ? TAKEN[m.doing.taken] : TAKEN[m.doing.state] || 'Sent'
+  return STATE[m.status]
+}
+// The message whose turn the chat's live line follows: the one being answered, never one in Hermes's queue.
+function beingAnswered(mine) { return mine.find(m => m.status === 'leased' && !inQueue(m)) }
+// The other side's typing bubble: three moving dots and what it is doing.
+function workingItem(name, agent, doing) {
+  return el('div', { class: 'msg theirs working', role: 'status', 'aria-live': 'polite' },
+    el('div', { class: 'who a-' + agent }, name),
+    el('div', { class: 'bub typing' }, el('span', { class: 'dots', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')),
+      el('span', { class: 'doing' }, doingWords(doing))))
+}
+// While a turn runs in the open chat, its line follows every two seconds, reading only this chat's state;
+// when the turn ends the chat is drawn again with the reply. A message still waiting to go is watched the
+// same way, so the chat is drawn again the moment it is taken and its turn's line shows (2 Nov: it waited
+// for the next 15-second read). One watch at a time, ended by any new page.
+let turnWatch = null
+function watchTurn(path, seqNow, turnId, name, was = 'leased', queued = false) {
+  clearTimeout(turnWatch)
+  turnWatch = setTimeout(async () => {
+    if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
+    const r = await call('GET', path)
+    if (seqNow !== viewSeq || r.status !== 200) return
+    const m = r.body.mine.find(x => x.id === turnId)
+    // Taken from Hermes's queue to run: drawn again, so its line shows under it.
+    if (!m || m.status !== was || (was === 'leased' && inQueue(m) !== queued)) {
+      const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+      if (!typing) return route()
+    }
+    const line = document.querySelector('#view .msg.working .doing')
+    if (line && m && was === 'leased' && !queued) line.textContent = doingWords(m.doing)
+    watchTurn(path, seqNow, turnId, name, was, queued)
+  }, 2000)
+}
+
 function pendingItems(mine, readAt) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
-    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to,
-      note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
+    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files,
+      note: mineNote(m) + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
         + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
       warn: m.status === 'dead' || m.status === 'uncertain' }))
 }
@@ -1650,8 +2006,8 @@ async function ownChatView(gw, sid) {
     const manage = v.can_manage && v.online && !h.gone && !t.error && !ended && !(o && inFlight(o)) && !v.chat.bot_chat
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
-        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`, gw, name,
-        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null),
+        undefined, gw, name,
+        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null, gatewayLive(v)),
       ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
       ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
         el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats')) : null,
@@ -1665,15 +2021,23 @@ async function ownChatView(gw, sid) {
     } else if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
         dock.push(signInPart(v, status), chatComposer(draftKey, 'Message to ' + name, 'Send to ' + name,
-          (text, k, reply) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
-            ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}) }), status, gw), status)
+          (text, k, reply, files) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
+            ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}),
+            ...(files.length ? { attachments: files } : {}) }), status, gw, gw), status)
       } else {
         dock.push(signInPart(v, status), status)
       }
     } else if (!v.can_send) {
       dock.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
     }
-    if (seqNow === viewSeq) showChat('own:' + key, top, bubbles(items), dock, items)
+    // His message being answered now: the other side's live line under it, kept current while it runs.
+    const turn = beingAnswered(v.mine)
+    const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing)] : bubbles(items)
+    if (seqNow === viewSeq) {
+      showChat('own:' + key, top, list, dock, items)
+      const waits = turn || v.mine.find(inQueue) || v.mine.find(m => m.status === 'queued')
+      if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status, inQueue(waits))
+    }
   }
   render()
   const p = await ownPage(`/own/${gw}/chats/${encodeURIComponent(sid)}/messages`)
@@ -1823,8 +2187,7 @@ async function hiddenView(gw) {
   const name = GATEWAY[gw]
   const note = el('p', { class: 'warn', role: 'status' })
   const head = [
-    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', `${name}, ${GATEWAY_WHAT[gw]}`, gw, name),
-    el('p', { class: 'quiet' }, `The chats you hid on ${name}, with every message kept. Bring back puts one in the chat list again.`),
+    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', undefined, gw, name),
     offLine(v)
   ]
   show(head, el('p', { class: 'quiet' }, `Asking ${name}...`))
@@ -1847,7 +2210,7 @@ async function hiddenView(gw) {
       return el('div', { class: 'row', 'data-chat': c.id },
         el('div', { class: 't' },
           el('strong', {}, chatName(c)),
-          el('span', { class: 'quiet' }, preview(c.preview)),
+          snippet(c.preview),
           opLine(o, name),
           line),
         el('div', { class: 'w' },
@@ -1867,18 +2230,18 @@ async function hiddenView(gw) {
   await page(null)
 }
 
-async function roomsView() {
-  setTab('rooms')
+async function roomsView(into = 'view') {
+  if (into === 'view') setTab('rooms')
   const r = await call('GET', '/chat')
-  if (refused(r)) return
+  if (refused(r, into)) return
   const rooms = r.body.rooms || []
-  show(
-    screenBar({ title: 'Rooms', heading: true, under: `Each group chat, as of ${when(r.body.rooms_as_of) || 'nothing yet'}` }),
-    rooms.length ? rooms.map(m => listRow({ onclick: () => go('/m/rooms/' + m.room_id) }, {
+  showIn(into, [
+    screenBar({ title: 'Rooms', heading: true }),
+    rooms.length ? rooms.map(m => listRow({ 'data-room': m.room_id, onclick: () => go('/m/rooms/' + m.room_id) }, {
       agent: null, label: m.name, title: m.name,
       tags: m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
-      lines: el('span', { class: 'quiet' }, m.last ? `${m.last.who}: ${preview(m.last.text)}` : 'No messages yet.') }))
-      : el('p', { class: 'quiet' }, 'No rooms yet.'))
+      lines: m.last ? snippet(m.last.text, 2, sender(m.last.who)) : el('span', { class: 'quiet' }, 'No messages yet.') }))
+      : el('p', { class: 'quiet' }, 'No rooms yet.')])
 }
 
 // A Bot's Bot Chat or a room: what the feed last sent shows at once, then the
@@ -1937,26 +2300,35 @@ async function chatView(target, tab) {
     const h = history()
     const items = h.items.concat(pendingItems(v.mine, readAt))
     const top = [
-      chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, room
-        ? `A room, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
-        : `Your Bot Chat, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`, room ? null : v.target, name),
+      chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, undefined,
+        room ? null : v.target, name, null, room ? null : botLive(v.live)),
       h.notes
     ]
     if (!items.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
     const dock = v.can_send
       ? [chatComposer(target, 'Message to ' + name, 'Send to ' + name,
-          (text, k) => call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: k }), status), status]
+          (text, k, reply, files, answer) => call('POST', '/chat/' + encodeURIComponent(target),
+            { text, idempotency_key: k, ...(answer ? { answer } : {}) }), status, null, null, v.cards), status]
       : [el('p', { class: 'quiet' }, said({ error: 'chat_write_off' }))]
-    if (seqNow === viewSeq) showChat(key, top, bubbles(items), dock, items)
+    // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs.
+    const turn = room ? null : v.mine.find(m => m.status === 'leased')
+    const list = [bubbles(items), turn ? workingItem(name, v.target, turn.doing) : null,
+      room ? null : chatCards(v.cards, location.pathname)]
+    if (seqNow === viewSeq) {
+      showChat(key, top, list, dock, items)
+      const waits = room ? null : turn || v.mine.find(m => m.status === 'queued')
+      if (waits) watchTurn('/chat/' + encodeURIComponent(v.target), seqNow, waits.id, name, waits.status)
+    }
   }
   render()
   const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages`)
   if (seqNow !== viewSeq || p.status !== 200 || p.body.pending) return
   t.newest = p.body
   keepThread(key, t)
-  // Never redrawn under someone typing; the next read shows it.
-  const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-  if (!typing) render()
+  // Drawn again under a box being typed in, which stays as it is (showChat).
+  const other = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) &&
+    !document.activeElement.matches('.dock .composer textarea')
+  if (!other) render()
 }
 
 // ── alerts (step 5) ───────────────────────────────────────────────────────
@@ -2168,6 +2540,7 @@ async function settingsView(note) {
   show(
     el('h2', {}, 'Alerts'), alerts,
     finger ? [el('h2', {}, 'Fingerprint'), finger] : null,
+    el('h2', {}, 'Voice'), wakeSetting(),
     el('h2', {}, 'Passkeys'), list, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
@@ -2197,12 +2570,495 @@ async function settingsView(note) {
     status)
 }
 
+// ── voice (Patrick, 2 Nov) ────────────────────────────────────────────────
+//
+// Dictation, Read aloud, voice chat and "Hey Hermes", all at no cost: the words come from the VM's own
+// Whisper (POST /voice/transcribe, voice.py and voice_worker.py), and reading aloud is this phone's own
+// speech (speechSynthesis). The microphone opens only after a tap (the microphone in the box, Voice chat
+// in a chat's bar) or with "Hey Hermes" turned on in Settings, only while the app is the page in front,
+// and the bar under the top says so the whole time it is open. Hiding the app or locking the phone stops
+// listening and reading at once, so nothing is read out on a locked phone. "Hey Hermes" listens only in
+// an open chat, never in the background.
+
+const WAKE_KEY = 'hermes.wake.v1'
+// "Hey Hermes", as Whisper writes it down: a greeting, then the name, then what he asks.
+const WAKE = /^[\s"'“]*(?:hey|hi|hello|okay|ok)[\s,.!-]+hermes\b[\s,.!?:;-]*/i
+const voice = { gen: 0, mode: null, state: null, key: null, path: null, name: '', queue: [], heard: null,
+  fromWake: false, paused: false, rec: null }
+const mic = { stream: null, ctx: null, an: null, buf: null }
+
+function canRecord() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)
+}
+
+function canSpeak() {
+  return 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window
+}
+
+function wakeOn() {
+  try { return localStorage.getItem(WAKE_KEY) === '1' } catch (e) { return false }
+}
+
+async function micOn() {
+  if (mic.stream) return null
+  try {
+    mic.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true,
+      autoGainControl: true } })
+  } catch (e) {
+    return e.name === 'NotAllowedError'
+      ? 'The microphone is blocked for this app. Allow it in the site settings for this app, then try again.'
+      : e.name === 'NotFoundError' ? 'This phone has no microphone the app can use.'
+        : 'The microphone did not start (' + (e.name || 'no reason given') + ').'
+  }
+  const AC = window.AudioContext || window.webkitAudioContext
+  if (AC) {
+    mic.ctx = new AC()
+    mic.an = mic.ctx.createAnalyser()
+    mic.an.fftSize = 2048
+    mic.ctx.createMediaStreamSource(mic.stream).connect(mic.an)
+    if (mic.ctx.state !== 'running') { try { await mic.ctx.resume() } catch (e) {} }
+  }
+  return null
+}
+
+function micOff() {
+  if (mic.stream) for (const t of mic.stream.getTracks()) t.stop()
+  if (mic.ctx) mic.ctx.close().catch(() => {})
+  Object.assign(mic, { stream: null, ctx: null, an: null, buf: null })
+}
+
+// How loud the room is now (the root mean square of the last few hundredths of a second).
+function level() {
+  if (!mic.an || !mic.ctx || mic.ctx.state !== 'running') return 0
+  const buf = mic.buf || (mic.buf = new Float32Array(mic.an.fftSize))
+  mic.an.getFloatTimeDomainData(buf)
+  let s = 0
+  for (const v of buf) s += v * v
+  return Math.sqrt(s / buf.length)
+}
+
+// Whether this phone can tell where speech starts and ends: voice chat and "Hey Hermes" need it.
+function hearsSpeech() {
+  return !!(mic.an && mic.ctx && mic.ctx.state === 'running')
+}
+
+function recType() {
+  for (const t of ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm']) {
+    if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t
+  }
+  return ''
+}
+
+// One recording from the open microphone. It records at once and hears where speech starts and ends: the
+// loudness against the room's own level, through WebAudio's analyser (nothing loaded, nothing sent). It
+// gives the recording once he has been quiet for `quiet` ms after speaking, or Done was tapped (rec.done),
+// or `most` ms passed. Nothing said for `wait` ms (0: no limit) gives null, as does rec.drop().
+function utterance({ quiet = 1500, most = 120000, wait = 0 } = {}) {
+  return new Promise(resolve => {
+    const type = recType()
+    const rec = new MediaRecorder(mic.stream, type ? { mimeType: type } : undefined)
+    const chunks = []
+    const started = Date.now()
+    let floor = null, loud = 0, lastLoud = 0, keep = false
+    const r = { spoke: false }
+    const stop = k => { keep = k; if (rec.state !== 'inactive') rec.stop() }
+    r.done = () => stop(true)
+    r.drop = () => stop(false)
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data) }
+    rec.onstop = () => {
+      clearInterval(tick)
+      if (voice.rec === r) voice.rec = null
+      resolve(keep && chunks.length ? new Blob(chunks, { type: (rec.mimeType || type || 'audio/webm').split(';')[0] }) : null)
+    }
+    const tick = setInterval(() => {
+      const now = Date.now()
+      const l = level()
+      if (floor === null) floor = l
+      const gate = Math.max(0.015, floor * 3)
+      if (l > gate) {
+        loud += 50
+        lastLoud = now
+        if (loud >= 150 && !r.spoke) { r.spoke = true; paintVoice() }
+      } else {
+        loud = 0
+        if (!r.spoke) floor = floor * 0.9 + l * 0.1
+      }
+      if (r.spoke && now - lastLoud > quiet) stop(true)
+      else if (now - started > most) stop(r.spoke || voice.mode === 'dictate')
+      else if (wait && !r.spoke && now - started > wait) stop(false)
+    }, 50)
+    voice.rec = r
+    rec.start(250)
+  })
+}
+
+async function transcribe(blob) {
+  const headers = { 'Content-Type': blob.type || 'audio/webm' }
+  if (csrf) headers['X-CSRF-Token'] = csrf
+  try {
+    const resp = await fetch(API + '/voice/transcribe', { method: 'POST', headers, credentials: 'same-origin',
+      cache: 'no-store', body: blob })
+    let out = {}
+    try { out = await resp.json() } catch (e) { out = {} }
+    return { status: resp.status, body: out }
+  } catch (e) {
+    return { status: 0, body: { error: 'offline' } }
+  }
+}
+
+// Reading aloud, on this phone, a sentence or so at a time (a long run in one go can stop partway).
+function pieces(text) {
+  const out = []
+  for (const s of String(text).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/)) {
+    for (let rest = s; rest; ) {
+      const cut = rest.length <= 220 ? rest.length : Math.max(rest.lastIndexOf(' ', 220), 1)
+      out.push(rest.slice(0, cut).trim())
+      rest = rest.slice(cut).trim()
+    }
+  }
+  return out.filter(Boolean)
+}
+
+async function speakText(text, g) {
+  if (!canSpeak()) return false
+  for (const p of pieces(text)) {
+    if (g !== voice.gen) return false
+    const ok = await new Promise(resolve => {
+      const u = new SpeechSynthesisUtterance(p)
+      u.lang = navigator.language || 'en-US'
+      u.onend = () => resolve(true)
+      u.onerror = () => resolve(false)
+      speechSynthesis.speak(u)
+    })
+    if (!ok) return false
+  }
+  return g === voice.gen
+}
+
+// What a message says, to read out: his own words or a reply's, as plain words.
+function spoken(m) {
+  const a = authored(m.text)
+  return plain(a.words || '').replace(/\s+/g, ' ').trim()
+}
+
+// The bar under the top: there the whole time the microphone is open or the phone reads aloud.
+function paintVoice() {
+  let bar = document.getElementById('voicebar')
+  if (!voice.mode) {
+    if (bar) bar.hidden = true
+    paintVoiceButtons()
+    return
+  }
+  if (!bar) {
+    bar = el('div', { id: 'voicebar', class: 'voicebar', role: 'status' })
+    document.querySelector('header.top').after(bar)
+  }
+  const n = voice.name || 'Hermes'
+  const hearing = voice.rec && voice.rec.spoke
+  const words = {
+    'dictate:listening': hearing ? 'Hearing you. Tap Done when you finish.' : 'Listening. Speak, then tap Done.',
+    'dictate:writing': 'Writing down what you said...',
+    'chat:listening': hearing ? `Voice chat with ${n}: hearing you` : `Voice chat with ${n}: listening`,
+    'chat:writing': `Voice chat with ${n}: writing down what you said...`,
+    'chat:waiting': `Voice chat with ${n}: waiting for the answer`,
+    'chat:speaking': `Voice chat with ${n}: reading the answer aloud`,
+    'wake:listening': hearing ? 'Hearing you. Listening for "Hey Hermes"' : 'Listening for "Hey Hermes"',
+    'wake:writing': 'Listening for "Hey Hermes"',
+    'wake:tap': '"Hey Hermes" is on. This phone wants a tap before it listens.',
+    'read:speaking': 'Reading aloud'
+  }[voice.mode + ':' + voice.state] || ''
+  const buttons = []
+  if (voice.mode === 'wake' && voice.state === 'tap') {
+    buttons.push(el('button', { class: 'primary', type: 'button', onclick: async () => {
+      if (mic.ctx) { try { await mic.ctx.resume() } catch (e) {} }
+      wakeLoop(voice.gen)
+    } }, 'Listen'))
+  }
+  if (voice.mode === 'dictate' && voice.state === 'listening') {
+    buttons.push(el('button', { class: 'primary', type: 'button', onclick: () => voice.rec && voice.rec.done() }, 'Done'))
+  }
+  buttons.push(el('button', { class: 'secondary', type: 'button', onclick: () => voiceStop(true) },
+    voice.mode === 'dictate' ? 'Cancel' : 'Stop'))
+  bar.className = 'voicebar' + (voice.state === 'listening' ? ' hot' : '') + (hearing ? ' hearing' : '')
+  bar.dataset.mode = voice.mode + ':' + voice.state
+  bar.replaceChildren(el('span', { class: 'vdot', 'aria-hidden': 'true' }), el('span', { class: 'vt' }, words), ...buttons)
+  bar.hidden = false
+  paintVoiceButtons()
+}
+
+function paintVoiceButtons() {
+  for (const b of document.querySelectorAll('#view .composer .mic')) {
+    b.setAttribute('aria-pressed', String(voice.mode === 'dictate'))
+  }
+  for (const b of document.querySelectorAll('#view .chatbar .talk')) {
+    b.setAttribute('aria-pressed', String(voice.mode === 'chat'))
+  }
+}
+
+// Everything stops: the recording is dropped, the reading cut off, the microphone closed. Stop tapped
+// (byHim) also keeps "Hey Hermes" quiet until he next comes back to the app.
+function voiceStop(byHim) {
+  voice.gen++
+  if (voice.rec) voice.rec.drop()
+  if (canSpeak()) speechSynthesis.cancel()
+  micOff()
+  Object.assign(voice, { mode: null, state: null, key: null, path: null, queue: [], heard: null, fromWake: false, rec: null })
+  if (byHim) voice.paused = true
+  paintVoice()
+}
+
+function voiceState(state) {
+  voice.state = state
+  paintVoice()
+}
+
+// The open chat's box: its draft's key, who it goes to, where it says how things went, and its send.
+function openComposer() {
+  const c = document.querySelector('#view .dock .composer')
+  return c && c.voice ? c.voice : null
+}
+
+// The microphone in the box: what he says goes into the box, where he reads it before sending.
+async function dictate(c) {
+  if (voice.mode === 'dictate') { if (voice.rec) voice.rec.done(); return }
+  if (voice.mode) voiceStop(false)
+  const g = voice.gen
+  Object.assign(voice, { mode: 'dictate', key: c.key, path: location.pathname, name: c.name })
+  voiceState('listening')
+  const no = await micOn()
+  if (g !== voice.gen) return
+  if (no) { voiceStop(false); c.status.textContent = no; return }
+  const blob = await utterance({ quiet: 2500, most: 240000 })
+  if (g !== voice.gen) return
+  micOff()
+  if (!blob) { voiceStop(false); c.status.textContent = 'Nothing was recorded.'; return wakeCheck() }
+  voiceState('writing')
+  const r = await transcribe(blob)
+  if (g !== voice.gen) return
+  voiceStop(false)
+  if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+  if (r.status !== 200) { c.status.textContent = r.status === 0 ? 'Could not reach the core. Nothing was written down.' : said(r.body); return wakeCheck() }
+  const text = String(r.body.text || '').trim()
+  if (!text) c.status.textContent = 'Whisper heard no words in that.'
+  else {
+    const now = openComposer()
+    ;(now && now.key === c.key ? now : c).add(text)
+  }
+  wakeCheck()
+}
+
+// Voice chat in the open chat: he talks, his words are sent, the answer is read aloud, and it listens again.
+async function talk(c, first) {
+  if (voice.mode === 'chat') return voiceStop(true)
+  if (voice.mode === 'wake') {
+    // From "Hey Hermes", or the button while it listens: the microphone stays open.
+    if (voice.rec) voice.rec.drop()
+    voice.gen++
+  } else if (voice.mode) voiceStop(false)
+  const g = voice.gen
+  Object.assign(voice, { mode: 'chat', key: c.key, path: location.pathname, name: c.name, queue: [],
+    heard: new Set(lastItems.key === c.chat ? lastItems.items.filter(m => !m.mine).map(m => String(m.text).trim()) : []),
+    fromWake: !!first })
+  voiceState('listening')
+  const no = await micOn()
+  if (g !== voice.gen) return
+  if (no) { voiceStop(false); c.status.textContent = no; return }
+  if (!hearsSpeech()) {
+    voiceStop(false)
+    c.status.textContent = 'This phone cannot tell here where you stop speaking, so voice chat cannot work. The microphone in the box still writes down what you say.'
+    return
+  }
+  if (first) return sendHeard(g, first)
+  listen(g)
+}
+
+async function listen(g) {
+  if (g !== voice.gen || voice.mode !== 'chat') return
+  if (voice.queue.length) return speakQueue(g)
+  voiceState('listening')
+  // Started by "Hey Hermes": a minute with nothing said goes back to listening for it.
+  const blob = await utterance({ quiet: 1300, most: 60000, wait: voice.fromWake ? 60000 : 30000 })
+  if (g !== voice.gen || voice.mode !== 'chat' || voice.state !== 'listening') return
+  if (!blob) {
+    if (voice.fromWake) return backToWake()
+    return listen(g)
+  }
+  voiceState('writing')
+  const r = await transcribe(blob)
+  if (g !== voice.gen) return
+  if (r.status !== 200) return voiceFailed(r)
+  const text = String(r.body.text || '').trim()
+  if (!text) return listen(g)
+  sendHeard(g, text)
+}
+
+async function sendHeard(g, text) {
+  const c = openComposer()
+  if (!c || c.key !== voice.key) return voiceStop(false)
+  voiceState('waiting')
+  const sent = await c.send(text)
+  if (g !== voice.gen) return
+  if (sent === 'card') {
+    // Words that answer a card are never sent by voice alone: they wait in the box, with the line over it.
+    voiceStop(true)
+    c.status.textContent = 'What you said answers a card. Read the line over the box, then send it or take the answer off.'
+    return
+  }
+  if (!sent) return voiceStop(false)
+  if (voice.queue.length) speakQueue(g)
+}
+
+function voiceFailed(r) {
+  const c = openComposer()
+  voiceStop(false)
+  if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+  if (c) c.status.textContent = r.status === 0 ? 'Could not reach the core. Voice chat stopped.' : said(r.body)
+}
+
+async function speakQueue(g) {
+  if (voice.state === 'speaking') return
+  voiceState('speaking')
+  while (voice.queue.length && g === voice.gen) {
+    const text = voice.queue.shift()
+    if (!await speakText(text, g)) break
+  }
+  if (g === voice.gen && voice.mode === 'chat') listen(g)
+}
+
+// Each time a chat is drawn: in voice chat, the new answers in it are read aloud. One that comes while he
+// has not started speaking is read at once; one that comes while he speaks waits until his words are sent.
+let lastItems = { key: null, items: [] }
+function voiceSaw(key, items) {
+  lastItems = { key, items }
+  if (voice.mode !== 'chat' || !voice.heard) return
+  const c = openComposer()
+  if (!c || c.chat !== key || c.key !== voice.key) return
+  for (const m of items) {
+    if (m.mine || m.status || !m.text) continue
+    const sig = String(m.text).trim()
+    if (voice.heard.has(sig)) continue
+    voice.heard.add(sig)
+    const words = spoken(m)
+    if (words) voice.queue.push(words)
+  }
+  if (!voice.queue.length) return
+  if (voice.state === 'waiting') speakQueue(voice.gen)
+  else if (voice.state === 'listening' && voice.rec && !voice.rec.spoke) { voice.state = 'queued'; voice.rec.drop(); speakQueue(voice.gen) }
+}
+
+// "Hey Hermes": on only when he turned it on in Settings, only in an open chat, only while the app is in
+// front, and never after he tapped Stop until he next comes back to the app. Each thing said is written
+// down by the VM's Whisper; only words that start with "Hey Hermes" do anything.
+function wakeCheck() {
+  if (!wakeOn() || voice.paused || voice.mode || document.visibilityState !== 'visible' || !canRecord()) return
+  const c = openComposer()
+  if (!c) return
+  wakeStart(c)
+}
+
+async function wakeStart(c) {
+  const g = voice.gen
+  Object.assign(voice, { mode: 'wake', key: c.key, path: location.pathname, name: c.name })
+  voiceState('listening')
+  const no = await micOn()
+  if (g !== voice.gen) return
+  if (no) { voiceStop(true); c.status.textContent = '"Hey Hermes" cannot listen: ' + no; return }
+  if (!mic.an) { voiceStop(true); c.status.textContent = 'This phone cannot tell here where you stop speaking, so "Hey Hermes" cannot work.'; return }
+  wakeLoop(g)
+}
+
+async function wakeLoop(g) {
+  if (g !== voice.gen || voice.mode !== 'wake') return
+  if (!hearsSpeech()) return voiceState('tap')
+  voiceState('listening')
+  const blob = await utterance({ quiet: 1000, most: 20000, wait: 20000 })
+  if (g !== voice.gen || voice.mode !== 'wake') return
+  if (!blob) return wakeLoop(g)
+  voiceState('writing')
+  const r = await transcribe(blob)
+  if (g !== voice.gen || voice.mode !== 'wake') return
+  if (r.status !== 200) return voiceFailed(r)
+  const text = String(r.body.text || '')
+  const m = text.match(WAKE)
+  if (!m) return wakeLoop(g)
+  const c = openComposer()
+  if (!c) return voiceStop(false)
+  talk(c, text.slice(m[0].length).trim() || null)
+}
+
+// A voice chat "Hey Hermes" started, with nothing said for a minute: back to listening for it.
+function backToWake() {
+  if (!wakeOn() || document.visibilityState !== 'visible') return voiceStop(false)
+  if (voice.rec) voice.rec.drop()
+  if (canSpeak()) speechSynthesis.cancel()
+  const g = ++voice.gen
+  Object.assign(voice, { mode: 'wake', queue: [], heard: null, fromWake: false })
+  wakeLoop(g)
+}
+
+// Leaving the page a voice chat or a dictation is on stops it; "Hey Hermes" starts again in the next chat.
+function voiceLeft() {
+  if (voice.mode && voice.path !== location.pathname) voiceStop(false)
+}
+
+// Voice chat's button in an open chat's bar.
+function voiceButtons() {
+  const bar = document.querySelector('#view .chatbar')
+  const c = openComposer()
+  if (!bar || !c || !canRecord() || bar.querySelector('.talk')) return
+  const b = el('button', { class: 'ib talk', type: 'button', 'aria-label': 'Voice chat', 'aria-pressed': String(voice.mode === 'chat'),
+    onclick: () => { const now = openComposer(); if (now) talk(now) } }, icon('talk'))
+  const more = bar.querySelector('.ib[aria-label="Chat actions"]')
+  bar.insertBefore(b, more)
+}
+
+function readAloud(m) {
+  if (voice.mode) voiceStop(false)
+  const g = voice.gen
+  Object.assign(voice, { mode: 'read', path: location.pathname })
+  voiceState('speaking')
+  speakText(spoken(m), g).then(() => { if (g === voice.gen) { voiceStop(false); wakeCheck() } })
+}
+
+function wakeSetting() {
+  const on = wakeOn()
+  const note = el('p', { class: 'quiet', role: 'status' })
+  return [
+    el('p', { class: 'quiet' }, 'The microphone in a chat\'s box writes down what you say with Whisper on the VM, ' +
+      'and Voice chat in a chat\'s bar talks with it. Read aloud is in a message\'s actions.'),
+    el('p', { class: 'quiet' }, on
+      ? '"Hey Hermes" is on for this phone: while a chat is open and the app is in front, it listens, with the bar ' +
+        'at the top saying so. It never listens in the background or with the phone locked.'
+      : '"Hey Hermes" is off. Turned on, it listens while a chat is open and the app is in front, with the bar at ' +
+        'the top saying so. It never listens in the background or with the phone locked.'),
+    canRecord() ? el('button', { class: on ? 'secondary' : 'primary', type: 'button', onclick: () => {
+      try {
+        if (on) localStorage.removeItem(WAKE_KEY)
+        else localStorage.setItem(WAKE_KEY, '1')
+      } catch (e) {
+        note.textContent = 'This phone did not keep the setting.'
+        return
+      }
+      if (on && voice.mode === 'wake') voiceStop(false)
+      voice.paused = false
+      settingsView(on ? '"Hey Hermes" is off.' : '"Hey Hermes" is on. Open a chat to use it.')
+    } }, on ? 'Turn "Hey Hermes" off' : 'Turn "Hey Hermes" on') : el('p', { class: 'warn' }, 'This browser cannot record, so voice does not work here.'),
+    note
+  ]
+}
+
 // ── routing and polling ───────────────────────────────────────────────────
 
 function badge(n) {
   const b = document.getElementById('badge')
   b.hidden = !n
   b.textContent = n ? String(n) : ''
+}
+
+// The badge read again at once after an answer made away from Decisions (a Bot Chat), not at the next poll.
+async function badgeNow() {
+  const list = await call('GET', '/cards')
+  if (list.status === 200) badge(list.body.cards.length)
 }
 
 function go(path) {
@@ -2225,6 +3081,7 @@ async function route() {
     chatPlace.toEnd = false
   }
   closeSheet()
+  voiceLeft()
   if (!csrf) {
     const me = await call('GET', '/me')
     if (me.status !== 200) return signInView(me.status === 0 ? said(me.body) : '')
@@ -2239,6 +3096,108 @@ async function route() {
   // The tabs' first names, from an old alert or home screen link.
   const FIRST = { 'needs-you': 'decisions', work: 'board' }
   if (FIRST[path]) { path = FIRST[path]; history.replaceState(null, '', '/m/' + path) }
+  // On a wide screen the list beside a chat and Decisions on the right are drawn with it.
+  const d = desk(path)
+  const drawn = [d.pick ? pickView(path) : mainView(path)]
+  if (d.list) drawn.push(d.list('list').then(() => markCurrent(path)))
+  if (d.side) drawn.push(decisionsView('side'))
+  await Promise.all(drawn)
+}
+
+// The desktop (Patrick's approved mock-up, its Desktop board): a rail of
+// Hermes, One, the six Bots and the tabs on the left; the chat list; the
+// conversation; and Decisions on the right. A phone gets none of it: the same
+// screens, one at a time, with the tabs at the foot. Which one is decided by
+// the window's width alone, in a browser or installed, and redrawn when it
+// changes.
+const WIDE = matchMedia('(min-width: 1000px)')
+const WIDEST = matchMedia('(min-width: 1360px)')
+const folded = { list: false, side: false }   // the panes Patrick folded away, for this visit
+const LIST_ONLY = /^(bots|rooms|hermes\/(me|one))$/
+
+function listFor(path) {
+  const own = path.match(/^(?:hermes|hidden)\/(me|one)(?:\/|$)/)
+  if (own) return into => gatewayView(own[1], into)
+  if (/^(bots|bramble)(\/|$)/.test(path)) return into => botsView(into)
+  if (/^(rooms|room)(\/|$)/.test(path)) return into => roomsView(into)
+  return null
+}
+
+function desk(path) {
+  const wide = WIDE.matches
+  const list = wide ? listFor(path) : null
+  const side = wide && WIDEST.matches && path !== '' && !/^decisions(\/|$)/.test(path)
+  const out = { list: list && !folded.list ? list : null, side: side && !folded.side,
+    pick: !!(list && !folded.list && LIST_ONLY.test(path)) }
+  document.body.classList.toggle('wide', wide)
+  document.body.classList.toggle('with-list', !!out.list)
+  document.body.classList.toggle('with-side', out.side)
+  for (const id of ['list', 'side']) {
+    const on = id === 'list' ? !!out.list : out.side
+    document.getElementById(id).hidden = !on
+    if (!on) document.getElementById(id).replaceChildren()
+  }
+  rail(path, { list: !!list, side })
+  return out
+}
+
+// The middle of the desktop when the list on its left is the page: what to pick there.
+function pickView(path) {
+  setTab(path.startsWith('rooms') ? 'rooms' : 'bots')
+  const own = path.match(/^hermes\/(me|one)$/)
+  show(el('div', { class: 'pick' }, own
+    ? [avatar(own[1]), el('p', {}, `Pick one of ${GATEWAY[own[1]]}'s chats on the left, or start a new one there.`)]
+    : el('p', {}, path === 'rooms' ? 'Pick a room on the left.' : 'Pick Hermes, One or a Bot on the left.')))
+}
+
+// The row of what is open in the middle, marked in the list beside it.
+function markCurrent(path) {
+  const m = path.match(/^hermes\/(?:me|one)\/(.+)$/) || []
+  const bot = path.match(/^bots\/(.+)$/) || (path === 'bramble' ? [0, 'bramble'] : [])
+  const room = path.match(/^rooms\/(.+)$/) || []
+  for (const row of document.querySelectorAll('#list .row')) {
+    const on = (m[1] && row.dataset.chat === m[1]) || (bot[1] && row.dataset.bot === bot[1]) ||
+      (room[1] && row.dataset.room === room[1])
+    if (on) row.setAttribute('aria-current', 'true')
+    else row.removeAttribute('aria-current')
+  }
+}
+
+const RAIL = [['me', '/m/hermes/me', 'Hermes'], ['one', '/m/hermes/one', 'One'],
+  ...['bramble', 'rift', 'sprocket', 'echo', 'magpie', 'wisp'].map(b => [b, '/m/bots/' + b, NAMES[b]])]
+
+// The rail's people and its fold buttons. The tabs below the people are the phone's own.
+function rail(path, can) {
+  const people = document.getElementById('agents')
+  const tools = document.getElementById('folds')
+  // A phone's tab bar has the four tabs only.
+  if (!WIDE.matches) { people.replaceChildren(); tools.replaceChildren(); return }
+  if (!people.childElementCount) {
+    people.append(...RAIL.map(([id, href, name]) => el('a', { href, class: 'agent', 'data-go': '', 'data-agent': id,
+      'aria-label': name, title: name }, avatar(id, name))))
+  }
+  const open = (path.match(/^(?:hermes|hidden)\/(me|one)/) || path.match(/^bots\/([a-z0-9_-]+)/) || [])[1] ||
+    (path === 'bramble' ? 'bramble' : null)
+  for (const a of people.children) {
+    if (a.dataset.agent === open) a.setAttribute('aria-current', 'page')
+    else a.removeAttribute('aria-current')
+  }
+  tools.replaceChildren(...[
+    can.list ? el('button', { class: 'ib', type: 'button', 'aria-pressed': String(!folded.list),
+      'aria-label': folded.list ? 'Show the chat list' : 'Hide the chat list', title: 'Chat list',
+      onclick: () => fold('list') }, icon('panel')) : null,
+    can.side ? el('button', { class: 'ib', type: 'button', 'aria-pressed': String(!folded.side),
+      'aria-label': folded.side ? 'Show Decisions' : 'Hide Decisions', title: 'Decisions',
+      onclick: () => fold('side') }, icon('dec')) : null].filter(Boolean))
+}
+
+function fold(pane) {
+  folded[pane] = !folded[pane]
+  route()
+}
+
+// What the middle shows: on a phone, the whole screen.
+function mainView(path) {
   const card = path.match(/^decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card) return cardView(card[1])
   if (path === 'board') return boardView()
@@ -2261,11 +3220,15 @@ async function route() {
 async function poll() {
   if (!csrf || document.visibilityState !== 'visible' || answering || document.querySelector('.sheet-back')) return
   const path = location.pathname
-  // A chat view reads itself again, unless something is being typed.
-  const box = document.querySelector('textarea')
+  // A chat view reads itself again. Its messages are drawn again under the box Patrick is typing in, and
+  // the box stays as it is (showChat). Any other box with focus or words in it (on the desktop, the chat
+  // list's New chat box is on the page too) holds the redraw.
+  const chatBox = '#view .dock .composer textarea'
+  const writing = [...document.querySelectorAll('textarea')].some(t => t.value && !t.matches(chatBox))
   if (/^\/m\/(bramble$|room$|rooms\/|bots\/|hermes\/)/.test(path)) {
-    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-    if ((!box || !box.value) && !typing) route()
+    const other = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) &&
+      !document.activeElement.matches(chatBox)
+    if (!writing && !other) route()
     return
   }
   const r = await call('GET', '/changes?since=' + seq)
@@ -2273,24 +3236,36 @@ async function poll() {
   seq = r.body.seq
   const card = path.match(/^\/m\/decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card && r.body.changed.includes(card[1]) && !document.querySelector('[data-confirm]')) return route()
-  if (/^\/m\/(decisions)?$/.test(path)) return route()
+  // Decisions on the desktop's right follow the list too, whatever is in the middle.
+  if (/^\/m\/(decisions)?$/.test(path) || !document.getElementById('side').hidden) return route()
   // Elsewhere, the badge still follows the list.
   const list = await call('GET', '/cards')
   if (list.status === 200) badge(list.body.cards.length)
 }
 
 document.addEventListener('click', event => {
-  const a = event.target.closest('a[data-tab]')
+  const a = event.target.closest('a[data-tab], a[data-go]')
   if (a) { event.preventDefault(); go(a.getAttribute('href')) }
 })
+// Turning a phone, or widening a window on One, redraws the page in the layout that fits it.
+for (const q of [WIDE, WIDEST]) q.addEventListener('change', () => { if (csrf) route() })
 document.getElementById('settings').addEventListener('click', () => go('/m/settings'))
 window.addEventListener('popstate', () => { newPage = true; route() })
 // The app keeps its own place on every page, so the browser does not put back an old one.
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
 addEventListener('scroll', placeJump, { passive: true })
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { poll(); if (csrf) checkAlerts() }
+  if (document.visibilityState === 'visible') {
+    poll()
+    if (csrf) checkAlerts()
+    voice.paused = false
+    wakeCheck()
+  } else {
+    // Hidden or locked: no listening and nothing read out.
+    voiceStop(false)
+  }
 })
+addEventListener('pagehide', () => voiceStop(false))
 window.addEventListener('beforeinstallprompt', event => {
   event.preventDefault()
   installPrompt = event
@@ -2306,5 +3281,10 @@ if ('serviceWorker' in navigator) {
   })
 }
 pollTimer = setInterval(poll, POLL_MS)
+// The Board is live: read again every 3 seconds while it is the page open and nothing is being answered.
+setInterval(() => {
+  if (csrf && document.visibilityState === 'visible' && !answering && location.pathname === '/m/board' &&
+    !document.querySelector('.sheet-back')) boardView()
+}, LIVE_MS)
 installBar()
 route()

@@ -22,8 +22,9 @@
 # unit's own limits; puts the launchers and units in place; makes the store with
 # every flag off the first time; makes the Work, Room and Bot Chat feed tokens
 # and the connector's token once, into the hermes user's ~/.config/thornswood
-# (0600); starts the core on 127.0.0.1:9135, the feeds once a minute and the
-# connector (which does nothing while connector_effects is off); and checks the
+# (0600); starts the core on 127.0.0.1:9135, the feeds once a minute, the live
+# Board every 2 seconds and the connector (which does nothing while
+# connector_effects is off); and checks the
 # core answers on loopback only. Step 5: it makes the tw-push user and
 # /srv/tw/push (0700, tw-push's only), puts the push worker's core token there,
 # and, once --origin is known, starts the push worker, which makes its own VAPID
@@ -96,6 +97,12 @@ fi
 members="$(getent group tw-decide | cut -d: -f4)"
 [[ -z "$members" ]] || stop "the tw-decide group has members ($members); it must have none."
 ok "user tw-decide"
+# Dictation's socket group (tw-decide-voice.service): the core alone is in it.
+getent group tw-decide-voice >/dev/null || groupadd --system tw-decide-voice
+id -nG tw-decide | tr ' ' '\n' | grep -qx tw-decide-voice || usermod -aG tw-decide-voice tw-decide
+members="$(getent group tw-decide-voice | cut -d: -f4)"
+[[ "$members" == tw-decide ]] || stop "the tw-decide-voice group's members are '$members'; it must be tw-decide alone."
+ok "group tw-decide-voice: tw-decide alone"
 # The push worker's user: the one part that reaches the internet, so a user of its own.
 if ! id tw-push >/dev/null 2>&1; then
   useradd --system --no-create-home --home-dir / --shell /usr/sbin/nologin --user-group tw-push
@@ -141,10 +148,12 @@ ok "venv at $venv, requirements $want"
 
 # 4. The launchers and units, from this copy.
 install -d -m 0755 "$opt/bin"
-for f in tw-decide tw-decide-feed tw-decide-connector tw-decide-push tw-decide-own; do
+for f in tw-decide tw-decide-feed tw-decide-live tw-decide-voice tw-decide-connector tw-decide-push tw-decide-own; do
   install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
 done
-for u in tw-decide.service tw-decide-bots.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service \
+for u in tw-decide.service tw-decide-bots.service tw-decide-feed.service tw-decide-feed.timer tw-decide-live.service \
+         tw-decide-voice.service \
+         tw-decide-connector.service \
          tw-decide-push.service tw-decide-own.service tw-decide-peers.service tw-decide-peers.timer; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
@@ -176,7 +185,7 @@ run() { runuser -u tw-decide -- "$opt/bin/tw-decide" --db "$db" "$@"; }
 # (first, so none starts its service again), every worker that leases from the
 # core or opens its store, and the core itself stop here. Each starts again
 # below, on this release, only once the core answers on the new schema (step 8).
-CORE_WORKERS="tw-decide-bots.service tw-decide-connector.service tw-decide-push.service tw-decide-own.service tw-decide-feed.service tw-decide-peers.service"
+CORE_WORKERS="tw-decide-bots.service tw-decide-live.service tw-decide-voice.service tw-decide-connector.service tw-decide-push.service tw-decide-own.service tw-decide-feed.service tw-decide-peers.service"
 systemctl stop tw-decide-feed.timer tw-decide-peers.timer
 systemctl stop $CORE_WORKERS
 systemctl stop tw-decide.service
@@ -277,6 +286,19 @@ else
   echo "The feeds wait for --room."
 fi
 
+# 9b. The live Board: what each Bot is doing now, every 2 seconds. Sent once
+# here first, so a failure stops the install with its own words.
+if runuser -u hermes -- /opt/thornswood-hermes/bin/tw-decide-live --once \
+     --hermes-home "$hh/.hermes" --tokens "$hh/.config/thornswood"; then ok "the live Board sent"; else
+  stop "the live Board did not send (the line above says what the core answered)"
+fi
+systemctl enable --quiet tw-decide-live.service
+systemctl reset-failed tw-decide-live.service
+systemctl restart tw-decide-live.service
+sleep 2
+systemctl is-active --quiet tw-decide-live.service || stop "the live Board did not start: journalctl -u tw-decide-live -n 20"
+ok "the live Board runs"
+
 # 10. The connector. While connector_effects is off it asks the core every half
 # minute and does nothing else. Only Patrick changes connector_effects.
 systemctl enable --quiet tw-decide-connector.service
@@ -344,3 +366,18 @@ systemctl enable --quiet --now tw-decide-peers.timer
 if systemctl start tw-decide-peers.service; then ok "the tailnet's view of One read"; else
   stop "the tailnet's view of One was not read: journalctl -u tw-decide-peers -n 20"
 fi
+
+# 14. Dictation, last, so every other part is running whatever it finds: Hermes's own local Whisper on a socket only the core may use.
+systemctl enable --quiet tw-decide-voice.service
+systemctl reset-failed tw-decide-voice.service
+systemctl restart tw-decide-voice.service
+for _ in $(seq 1 30); do [[ -S /run/tw/decide-voice/voice.sock ]] && break; sleep 0.5; done
+[[ -S /run/tw/decide-voice/voice.sock ]] || stop "dictation did not open its socket: journalctl -u tw-decide-voice -n 50"
+[[ "$(stat -c '%a %G' /run/tw/decide-voice/voice.sock)" == "660 tw-decide-voice" ]] \
+  || stop "dictation's socket is $(stat -c '%a %G' /run/tw/decide-voice/voice.sock), not 660 tw-decide-voice"
+ok "dictation listens on /run/tw/decide-voice/voice.sock (660, tw-decide-voice)"
+whisper="$(runuser -u tw-decide -g tw-decide -G tw-decide-voice -- /usr/bin/python3 -I -c \
+  'import sys; sys.path.insert(0, "/opt/thornswood-hermes/current"); from thornswood_decisions.voice import Voice; print(Voice().check() or "")')" \
+  || stop "the core could not ask dictation which Whisper it has: journalctl -u tw-decide-voice -n 50"
+[[ -n "$whisper" ]] || stop "Hermes on this VM has no local Whisper (faster-whisper in Hermes's own runtime, or HERMES_LOCAL_STT_COMMAND), so dictation would answer nothing. Install it into Hermes, then run this again."
+ok "dictation uses Hermes's local Whisper: $whisper"

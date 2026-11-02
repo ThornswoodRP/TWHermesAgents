@@ -1,0 +1,39 @@
+# tw-decide-voice: dictation for the phone app (Patrick, 2 Nov: voice with the
+# VM's Whisper, no paid service). Hermes's own local Whisper, in Hermes's own
+# runtime, as the Bots' hermes user, on a Unix socket only the decision core may
+# use (group tw-decide-voice, whose one member is tw-decide, and the caller's uid
+# checked). A recording lives in a private folder until its words are back.
+[Unit]
+Description=Thornswood decision core: dictation with the VM's Whisper
+After=tw-decide.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=hermes
+Group=tw-decide-voice
+EnvironmentFile=/etc/thornswood/tw-decide.env
+ExecStart=/opt/thornswood-hermes/bin/tw-decide-voice --hermes ${TW_HERMES_BIN}
+WorkingDirectory=~
+RuntimeDirectory=tw/decide-voice
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryHigh=1200M
+MemoryMax=1600M
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

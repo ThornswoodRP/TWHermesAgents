@@ -1,0 +1,36 @@
+# Merges every open pull request into main whose exact head passed both
+# guard rail checks (scripts/merge_green.py says the rule). GitHub's own
+# auto-merge needs a paid plan on a private repository, so this does its
+# job (Patrick, 2 Nov 2026: "I want automerge on for this shit too").
+#
+# It runs main's own copy of the script, never a pull request's code: a
+# workflow_run job runs from the default branch, and the checkout below is
+# main with no credential kept. Its token can merge and delete a merged
+# branch here and nothing else; it reads no secret.
+name: Merge green pull requests
+on:
+  workflow_run:
+    workflows: ["Guard rail tests"]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+concurrency:
+  group: merge-green
+  cancel-in-progress: false
+jobs:
+  merge:
+    name: Merge green pull requests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Merge what is green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/merge_green.py
