@@ -13,7 +13,7 @@ Until test T33 passes and Patrick says so, the Claude report page stays the only
 | 2 | The Desktop pane: the same cards, revision-checked answers, a polling fallback, pairing | `api.py`, `cli.py`, `plugins/thornswood-decisions/` |
 | 3 | The phone, read only: the app shell on the `ts.net` origin, sign-in, cards, the Work and Room views | `passkey.py`, `feeds.py`, `feed_reader.py`, `app/` |
 | 4 | Phone answers and chat: the same commands as Desktop, the six Bot Chats and the room | `chat.py`, `connector.py`, `room_send.py`, `app/` |
-| 5 | Web Push: the outbox, the one quiet "Hermes needs you", deep links, denial and revoke tests | `webpush.py`, `push.py`, `push_worker.py`, `app/sw.js` |
+| 5 | Web Push: the outbox, the one "Hermes needs you", deep links, denial and revoke tests | `webpush.py`, `push.py`, `push_worker.py`, `app/sw.js` |
 | 6 | The Main card | Waits for phase 7. Not built |
 
 Every feature flag starts off: `decision_write`, `mobile_read`, `mobile_chat_write`, `push_send`, `connector_effects`. Tests use a separate test workspace and test actions, never a real deploy, merge or Ship.
@@ -78,7 +78,7 @@ No API_SERVER_KEY, no api_server listener and no change to the gateway's setting
 
 ## Web Push (step 5)
 
-A card that needs Patrick puts one quiet line on his phone's lock screen: "Hermes needs you", with no body, no buttons and no sound. A tap opens that exact card in the app. Nothing a notification does answers a card. Standard Web Push with our own VAPID key, through the phone browser's own push service: no paid push, no account, no Cloudflare. The Tailscale `ts.net` origin is enough for the phone to subscribe, so Cloudflare Tunnel comes in only if T10 or T11 fail there.
+A card that needs Patrick puts one line on his phone: "Hermes needs you", with no body and no buttons. It pops up with the phone's normal notification sound (Patrick's answer, 2 Nov; it was silent before, which Android files with no pop-up). A tap opens that exact card in the app. Nothing a notification does answers a card. Standard Web Push with our own VAPID key, through the phone browser's own push service: no paid push, no account, no Cloudflare. The Tailscale `ts.net` origin is enough for the phone to subscribe, so Cloudflare Tunnel comes in only if T10 or T11 fail there.
 
 | File | What it holds |
 |---|---|
@@ -89,7 +89,7 @@ A card that needs Patrick puts one quiet line on his phone's lock screen: "Herme
 
 The payload is only `{v, event_id, decision_id, attention_revision, path}`: no question, repo, answer or token, and the push service sees only ciphertext. `api.py` adds `GET /push` (the alert state, phone data like the cards), `POST /push/subscribe` (cookie, CSRF and the exact Origin), `/push/unsubscribe` and `/push/denied`, and `POST /push-worker/hello`, `/claim` and `/result` for the worker's token only, never a browser. If the worker's keys are ever lost, `tw-decide push-reset --workspace thornswood` forgets them and every subscription, and the phone turns alerts on again.
 
-`tests/test_decisions_push.py` checks the encryption against the RFC's example, the VAPID header, the seal, the allowlist, the outbox rules and the worker against a stand-in push service. `tests/decisions_phone_check.js` now also turns alerts on and is told no, has DevTools deliver a push (no push service) and checks the one quiet line and its tag, and checks the alert of an answered card is taken off. Not checked here: a real push service taking a push, the tap on an alert (DevTools cannot tap one), and T10 to T13 on Patrick's phone.
+`tests/test_decisions_push.py` checks the encryption against the RFC's example, the VAPID header, the seal, the allowlist, the outbox rules and the worker against a stand-in push service. `tests/decisions_phone_check.js` now also turns alerts on and is told no, has DevTools deliver a push (no push service) and checks the one line, its sound and its tag, and checks the alert of an answered card is taken off. Not checked here: a real push service taking a push, the tap on an alert (DevTools cannot tap one), and T10 to T13 on Patrick's phone.
 
 ## Installing on the VM
 
@@ -134,7 +134,7 @@ On the VM, after step 7 above, with the installed commit:
 
 1. `sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/phone-test.sh <commit> start`
 2. On the phone, with Tailscale on: open `https://hermes.<tailnet>.ts.net:8443/m/`, then `phone-test.sh <commit> pair` and type the code within 10 minutes. Add a passkey from Settings, and add the app to the home screen (T10).
-3. Turn alerts on in Settings, close the app, lock the phone, and run `phone-test.sh <commit> card`. One quiet "Hermes needs you" should arrive (T11). Tapping it opens that exact card after sign-in, and the lock screen shows nothing else (T12, T13).
+3. Turn alerts on in Settings, close the app, lock the phone, and run `phone-test.sh <commit> card`. One "Hermes needs you" should pop up with the phone sound (T11). Tapping it opens that exact card after sign-in, and the lock screen shows nothing else (T12, T13).
 4. `phone-test.sh <commit> card high` checks the high-risk path: its check screen, then a passkey sign-in.
 5. `phone-test.sh <commit> stop` takes 8443 off Tailscale Serve and stops both. The test store stays.
 

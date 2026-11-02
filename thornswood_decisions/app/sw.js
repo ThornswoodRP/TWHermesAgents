@@ -47,7 +47,7 @@ self.addEventListener('push', event => {
   event.waitUntil(self.registration.showNotification('Hermes needs you', {
     tag: id ? 'decision:' + id : 'thornswood',
     renotify: false,
-    silent: true,
+    silent: false,
     icon: '/m/icon-192.png',
     data: { path: id ? '/m/decisions/' + id : '/m/decisions' }
   }))

@@ -559,13 +559,13 @@ const base = `http://localhost:${port}`
   const reg = regs.find(r => r.scopeURL === base + '/m/' && !r.isDeleted)
   const shown = async () => page.evaluate(async () => (await (await navigator.serviceWorker.getRegistration('/m/')).getNotifications())
     .map(n => ({ title: n.title, body: n.body, tag: n.tag, silent: n.silent, path: n.data && n.data.path, actions: n.actions.length })))
-  await step('a push shows only "Hermes needs you", quiet, tagged by its card', async () => {
+  await step('a push shows only "Hermes needs you", with the phone sound, tagged by its card', async () => {
     if (!reg) throw new Error('no service worker registration seen')
     await cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId: reg.registrationId,
       data: JSON.stringify({ v: 1, event_id: 'px_1', decision_id: card, attention_revision: 1, path: '/m/decisions/' + card }) })
     let list = []
     for (let i = 0; i < 50 && !list.length; i++) { list = await shown(); if (!list.length) await new Promise(ok => setTimeout(ok, 100)) }
-    const want = { title: 'Hermes needs you', body: '', tag: 'decision:' + card, silent: true, path: '/m/decisions/' + card, actions: 0 }
+    const want = { title: 'Hermes needs you', body: '', tag: 'decision:' + card, silent: false, path: '/m/decisions/' + card, actions: 0 }
     if (JSON.stringify(list) !== JSON.stringify([want])) throw new Error(JSON.stringify(list))
   })
   await step('a push with a bad card id opens only Decisions', async () => {
