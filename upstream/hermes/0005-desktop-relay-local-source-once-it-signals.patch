@@ -1,8 +1,8 @@
-From 8646330c129e124234bd71e1146013fbf267c63d Mon Sep 17 00:00:00 2001
-From: Claude <noreply@anthropic.com>
-Date: Mon, 2 Nov 2026 02:55:18 +0000
-Subject: [PATCH] fix(desktop): relay a remote-primary Desktop's local source
- once it signals outbox mail
+From ceb65f093dee56f911cae2f238d62a0042f111b6 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 04:37:02 +0000
+Subject: [PATCH 1/2] fix(desktop): relay a remote-primary Desktop's local
+ source once it signals outbox mail
 
 9cbc6a5ac0 left the local registry source out of the relay's peer set
 whenever one remote connection is the primary, so an unused local runtime
@@ -161,6 +161,183 @@ index 40bd20a167..fee5aab9dd 100644
    // Queued deliveries check `disposed` before they run; forget the lane tails
    // so a restart starts every target fresh instead of behind stale chains.
    relayLanes.clear()
+-- 
+2.43.0
+
+
+From c57325f64dc2d8a5e8d82cb6976197039fc2e4af Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 04:37:02 +0000
+Subject: [PATCH 2/2] fix(desktop): a stored session the store already owns is
+ read on that owner, not walked across the active source's profiles
+
+probeStoredSession took an owner only from its caller. resolveSessionProfile
+and the other profile-only callers name none, so a session whose exact owner
+the store already knew (tile route, unique hint, tagged row or proven runtime
+event) still went down the cross-profile ladder. That ladder walks $profiles,
+the ACTIVE source's names. On a remote-primary Desktop, This device's Bot Chat
+was looked up under every remote Bot's name, and the session read pin sent each
+lookup to the owner's connection ('local'), which refused each name it does not
+have ("Profile \"rift\" no longer exists") and held one lookup 120 s on a
+remote-dashboard dial.
+
+The probe now starts from the same sync owner ladder session RPCs use, and an
+exact route found there is fail-closed like an explicit one. A session with no
+known exact owner walks the profiles as before.
+---
+ .../resolve-stored-session.test.ts            | 82 ++++++++++++++++++-
+ .../hooks/use-session-actions/utils.ts        | 30 ++++++-
+ 2 files changed, 109 insertions(+), 3 deletions(-)
+
+diff --git a/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts b/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
+index 250ab7a566..8fd75438ff 100644
+--- a/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
++++ b/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
+@@ -4,11 +4,18 @@ import type * as HermesModule from '@/hermes'
+ import { getSession } from '@/hermes'
+ import { $activeGatewayProfile, $profiles } from '@/store/profile'
+ import { $projectTree } from '@/store/projects'
+-import { $cronSessions, $messagingSessions, $sessions, $unlistedSessionOwnerRows } from '@/store/session'
++import {
++  $cronSessions,
++  $messagingSessions,
++  $sessions,
++  $unlistedSessionOwnerRows,
++  _resetSessionOwnerHintsForTests,
++  setSessionOwnerHint
++} from '@/store/session'
+ import { $removedSessionIds, tombstoneSessions, untombstoneSessions } from '@/store/session-removal'
+ import type { SessionInfo } from '@/types/hermes'
+ 
+-import { cachedSessionRow, resolveStoredSession } from './utils'
++import { cachedSessionRow, probeStoredSession, resolveStoredSession } from './utils'
+ 
+ vi.mock('@/hermes', async importActual => ({
+   ...(await importActual<typeof HermesModule>()),
+@@ -342,3 +349,74 @@ describe('cachedSessionRow owner preference', () => {
+     expect(cachedSessionRow('missing')).toBeUndefined()
+   })
+ })
++
++describe('resolveStoredSession with an exact owner the store already knows', () => {
++  // This device's Bot Chat on a Desktop whose primary is a remote Bots host:
++  // $profiles is the REMOTE's list, the chat lives on 'local'/'default'.
++  beforeEach(() => {
++    $cronSessions.set([])
++    $messagingSessions.set([])
++    $sessions.set([])
++    $projectTree.set([])
++    $removedSessionIds.set(new Set())
++    $unlistedSessionOwnerRows.set([])
++    $profiles.set(profiles('bramble', 'magpie', 'rift', 'sprocket', 'wisp'))
++    $activeGatewayProfile.set('bramble')
++    _resetSessionOwnerHintsForTests()
++    setSessionOwnerHint('local-4e2938', { connectionId: 'local', profile: 'default' })
++    mockGetSession.mockReset()
++  })
++
++  afterEach(() => {
++    _resetSessionOwnerHintsForTests()
++    $profiles.set([])
++    $activeGatewayProfile.set('default')
++    $sessions.set([])
++  })
++
++  it('reads the chat once on its owner and never walks the remote profile names', async () => {
++    mockGetSession.mockImplementation(async (id, scope) => {
++      if (scope && typeof scope === 'object' && scope.connectionId === 'local' && scope.profile === 'default') {
++        return session({ id })
++      }
++
++      throw new Error(`Profile "${String(scope)}" no longer exists.`)
++    })
++
++    const resolved = await resolveStoredSession('local-4e2938')
++
++    expect(resolved?.connection_id).toBe('local')
++    expect(resolved?.profile).toBe('default')
++    expect(mockGetSession).toHaveBeenCalledTimes(1)
++    expect(mockGetSession).toHaveBeenCalledWith('local-4e2938', { connectionId: 'local', profile: 'default' })
++  })
++
++  it('fails closed on that owner instead of trying each remote profile', async () => {
++    mockGetSession.mockRejectedValue(new Error('404: Session not found'))
++
++    const result = await probeStoredSession('local-4e2938')
++
++    expect(result.status).toBe('gone')
++    expect(mockGetSession).toHaveBeenCalledTimes(1)
++
++    for (const name of ['bramble', 'magpie', 'rift', 'sprocket', 'wisp']) {
++      expect(mockGetSession).not.toHaveBeenCalledWith('local-4e2938', name)
++    }
++  })
++
++  it('still walks the profiles when the store knows no exact owner', async () => {
++    _resetSessionOwnerHintsForTests()
++    mockGetSession.mockImplementation(async (id, profile) => {
++      if (profile === 'rift') {
++        return session({ id })
++      }
++
++      throw new Error('404: Session not found')
++    })
++
++    const resolved = await resolveStoredSession('s9')
++
++    expect(resolved?.profile).toBe('rift')
++    expect(mockGetSession).toHaveBeenNthCalledWith(1, 's9', 'bramble')
++  })
++})
+diff --git a/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts b/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
+index 511010ee00..ac26e0bc02 100644
+--- a/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
++++ b/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
+@@ -2160,6 +2160,25 @@ export function cachedSessionRow(storedSessionId: string): SessionInfo | undefin
+   )
+ }
+ 
++/** The exact (connection-bearing) owner the store already knows for a stored
++ *  id, through the same sync ladder session RPCs use; undefined when it knows
++ *  only a bare profile or nothing. */
++function knownExactOwnerRoute(storedSessionId: string): SessionProfileRoute | undefined {
++  const owner = resolveSessionRpcOwner({
++    routingSessionId: storedSessionId,
++    tileOwnerRoute: sessionTileOwnerRoute,
++    sessionOwnerHint: getSessionOwnerHint,
++    sessionRowOwner: id => knownSessionOwner(ownerLookupSessionRows(), id),
++    eventOwner: runtimeSessionOwner
++  })
++
++  if (!owner || typeof owner !== 'object' || !String(owner.connectionId ?? '').trim()) {
++    return undefined
++  }
++
++  return owner
++}
++
+ export type StoredSessionProbe = { status: 'found'; session: SessionInfo } | { status: 'gone' | 'inconclusive' }
+ 
+ export async function resolveStoredSession(
+@@ -2178,8 +2197,17 @@ export async function resolveStoredSession(
+  *  ids that live on a profile not yet listed (#125678). */
+ export async function probeStoredSession(
+   storedSessionId: string,
+-  ownerRoute?: SessionProfileRoute
++  explicitOwnerRoute?: SessionProfileRoute
+ ): Promise<StoredSessionProbe> {
++  // A caller that names no owner still gets the exact one the store already
++  // knows (tile route, unique hint, tagged row, proven runtime event). The
++  // profile ladder below walks the AMBIENT source's profile names; a session
++  // whose known owner is another connection (This device's Bot Chat on a
++  // remote-primary Desktop) has nothing to find there, and every name in that
++  // walk reached the owner's connection through the read pin, which refused
++  // or dialed each one in turn ("Profile \"rift\" no longer exists", and a
++  // 120 s remote-dashboard wait for another).
++  const ownerRoute = explicitOwnerRoute ?? knownExactOwnerRoute(storedSessionId)
+   let allGone = true
+ 
+   const recordFailure = (error: unknown) => {
 -- 
 2.43.0
 

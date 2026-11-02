@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Five causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Six causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
@@ -74,7 +74,9 @@ The fix passes the model to the pick in both Codex callers. The year-long
 bench on a slug the account really cannot use is upstream's design (#71970)
 and stays; it now benches only that slug.
 
-## 0005: the Desktop relays This device's Bot Chat when its main connection is remote
+## 0005: the Desktop relays This device's Bot Chat when its main connection is remote, and reads it on its own connection
+
+0005 holds two commits. The first is the relay, the second the lookups.
 
 Cause: upstream 9cbc6a5ac0 (11 Sep) made `relayEligibleRoutes`
 (apps/desktop/src/plugins/hermes-bots/relay.ts) drop the local "This device"
@@ -98,12 +100,32 @@ signals, nothing changes: the local source of a remote-primary Desktop is
 still never polled or pinned. A signal from the primary, or an untagged one,
 does not count.
 
-Check it with the Desktop's own tests:
+The second cause: the Desktop looked This device's Bot Chat up under every
+remote Bot's name. Card 1's `desktop.log` on One (2 Nov) has
+`GET /api/sessions/local-4e2938…` with `profile=bramble` at 5:38 PM, then
+`magpie`, `rift`, `sprocket` and `wisp` at 7:43 PM. Magpie's failed after
+a 120 s wait for a remote dashboard. The other three were refused at once
+with "Profile ... no longer exists", one after another within 8 ms.
+`probeStoredSession` (apps/desktop/src/app/session/hooks/use-session-actions/utils.ts)
+took an owner only from its caller. `resolveSessionProfile` and the other
+profile-only callers name none, so even a chat whose exact owner the store
+already knew went down the cross-profile ladder. That ladder walks the
+active source's profile names, here the remote Bots'. The session read pin
+then sent each name to the chat's real connection, `local`, which has none
+of them.
+
+The fix: the probe starts from the same owner ladder that session calls use
+(tile route, the one hint, a tagged row, a proven runtime event). An exact
+owner found there is read once, and a miss there is final, as with an
+owner the caller names. A chat with no known exact owner walks the profiles
+as before.
+
+Check both with the Desktop's own tests:
 
 ```
 cd apps/desktop
 npm ci --ignore-scripts
-npx vitest run src/plugins/hermes-bots/
+npx vitest run src/plugins/hermes-bots/ src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
 ```
 
 ## Test results so far
@@ -117,3 +139,10 @@ npx vitest run src/plugins/hermes-bots/
 - 0004: not run yet. The upstream pull requests wait on a Linux run of all
   five.
 - 0005 (Linux, Node 22, 2 Nov, on 0001 to 0004): `vitest run src/plugins/hermes-bots/` 107 files, 873 passed, 0 failed (2 new; the first fails without the fix), and `tsc --noEmit` is clean.
+- 0005's second commit (Linux, Node 22, 2 Nov): resolve-stored-session.test.ts
+  24 passed (3 new; the first two fail without the fix). `vitest run` over
+  src/app/session, src/store, src/app/contrib and src/plugins/hermes-bots:
+  4,581 passed and 3 failed. The 3 are dead-session-prune's debounce test and
+  two voice-prefs tests, and they fail the same way on v0.22.5 without any
+  of these patches. `tsc -p . --noEmit` and eslint on the changed files are
+  clean.
