@@ -1,0 +1,458 @@
+From 9102be92025becdefedb71fa06ec60be16176ef3 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:37:24 +0000
+Subject: [PATCH] desktop: resolve a switch target's descriptor in the dial,
+ not inside the commit
+
+A source switch dialed the target's socket in phase one, then looked up its
+connection descriptor inside the commit, under the commit's local 20 s
+budget, after the previous backend's bindings were already severed. The
+commit only lands once that descriptor is published (targetIsActive), and
+the lookup can cross into a remote bring-up: a retained socket can still be
+open while main's pooled backend for the route is being rebuilt (its ssh
+tunnel dropped when the remote dashboard restarted). Then the lookup waits
+for a whole remote boot, the commit times out, and the switch fails with
+"did not become active" while the target is still coming up. Measured: the
+activation moved the route at 14:19:09.182, no descriptor was published,
+the switch gave up at 14:19:29.350, and the remote dashboards bound at
+14:19:35 and 14:19:36.
+
+openGatewayAgent now resolves the descriptor together with the socket, on
+the caller's dial budget, and returns it; a failed lookup fails the dial
+before anything is touched. selectConnection hands it to ensureGatewayAgent,
+which publishes it without a lookup of its own. Callers that pass no
+descriptor (the SDK and session doors) look it up as before.
+---
+ apps/desktop/src/store/connections.test.ts    |  76 ++++++++++-
+ apps/desktop/src/store/connections.ts         |  15 ++-
+ .../profile-agent-dial-descriptor.test.ts     | 125 ++++++++++++++++++
+ apps/desktop/src/store/profile.ts             |  65 ++++++---
+ 4 files changed, 254 insertions(+), 27 deletions(-)
+ create mode 100644 apps/desktop/src/store/profile-agent-dial-descriptor.test.ts
+
+diff --git a/apps/desktop/src/store/connections.test.ts b/apps/desktop/src/store/connections.test.ts
+index aeef63ba90..47bc69aac9 100644
+--- a/apps/desktop/src/store/connections.test.ts
++++ b/apps/desktop/src/store/connections.test.ts
+@@ -24,8 +24,16 @@ const $connection = atom<null | {
+ const $activeSessionId = atom<null | string>(null)
+ const $gatewaySwitching = atom(false)
+ 
++interface DialDescriptor {
++  connectionId?: string
++  mode?: 'local' | 'remote'
++  profile?: string
++  registryScoped?: boolean
++}
++
+ interface ActivationOptions {
+   beforeActivate?: () => boolean
++  descriptor?: DialDescriptor
+   signal?: AbortSignal
+ }
+ 
+@@ -33,7 +41,7 @@ const ensureGatewayAgent = vi.fn(
+   async (_connectionId: null | string, _profile: string, _options?: ActivationOptions): Promise<void> => undefined
+ )
+ 
+-const openGatewayAgent = vi.fn(async (_connectionId: string, _profile: string): Promise<void> => undefined)
++const openGatewayAgent = vi.fn(async (_connectionId: string, _profile: string): Promise<DialDescriptor | null> => null)
+ const refreshActiveProfile = vi.fn(async () => undefined)
+ const requestFreshSession = vi.fn()
+ const beforeConnectionSwitch = vi.fn()
+@@ -137,7 +145,7 @@ beforeEach(() => {
+     })
+   })
+   openGatewayAgent.mockReset()
+-  openGatewayAgent.mockResolvedValue(undefined)
++  openGatewayAgent.mockResolvedValue(null)
+   refreshActiveProfile.mockClear()
+   requestFreshSession.mockClear()
+   beforeConnectionSwitch.mockClear()
+@@ -319,6 +327,8 @@ describe('selectConnection', () => {
+     $connection.set({ connectionId: 'local', mode: 'local' })
+     openGatewayAgent.mockImplementation(async () => {
+       await dialGate
++
++      return null
+     })
+ 
+     const openHomelab = selectConnection('homelab')
+@@ -519,6 +529,8 @@ describe('selectConnection', () => {
+       expect($activeSessionId.get()).toBe('a93bb39d')
+       expect($gatewaySwitching.get()).toBe(false)
+       expect(wipeSessionListsForGatewaySwitch).not.toHaveBeenCalled()
++
++      return null
+     })
+ 
+     // Every publication of the new source, with what a session-scoped effect
+@@ -649,7 +661,7 @@ describe('selectConnection', () => {
+     vi.useFakeTimers()
+ 
+     try {
+-      const dial = deferred<void>()
++      const dial = deferred<null>()
+ 
+       setConnectionsRegistry(registry)
+       $connection.set({ connectionId: 'local', mode: 'local' })
+@@ -675,7 +687,7 @@ describe('selectConnection', () => {
+       expect(outcome).toBe('pending')
+       expect($pendingConnectionId.get()).toBe('homelab')
+ 
+-      dial.resolve()
++      dial.resolve(null)
+       await attempt
+ 
+       expect(outcome).toBe('resolved')
+@@ -686,6 +698,60 @@ describe('selectConnection', () => {
+     }
+   })
+ 
++  it("the target's descriptor is resolved by the dial and handed to the commit, so a cold remote boot behind it lands", async () => {
++    // 2 Nov: the target's socket was already open, but main's pooled backend
++    // for it was being rebuilt (its tunnel dropped when the remote dashboard
++    // restarted). The descriptor lookup inside the commit waited ~27 s for
++    // that boot, the 20 s commit budget ran out after the old bindings were
++    // severed, and the switch failed with "did not become active". The lookup
++    // is now part of the dial: the wait runs on the dial budget, and the
++    // commit publishes what the dial resolved.
++    vi.useFakeTimers()
++
++    try {
++      const descriptor = { connectionId: 'homelab', mode: 'remote' as const, profile: 'default', registryScoped: true }
++      const lookup = deferred<typeof descriptor>()
++
++      setConnectionsRegistry(registry)
++      $connection.set({ connectionId: 'local', mode: 'local' })
++      openGatewayAgent.mockImplementationOnce(() => lookup.promise)
++      ensureGatewayAgent.mockImplementationOnce(async (_connectionId, _profile, options) => {
++        if (options?.beforeActivate && !options.beforeActivate()) {
++          return
++        }
++
++        if (options?.descriptor) {
++          $connection.set(options.descriptor)
++        }
++      })
++
++      let outcome = 'pending'
++
++      const attempt = selectConnection('homelab').then(
++        () => {
++          outcome = 'resolved'
++        },
++        (error: Error) => {
++          outcome = error.message
++        }
++      )
++
++      await vi.advanceTimersByTimeAsync(27_000)
++      expect(outcome).toBe('pending')
++      expect(beginGatewaySwitch).not.toHaveBeenCalled()
++
++      lookup.resolve(descriptor)
++      await attempt
++
++      expect(outcome).toBe('resolved')
++      expect(ensureGatewayAgent).toHaveBeenCalledWith('homelab', 'default', expect.objectContaining({ descriptor }))
++      expect($connection.get()).toEqual(descriptor)
++      expect(recoverActiveSourceAfterFailedGatewaySwitch).not.toHaveBeenCalled()
++    } finally {
++      vi.useRealTimers()
++    }
++  })
++
+   it('a dial that never answers times out: nothing severed, the click fails visibly, and the source can be retried', async () => {
+     vi.useFakeTimers()
+ 
+@@ -693,7 +759,7 @@ describe('selectConnection', () => {
+       setConnectionsRegistry(registry)
+       $connection.set({ connectionId: 'local', mode: 'local' })
+       $activeSessionId.set('a93bb39d')
+-      openGatewayAgent.mockImplementationOnce(() => new Promise<void>(() => undefined))
++      openGatewayAgent.mockImplementationOnce(() => new Promise<null>(() => undefined))
+ 
+       const outcome = selectConnection('homelab').then(
+         () => 'resolved',
+diff --git a/apps/desktop/src/store/connections.ts b/apps/desktop/src/store/connections.ts
+index 7d9fc45366..923ea5373b 100644
+--- a/apps/desktop/src/store/connections.ts
++++ b/apps/desktop/src/store/connections.ts
+@@ -44,8 +44,8 @@ const LAST_PROFILE_STORAGE_KEY = 'hermes.desktop.lastProfileByConnection'
+ // a barrier left up or a wipe left unpainted.
+ //
+ // The dial and the commit are different work and so carry different budgets.
+-// The commit is local (sever the old bindings, activate, publish) and stays at
+-// the reconnect-class 20 s. The dial is the main process's whole remote
++// The commit is local (sever the old bindings, activate, publish the
++// descriptor the dial resolved) and stays at the reconnect-class 20 s. The dial is the main process's whole remote
+ // bring-up chain, which the renderer cannot time from here — see
+ // SOURCE_SWITCH_DIAL_TIMEOUT_MS in lib/with-timeout.ts for its composition.
+ const SWITCH_COMMIT_TIMEOUT_MS = 20_000
+@@ -464,10 +464,12 @@ export async function selectConnection(connectionId: string, options: SelectConn
+   let token = null as GatewaySwitchToken | null
+ 
+   try {
+-    // Phase 1 — open the target's socket; the active route is untouched.
+-    // Always use the explicit registry route. `local` must mean This device,
+-    // and a registry primary can differ from a legacy per-profile override.
+-    await withTimeout(
++    // Phase 1 — open the target's socket and resolve its descriptor; the
++    // active route is untouched. Always use the explicit registry route.
++    // `local` must mean This device, and a registry primary can differ from a
++    // legacy per-profile override. The descriptor lookup can wait on a whole
++    // remote boot, so it belongs to this budget, not the commit's.
++    const targetDescriptor = await withTimeout(
+       openGatewayAgent(connectionId, targetProfile),
+       SOURCE_SWITCH_DIAL_TIMEOUT_MS,
+       `Timed out connecting to "${targetConnection.label}".`
+@@ -513,6 +515,7 @@ export async function selectConnection(connectionId: string, options: SelectConn
+     try {
+       try {
+         const activation = ensureGatewayAgent(connectionId, targetProfile, {
++          descriptor: targetDescriptor ?? undefined,
+           signal: activationController.signal,
+           beforeActivate: () => {
+             if (revision !== switchRevision) {
+diff --git a/apps/desktop/src/store/profile-agent-dial-descriptor.test.ts b/apps/desktop/src/store/profile-agent-dial-descriptor.test.ts
+new file mode 100644
+index 0000000000..2a7d10ea58
+--- /dev/null
++++ b/apps/desktop/src/store/profile-agent-dial-descriptor.test.ts
+@@ -0,0 +1,125 @@
++import { atom } from 'nanostores'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++
++import type { HermesConnection } from '@/global'
++
++import { deferred } from '../test/deferred'
++
++// Phase one of the two-phase source switch resolves the target's descriptor
++// (openGatewayAgent), and the commit (ensureGatewayAgent with that descriptor)
++// makes no lookup of its own. The lookup can wait on a whole remote boot, which
++// must run on the dial's budget, before anything is severed — not inside the
++// commit's local 20 s window.
++
++const ensureGatewayForAgent = vi.fn(async (_connectionId: null | string, _profile: string) => true)
++const ensureGatewayForProfile = vi.fn(async (_profile: string) => undefined)
++const openGatewayForAgent = vi.fn(async (_connectionId: null | string, _profile: string, _options?: unknown) => undefined)
++const openGatewayForProfile = vi.fn(async (_profile: string) => undefined)
++
++vi.mock('@/store/gateway', () => ({
++  $gateway: atom<unknown>({ id: 'live-socket' }),
++  activeGatewayProfileKey: () => ensureGatewayForAgent.mock.lastCall?.[1] ?? 'default',
++  ensureGatewayForAgent,
++  ensureGatewayForProfile,
++  openGatewayForAgent,
++  openGatewayForProfile
++}))
++vi.mock('@/hermes', () => ({
++  getProfiles: vi.fn(async () => ({ profiles: [] })),
++  setApiRequestProfile: vi.fn()
++}))
++vi.mock('@/lib/query-client', () => ({ invalidateProfileScopedQueries: vi.fn() }))
++vi.mock('@/store/starmap', () => ({ reloadOpenStarmapGraph: vi.fn(), resetStarmapGraph: vi.fn() }))
++
++const { $activeGatewayProfile, ensureGatewayAgent, openGatewayAgent } = await import('./profile')
++const { $connection } = await import('./session')
++
++const agentConn = (over: Partial<HermesConnection> = {}): HermesConnection =>
++  ({ baseUrl: 'https://homelab.invalid', connectionId: 'homelab', mode: 'remote', profile: 'research', ...over }) as HermesConnection
++
++const localConn = (): HermesConnection => ({ baseUrl: '', mode: 'local', profile: 'default' }) as HermesConnection
++
++const getConnectionFor =
++  vi.fn<(payload: { connectionId?: null | string; profile?: null | string }) => Promise<HermesConnection>>()
++
++beforeEach(() => {
++  getConnectionFor.mockReset()
++  ensureGatewayForAgent.mockClear()
++  openGatewayForAgent.mockClear()
++  $activeGatewayProfile.set('default')
++  $connection.set(localConn())
++  vi.stubGlobal('window', { hermesDesktop: { getConnection: vi.fn(), getConnectionFor }, localStorage: window.localStorage })
++})
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++  $connection.set(null)
++})
++
++describe('openGatewayAgent resolves the descriptor as part of the dial', () => {
++  it('settles only once the descriptor arrives, returns it, and touches nothing', async () => {
++    const lookup = deferred<HermesConnection>()
++    getConnectionFor.mockImplementationOnce(() => lookup.promise)
++
++    let settled = false
++
++    const dial = openGatewayAgent('homelab', 'research').then(result => {
++      settled = true
++
++      return result
++    })
++
++    await Promise.resolve()
++    await Promise.resolve()
++
++    expect(openGatewayForAgent).toHaveBeenCalledWith('homelab', 'research', {
++      activationLease: true,
++      spawnPriority: 'foreground'
++    })
++    expect(getConnectionFor).toHaveBeenCalledWith({ connectionId: 'homelab', profile: 'research' })
++    expect(settled).toBe(false)
++
++    lookup.resolve(agentConn())
++
++    expect(await dial).toEqual(agentConn())
++    expect($connection.get()?.mode).toBe('local')
++    expect($activeGatewayProfile.get()).toBe('default')
++  })
++
++  it('a failed lookup fails the dial, before the commit can sever anything', async () => {
++    getConnectionFor.mockRejectedValueOnce(new Error('source unreachable'))
++
++    await expect(openGatewayAgent('homelab', 'research')).rejects.toThrow('source unreachable')
++    expect($connection.get()?.mode).toBe('local')
++    expect($activeGatewayProfile.get()).toBe('default')
++  })
++
++  it('resolves null when the bridge has no registry lookup', async () => {
++    vi.stubGlobal('window', { hermesDesktop: { getConnection: vi.fn() }, localStorage: window.localStorage })
++
++    expect(await openGatewayAgent('homelab', 'research')).toBeNull()
++  })
++})
++
++describe('ensureGatewayAgent with the descriptor the dial resolved', () => {
++  it('publishes it without a lookup of its own, even while main would still be booting the target', async () => {
++    // A lookup now would wait on the remote boot; the commit must not ask.
++    getConnectionFor.mockImplementation(() => new Promise<HermesConnection>(() => undefined))
++
++    await ensureGatewayAgent('homelab', 'research', { descriptor: agentConn() })
++
++    expect(getConnectionFor).not.toHaveBeenCalled()
++    expect(ensureGatewayForAgent).toHaveBeenCalledWith('homelab', 'research')
++    expect($connection.get()).toEqual(agentConn())
++    expect($activeGatewayProfile.get()).toBe('research')
++  })
++
++  it('without one, still looks the descriptor up itself (the SDK and session doors)', async () => {
++    getConnectionFor.mockResolvedValueOnce(agentConn())
++
++    await ensureGatewayAgent('homelab', 'research')
++
++    expect(getConnectionFor).toHaveBeenCalledWith({ connectionId: 'homelab', profile: 'research' })
++    expect($connection.get()).toEqual(agentConn())
++  })
++})
+diff --git a/apps/desktop/src/store/profile.ts b/apps/desktop/src/store/profile.ts
+index d5c61bec0e..9eb967003f 100644
+--- a/apps/desktop/src/store/profile.ts
++++ b/apps/desktop/src/store/profile.ts
+@@ -764,24 +764,46 @@ async function resolveConnectionForAgent(connectionId: string, profile: string):
+ 
+ // Phase one of the two-phase source switch (store/connections
+ // selectConnection): dial the (connectionId, profile) socket WITHOUT activating
+-// it. The active route, $activeGatewayProfile and $connection are untouched, so
+-// the previous backend stays fully bound and painted while the target
+-// spawns/connects — a dead target fails HERE and the current source loses
+-// nothing. The follow-up ensureGatewayAgent then finds the socket open and
+-// activates it synchronously, which lets the caller sever the previous
++// it, and resolve the target's connection descriptor. The active route,
++// $activeGatewayProfile and $connection are untouched, so the previous backend
++// stays fully bound and painted while the target spawns/connects — a dead
++// target fails HERE and the current source loses nothing. The follow-up
++// ensureGatewayAgent is handed the descriptor resolved here, finds the socket
++// open and activates it synchronously, which lets the caller sever the previous
+ // backend's session bindings and publish the new source in the same tick
+-// (#93937). An already-open target is a no-op.
+-export async function openGatewayAgent(connectionId: string, profile: string): Promise<void> {
++// (#93937). An already-open target is a no-op for the socket.
++//
++// The descriptor is part of the dial, not the commit: the commit only lands
++// once the descriptor naming the target is published (selectConnection's
++// targetIsActive), and resolving it can cross into a remote bring-up — a
++// retained socket can still be open while main's pooled backend for that
++// route is being rebuilt (its tunnel dropped when the remote dashboard
++// restarted), so the lookup waits for a whole remote boot. Resolved inside the
++// commit, that wait ran on the commit's local budget after the old bindings
++// were already severed, and the switch failed with "did not become active"
++// while the target was coming up. Resolved here, it runs on the caller's dial
++// budget, and a lookup that fails fails the dial before anything is touched.
++// Resolves null only when the bridge has no getConnectionFor (then the commit
++// looks the descriptor up itself, as before).
++export async function openGatewayAgent(connectionId: string, profile: string): Promise<HermesConnection | null> {
+   const connection = connectionId.trim()
+ 
+   if (!connection) {
+-    return
++    return null
+   }
+ 
+-  await openGatewayForAgent(connection, normalizeProfileKey(profile), {
+-    activationLease: true,
+-    spawnPriority: 'foreground'
+-  })
++  const target = normalizeProfileKey(profile)
++  const getConnectionFor = window.hermesDesktop?.getConnectionFor
++
++  const [descriptor] = await Promise.all([
++    getConnectionFor ? getConnectionFor({ connectionId: connection, profile: target }) : Promise.resolve(null),
++    openGatewayForAgent(connection, target, {
++      activationLease: true,
++      spawnPriority: 'foreground'
++    })
++  ])
++
++  return descriptor ?? null
+ }
+ 
+ // Activate a connection-scoped agent's gateway — the (connectionId, profile)
+@@ -810,6 +832,12 @@ export async function openGatewayAgent(connectionId: string, profile: string): P
+ // null-connectionId profile fallthrough.
+ export interface EnsureGatewayAgentOptions {
+   beforeActivate?: () => boolean
++  /**
++   * The target's descriptor, already resolved by openGatewayAgent. When given,
++   * the activation publishes it and makes no lookup of its own, so nothing in
++   * the commit waits on the main process or the remote.
++   */
++  descriptor?: HermesConnection
+   /** Revokes this caller's right to activate or publish after async work. */
+   signal?: AbortSignal
+ }
+@@ -845,7 +873,7 @@ function releaseWhenAborted(promise: Promise<void>, signal?: AbortSignal): Promi
+ export async function ensureGatewayAgent(
+   connectionId: null | string,
+   profile: string,
+-  { beforeActivate, signal }: EnsureGatewayAgentOptions = {}
++  { beforeActivate, descriptor: resolvedDescriptor, signal }: EnsureGatewayAgentOptions = {}
+ ): Promise<void> {
+   const target = normalizeProfileKey(profile)
+   const connection = (connectionId ?? '').trim() || null
+@@ -877,13 +905,18 @@ export async function ensureGatewayAgent(
+       return
+     }
+ 
+-    // Descriptor resolves concurrently with the dial, same as the profile
+-    // path, so no await sits between the activation and the publication.
++    // A descriptor the dial already resolved (openGatewayAgent) is used as
++    // is. Otherwise it resolves concurrently with the dial, same as the
++    // profile path, so no await sits between the activation and the
++    // publication.
+     const activation = signal
+       ? ensureGatewayForAgent(connection, target, { signal })
+       : ensureGatewayForAgent(connection, target)
+ 
+-    const [descriptor, activated] = await Promise.all([resolveConnectionForAgent(connection, target), activation])
++    const [descriptor, activated] = await Promise.all([
++      resolvedDescriptor ?? resolveConnectionForAgent(connection, target),
++      activation
++    ])
+ 
+     if (signal?.aborted) {
+       return
+-- 
+2.43.0
+
