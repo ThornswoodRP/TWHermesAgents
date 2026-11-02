@@ -1,0 +1,169 @@
+From 4da5028b348a02639aa8773d690c11e4ac61825b Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 02:54:01 +0000
+Subject: [PATCH] fix(aux): pick the Codex pool entry for the auxiliary call's
+ model
+
+The auxiliary Codex resolver knows the model it will call but asked the
+pool for an entry without naming it. An unscoped pick honours every model
+cooldown on an entry, and a Codex entitlement bench lasts a year, so one
+slug the account cannot use (say gpt-5.5) kept the credential from every
+auxiliary task on every other slug, and the resolver found no token. The
+chat path already picks with the model. _select_pool_entry now takes the
+model, and both Codex callers pass it.
+---
+ agent/auxiliary_client.py                     | 25 ++++++++++-------
+ tests/agent/test_auxiliary_client.py          | 18 +++++++++++++
+ .../test_codex_credential_host_binding.py     | 27 +++++++++++++++----
+ 3 files changed, 56 insertions(+), 14 deletions(-)
+
+diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
+index 88f1fa59..21c451b2 100644
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -1033,13 +1033,18 @@ def _load_pool_with_credentials(provider: str, note: str = "") -> Optional[Any]:
+     return pool if pool and pool.has_credentials() else None
+ 
+ 
+-def _select_pool_entry(provider: str) -> tuple[bool, Optional[Any]]:
+-    """Return (pool_exists_for_provider, selected_entry)."""
++def _select_pool_entry(provider: str, *, model: Optional[str] = None) -> tuple[bool, Optional[Any]]:
++    """Return (pool_exists_for_provider, selected_entry).
++
++    Pass *model* whenever the call's model is known: an unscoped select honours every model
++    cooldown on an entry, so one slug's bench (a Codex entitlement bench lasts a year) would
++    otherwise keep the credential from every other model too.
++    """
+     pool = _load_pool_with_credentials(provider)
+     if pool is None:
+         return False, None
+     try:
+-        return True, pool.select()
++        return True, pool.select(model=model)
+     except Exception as exc:
+         logger.debug("Auxiliary client: could not select pool entry for %s: %s", provider, exc)
+         return True, None
+@@ -2108,13 +2113,14 @@ def _resolve_xai_oauth_for_aux() -> Optional[tuple[str, str]]:
+     return _creds_pair(creds)
+ 
+ 
+-def _resolve_codex_credential_and_base() -> tuple[Optional[str], str]:
++def _resolve_codex_credential_and_base(model: Optional[str] = None) -> tuple[Optional[str], str]:
+     """``(token, base_url)`` taken from ONE authority, so a Codex key is only ever sent to the host
+     it belongs to (#121486): the profile-scoped ``HERMES_CODEX_BASE_URL`` wins; otherwise a pooled
+     key goes where that pool entry routes (row URL / ``model.base_url``) and the auth.json OAuth
+-    token goes to the ChatGPT default. ``(None, <base>)`` without a usable token."""
++    token goes to the ChatGPT default. ``(None, <base>)`` without a usable token. *model* scopes the
++    pool pick, so a bench on another slug does not hide a credential this model can use."""
+     override = _codex_base_url_override()
+-    pool_present, entry = _select_pool_entry("openai-codex")
++    pool_present, entry = _select_pool_entry("openai-codex", model=model)
+     if pool_present:
+         token = _pool_runtime_api_key(entry)
+         if token:
+@@ -2976,7 +2982,7 @@ def _build_codex_client(model: str) -> tuple[Optional[Any], Optional[str]]:
+             "pass model explicitly (auxiliary.<task>.model in config.yaml)."
+         )
+         return None, None
+-    codex_token, base_url = _resolve_codex_credential_and_base()
++    codex_token, base_url = _resolve_codex_credential_and_base(model)
+     if not codex_token:
+         return None, None
+     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
+@@ -5046,13 +5052,14 @@ def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
+     no_token_msg = "resolve_provider_client: openai-codex requested but no Codex OAuth token found (run: hermes model)"
+     if req.raw_codex:
+         # Raw OpenAI client for callers needing responses.stream() (main agent loop).
+-        codex_token, base_url = _resolve_codex_credential_and_base()
++        wire_model = _normalize_resolved_model(model, req.provider)
++        codex_token, base_url = _resolve_codex_credential_and_base(wire_model)
+         if not codex_token:
+             logger.warning(no_token_msg)
+             return None, None
+         raw_client = _create_openai_client(api_key=codex_token, base_url=base_url,
+                                            default_headers=_codex_cloudflare_headers(codex_token, base_url=base_url))
+-        return raw_client, _normalize_resolved_model(model, req.provider)
++        return raw_client, wire_model
+     client, default = _build_codex_client(model)
+     return _route_or_warn(req, client, default, no_token_msg)
+ 
+diff --git a/tests/agent/test_auxiliary_client.py b/tests/agent/test_auxiliary_client.py
+index 6a161183..fafc44eb 100644
+--- a/tests/agent/test_auxiliary_client.py
++++ b/tests/agent/test_auxiliary_client.py
+@@ -704,6 +704,24 @@ class TestBuildCodexClient:
+         assert mock_openai.call_args.kwargs["api_key"] == "codex-auth-token"
+         assert mock_openai.call_args.kwargs["base_url"] == "https://chatgpt.com/backend-api/codex"
+ 
++    def test_codex_client_picks_the_pool_entry_for_its_model(self):
++        """The pool pick names the model, so a bench on another slug cannot hide the entry."""
++        entry = SimpleNamespace(
++            runtime_api_key="codex-pool-token",
++            runtime_base_url="https://chatgpt.com/backend-api/codex",
++        )
++        with (
++            patch("agent.auxiliary_client._select_pool_entry", return_value=(True, entry)) as pick,
++            patch("agent.auxiliary_client.OpenAI") as mock_openai,
++        ):
++            mock_openai.return_value = MagicMock()
++            from agent.auxiliary_client import _build_codex_client
++
++            client, _ = _build_codex_client("gpt-5.4")
++
++        assert client is not None
++        pick.assert_called_once_with("openai-codex", model="gpt-5.4")
++
+     def test_profile_codex_base_url_overrides_pool_endpoint(self, monkeypatch):
+         """Auxiliary Codex calls use the same profile endpoint override as the main client."""
+         entry = SimpleNamespace(
+diff --git a/tests/hermes_cli/test_codex_credential_host_binding.py b/tests/hermes_cli/test_codex_credential_host_binding.py
+index c441f9fd..143eec4f 100644
+--- a/tests/hermes_cli/test_codex_credential_host_binding.py
++++ b/tests/hermes_cli/test_codex_credential_host_binding.py
+@@ -54,14 +54,17 @@ def _write_config(home: Path, *, base_url: str = "") -> None:
+     (home / "config.yaml").write_text(yaml.safe_dump({"model": model}))  # load cache keys on stat
+ 
+ 
+-def _write_pool(home: Path, key: str, *, row_base: str = CHATGPT) -> None:
++def _write_pool(home: Path, key: str, *, row_base: str = CHATGPT, model_cooldowns: dict | None = None) -> None:
+     """A pool-only setup: the gateway key lives in ``credential_pool.openai-codex`` (no singleton)."""
++    row = {
++        "id": "gw", "label": "gateway", "auth_type": "api_key", "priority": 0,
++        "source": "manual", "access_token": key, "base_url": row_base,
++    }
++    if model_cooldowns:
++        row["model_cooldowns"] = model_cooldowns
+     (home / "auth.json").write_text(json.dumps({
+         "version": 1, "providers": {},
+-        "credential_pool": {"openai-codex": [{
+-            "id": "gw", "label": "gateway", "auth_type": "api_key", "priority": 0,
+-            "source": "manual", "access_token": key, "base_url": row_base,
+-        }]},
++        "credential_pool": {"openai-codex": [row]},
+     }))
+ 
+ 
+@@ -303,6 +306,20 @@ def test_aux_codex_client_binds_pool_key_to_model_base_url_gateway(monkeypatch):
+     assert (token, base_url) == (OPAQUE, GW)
+ 
+ 
++def test_aux_codex_pool_pick_is_scoped_to_the_call_model(monkeypatch):
++    """An entitlement bench on one slug (a year) must not hide the credential from another slug:
++    the auxiliary resolver knows its model and picks for it, as the chat path does."""
++    import time
++    from agent.credential_pool_model_cooldowns import MODEL_ENTITLEMENT_BENCH_SECONDS
++    home = _home(monkeypatch)
++    _write_config(home)
++    _write_pool(home, OPAQUE, model_cooldowns={"gpt-5.5": time.time() + MODEL_ENTITLEMENT_BENCH_SECONDS})
++    from agent import auxiliary_client as aux
++
++    assert aux._resolve_codex_credential_and_base("gpt-5.3-codex") == (OPAQUE, CHATGPT)
++    assert aux._resolve_codex_credential_and_base("gpt-5.5")[0] is None
++
++
+ def test_aux_codex_client_singleton_positive_control(monkeypatch):
+     home = _home(monkeypatch)
+     _write_config(home)
+-- 
+2.43.0
+

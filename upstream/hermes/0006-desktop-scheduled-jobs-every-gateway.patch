@@ -1,0 +1,1112 @@
+From 074d002f60f8e95bad852f864d0fa5a316a99331 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 06:21:00 +0000
+Subject: [PATCH] desktop: list every connected gateway's scheduled jobs, and
+ send each job's actions to its own gateway
+
+The Scheduled jobs page and the sidebar's Cron jobs section asked only the
+connection in front. A job on another registered connection (a Bot's
+schedule on an SSH host while a chat on This device is in front) never
+showed, and nothing could pause, run or edit it from there.
+
+The all-profiles list now joins every connected registry gateway's jobs the
+way the unified Sessions list joins their chats: only already-pooled
+backends are read (a refresh never dials), a gateway already listed (same
+connection or same install_id) is read once, and a dead one adds nothing.
+Each spliced job carries the connection_id that served it, and every
+per-job call (get, runs, edit, pause, resume, run now, stop, delete) goes
+to that connection under the job's own profile. Rows are keyed by
+(connection, id), since two gateways can hold one id.
+---
+ apps/desktop/electron/cron-job-union.test.ts  | 145 +++++++++++++++
+ apps/desktop/electron/cron-job-union.ts       | 169 ++++++++++++++++++
+ apps/desktop/electron/main.ts                 |  31 ++++
+ apps/desktop/src/api/cron-job-owner.test.ts   |  60 +++++++
+ apps/desktop/src/api/cron.ts                  |  81 ++++++---
+ .../app/chat/sidebar/cron-jobs-section.tsx    |  47 +++--
+ apps/desktop/src/app/chat/sidebar/index.tsx   |   4 +-
+ apps/desktop/src/app/contrib/wiring.tsx       |   4 +-
+ apps/desktop/src/app/cron/cron-actions.ts     |   6 +-
+ apps/desktop/src/app/cron/index.tsx           |  56 ++++--
+ apps/desktop/src/store/cron.test.ts           |  28 ++-
+ apps/desktop/src/store/cron.ts                |  10 ++
+ apps/desktop/src/types/hermes.ts              |   6 +
+ 13 files changed, 574 insertions(+), 73 deletions(-)
+ create mode 100644 apps/desktop/electron/cron-job-union.test.ts
+ create mode 100644 apps/desktop/electron/cron-job-union.ts
+ create mode 100644 apps/desktop/src/api/cron-job-owner.test.ts
+
+diff --git a/apps/desktop/electron/cron-job-union.test.ts b/apps/desktop/electron/cron-job-union.test.ts
+new file mode 100644
+index 0000000000..5ef7466adf
+--- /dev/null
++++ b/apps/desktop/electron/cron-job-union.test.ts
+@@ -0,0 +1,145 @@
++/**
++ * Tests for electron/cron-job-union.ts: the Scheduled jobs list across every
++ * connected gateway, each job tagged with the connection that serves it.
++ *
++ * Run with: npx vitest run electron/cron-job-union.test.ts
++ */
++
++import assert from 'node:assert/strict'
++
++import { test } from 'vitest'
++
++import { type CronUnionSource, isAllProfilesCronListRequest, mergeRegistryCronJobs, otherCronSources } from './cron-job-union'
++
++const source = (connectionId: string, backendId?: string, descriptors = [connectionId]): CronUnionSource => ({
++  backendId,
++  backends: descriptors.map(descriptor => ({ descriptor })),
++  connectionId
++})
++
++function jsonFrom(answers: Record<string, unknown>) {
++  const calls: Array<{ descriptor: unknown; path: string }> = []
++
++  const getJson = async (descriptor: unknown, path: string) => {
++    calls.push({ descriptor, path })
++    const answer = answers[String(descriptor)]
++
++    if (answer instanceof Error) {
++      throw answer
++    }
++
++    return answer
++  }
++
++  return { calls, getJson }
++}
++
++test('only a GET of the cross-profile list is the unified list', () => {
++  assert.equal(isAllProfilesCronListRequest('GET', '/api/cron/jobs'), true)
++  assert.equal(isAllProfilesCronListRequest(undefined, '/api/cron/jobs?profile=all'), true)
++  assert.equal(isAllProfilesCronListRequest('get', '/api/cron/jobs/?profile=ALL'), true)
++  assert.equal(isAllProfilesCronListRequest('GET', '/api/cron/jobs?profile=bramble'), false)
++  assert.equal(isAllProfilesCronListRequest('POST', '/api/cron/jobs'), false)
++  assert.equal(isAllProfilesCronListRequest('GET', '/api/cron/jobs/abc'), false)
++  assert.equal(isAllProfilesCronListRequest('GET', '/api/cron/jobs/abc/runs'), false)
++  assert.equal(isAllProfilesCronListRequest('GET', undefined), false)
++})
++
++test("another gateway's jobs join the front's, tagged with their connection", async () => {
++  const front = [{ id: 'mine', profile: 'default' }]
++
++  const { calls, getJson } = jsonFrom({
++    'thornswood-bots': [
++      { id: 'review-1', profile: 'bramble' },
++      { id: 'review-2', profile: 'bramble' }
++    ]
++  })
++
++  const merged = await mergeRegistryCronJobs(front, [source('thornswood-bots', 'b')], getJson, {
++    backendId: 'a',
++    connectionId: null
++  })
++
++  assert.deepEqual(merged, [
++    { id: 'mine', profile: 'default' },
++    { connection_id: 'thornswood-bots', id: 'review-1', profile: 'bramble' },
++    { connection_id: 'thornswood-bots', id: 'review-2', profile: 'bramble' }
++  ])
++  assert.deepEqual(calls, [{ descriptor: 'thornswood-bots', path: '/api/cron/jobs?profile=all' }])
++})
++
++test('the front connection and backends already listed are not read again', () => {
++  const sources = [
++    source('my-hermes', 'vm-1'),
++    source('thornswood-bots', 'vm-2'),
++    source('same-gateway-again', 'vm-2'),
++    source('local', 'one'),
++    source('no-install-id')
++  ]
++
++  assert.deepEqual(
++    otherCronSources(sources, { backendId: 'one', connectionId: 'my-hermes' }).map(s => s.connectionId),
++    ['thornswood-bots', 'no-install-id']
++  )
++  assert.deepEqual(
++    otherCronSources(sources, { backendId: null, connectionId: null }).map(s => s.connectionId),
++    ['my-hermes', 'thornswood-bots', 'local', 'no-install-id']
++  )
++})
++
++test('with no other gateway the front answer is returned as it is', async () => {
++  const front = [{ id: 'mine' }]
++  const { calls, getJson } = jsonFrom({})
++
++  assert.equal(await mergeRegistryCronJobs(front, [], getJson, { connectionId: null }), front)
++  assert.equal(await mergeRegistryCronJobs(front, [source('local')], getJson, { connectionId: 'local' }), front)
++  assert.equal(calls.length, 0)
++})
++
++test("an error body from the front is never hidden behind other gateways' jobs", async () => {
++  const failure = { detail: 'boom' }
++  const { calls, getJson } = jsonFrom({ other: [{ id: 'x' }] })
++
++  assert.equal(await mergeRegistryCronJobs(failure, [source('other')], getJson, { connectionId: null }), failure)
++  assert.equal(calls.length, 0)
++})
++
++test("a dead backend falls to the source's next one, and a dead source adds nothing", async () => {
++  const { getJson } = jsonFrom({
++    'bots-a': new Error('ECONNREFUSED'),
++    'bots-b': [{ id: 'review', profile: 'bramble' }],
++    gone: new Error('timeout')
++  })
++
++  const merged = await mergeRegistryCronJobs(
++    [],
++    [source('thornswood-bots', undefined, ['bots-a', 'bots-b']), source('gone')],
++    getJson,
++    { connectionId: null }
++  )
++
++  assert.deepEqual(merged, [{ connection_id: 'thornswood-bots', id: 'review', profile: 'bramble' }])
++})
++
++test('each job is listed once per (connection, profile, id); "unknown" ids are never merged', async () => {
++  const { getJson } = jsonFrom({
++    bots: [
++      { id: 'review', profile: 'bramble' },
++      { id: 'review', profile: 'bramble' },
++      { id: 'review', profile: 'rift' },
++      { id: 'unknown' },
++      { id: 'unknown' },
++      null,
++      'junk'
++    ]
++  })
++
++  const merged = (await mergeRegistryCronJobs([], [source('bots')], getJson, { connectionId: null })) as unknown[]
++
++  assert.deepEqual(merged, [
++    { connection_id: 'bots', id: 'review', profile: 'bramble' },
++    { connection_id: 'bots', id: 'review', profile: 'rift' },
++    { connection_id: 'bots', id: 'unknown' },
++    { connection_id: 'bots', id: 'unknown' }
++  ])
++})
+diff --git a/apps/desktop/electron/cron-job-union.ts b/apps/desktop/electron/cron-job-union.ts
+new file mode 100644
+index 0000000000..5e2fc76fd2
+--- /dev/null
++++ b/apps/desktop/electron/cron-job-union.ts
+@@ -0,0 +1,169 @@
++/**
++ * The unified Scheduled jobs list: the jobs of the connection in front plus
++ * every CONNECTED registry gateway's jobs, the way the unified Sessions list
++ * already splices every connected gateway's chats in (#88880).
++ *
++ * Cron jobs live in each backend's own profile tree. The renderer's list call
++ * names only the connection in front, so a job on another registered
++ * connection (a Bot's schedule on an SSH host while you read a chat on This
++ * device) never reached the sidebar's Cron jobs section or the Scheduled jobs
++ * page. Every job read here is tagged with the `connection_id` that serves it,
++ * so its per-job calls (pause, trigger, edit, runs) go to that backend.
++ *
++ * Only already-pooled backends are read (the caller passes the same sources
++ * the Sessions list uses): a list refresh must never dial or spawn a backend.
++ * A dead or erroring gateway contributes nothing rather than breaking the list.
++ */
++
++type GetJson = (descriptor: unknown, path: string) => Promise<unknown>
++
++export interface CronUnionSource {
++  backends: Array<{ descriptor: unknown }>
++  connectionId: string
++  /** The gateway's install_id, when known. Two sources with one install_id are
++   *  one backend (one profile tree), so its jobs are listed once. */
++  backendId?: string
++}
++
++/** The connection in front: its registry id (null for the unpinned primary)
++ *  and its gateway install_id when known. */
++export interface CronUnionFront {
++  backendId?: null | string
++  connectionId: null | string
++}
++
++const ALL_PROFILES_CRON_PATH = '/api/cron/jobs?profile=all'
++
++/** A GET of the cross-profile job list: `/api/cron/jobs` with no profile or `profile=all`. */
++export function isAllProfilesCronListRequest(method: string | undefined, path: string | undefined): boolean {
++  if ((method || 'GET').toUpperCase() !== 'GET' || typeof path !== 'string') {
++    return false
++  }
++
++  let url: URL
++
++  try {
++    url = new URL(path, 'http://x')
++  } catch {
++    return false
++  }
++
++  if (url.pathname.replace(/\/+$/, '') !== '/api/cron/jobs') {
++    return false
++  }
++
++  return (url.searchParams.get('profile') || 'all').trim().toLowerCase() === 'all'
++}
++
++function jobIdentity(connectionId: string, job: Record<string, unknown>): null | string {
++  const id = String(job.id ?? job.job_id ?? '').trim()
++
++  // cron.jobs fills a missing id with the sentinel "unknown"; never merge on it.
++  if (!id || id === 'unknown') {
++    return null
++  }
++
++  return `${connectionId}\u0000${String(job.profile ?? '').trim() || 'default'}\u0000${id}`
++}
++
++/** One source's jobs from the first of its backends that answers. Every
++ *  backend of a connection serves the same profile tree (an SSH source runs one
++ *  backend per profile over one HERMES_HOME), so one answer covers it. */
++async function readSourceJobs(source: CronUnionSource, getJson: GetJson): Promise<Record<string, unknown>[]> {
++  for (const { descriptor } of source.backends) {
++    try {
++      const jobs = await getJson(descriptor, ALL_PROFILES_CRON_PATH)
++
++      if (Array.isArray(jobs)) {
++        return jobs.filter((job): job is Record<string, unknown> => Boolean(job) && typeof job === 'object')
++      }
++    } catch {
++      // Dead or still-starting backend: try the source's next backend.
++    }
++  }
++
++  return []
++}
++
++const trimmed = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
++
++/** The sources that are another backend than the front and than each other:
++ *  a source is skipped when it IS the front connection, or when its install_id
++ *  is the front's or an earlier source's (the same gateway registered twice,
++ *  or the unpinned primary that is also a registry connection). */
++export function otherCronSources(sources: readonly CronUnionSource[], front: CronUnionFront): CronUnionSource[] {
++  const frontConnection = trimmed(front.connectionId)
++  const seenBackends = new Set<string>()
++  const frontBackend = trimmed(front.backendId)
++
++  if (frontBackend) {
++    seenBackends.add(frontBackend)
++  }
++
++  const others: CronUnionSource[] = []
++
++  for (const source of sources) {
++    if (!source.connectionId || source.connectionId === frontConnection) {
++      continue
++    }
++
++    const backendId = trimmed(source.backendId)
++
++    if (backendId) {
++      if (seenBackends.has(backendId)) {
++        continue
++      }
++
++      seenBackends.add(backendId)
++    }
++
++    others.push(source)
++  }
++
++  return others
++}
++
++/**
++ * `base` is the front connection's own answer and is returned first and
++ * untagged (its rows already belong to the connection the renderer named).
++ * A non-array `base` (an error body) is returned unchanged: the union never
++ * hides the front connection's failure.
++ */
++export async function mergeRegistryCronJobs(
++  base: unknown,
++  sources: readonly CronUnionSource[],
++  getJson: GetJson,
++  front: CronUnionFront
++): Promise<unknown> {
++  if (!Array.isArray(base)) {
++    return base
++  }
++
++  const others = otherCronSources(sources, front)
++
++  if (others.length === 0) {
++    return base
++  }
++
++  const merged: unknown[] = [...base]
++  const seen = new Set<string>()
++  const reads = await Promise.all(others.map(source => readSourceJobs(source, getJson)))
++
++  others.forEach((source, index) => {
++    for (const job of reads[index]) {
++      const identity = jobIdentity(source.connectionId, job)
++
++      if (identity) {
++        if (seen.has(identity)) {
++          continue
++        }
++
++        seen.add(identity)
++      }
++
++      merged.push({ ...job, connection_id: source.connectionId })
++    }
++  })
++
++  return merged
++}
+diff --git a/apps/desktop/electron/main.ts b/apps/desktop/electron/main.ts
+index 3206f7e63c..8af75af1c6 100644
+--- a/apps/desktop/electron/main.ts
++++ b/apps/desktop/electron/main.ts
+@@ -213,6 +213,7 @@ import type { RegistryConnection } from './connection-registry'
+ import type { RosterProfileMetadata } from './connection-registry'
+ import { liveWindowState, overlayWindowState } from './connection-window-state'
+ import { describeCrashReason, installCrashForensics } from './crash-forensics'
++import { isAllProfilesCronListRequest, mergeRegistryCronJobs } from './cron-job-union'
+ import { adoptServedDashboardToken } from './dashboard-token'
+ import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
+ import { registerDeepLinkProtocol as registerDeepLinkProtocolWith } from './deep-link-protocol'
+@@ -16139,7 +16140,37 @@ function isNotFoundApiError(error) {
+   return /(?:^|\s)404\b/.test(String((error as any)?.message ?? error))
+ }
+ 
++// The Scheduled jobs list across every connected gateway: the front
++// connection's own answer, then each other CONNECTED registry gateway's jobs,
++// each tagged with the connection that serves it so its per-job calls route
++// there (cron-job-union.ts). Before this the list asked only the connection in
++// front, so a Bot's jobs on an SSH host never showed while you read a chat on
++// another connection. Same never-dial sources as the unified Sessions list.
+ async function handleHermesApiRequest(request) {
++  if (!isAllProfilesCronListRequest(request?.method, request?.path)) {
++    return handleFrontHermesApiRequest(request)
++  }
++
++  const own = await handleFrontHermesApiRequest(request)
++  const registryConnectionId = apiRequestRegistryConnectionId(request)
++
++  const sources = await pooledRegistrySessionSources(
++    shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
++  )
++
++  const frontBackendId = registryConnectionId
++    ? sources.find(source => source.connectionId === registryConnectionId)?.backendId
++    : await primaryBackendInstallId()
++
++  return mergeRegistryCronJobs(
++    own,
++    sources,
++    (descriptor, path) => getJsonForBackend(descriptor, path, { timeoutMs: 10_000 }),
++    { backendId: frontBackendId, connectionId: registryConnectionId || null }
++  )
++}
++
++async function handleFrontHermesApiRequest(request) {
+   // Registry-pinned request (request.connectionId): the renderer is working
+   // against a REGISTERED gateway connection, so the data — cron jobs and their
+   // run sessions included — lives in THAT host's state.db, not any local
+diff --git a/apps/desktop/src/api/cron-job-owner.test.ts b/apps/desktop/src/api/cron-job-owner.test.ts
+new file mode 100644
+index 0000000000..ae8732dfee
+--- /dev/null
++++ b/apps/desktop/src/api/cron-job-owner.test.ts
+@@ -0,0 +1,60 @@
++import { beforeEach, expect, it, vi } from 'vitest'
++
++import { setApiRequestConnection, setApiRequestProfile } from './client'
++import {
++  deleteCronJob,
++  getCronJob,
++  getCronJobRuns,
++  pauseCronJob,
++  resumeCronJob,
++  triggerCronJob,
++  updateCronJob
++} from './cron'
++
++beforeEach((): void => {
++  Object.defineProperty(window, 'hermesDesktop', {
++    configurable: true,
++    value: { api: vi.fn().mockResolvedValue({ runs: [{ id: 'run-1' }] }) }
++  })
++  setApiRequestConnection('my-hermes')
++  setApiRequestProfile('default')
++})
++
++const listedElsewhere = { connection_id: 'thornswood-bots', id: 'review/1', profile: 'bramble' }
++
++const perJobCalls = [
++  ['getCronJob', () => getCronJob(listedElsewhere)],
++  ['getCronJobRuns', () => getCronJobRuns(listedElsewhere)],
++  ['updateCronJob', () => updateCronJob(listedElsewhere, { enabled: false } as never)],
++  ['pauseCronJob', () => pauseCronJob(listedElsewhere)],
++  ['resumeCronJob', () => resumeCronJob(listedElsewhere)],
++  ['triggerCronJob', () => triggerCronJob(listedElsewhere)],
++  ['deleteCronJob', () => deleteCronJob(listedElsewhere)]
++] as const
++
++it.each(perJobCalls)(
++  "%s goes to the gateway that listed the job, under the job's own profile",
++  async (_name: string, call: () => Promise<unknown>): Promise<void> => {
++    await call()
++    const [request] = vi.mocked(window.hermesDesktop.api).mock.calls[0]
++    expect(request).toMatchObject({ connectionId: 'thornswood-bots', profile: 'bramble' })
++    expect(request.path).toContain('/api/cron/jobs/review%2F1')
++  }
++)
++
++it('an untagged job still belongs to the connection in front', async (): Promise<void> => {
++  await pauseCronJob({ id: 'mine', profile: 'default' })
++  await triggerCronJob('mine')
++
++  for (const [request] of vi.mocked(window.hermesDesktop.api).mock.calls) {
++    expect(request).toMatchObject({ connectionId: 'my-hermes', profile: 'default' })
++  }
++})
++
++it("a listed job's runs are stamped with the job's connection, not the front one", async (): Promise<void> => {
++  const runs = await getCronJobRuns(listedElsewhere)
++  expect(runs[0]).toMatchObject({ connection_id: 'thornswood-bots', id: 'run-1' })
++
++  const ownRuns = await getCronJobRuns('mine')
++  expect(ownRuns[0]).toMatchObject({ connection_id: 'my-hermes', id: 'run-1' })
++})
+diff --git a/apps/desktop/src/api/cron.ts b/apps/desktop/src/api/cron.ts
+index 61405590c4..aa97e5dd81 100644
+--- a/apps/desktop/src/api/cron.ts
++++ b/apps/desktop/src/api/cron.ts
+@@ -12,6 +12,7 @@ import {
+   connectionScoped,
+   getApiRequestConnection,
+   hermesApi,
++  ownerScoped,
+   profileScoped,
+   STARTUP_REQUEST_TIMEOUT_MS
+ } from './client'
+@@ -22,6 +23,35 @@ import {
+ // synchronous long-operation endpoint rather than weakening all API timeouts.
+ const CRON_TRIGGER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000
+ 
++/** A job the caller holds: its id alone (the connection in front owns it), or
++ *  the listed row, whose `connection_id` names the registry gateway that
++ *  serves it when the unified list spliced it in from another connection. */
++export type CronJobRef = Pick<CronJob, 'connection_id' | 'id' | 'profile'> | string
++
++const cronJobId = (job: CronJobRef): string => (typeof job === 'string' ? job : job.id)
++
++/** The registry connection that listed `job`; empty for the connection in front. */
++const listedConnection = (job: CronJobRef): string =>
++  typeof job === 'string' ? '' : String(job.connection_id ?? '').trim()
++
++/** The connection a job's runs belong to, for stamping their rows. */
++function cronJobConnection(job: CronJobRef): null | string {
++  return listedConnection(job) || getApiRequestConnection()
++}
++
++/** Every per-job call goes to the backend that listed the job. A job spliced
++ *  in from another connection carries that connection and its own profile; an
++ *  untagged one belongs to the connection in front, as before. */
++function cronJobScope(job: CronJobRef): { connectionId?: string; priority?: 'foreground'; profile?: string } {
++  const connectionId = listedConnection(job)
++
++  if (!connectionId || typeof job === 'string') {
++    return { ...profileScoped(), ...connectionScoped() }
++  }
++
++  return ownerScoped({ connectionId, profile: job.profile || undefined })
++}
++
+ // Cron jobs are stored per-profile (<HERMES_HOME>/cron/jobs.json), and the
+ // backend's list endpoint defaults to 'all'. Pass a concrete profile key to
+ // list just that profile's jobs, or 'all' for the unified cross-profile view.
+@@ -38,19 +68,17 @@ export function getCronJobs(profile?: string): Promise<CronJob[]> {
+   })
+ }
+ 
+-export function getCronJob(jobId: string): Promise<CronJob> {
++export function getCronJob(job: CronJobRef): Promise<CronJob> {
+   return hermesApi<CronJob>({
+-    ...profileScoped(),
+-    ...connectionScoped(),
+-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}`
++    ...cronJobScope(job),
++    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}`
+   })
+ }
+ 
+-export async function getCronJobRuns(jobId: string, limit = 20): Promise<SessionInfo[]> {
++export async function getCronJobRuns(job: CronJobRef, limit = 20): Promise<SessionInfo[]> {
+   const { runs } = await hermesApi<{ runs: SessionInfo[] }>({
+-    ...profileScoped(),
+-    ...connectionScoped(),
+-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/runs?limit=${limit}`
++    ...cronJobScope(job),
++    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/runs?limit=${limit}`
+   })
+ 
+   // Run rows are backend-returned sessions like any other page, so they carry
+@@ -62,7 +90,7 @@ export async function getCronJobRuns(jobId: string, limit = 20): Promise<Session
+   // id-only resume and the transcript never loaded (#82527). The backend
+   // stamps `profile` (the job's owning profile); this adds the connection
+   // half, exactly as /api/sessions and the sidebar slices do.
+-  return stampRowsWithOwningConnection(runs ?? [], getApiRequestConnection())
++  return stampRowsWithOwningConnection(runs ?? [], cronJobConnection(job))
+ }
+ 
+ // The single source of truth for cron delivery targets (local + configured
+@@ -88,49 +116,44 @@ export function createCronJob(body: CronJobCreatePayload): Promise<CronJob> {
+   })
+ }
+ 
+-export function updateCronJob(jobId: string, updates: CronJobUpdates): Promise<CronJob> {
++export function updateCronJob(job: CronJobRef, updates: CronJobUpdates): Promise<CronJob> {
+   return hermesApi<CronJob>({
+-    ...profileScoped(),
+-    ...connectionScoped(),
+-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}`,
++    ...cronJobScope(job),
++    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}`,
+     method: 'PUT',
+     body: { updates }
+   })
+ }
+ 
+-export function pauseCronJob(jobId: string): Promise<CronJob> {
++export function pauseCronJob(job: CronJobRef): Promise<CronJob> {
+   return hermesApi<CronJob>({
+-    ...profileScoped(),
+-    ...connectionScoped(),
+-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/pause`,
++    ...cronJobScope(job),
++    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/pause`,
+     method: 'POST'
+   })
+ }
+ 
+-export function resumeCronJob(jobId: string): Promise<CronJob> {
++export function resumeCronJob(job: CronJobRef): Promise<CronJob> {
+   return hermesApi<CronJob>({
+-    ...profileScoped(),
+-    ...connectionScoped(),
+-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/resume`,
++    ...cronJobScope(job),
++    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/resume`,
+     method: 'POST'
+   })
+ }
+ 
+-export function triggerCronJob(jobId: string): Promise<CronJob> {
++export function triggerCronJob(job: CronJobRef): Promise<CronJob> {
+   return hermesApi<CronJob>({
+-    ...profileScoped(),
+-    ...connectionScoped(),
+-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/trigger`,
++    ...cronJobScope(job),
++    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}/trigger`,
+     method: 'POST',
+     timeoutMs: CRON_TRIGGER_REQUEST_TIMEOUT_MS
+   })
+ }
+ 
+-export function deleteCronJob(jobId: string): Promise<{ ok: boolean }> {
++export function deleteCronJob(job: CronJobRef): Promise<{ ok: boolean }> {
+   return hermesApi<{ ok: boolean }>({
+-    ...profileScoped(),
+-    ...connectionScoped(),
+-    path: `/api/cron/jobs/${encodeURIComponent(jobId)}`,
++    ...cronJobScope(job),
++    path: `/api/cron/jobs/${encodeURIComponent(cronJobId(job))}`,
+     method: 'DELETE'
+   })
+ }
+diff --git a/apps/desktop/src/app/chat/sidebar/cron-jobs-section.tsx b/apps/desktop/src/app/chat/sidebar/cron-jobs-section.tsx
+index ccf1837970..8705192e2a 100644
+--- a/apps/desktop/src/app/chat/sidebar/cron-jobs-section.tsx
++++ b/apps/desktop/src/app/chat/sidebar/cron-jobs-section.tsx
+@@ -14,7 +14,7 @@ import { useI18n } from '@/i18n'
+ import { fmtDayTime, relativeTime } from '@/lib/time'
+ import { cn } from '@/lib/utils'
+ import { confirm } from '@/store/confirm'
+-import { updateCronJobs } from '@/store/cron'
++import { cronJobKey, updateCronJobs, withListedConnection } from '@/store/cron'
+ import { $changeEventsAvailable, $cronChangeTick } from '@/store/live-sync'
+ import { notify, notifyError } from '@/store/notifications'
+ import { $selectedStoredSessionId } from '@/store/session'
+@@ -79,7 +79,7 @@ interface SidebarCronJobsSectionProps {
+   // Open the full Cron page focused on this job (manage / full history).
+   onManageJob: (jobId: string) => void
+   // Fire the job now.
+-  onTriggerJob: (jobId: string) => Promise<void>
++  onTriggerJob: (job: CronJob) => Promise<void>
+   onToggle: () => void
+   open: boolean
+ }
+@@ -129,14 +129,14 @@ export function SidebarCronJobsSection({
+     }
+   }, [])
+ 
+-  const triggerJob = (jobId: string) => {
++  const triggerJob = (job: CronJob) => {
+     const controller = triggerControllerRef.current
+ 
+     if (!controller) {
+       return
+     }
+ 
+-    void controller.run(jobId, () => onTriggerJob(jobId)).catch(() => undefined)
++    void controller.run(cronJobKey(job), () => onTriggerJob(job)).catch(() => undefined)
+   }
+ 
+   const visible = usePaneVisible()
+@@ -199,15 +199,15 @@ export function SidebarCronJobsSection({
+         <SidebarGroupContent className="scrollbar-fade flex max-h-72 flex-col gap-px overflow-x-hidden overflow-y-auto overscroll-contain pb-1.75 compact:max-h-none compact:overflow-visible">
+           {shown.map(job => (
+             <CronJobSidebarRow
+-              busy={triggeringJobIds.has(job.id)}
+-              expanded={peekJobId === job.id}
++              busy={triggeringJobIds.has(cronJobKey(job))}
++              expanded={peekJobId === cronJobKey(job)}
+               job={job}
+-              key={job.id}
++              key={cronJobKey(job)}
+               nowMs={nowMs}
+               onManage={() => onManageJob(job.id)}
+               onOpenRun={onOpenRun}
+-              onTogglePeek={() => setPeekJobId(prev => (prev === job.id ? null : job.id))}
+-              onTrigger={() => triggerJob(job.id)}
++              onTogglePeek={() => setPeekJobId(prev => (prev === cronJobKey(job) ? null : cronJobKey(job)))}
++              onTrigger={() => triggerJob(job)}
+             />
+           ))}
+           {hiddenCount > 0 && (
+@@ -262,8 +262,10 @@ function CronJobSidebarRow({
+   // row updates in place.
+   const togglePause = async () => {
+     try {
+-      const updated = isPaused ? await resumeCronJob(job.id) : await pauseCronJob(job.id)
+-      updateCronJobs(rows => rows.map(row => (row.id === job.id ? updated : row)))
++      const updated = isPaused ? await resumeCronJob(job) : await pauseCronJob(job)
++      updateCronJobs(rows =>
++        rows.map(row => (cronJobKey(row) === cronJobKey(job) ? withListedConnection(job, updated) : row))
++      )
+       notify({ kind: 'success', title: isPaused ? c.resumed : c.paused, message: label })
+     } catch (err) {
+       notifyError(err, c.failedUpdate)
+@@ -283,8 +285,8 @@ function CronJobSidebarRow({
+     }
+ 
+     try {
+-      await deleteCronJob(job.id)
+-      updateCronJobs(rows => rows.filter(row => row.id !== job.id))
++      await deleteCronJob(job)
++      updateCronJobs(rows => rows.filter(row => cronJobKey(row) !== cronJobKey(job)))
+       notify({ kind: 'success', title: c.deleted, message: label })
+     } catch (err) {
+       notifyError(err, c.failedDelete)
+@@ -387,17 +389,28 @@ function CronJobSidebarRow({
+           </Tip>
+         </SidebarRowShell>
+       </ActionsContextMenu>
+-      {expanded && <CronJobSidebarRuns jobId={job.id} onOpenRun={onOpenRun} />}
++      {expanded && (
++        <CronJobSidebarRuns
++          connectionId={job.connection_id}
++          jobId={job.id}
++          onOpenRun={onOpenRun}
++          profile={job.profile}
++        />
++      )}
+     </div>
+   )
+ }
+ 
+ function CronJobSidebarRuns({
++  connectionId,
+   jobId,
+-  onOpenRun
++  onOpenRun,
++  profile
+ }: {
++  connectionId?: string
+   jobId: string
+   onOpenRun: (sessionId: string, session?: SessionInfo) => void
++  profile?: null | string
+ }) {
+   const { t } = useI18n()
+   const c = t.cron
+@@ -411,7 +424,7 @@ function CronJobSidebarRuns({
+     let cancelled = false
+ 
+     const load = () =>
+-      getCronJobRuns(jobId, PEEK_RUN_LIMIT)
++      getCronJobRuns({ connection_id: connectionId, id: jobId, profile }, PEEK_RUN_LIMIT)
+         .then(result => {
+           // A fresh poll re-evaluates every run already opened (#88443).
+           reconcileCronRunVerdicts(result)
+@@ -451,7 +464,7 @@ function CronJobSidebarRuns({
+       window.clearInterval(intervalId)
+     }
+     // cronChangeTick: a fired run reloads the peek immediately.
+-  }, [changeEventsAvailable, cronChangeTick, jobId, visible])
++  }, [changeEventsAvailable, connectionId, cronChangeTick, jobId, profile, visible])
+ 
+   return (
+     <div className="mb-1 ml-[1.375rem] flex flex-col gap-px">
+diff --git a/apps/desktop/src/app/chat/sidebar/index.tsx b/apps/desktop/src/app/chat/sidebar/index.tsx
+index dadfd889c0..40c3a2f332 100644
+--- a/apps/desktop/src/app/chat/sidebar/index.tsx
++++ b/apps/desktop/src/app/chat/sidebar/index.tsx
+@@ -23,7 +23,7 @@ import {
+ } from '@/components/ui/sidebar'
+ import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+ import { useContributions } from '@/contrib/react/use-contributions'
+-import { type SessionInfo, type SessionSearchResult } from '@/hermes'
++import { type CronJob, type SessionInfo, type SessionSearchResult } from '@/hermes'
+ import { useI18n } from '@/i18n'
+ import { comboTokens } from '@/lib/keybinds/combo'
+ import { sessionMatchesSearch } from '@/lib/session-search'
+@@ -390,7 +390,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
+    *  context-menu "Open in split" path passes just a `dir`. */
+   onNewSessionSplit: NewSessionSplitHandler
+   onManageCronJob: (jobId: string) => void
+-  onTriggerCronJob: (jobId: string) => Promise<void>
++  onTriggerCronJob: (job: CronJob) => Promise<void>
+ }
+ 
+ export function ChatSidebar({
+diff --git a/apps/desktop/src/app/contrib/wiring.tsx b/apps/desktop/src/app/contrib/wiring.tsx
+index 954975fa63..7db01a4372 100644
+--- a/apps/desktop/src/app/contrib/wiring.tsx
++++ b/apps/desktop/src/app/contrib/wiring.tsx
+@@ -1145,8 +1145,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
+     onThreadMessagesChange: handleThreadMessagesChange,
+     onToggleSelectedPin: toggleSelectedPin,
+     onTranscribeAudio: transcribeVoiceAudio,
+-    onTriggerCronJob: jobId =>
+-      triggerAndRefreshCronJobs(jobId, profileScope === ALL_PROFILES ? 'all' : profileScope)
++    onTriggerCronJob: job =>
++      triggerAndRefreshCronJobs(job, profileScope === ALL_PROFILES ? 'all' : profileScope)
+         .then(() => undefined)
+         .catch(() => undefined),
+     followDefaultModel,
+diff --git a/apps/desktop/src/app/cron/cron-actions.ts b/apps/desktop/src/app/cron/cron-actions.ts
+index e49c541f64..a7de6790f1 100644
+--- a/apps/desktop/src/app/cron/cron-actions.ts
++++ b/apps/desktop/src/app/cron/cron-actions.ts
+@@ -1,4 +1,4 @@
+-import { type CronJob, getApiRequestConnection, getCronJobs, triggerCronJob } from '@/hermes'
++import { type CronJob, type CronJobRef, getApiRequestConnection, getCronJobs, triggerCronJob } from '@/hermes'
+ import {
+   beginCronJobsAction,
+   beginCronJobsRequest,
+@@ -88,10 +88,10 @@ export async function mutateAndRefreshCronJobs<T>(
+  * the trigger already succeeded and must not be shown as failed.
+  */
+ export async function triggerAndRefreshCronJobs(
+-  jobId: string,
++  job: CronJobRef,
+   profile: 'all' | string
+ ): Promise<CronTriggerRefreshResult> {
+-  const { value: _value, ...result } = await mutateAndRefreshCronJobs(profile, () => triggerCronJob(jobId))
++  const { value: _value, ...result } = await mutateAndRefreshCronJobs(profile, () => triggerCronJob(job))
+ 
+   return result
+ }
+diff --git a/apps/desktop/src/app/cron/index.tsx b/apps/desktop/src/app/cron/index.tsx
+index e79f611944..6ffc3e95b0 100644
+--- a/apps/desktop/src/app/cron/index.tsx
++++ b/apps/desktop/src/app/cron/index.tsx
+@@ -48,7 +48,7 @@ import { type Translations, useI18n } from '@/i18n'
+ import { AlertTriangle } from '@/lib/icons'
+ import { requestModelOptions } from '@/lib/model-options'
+ import { asText } from '@/lib/text'
+-import { $cronFocusJobId, $cronJobs, invalidateCronJobsRequests, setCronFocusJobId } from '@/store/cron'
++import { $cronFocusJobId, $cronJobs, cronJobKey, invalidateCronJobsRequests, setCronFocusJobId } from '@/store/cron'
+ import { $changeEventsAvailable, $cronChangeTick } from '@/store/live-sync'
+ import { notify, notifyError } from '@/store/notifications'
+ import { $profileScope, ALL_PROFILES } from '@/store/profile'
+@@ -404,8 +404,8 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+     const match = jobs.find(job => job.id === focusJobId || jobName(job) === focusJobId)
+ 
+     if (match) {
+-      setSelectedJobId(match.id)
+-      pendingScrollRef.current = match.id
++      setSelectedJobId(cronJobKey(match))
++      pendingScrollRef.current = cronJobKey(match)
+     }
+ 
+     setCronFocusJobId(null)
+@@ -436,7 +436,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+   // Detail always reflects a concrete job: the explicitly selected one, else the
+   // first visible row, so the right pane is never empty while jobs exist.
+   const selectedJob = useMemo(
+-    () => visibleJobs.find(job => job.id === selectedJobId) ?? visibleJobs[0] ?? null,
++    () => visibleJobs.find(job => cronJobKey(job) === selectedJobId) ?? visibleJobs[0] ?? null,
+     [visibleJobs, selectedJobId]
+   )
+ 
+@@ -445,7 +445,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+   useEffect(() => {
+     const target = pendingScrollRef.current
+ 
+-    if (!target || selectedJob?.id !== target) {
++    if (!target || !selectedJob || cronJobKey(selectedJob) !== target) {
+       return
+     }
+ 
+@@ -456,6 +456,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+   }, [selectedJob])
+ 
+   const totalCount = jobs.length
++  const selectedJobKey = selectedJob ? `${profile}:${cronJobKey(selectedJob)}` : ''
+ 
+   function beginJobBusy(jobId: string): symbol {
+     const token = Symbol(jobId)
+@@ -486,7 +487,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+       const isPaused = jobState(job) === 'paused'
+ 
+       const { refreshError, stale } = await mutateAndRefreshCronJobs(profile, () =>
+-        isPaused ? resumeCronJob(job.id) : pauseCronJob(job.id)
++        isPaused ? resumeCronJob(job) : pauseCronJob(job)
+       )
+ 
+       if (stale) {
+@@ -530,7 +531,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+ 
+   async function handleTrigger(job: CronJob) {
+     const viewProfile = profile
+-    const key = `${viewProfile}:${job.id}`
++    const key = `${viewProfile}:${cronJobKey(job)}`
+     const controller = triggerControllerRef.current
+ 
+     if (!controller) {
+@@ -549,7 +550,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+     try {
+       const run = await controller.run(
+         key,
+-        () => triggerAndRefreshCronJobs(job.id, viewProfile),
++        () => triggerAndRefreshCronJobs(job, viewProfile),
+         () => notify({ kind: 'info', title: c.triggerNow, message: truncate(jobTitle(job), 60) })
+       )
+ 
+@@ -589,7 +590,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+       return
+     }
+ 
+-    const { refreshError, stale } = await mutateAndRefreshCronJobs(profile, () => deleteCronJob(pendingDelete.id))
++    const { refreshError, stale } = await mutateAndRefreshCronJobs(profile, () => deleteCronJob(pendingDelete))
+ 
+     if (stale) {
+       return
+@@ -635,7 +636,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+         refreshError,
+         stale
+       } = await mutateAndRefreshCronJobs(profile, () =>
+-        updateCronJob(editor.job.id, cronEditorUpdates(values, { scriptOnlyJob }))
++        updateCronJob(editor.job, cronEditorUpdates(values, { scriptOnlyJob }))
+       )
+ 
+       if (stale || !updated) {
+@@ -710,15 +711,15 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+           >
+             {visibleJobs.map(job => (
+               <CronJobListRow
+-                active={selectedJob?.id === job.id}
++                active={selectedJob ? cronJobKey(selectedJob) === cronJobKey(job) : false}
+                 job={job}
+-                key={job.id}
++                key={cronJobKey(job)}
+                 menuItems={[
+                   { icon: 'edit', label: c.edit, onSelect: () => setEditor({ mode: 'edit', job }) },
+                   { icon: 'trash', label: t.common.delete, onSelect: () => setPendingDelete(job), tone: 'danger' }
+                 ]}
+                 menuLabel={c.manage}
+-                onSelect={() => setSelectedJobId(job.id)}
++                onSelect={() => setSelectedJobId(cronJobKey(job))}
+               />
+             ))}
+             {visibleJobs.length === 0 && (
+@@ -747,7 +748,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+ 
+           {selectedJob ? (
+             <CronJobDetail
+-              busy={busyJobTokens.has(selectedJob.id) || triggeringJobKeys.has(`${profile}:${selectedJob.id}`)}
++              busy={busyJobTokens.has(selectedJob.id) || triggeringJobKeys.has(selectedJobKey)}
+               c={c}
+               job={selectedJob}
+               onEdit={() => setEditor({ mode: 'edit', job: selectedJob })}
+@@ -755,8 +756,8 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
+               onPauseResume={() => void handlePauseResume(selectedJob)}
+               onPendingRunSettled={settlePendingTrigger}
+               onTrigger={() => void handleTrigger(selectedJob)}
+-              pendingJobKey={`${profile}:${selectedJob.id}`}
+-              pendingRunAt={pendingTriggers.get(`${profile}:${selectedJob.id}`)}
++              pendingJobKey={selectedJobKey}
++              pendingRunAt={pendingTriggers.get(selectedJobKey)}
+             />
+           ) : query.trim() ? (
+             // A search with no selected job: search-flavored copy is right.
+@@ -832,7 +833,7 @@ function CronJobListRow({
+       menuItems={menuItems}
+       menuLabel={menuLabel}
+       onSelect={onSelect}
+-      rowKey={job.id}
++      rowKey={cronJobKey(job)}
+       title={jobTitle(job)}
+     />
+   )
+@@ -938,7 +939,9 @@ function CronJobDetail({
+ 
+       <CronJobRuns
+         c={c}
++        connectionId={job.connection_id}
+         jobId={job.id}
++        jobProfile={job.profile}
+         onOpenSession={onOpenSession}
+         onPendingRunSettled={onPendingRunSettled}
+         pendingJobKey={pendingJobKey}
+@@ -976,14 +979,19 @@ const PENDING_RUN_TIMEOUT_MS = 90_000
+ 
+ function CronJobRuns({
+   c,
++  connectionId,
+   jobId,
++  jobProfile,
+   onOpenSession,
+   onPendingRunSettled,
+   pendingJobKey,
+   pendingRunAt
+ }: {
+   c: Translations['cron']
++  /** The registry gateway that listed the job; absent for the connection in front. */
++  connectionId?: string
+   jobId: string
++  jobProfile?: null | string
+   onOpenSession?: (sessionId: string, session?: SessionInfo) => void
+   onPendingRunSettled: (key: string, requestedAt: number) => void
+   pendingJobKey?: string
+@@ -999,7 +1007,7 @@ function CronJobRuns({
+     let cancelled = false
+ 
+     const load = () =>
+-      getCronJobRuns(jobId)
++      getCronJobRuns({ connection_id: connectionId, id: jobId, profile: jobProfile })
+         .then(result => {
+           // A fresh poll re-evaluates every run already opened (#88443).
+           reconcileCronRunVerdicts(result)
+@@ -1059,7 +1067,17 @@ function CronJobRuns({
+       document.removeEventListener('visibilitychange', onVisible)
+     }
+     // cronChangeTick: a fired run moves jobs.json bookkeeping → reload now.
+-  }, [changeEventsAvailable, cronChangeTick, jobId, onPendingRunSettled, pending, pendingJobKey, pendingRunAt])
++  }, [
++    changeEventsAvailable,
++    connectionId,
++    cronChangeTick,
++    jobId,
++    jobProfile,
++    onPendingRunSettled,
++    pending,
++    pendingJobKey,
++    pendingRunAt
++  ])
+ 
+   // Bounded life for the queued row: even on an event-capable backend (where
+   // the fast poll above may be the only prober), the feedback disappears and
+diff --git a/apps/desktop/src/store/cron.test.ts b/apps/desktop/src/store/cron.test.ts
+index 2e69343548..68a388e218 100644
+--- a/apps/desktop/src/store/cron.test.ts
++++ b/apps/desktop/src/store/cron.test.ts
+@@ -1,6 +1,14 @@
+ import { beforeEach, describe, expect, it } from 'vitest'
+ 
+-import { $cronJobs, beginCronJobsRequest, commitCronJobsRequest, setCronJobs, updateCronJobs } from './cron'
++import {
++  $cronJobs,
++  beginCronJobsRequest,
++  commitCronJobsRequest,
++  cronJobKey,
++  setCronJobs,
++  updateCronJobs,
++  withListedConnection
++} from './cron'
+ 
+ const oldJob = { id: 'old' } as never
+ const newJob = { id: 'new' } as never
+@@ -37,3 +45,21 @@ describe('cron jobs request fencing', () => {
+     expect($cronJobs.get()).toEqual([newJob])
+   })
+ })
++
++describe('jobs from more than one gateway', () => {
++  it('keeps two gateways\' jobs with one id apart', () => {
++    expect(cronJobKey({ id: 'review' })).not.toBe(cronJobKey({ connection_id: 'thornswood-bots', id: 'review' }))
++    expect(cronJobKey({ connection_id: 'a', id: 'review' })).toBe(cronJobKey({ connection_id: 'a', id: 'review' }))
++  })
++
++  it("keeps the listing's connection on a row its own backend sent back", () => {
++    const updated = { id: 'review', state: 'paused' } as never
++
++    expect(withListedConnection({ connection_id: 'thornswood-bots' }, updated)).toEqual({
++      connection_id: 'thornswood-bots',
++      id: 'review',
++      state: 'paused'
++    })
++    expect(withListedConnection({}, updated)).toBe(updated)
++  })
++})
+diff --git a/apps/desktop/src/store/cron.ts b/apps/desktop/src/store/cron.ts
+index b6df8cb0fc..f107439015 100644
+--- a/apps/desktop/src/store/cron.ts
++++ b/apps/desktop/src/store/cron.ts
+@@ -75,6 +75,16 @@ export const setCronJobs = (jobs: CronJob[]) => {
+   $cronJobs.set(jobs)
+ }
+ 
++/** A job's identity in the unified list: two gateways can hold the same id,
++ *  so the connection that listed it is part of who it is. */
++export const cronJobKey = (job: Pick<CronJob, 'connection_id' | 'id'>): string =>
++  `${job.connection_id ?? ''}\u0000${job.id}`
++
++/** A per-job response comes from the job's own backend, which knows nothing of
++ *  the Desktop's connection ids; keep the listing's tag on the replacement row. */
++export const withListedConnection = (listed: Pick<CronJob, 'connection_id'>, updated: CronJob): CronJob =>
++  listed.connection_id ? { ...updated, connection_id: listed.connection_id } : updated
++
+ // In-place edit so the cron overlay's mutations (create/edit/delete/pause/…)
+ // land in the same atom the sidebar renders — no stale list until the next poll.
+ export const updateCronJobs = (fn: (jobs: CronJob[]) => CronJob[]) => {
+diff --git a/apps/desktop/src/types/hermes.ts b/apps/desktop/src/types/hermes.ts
+index 927c98b200..d18f673d34 100644
+--- a/apps/desktop/src/types/hermes.ts
++++ b/apps/desktop/src/types/hermes.ts
+@@ -1049,6 +1049,10 @@ export interface AnalyticsTotals {
+ }
+ 
+ export interface CronJob {
++  /** The registry gateway that serves this job, stamped by the unified list
++   *  when the job comes from a connection other than the one in front.
++   *  Absent: the connection in front owns it. */
++  connection_id?: string
+   deliver?: null | string
+   enabled: boolean
+   id: string
+@@ -1058,6 +1062,8 @@ export interface CronJob {
+   name?: null | string
+   next_run_at?: null | string
+   no_agent?: boolean
++  /** The profile whose cron store holds the job (the backend annotates every listed job). */
++  profile?: null | string
+   prompt?: null | string
+   provider?: null | string
+   schedule?: CronJobSchedule
+-- 
+2.43.0
+
