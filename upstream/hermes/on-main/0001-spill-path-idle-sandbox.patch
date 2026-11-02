@@ -1,0 +1,134 @@
+From cd477341c8de88fda99e9a7e9fd86d1cafbfa63d Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 23:43:33 +0000
+Subject: [PATCH] fix(spill): name the sandbox path when the idle reaper
+ dropped the env
+
+Cause: under a remote terminal backend the agent's read_file and terminal
+run inside the sandbox, but tool_executor passed get_active_env() to
+maybe_persist_tool_result, which is None once the idle reaper has
+unregistered the env (TERMINAL_LIFETIME_SECONDS, default 300, while the
+persistent container lives on) or before the first terminal call; and
+_is_host_side_env(None) returned True, so the <persisted-output> note
+named the host path $HERMES_HOME/cache/spillover/<id>.txt, which does not
+exist in the sandbox.
+
+- tool_executor brings the env back with ensure_task_env() (as vision
+  does, #62825) for the spill and the turn budget; it is a no-op on local.
+- _is_host_side_env(None) is True only when the active backend is local;
+  under a remote backend with no env the result is truncated inline rather
+  than pointing at a path the agent cannot read.
+
+Seen on v0.22.5 with the docker backend (podman): container started 3:49 PM,
+idle 11 minutes, a 192,576-character tool result at 4:00 PM got a host path.
+---
+ agent/tool_executor.py                  | 14 ++++++++++----
+ tests/tools/test_tool_result_storage.py | 19 +++++++++++++++++++
+ tools/tool_result_storage.py            | 13 ++++++++++---
+ 3 files changed, 39 insertions(+), 7 deletions(-)
+
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+index 8500baf4..350ef922 100644
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -55,7 +55,7 @@ from agent.tool_dispatch_helpers import (
+     _plan_tool_batch_segments,
+     make_tool_result_message,
+ )
+-from tools.terminal_tool_lifecycle import get_active_env
++from tools.terminal_tool_lifecycle import ensure_task_env, get_active_env
+ from tools.thread_context import propagate_context_to_thread
+ from tools.tool_result_storage import (
+     maybe_persist_tool_result,
+@@ -1128,16 +1128,22 @@ def _commit_tool_result(
+     agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s){_status_suffix}")
+ 
+     persisted_result = function_result
++    # The spill note must name a path the agent's own file tools can read. Under a remote backend
++    # those tools run in the sandbox, which the idle reaper may have unregistered since the last
++    # terminal call (the container itself persists): bring it back, as vision does (#62825),
++    # instead of passing None, which used to be read as "host side" and named a host path.
++    # ensure_task_env is a no-op returning None on the local backend.
++    spill_env = ensure_task_env(effective_task_id)
+     if _is_multimodal_tool_result(persisted_result):
+         persisted_result = _persist_multimodal_text_parts(
+-            persisted_result, function_name, tool_call_id, get_active_env(effective_task_id), budget,
++            persisted_result, function_name, tool_call_id, spill_env, budget,
+         )
+     else:
+         persisted_result = maybe_persist_tool_result(
+             content=persisted_result,
+             tool_name=function_name,
+             tool_use_id=tool_call_id,
+-            env=get_active_env(effective_task_id),
++            env=spill_env,
+             config=budget,
+         )
+     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
+@@ -1225,7 +1231,7 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
+         return
+     batch = messages[-num_tools:]
+     contents_before = [message.get("content") for message in batch]
+-    enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
++    enforce_turn_budget(batch, env=ensure_task_env(effective_task_id), config=budget)
+     plugin_live_notes.keep_after_turn_budget(agent, batch)
+     sync_rewritten_tool_rows(agent, batch, contents_before)
+     record_tool_batch(agent, batch, contents_before)
+diff --git a/tests/tools/test_tool_result_storage.py b/tests/tools/test_tool_result_storage.py
+index e0ef3542..2e75837d 100644
+--- a/tests/tools/test_tool_result_storage.py
++++ b/tests/tools/test_tool_result_storage.py
+@@ -417,6 +417,25 @@ class TestSpillover:
+         assert spill_file.read_text(encoding="utf-8") == content
+         assert str(spill_file) in result
+ 
++    def test_env_none_under_a_remote_backend_never_names_a_host_path(self, monkeypatch):
++        """No sandbox registered right now (never started, or unregistered by the idle reaper
++        while the persistent container lives on) is NOT "host side" under a remote backend: the
++        agent's read_file/terminal run in the sandbox, where the host path dangles. Without an env
++        to probe or write through, the result is truncated inline rather than pointing at a path
++        the agent cannot read (the caller passes ensure_task_env(), so this is the failed-start
++        case only)."""
++        monkeypatch.setenv("TERMINAL_ENV", "docker")
++        content = "w" * 60_000
++        result = maybe_persist_tool_result(
++            content=content,
++            tool_name="tw_git",
++            tool_use_id="tc_idle_1",
++            env=None,
++            threshold=30_000,
++        )
++        assert str(get_spillover_dir()) not in result
++        assert "Full output could not be saved" in result
++
+     def test_local_env_persists_to_spillover_not_sandbox(self):
+         """LocalEnvironment routes host-side: no env.execute() shell-out."""
+         from tools.environments.local import LocalEnvironment
+diff --git a/tools/tool_result_storage.py b/tools/tool_result_storage.py
+index 39407dc5..2e5d7852 100644
+--- a/tools/tool_result_storage.py
++++ b/tools/tool_result_storage.py
+@@ -181,10 +181,17 @@ def _prune_spillover_once() -> None:
+ 
+ 
+ def _is_host_side_env(env) -> bool:
+-    """True when this process should write the spill file directly: ``env=None`` (no sandbox
+-    yet) or a backend whose files are the host's. Others resolve ``read_file`` inside the sandbox."""
++    """True when the agent's file tools read host paths: a backend whose files are the host's.
++    ``env=None`` means host-side only when the ACTIVE backend is local; under a remote backend
++    (docker, ssh, ...) ``read_file``/``terminal`` resolve inside the sandbox, so a host path would
++    dangle there even though no sandbox is registered right now (never started, or reaped after
++    ``TERMINAL_LIFETIME_SECONDS`` idle while the persistent container lives on)."""
+     if env is None:
+-        return True
++        try:
++            from tools.credential_files import _terminal_backend
++            return _terminal_backend() == "local"
++        except Exception:
++            return False
+     from tools.environments.base import env_uses_host_filesystem
+ 
+     return env_uses_host_filesystem(env)
+-- 
+2.43.0
+

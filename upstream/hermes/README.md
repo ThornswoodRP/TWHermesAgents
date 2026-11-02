@@ -81,6 +81,21 @@ test_auxiliary_client.py: the first version passed `model=None` to every
 pick, and stand-in pools written as `select(self)` refused it. Unscoped picks
 are back to `select()`, and the Codex stand-ins take `model`.
 
+## On upstream main
+
+The pull requests go to upstream main, not to v0.22.5. On 2 Nov, main was
+`5aa8df74`. 0002, 0003 and 0004 apply there as they are. 0001 does not:
+upstream had changed `_is_host_side_env` to ask
+`env_uses_host_filesystem(env)` for a live environment. `on-main/0001-spill-path-idle-sandbox.patch`
+is 0001 on that main. It keeps upstream's check for a live environment and
+changes only the `env=None` case. Run on that main (cloud, Python 3.14):
+test_tool_result_storage passed 59 of 59. The tool executor, spill, persist
+and turn budget tests failed 4 of 433 with the patch, and they fail the same
+4 ways on main without it: two checkpoint path tests that fail only when
+run after the storage tests, and two opencode routing tests that need the
+anthropic extra. The files here at the top stay as they are for v0.22.5,
+the version the VM runs.
+
 ## Test results so far
 
 - Windows (One, Python 3.14, 1 Nov), 0001 and 0002: test_tool_result_storage
