@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Nine causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Ten causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
@@ -11,7 +11,7 @@ Apply them in order on a checkout of that commit:
 
 ```
 git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch 0005-desktop-relay-local-source-once-it-signals.patch 0006-desktop-scheduled-jobs-every-gateway.patch
-scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py
+scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py tests/agent/test_codex_usage_attribution.py tests/agent/test_codex_cloudflare_headers.py tests/plugins/image_gen/test_openai_codex_provider.py tests/hermes_cli/test_auth_store_windows_encoding.py tests/gateway/test_multiplex_process_memo_scope.py
 ```
 
 ## 0001: the "too large" note names a path the Bot can read
@@ -72,7 +72,14 @@ empty and auxiliary_client found no token.
 
 The fix passes the model to the pick in both Codex callers. The year-long
 bench on a slug the account really cannot use is upstream's design (#71970)
-and stays; it now benches only that slug.
+and stays; it now benches only that slug. A pick with no model is the
+unscoped `select()` it always was, so no other provider's path changes. The
+test stand-ins on the Codex paths take the model, as the real pool does.
+
+The first Linux run of all four (2 Nov) failed 3 tests in
+test_auxiliary_client.py: the first version passed `model=None` to every
+pick, and stand-in pools written as `select(self)` refused it. Unscoped picks
+are back to `select()`, and the Codex stand-ins take `model`.
 
 ## 0005: the Desktop relays This device's Bot Chat when its main connection is remote, and reads it on its own connection
 
@@ -180,6 +187,51 @@ id One's own gateway would mint for `bot-chat:default` (generations 0 to
 5). Which step wrote the my-hermes owner is still open; no fix is written
 for it until that is measured.
 
+## 0007: a coalesced webhook delivery survives a gateway restart
+
+Made against upstream main `013bde47` (2 Nov 2026), in `on-main/`.
+
+Cause, measured on the VM (gateway.log line 2032, 1 Nov 10:31:12 PM, during
+the #72 install's gateway stop): two GitHub deliveries on the coalesced
+`github-checks` route were lost. A coalesced delivery is answered
+`202 coalesced` before any admission, and GitHub does not resend an
+answered delivery, so the coalescer's buffer is its only copy. On a stop,
+`drain_gateway_runtime` withdraws every adapter's message handler before the
+adapters disconnect. The webhook adapter's disconnect flush then admitted
+each pending group against the withdrawn ingress: `producer_scope` found no
+runner and raised `RuntimeStoreError('not_found')`, the group was logged
+"was not admitted", and it was gone. A hard kill lost the buffer outright.
+
+The fix keeps each pending group in a spool in the gateway's home
+(`webhook_coalesce_pending.json`, 0600, written atomically) until its
+admission commits. The route's config is never written (it can hold the
+HMAC secret); it is read back from the live routes. While ingress is
+withdrawn, a settled group is not tried and stays spooled. When the next run's
+listener is up and its ingress is wired, every spooled group is buffered
+again and admitted as usual. A route that is gone is dropped and named, and
+an unreadable spool is set aside. A refusal by a serving gateway behaves as
+before.
+
+Tests: four new ones in `tests/gateway/test_webhook_coalescing.py` (drain
+then next run, admitted and refused, a newer event during admission, a gone
+route and a bad spool); the existing helper's runner now has a session
+authority, as `producer_scope` requires. The coalescer's own spool logic
+passed a stand-alone run here; the gateway tests need upstream's test
+environment with the `messaging` extra (aiohttp), so run them before the pull
+request is opened:
+
+```
+git am on-main/0007-webhook-coalesce-survives-restart.patch
+python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
+HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/gateway/test_webhook_coalescing.py tests/gateway/test_webhook_adapter.py tests/gateway/test_webhook_authority.py -q -rfE
+```
+
+The first run on 2 Nov (with aiohttp) failed only the drain test, 5 of 5:
+its requests went to a route with a real HMAC secret unsigned, so the
+adapter answered 401 and nothing was ever coalesced or spooled. The test
+now signs them and checks each answer is `202 coalesced` and the spool holds
+the group before the stop. Upstream without 0007 passed 71 of 71.
+
 ## 0008: a remote dashboard's READY wait runs on the remote, not as one ssh login a second
 
 Cause, measured on 2 Nov: the box's journal showed about 40 separate ssh
@@ -237,6 +289,57 @@ test in `src/store/connections.test.ts` fail without the fix (5 failed) and
 pass with it. The whole Desktop suite, `npx vitest run src`: 1,343 files,
 11,534 tests passed. `tsc -p tsconfig.json --noEmit` and eslint clean.
 
+## 0010: the Bot Screen watcher reads each home under its own terminal policy
+
+Made against upstream main `013bde47` (2 Nov 2026), in `on-main/`. The file
+it changes is the same in v0.22.5, so it applies there too.
+
+Cause of the container burst (1 Nov, 3:50:00 PM). Bramble's Bot Screen came
+up at 3:49:59 PM. Within 0.4 s, five new containers labelled
+`profile_bramble`, each mounting Bramble's home but another Bot's work folder
+at `/workspace`, and one local environment were built. There was one build
+in each serve process on the VM that watched Bramble's home, and all of them
+logged to Bramble's `agent.log`. The serve backend's watcher
+(`tui_gateway/methods_display_watch.py`) re-reads every served home's screen
+when its files move, and every 30 s it checks for idle screens. It did both
+under HERMES_HOME alone. The status read re-attaches a sandbox-hosted screen
+(`runtime._owned_sandbox_env`, which acquires a terminal environment), so it
+ran on the LAUNCH profile's terminal policy. Each process built a container
+keyed and mounted as Bramble but rooted at its own Bot's `terminal.cwd`.
+
+The fix binds the watched home's full runtime scope (home, secrets, terminal)
+for each poll body. That is what `@_profile_scoped` binds for a `display.*`
+call, and what `methods_profiles._hermes_home_scope` already binds for config
+reads (upstream #120726). The re-attach then finds the profile's own
+container. Two new tests in `tests/tui_gateway/test_display_watch.py` cover
+the runtime-file poll and the idle check: each body sees the watched home's
+own `TERMINAL_CWD`, not the launch profile's. The launch home keeps its frozen
+launch environment, and its HERMES_HOME is still bound explicitly: in
+single-profile mode the launch scope binds secrets only, and the watcher
+thread's own context carries no home override, so without it the three
+existing tests for a screen starting or stopping read the process home.
+
+```
+git am on-main/0010-display-watch-profile-scope.patch
+python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
+HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/tui_gateway/test_display_watch.py tests/tui_gateway/test_display_methods.py -q -rfE
+```
+
+## On upstream main
+
+The pull requests go to upstream main, not to v0.22.5. On 2 Nov, main was
+`5aa8df74`. 0002, 0003 and 0004 apply there as they are. 0001 does not:
+upstream had changed `_is_host_side_env` to ask
+`env_uses_host_filesystem(env)` for a live environment. `on-main/0001-spill-path-idle-sandbox.patch`
+is 0001 on that main. It keeps upstream's check for a live environment and
+changes only the `env=None` case. Run on that main (cloud, Python 3.14):
+test_tool_result_storage passed 59 of 59. The tool executor, spill, persist
+and turn budget tests failed 4 of 433 with the patch, and they fail the same
+4 ways on main without it: two checkpoint path tests that fail only when
+run after the storage tests, and two opencode routing tests that need the
+anthropic extra. The files here at the top stay as they are for v0.22.5,
+the version the VM runs.
+
 ## Upstream's lint on the five open pull requests
 
 Upstream's blocking "code health ratchet" (scripts/code_health) failed four
@@ -274,7 +377,7 @@ that limit, worded badly. The earlier check that ruled out a five-PR cap was
 wrong: the accounts it counted with more than five open must have write
 access, which it didn't check. The fork branch is ready (the follow-up
 commit included), so 0006 opens with the same title and body once one of
-the five merges or closes. 0007 waits behind it the same way.
+the five merges or closes. 0007 and 0010 wait behind it the same way.
 
 ## Test results so far
 
@@ -284,8 +387,14 @@ the five merges or closes. 0007 waits behind it the same way.
   passed.
 - Linux (the VM, python:3.14 container, 2 Nov), 0001 to 0003: 72 passed,
   0 failed.
-- 0004: not run yet. The upstream pull requests wait on a Linux run of all
-  five.
+- Linux (cloud, Python 3.14.6, uv.lock's dev group, 2 Nov), 0001 to 0004:
+  the five files above plus the Nous, xAI and Anthropic pool tests, 369
+  passed and 1 failed. The failing test,
+  test_anthropic_messages_profile_resolves_to_messages_adapter, fails the
+  same way on v0.22.5 with no patches: the anthropic extra is not installed
+  there.
+- 0004 on the VM: waits on the Linux run card. The upstream pull requests
+  wait on it.
 - 0005 (Linux, Node 22, 2 Nov, on 0001 to 0004): `vitest run src/plugins/hermes-bots/` 107 files, 873 passed, 0 failed (2 new; the first fails without the fix), and `tsc --noEmit` is clean.
 - 0005's second commit (Linux, Node 22, 2 Nov): resolve-stored-session.test.ts
   24 passed (3 new; the first two fail without the fix). `vitest run` over
