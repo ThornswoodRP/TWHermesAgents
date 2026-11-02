@@ -570,26 +570,31 @@ class GitService:
     def start_run(self, caller: str, args: dict) -> dict:
         bot, task = self._bot(args), self._task(args)
         repo = self.policy.data["runs"]["repo"]
+        # Every run starts on the policy's branch (main). tw_git takes no ref
+        # from the caller, so it is the policy's: reading it from the call
+        # left it empty, and every run was refused as "not on main" (2 Nov,
+        # #5334's tunnel run).
+        ref = self.policy.data["runs"]["ref"]
         workflow = str(args.get("workflow") or "")
         inputs = args.get("inputs") or {}
         if not isinstance(inputs, dict) or not all(isinstance(v, str) for v in inputs.values()):
             raise Refused("a run's inputs are named strings")
-        commit = self._ref_sha(repo, "main")
+        commit = self._ref_sha(repo, ref)
         lists = self._verb_lists(repo, commit)
         channel = str(args.get("channel") or "dev")
         decision_id = args.get("decision_id")
-        self._check(self.rules.start_run(bot, repo, workflow, str(args.get("ref") or ""), inputs, lists,
+        self._check(self.rules.start_run(bot, repo, workflow, ref, inputs, lists,
                                          commit=commit, channel=channel, decision_id=decision_id))
         # Where the workflow itself lives: Thornswood, or Ops for box-run.yml
         # (policy runs.workflows.<name>.repo). The line was checked against
         # Thornswood's main above; the run starts on main of its own repo.
         where = (self.policy.data["runs"]["workflows"][workflow] or {}).get("repo", repo)
-        at = commit if where == repo else self._ref_sha(where, "main")
+        at = commit if where == repo else self._ref_sha(where, ref)
         digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:16]
         started: dict = {}
 
         def find():
-            runs = self.gh.get("bramble", where, f"/repos/{where}/actions/workflows/{quote(workflow)}/runs?event=workflow_dispatch&branch=main&head_sha={at}&per_page=20")
+            runs = self.gh.get("bramble", where, f"/repos/{where}/actions/workflows/{quote(workflow)}/runs?event=workflow_dispatch&branch={quote(ref)}&head_sha={at}&per_page=20")
             for run in runs.get("workflow_runs", []):
                 if run.get("head_sha") == at and (not started or run.get("created_at", "") >= started.get("at", "")):
                     return {"run": run["id"], "url": run.get("html_url")}
@@ -599,7 +604,7 @@ class GitService:
             from datetime import datetime, timezone
             started["at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             r = self.gh.call("bramble", where, WRITE["actions"], "POST", f"/repos/{where}/actions/workflows/{quote(workflow)}/dispatches",
-                             {"ref": "main", "inputs": inputs})
+                             {"ref": ref, "inputs": inputs})
             if r.status != 204:
                 raise GitHubError(r.status, str(r.body))
             return {"dispatched": True}
