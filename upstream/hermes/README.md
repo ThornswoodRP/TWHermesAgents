@@ -152,6 +152,13 @@ connection under the job's own profile, and its runs are stamped with that
 connection. Rows are keyed by (connection, id), since two gateways can hold
 one id. A list for one named profile is unchanged.
 
+Upstream main has moved past v0.22.5 here: its 0e0b2328 added Stop for a
+running job and the missed-run policy, which touch the same lines of
+apps/desktop/src/api/cron.ts and the Scheduled jobs page. So the upstream
+pull request uses `0006-desktop-scheduled-jobs-every-gateway-upstream-main.patch`,
+the same change made on upstream main 4d26e0cc (Stop for a running job also
+goes to the job's own gateway there). It needs nothing from 0001 to 0005.
+
 Check it with the Desktop's own tests:
 
 ```
@@ -191,6 +198,6 @@ for it until that is measured.
 - 0006 (Linux, Node 26, 2 Nov, on 0001 to 0005): the five suites above, 57
   files, 447 passed, 0 failed (the new cron-job-owner test fails 8 of 9
   without the fix); `tsc -p . --noEmit`, `tsc -p tsconfig.electron.json
-  --noEmit` and eslint on the changed files are clean. The same change on
-  upstream main (5351ed71d4, which also has Stop for a running job): 62 files,
-  478 passed, 0 failed, both tsc runs and eslint clean.
+  --noEmit` and eslint on the changed files are clean. The upstream-main
+  patch on 4d26e0cc (Linux, Node 26, 2 Nov): the same suites, 62 files, 478
+  passed, 0 failed; both tsc runs clean.
