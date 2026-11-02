@@ -1,6 +1,7 @@
 """scripts/apply.py against a stand-in for the VM's Hermes home, the rendered
 profile files, and the repo itself holding no tokens."""
 
+import json
 import os
 import re
 import shutil
@@ -49,7 +50,8 @@ class Apply(unittest.TestCase):
         cls.commit = subprocess.run(["git", "-C", str(cls.repo), "rev-parse", "HEAD"], check=True,
                                     capture_output=True, text=True).stdout.strip()
 
-    def run_apply(self, home: Path, *extra, expect=None, image="present", podman=None, wake_secret=True):
+    def run_apply(self, home: Path, *extra, expect=None, image="present", podman=None, wake_secret=True,
+                  hermes=None):
         work = home.parent / "tw-work"
         secret = home.parent / "github-webhook.env"
         if wake_secret:
@@ -59,11 +61,16 @@ class Apply(unittest.TestCase):
         state = home.parent / "podman.state"
         state.write_text(image, encoding="utf-8")
         fake = f"{Path(sys.executable).as_posix()} {(Path(__file__).with_name('fake_podman.py')).as_posix()}"
-        env = dict(os.environ, FAKE_PODMAN_STATE=str(state))
+        fake_hermes = f"{Path(sys.executable).as_posix()} {(Path(__file__).with_name('fake_hermes.py')).as_posix()}"
+        env = dict(os.environ, FAKE_PODMAN_STATE=str(state), FAKE_HERMES_STATE=str(home.parent / "hermes.json"))
         return subprocess.run([sys.executable, str(self.repo / "scripts" / "apply.py"), "--expect", expect or self.commit,
                                "--hermes-home", str(home), "--work-root", str(work), "--podman", podman or fake,
-                               "--wake-secret-file", str(secret), *extra],
+                               "--hermes", hermes or fake_hermes, "--wake-secret-file", str(secret), *extra],
                               capture_output=True, text=True, env=env)
+
+    def hermes_state(self, home: Path) -> dict:
+        f = home.parent / "hermes.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
     def podman_log(self, home: Path) -> str:
         log = home.parent / "podman.log"
@@ -135,6 +142,70 @@ class Apply(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(got.read_text(encoding="utf-8"), want, "the next apply puts the repo's copy back")
         self.assertEqual([p.name for p in got.parent.iterdir()], ["SKILL.md"], "no half-written file is left")
+
+    def test_bramble_gets_its_owed_wake_check_once_and_no_other_bot_does(self):
+        # 1 Nov, 10:02 PM on: every wake the fleet queue turned away was
+        # dropped. The owed-wake check wakes Bramble once the queue has room.
+        from thornswood_guard import owed_wake
+        home = self.home()
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        script = home / "profiles" / "bramble" / "scripts" / "tw-owed-wake.py"
+        self.assertEqual(script.read_bytes(), (REPO / "deploy" / "hermes-scripts" / "tw-owed-wake.py").read_bytes())
+        jobs = self.hermes_state(home)["jobs"]
+        self.assertEqual(list(jobs), ["bramble"], "only Bramble's profile gets a job")
+        (job,) = jobs["bramble"]
+        self.assertEqual((job["name"], job["schedule"], job["script"], job["skills"], job["deliver"]),
+                         ("tw-owed-wake", "every 5m", "tw-owed-wake.py", ["bramble-duties"], "local"))
+        self.assertIn(owed_wake.OWED_WAKE_MARK, job["prompt"])
+        self.assertIn(f"owed-wake job {job['id']} is active", r.stdout)
+        for bot in policy().bots:
+            if bot != "bramble":
+                self.assertFalse((home / "profiles" / bot / "scripts").exists(), bot)
+        # A second apply brings the same job up to date; it never makes another.
+        state = self.hermes_state(home)
+        state["jobs"]["bramble"][0].update(schedule="every 1m", prompt="changed on the VM")
+        (home.parent / "hermes.json").write_text(json.dumps(state), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (again,) = self.hermes_state(home)["jobs"]["bramble"]
+        self.assertEqual((again["id"], again["schedule"], again["prompt"]), (job["id"], "every 5m", job["prompt"]))
+
+    def test_a_paused_owed_wake_job_stays_paused(self):
+        home = self.home()
+        self.assertEqual(self.run_apply(home).returncode, 0)
+        state = self.hermes_state(home)
+        state["jobs"]["bramble"][0]["state"] = "paused"
+        (home.parent / "hermes.json").write_text(json.dumps(state), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Patrick paused it, so it stays paused", r.stdout)
+        self.assertEqual(self.hermes_state(home)["jobs"]["bramble"][0]["state"], "paused")
+
+    def test_two_owed_wake_jobs_are_named_not_guessed_between(self):
+        home = self.home()
+        two = [{"id": i, "name": "tw-owed-wake", "schedule": "every 5m", "script": "tw-owed-wake.py"} for i in ("a1", "b2")]
+        (home.parent / "hermes.json").write_text(json.dumps({"jobs": {"bramble": two}}), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("2 cron jobs are named tw-owed-wake (a1, b2)", r.stdout)
+
+    def test_a_hermes_that_does_not_answer_stops_everything(self):
+        home = self.home()
+        (home.parent / "hermes.json").write_text(json.dumps({"broken": True}), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("bramble: hermes -p bramble cron list exited 1", r.stdout)
+        self.assertIn("Nothing was changed", r.stdout)
+        self.assertFalse((home / "profiles" / "rift" / "plugins").exists())
+
+    def test_check_reads_the_jobs_and_writes_none(self):
+        home = self.home()
+        r = self.run_apply(home, "--check")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.hermes_state(home), {})
+        log = (home.parent / "hermes.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line) for line in log], [["-p", "bramble", "cron", "list", "--all"]])
 
     def test_the_duties_skill_says_what_bramble_does(self):
         text = (REPO / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
