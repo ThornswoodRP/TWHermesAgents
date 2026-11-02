@@ -49,7 +49,7 @@ class FromTheStream(unittest.TestCase):
                           encoding="utf-8")
         h = own_connector.Hermes([sys.executable], [sys.executable], Path(tempfile.mkdtemp()), "One")
         heard = []
-        outcome, _, _, sid = h._run([sys.executable, str(script)], SID, lambda state, tool: heard.append((state, tool)))
+        outcome, _, _, sid = h._run([sys.executable, str(script)], SID, lambda state, tool, *_: heard.append((state, tool)))
         self.assertEqual((outcome, sid), ("confirmed", SID))
         self.assertEqual(heard, [("thinking", None), ("tool", "terminal"), ("thinking", None), ("tool", None),
                                  ("thinking", None), ("writing", None)])
@@ -81,7 +81,7 @@ class SaidWithEachClaim(unittest.TestCase):
         t = threading.Thread(target=c._deliver, args=({"id": "own_abc", "session_id": SID, "text": "hi"},))
         t.start()
         hermes.started.wait(10)
-        self.assertEqual(c.busy()["turns"], [{"id": "own_abc", "state": "tool", "tool": "read_file"}])
+        self.assertEqual(c.busy()["turns"], [{"id": "own_abc", "state": "tool", "tool": "read_file", "admitted": False}])
         hermes.go.set()
         t.join(10)
         self.assertEqual(c.busy()["turns"], [])
@@ -112,10 +112,10 @@ class TheCore(unittest.TestCase):
         waiting = self.g.own.send(self.p, "one", SID, None, "and then this", "own-key-0002")["message_id"]
         self.say([{"id": mid, "state": "tool", "tool": "terminal"}, {"id": waiting, "state": "thinking"}])
         got = self.mine()
-        self.assertEqual(got[mid]["doing"], {"state": "tool", "tool": "terminal"})
+        self.assertEqual(got[mid]["doing"], {"state": "tool", "tool": "terminal", "admitted": False})
         self.assertNotIn("doing", got[waiting], "a message still waiting has no turn yet")
         self.say([{"id": mid, "state": "writing", "tool": "terminal"}])
-        self.assertEqual(self.mine()[mid]["doing"], {"state": "writing", "tool": None}, "a tool only with a tool")
+        self.assertEqual(self.mine()[mid]["doing"], {"state": "writing", "tool": None, "admitted": False}, "a tool only with a tool")
 
     def test_only_well_formed_turns(self):
         mid = self.leased()
@@ -123,7 +123,7 @@ class TheCore(unittest.TestCase):
                     [{"id": mid, "state": "tool", "tool": "rm -rf /"}]):
             self.say(bad)
             doing = self.mine()[mid].get("doing")
-            self.assertTrue(doing is None or doing == {"state": "tool", "tool": None}, (bad, doing))
+            self.assertTrue(doing is None or doing == {"state": "tool", "tool": None, "admitted": False}, (bad, doing))
 
     def test_gone_once_the_connector_is_not_heard_from(self):
         mid = self.leased()
@@ -146,7 +146,7 @@ class OverHttp(unittest.TestCase):
                               body={"limit": 0, "ready": True, "turns": [{"id": mid, "state": "writing"}]})
         self.assertEqual(status, 200)
         self.assertEqual(next(m for m in g.own.view(p, "one", SID)["mine"] if m["id"] == mid)["doing"],
-                         {"state": "writing", "tool": None})
+                         {"state": "writing", "tool": None, "admitted": False})
 
 
 if __name__ == "__main__":

@@ -21,6 +21,11 @@ Every few seconds it:
        a new chat:      hermes chat -Q --format stream-json --query-file <file> --yolo --source cli --in <home>
        an existing one: hermes chat -Q --format stream-json --query-file <file> --resume <session id>
 
+   through room_send.py, which runs that same `hermes chat` in Hermes's own
+   runtime and hands a message to a chat whose turn is already running the way
+   Desktop's box does, by the chat's busy-input setting (steer, interrupt or
+   queue; Patrick's answer A on q-one-busy-chat, 2 Nov; contracts.json "busy");
+
    A new chat is made with `--yolo`, Patrick's "full power behind the passkey"
    (the core takes a message only from a passkey sign-in of the last 30
    minutes), and listed like any chat he starts (`--source cli`); Hermes names
@@ -557,13 +562,22 @@ def fitted(state_db: Path, wanted: list[str], now: datetime) -> bytes:
 
 # ── running a turn ────────────────────────────────────────────────────────
 
+# How room_send.py's turn says Hermes took a message, and the live line's state for it.
+ADMISSIONS = {"started": "thinking", "queued": "queued", "steered": "steered", "redirected": "redirected"}
+
+
 def follow_turn(stream, seen: dict, tell) -> None:
     """Hermes's stream-json events of one turn, read as they come (hermes_cli/stream_json.py). The start and
     the end are kept in `seen` without their text (the session id and the exit code are all that is read
     from them), and `tell(state, tool)` hears each change of what the turn is doing, once: "thinking" (the
     start, and after each tool's result), "writing" (the reply's text), or "tool" with the tool's name
     when it is a plain name (else None). Never the words, a tool's input or its output. The Bots'
-    connector reads its Bot Chat turns with this too (connector.py)."""
+    connector reads its Bot Chat turns with this too (connector.py).
+
+    room_send.py's turn adds one line saying how Hermes took the message ({"type": "admission"}): "queued" (behind
+    the turn already running, in Hermes's own queue), "steered" or "redirected" (into the running turn), or
+    "started" (also said when a queued one leaves the queue to run). From then on `seen["admitted"]` is true:
+    Hermes has the message; `seen["taken"]` keeps a steer or redirect for the rest of the turn."""
     now = None
     for line in stream:
         try:
@@ -579,6 +593,11 @@ def follow_turn(stream, seen: dict, tell) -> None:
             seen[kind] = ev
         state = {"system": ("thinking", None), "tool_result": ("thinking", None),
                  "text": ("writing", None)}.get(kind)
+        if kind == "admission" and ev.get("status") in ADMISSIONS:
+            seen["admitted"] = True
+            if ev["status"] in ("steered", "redirected"):
+                seen["taken"] = ev["status"]
+            state = (ADMISSIONS[ev["status"]], None)
         if kind == "tool_use":
             name = ev.get("name")
             state = ("tool", name if isinstance(name, str) and TOOL_NAME.match(name) else None)
@@ -589,8 +608,10 @@ def follow_turn(stream, seen: dict, tell) -> None:
 
 class Hermes:
     def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str,
-                 state_db: Path | None = None):
+                 state_db: Path | None = None, turn_cmd: list[str] | None = None):
         self.cmd, self.ready_cmd, self.home_dir, self.name = list(hermes_cmd), list(ready_cmd), home_dir, name
+        # room_send.py in Hermes's runtime (helper_command), which takes `hermes chat`'s own arguments.
+        self.turn_cmd = list(turn_cmd) if turn_cmd else list(hermes_cmd)
         self.state_db = state_db  # Hermes's own state.db, read only, to see a turn wait for the chat's turn
 
     def ready(self) -> tuple[str, str]:
@@ -667,7 +688,7 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.cmd, "chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
+            argv = [*self.turn_cmd, "chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
             if image is not None:
                 argv += ["--image", str(image)]
             if session_id:
@@ -678,27 +699,27 @@ class Hermes:
 
     def _run(self, argv: list[str], session_id: str | None, doing=None) -> tuple[str, str, str, str | None]:
         seen: dict = {}
-        tell = doing or (lambda state, tool: None)
+        tell = doing or (lambda state, tool, admitted=False, taken=None: None)
         began = time.time()
         moved = threading.Event()  # the turn said more than its start: it has the chat's turn
 
         def heard(state, tool):
             if seen.get("events", 0) > 1:
                 moved.set()
-            tell(state, tool)
+            tell(state, tool, bool(seen.get("admitted")), seen.get("taken"))
 
         def read(stream):
             follow_turn(stream, seen, heard)
 
         def held():
-            # While the turn has said nothing past its start, it may be waiting for a turn another Hermes
-            # process (Desktop) is running in the same chat: then the line says so, not "thinking".
+            # While the turn has said nothing past its start, it may be waiting for the chat's turn lease,
+            # held by another Hermes process running a turn in the same chat: then it is in a queue too.
             waiting = False
             while not moved.wait(2) and proc.poll() is None:
                 now = turn_held(self.state_db, session_id, began)
                 if now != waiting and not moved.is_set():
                     waiting = now
-                    tell("waiting" if now else "thinking", None)
+                    tell("queued" if now else "thinking", None, bool(seen.get("admitted")), seen.get("taken"))
 
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **quiet(),
@@ -1011,9 +1032,13 @@ class OwnConnector:
                 self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": "that chat is gone"})
                 self.feed_now = True
             return
-        def doing(state, tool):
+        def doing(state, tool, admitted=False, taken=None):
+            # `admitted`: Hermes has the message (room_send.py's turn said how it took it). The core hands this
+            # connector the chat's next message only once each before it is in Hermes, so they keep order.
+            # `taken`: steered or redirected into the turn already running, kept while that turn goes on.
             with self._lock:
-                self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool}
+                self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool, "admitted": admitted,
+                                          **({"taken": taken} if taken else {})}
         text, image = item["text"], None
         files = item.get("attachments") or []
         if files:
@@ -1235,8 +1260,9 @@ def main(argv: list[str]) -> int:
     else:
         token = Path.home() / ".config" / "thornswood" / f"own-{args.gateway}.token"
     home = Path(args.hermes_home) if args.hermes_home else hermes_home()
-    hermes = Hermes([args.hermes], helper_command(args.hermes, python=args.hermes_python, root=args.hermes_root), Path.home(),
-                    GATEWAYS[args.gateway], state_db=home / "state.db")
+    ready = helper_command(args.hermes, python=args.hermes_python, root=args.hermes_root)
+    hermes = Hermes([args.hermes], ready, Path.home(),
+                    GATEWAYS[args.gateway], state_db=home / "state.db", turn_cmd=ready)
     here = Path(__file__).resolve().parent
     updater = Updater(Path(args.clone), args.git, here) if args.clone else None
     conn = OwnConnector(Core(args.core, args.gateway, read_token(token)), hermes, home / "state.db",
