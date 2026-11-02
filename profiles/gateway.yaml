@@ -37,6 +37,9 @@ auxiliary:
   vision:
     provider: anthropic
     model: claude-opus-5-5
+  approval:
+    provider: anthropic
+    model: claude-opus-5-5
   title_generation:
     model_upgrade_enabled: false
   background_review:
@@ -44,7 +47,24 @@ auxiliary:
 curator:
   enabled: false
 approvals:
-  mode: manual
+  mode: smart
+  smart_policy: "You are judging a command from a Thornswood Bot. Each Bot works only\
+    \ in its own\ncopy of a repository, mounted at /workspace in its own sandbox.\
+    \ Every write to\nGitHub, every merge, release, deploy and publish goes through\
+    \ Thornswood's\nbrokers, never through a shell command.\nDENY a command that:\n\
+    - reads, prints, copies or sends a credential: a token, key, password, .env file,\n\
+    \  auth.json, an SSH or GPG key, anything under /etc/thornswood or a .ssh folder;\n\
+    - pushes, merges, tags, releases, deploys or publishes, or writes to a remote\n\
+    \  service (git push, gh with a write, curl or wget sending data, scp, rsync to\
+    \ a\n  remote, nc);\n- changes the machine: services, schedules, users, groups,\
+    \ sudo, the firewall,\n  Tailscale, podman or docker, packages outside /workspace;\n\
+    - deletes, moves or changes files outside /workspace and /tmp, or changes their\n\
+    \  owner or permissions.\nAPPROVE a command that only reads or inspects, or that\
+    \ builds, tests, lints or\nformats the repository under /workspace with the repository's\
+    \ own scripts and\ntools, or that runs local git commands which do not reach a\
+    \ remote (status,\ndiff, log, show, add, commit, switch, branch, stash, restore).\n\
+    ESCALATE anything else, and anything you are not sure of: a person decides.\n"
+  timeout: 300
   cron_mode: deny
   unattended_mode: deny
   single_query_mode: deny
