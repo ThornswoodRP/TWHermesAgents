@@ -49,17 +49,54 @@ class TheRoute(unittest.TestCase):
         self.assertEqual(self.route["toolsets"], ["thornswood"])
         self.assertEqual(wake_path(self.p), "/p/bramble/webhooks/github-checks")
 
-    def test_only_finished_actions_suites_and_closed_or_dequeued_prs(self):
+    def test_only_finished_actions_suites_and_dequeued_prs(self):
         any_of = self.route["filters"][1]["any"]
         self.assertIn({"all": [{"field": "event", "equals": "check_suite"},
                                {"field": "action", "equals": "completed"},
                                {"field": "check_suite.app.slug", "equals": "github-actions"}]}, any_of)
         self.assertIn({"all": [{"field": "event", "equals": "pull_request"},
-                               {"field": "action", "in": ["closed", "dequeued"]}]}, any_of)
+                               {"field": "action", "equals": "dequeued"}]}, any_of)
+        # A merge pushes main, and main's own check suites wake the sweep.
+        self.assertNotIn("closed", json.dumps(any_of))
 
-    def test_a_heads_suites_wake_bramble_once(self):
-        self.assertEqual(self.route["coalesce"]["key"], "check_suite.head_sha")
-        self.assertGreater(self.route["coalesce"]["max_wait_seconds"], self.route["coalesce"]["window_seconds"])
+    def test_every_check_suite_joins_one_sweep(self):
+        # 1 Nov, 9:54 to 10:02 PM: wakes keyed per commit spent the fleet's 20
+        # new tickets for the hour. The key is the one value the filter lets
+        # through, so suites on any head in any repository make one group.
+        c = self.route["coalesce"]
+        self.assertEqual(c["key"], "check_suite.app.slug")
+        suite_filter = self.route["filters"][1]["any"][0]["all"]
+        self.assertIn({"field": c["key"], "equals": "github-actions"}, suite_filter)
+        self.assertGreater(c["max_wait_seconds"], c["window_seconds"])
+        # At most one sweep per window while suites keep coming, whatever their number.
+        self.assertLessEqual(3600 / c["max_wait_seconds"], 4)
+
+    def test_the_group_key_resolves_for_every_suite_and_never_for_a_dequeued_pr(self):
+        c = self.route["coalesce"]["key"]
+
+        def group_key(key: str, payload: dict):
+            # Hermes's WebhookCoalescer.group_key: a bare dotted field is
+            # rendered from the payload, and a field that does not resolve
+            # means no group, so the event is dispatched at once.
+            value = payload
+            for part in key.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    return None
+                value = value[part]
+            return str(value)
+
+        heads = [{"check_suite": {"head_sha": h * 40, "app": {"slug": "github-actions"}},
+                  "repository": {"full_name": r}}
+                 for h, r in (("a", "ThornswoodRP/Thornswood"), ("b", "ThornswoodRP/Thornswood-Ops"),
+                              ("c", "ThornswoodRP/skymp"))]
+        keys = {group_key(c, p) for p in heads}
+        self.assertEqual(keys, {"github-actions"})
+        self.assertIsNone(group_key(c, {"pull_request": {"number": 1}, "reason": "MERGE_CONFLICT"}))
+
+    def test_the_prompt_says_a_wake_is_a_whole_sweep(self):
+        for must in ("over all of them and not only this commit", "Thornswood-Ops", "the fork",
+                     "Ops run notes", "the latest of the events since your last wake"):
+            self.assertIn(must, WAKE_PROMPT)
 
     def test_the_prompt_holds_only_githubs_own_fields(self):
         # A title, branch name, body or comment is text anyone can type; the

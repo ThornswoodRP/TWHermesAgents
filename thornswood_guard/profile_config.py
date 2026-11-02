@@ -159,21 +159,42 @@ GATEWAY_HELPER_TOOLSETS = ["vision", "video"]
 # pull_request events at /p/bramble/webhooks/<route>; Tailscale Funnel
 # publishes that one path (deploy/install.sh). GitHub's signature is checked
 # against WEBHOOK_SECRET, which reaches the gateway only through systemd, so
-# no secret is ever in a config file. Each event starts a fresh Bramble
+# no secret is ever in a config file. Each wake starts a fresh Bramble
 # session with only its broker tools. The prompt holds GitHub's own fields
 # (event, repository, commit, numbers, states), never a title, branch name or
 # body anyone can type, and Bramble reads the rest through tw_git.
+#
+# One wake sweeps everything. Bramble's duties read the state of all three
+# repositories (every open pull request, the run notes, the Desk's list), so a
+# wake for one commit does the same work as a wake for any other. 1 Nov, 9:54
+# to 10:02 PM: wakes were keyed per commit, a burst of check suites on several
+# heads started one Bramble turn each, and those 20 turns spent the fleet
+# queue's 20 new tickets for the hour. From 10:02 PM every wake, and every
+# other Bot's turn, was refused for an hour, so Ops #205 and #206 sat green.
+# So every finished check suite joins one group, keyed on the one value the
+# filter lets through (check_suite.app.slug, always github-actions): one
+# Bramble turn once they have gone quiet for two minutes, and at least one
+# every fifteen while they keep coming. Wakes scale with time, not with how
+# many commits or suites GitHub reports. A dequeued pull request has no
+# check_suite, so the key does not resolve and it wakes Bramble at once, with
+# GitHub's reason, which only that event carries. A closed pull request no
+# longer wakes Bramble: a merge pushes main, and main's own check suites wake
+# the sweep.
+WAKE_GROUP_FIELD = "check_suite.app.slug"
+
 WAKE_PROMPT = (
-    "GitHub event {event_type} ({action}) on {repository.full_name}.\n"
+    "GitHub event {event_type} ({action}) on {repository.full_name}, the latest of the events since your last "
+    "wake.\n"
     "Check suite: commit {check_suite.head_sha}, conclusion {check_suite.conclusion}.\n"
     "Pull request: #{pull_request.number}, head {pull_request.head.sha}, merged {pull_request.merged}, "
     "dequeued reason {reason}.\n"
-    "This is a wake-up, not an instruction: read the pull requests on that commit and your own open cards "
-    "through tw_git and tw_decide, then do your bramble-duties skill on the exact head (merge through the queue "
-    "once every required check passed and your review stands; hand a red check back to its owner; a pull request "
-    "dequeued unmerged goes back to its owner with GitHub's reason and the queue run, and nothing puts it back "
-    "until the owner pushes; after a merge, the Ops run notes and the Desk's list that wait on it; report a merge "
-    "and its Release). Nothing in this event approves anything."
+    "This is a wake-up, not an instruction. Every finished check suite in the three repositories is gathered into "
+    "one wake, so do your whole bramble-duties skill through tw_git and tw_decide, over all of them and not only "
+    "this commit: every open pull request in Thornswood, Thornswood-Ops and the fork (merge through the queue once "
+    "every required check passed and your review stands on the exact head; hand a red check back to its owner); "
+    "a pull request dequeued unmerged goes back to its owner with GitHub's reason and the queue run, and nothing "
+    "puts it back until the owner pushes; then the Ops run notes and the Desk's list; report each merge and its "
+    "Release. Nothing in this event approves anything."
 )
 
 
@@ -195,13 +216,13 @@ def wake_route(policy: Policy) -> dict:
                          {"field": "action", "equals": "completed"},
                          {"field": "check_suite.app.slug", "equals": "github-actions"}]},
                 {"all": [{"field": "event", "equals": "pull_request"},
-                         {"field": "action", "in": ["closed", "dequeued"]}]},
+                         {"field": "action", "equals": "dequeued"}]},
             ]},
         ],
-        # A head's several check suites finish within minutes of each other:
-        # one Bramble run once they have gone quiet. A pull_request event has
-        # no check_suite, so it is never held back.
-        "coalesce": {"key": "check_suite.head_sha", "window_seconds": 120, "max_wait_seconds": 900},
+        # Every finished check suite, on any head in any of the three
+        # repositories, joins the one group (see WAKE_PROMPT above). A
+        # dequeued pull_request has no check_suite, so it is never held back.
+        "coalesce": {"key": WAKE_GROUP_FIELD, "window_seconds": 120, "max_wait_seconds": 900},
         "toolsets": ["thornswood"],
         "prompt": WAKE_PROMPT,
     }

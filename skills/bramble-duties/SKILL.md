@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Merge green pull requests, hand a pull request the merge queue dropped back to its owner, and run the Ops run notes and the Desk's list. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.0.0
+version: 1.1.0
 author: Thornswood-Hermes (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -20,6 +20,10 @@ because nothing told you about them. Do every step through `tw_git` and
 try another route.
 
 ## 1. Merge what is green
+
+Every finished check suite in the three repositories is gathered into one
+wake, so a wake is never only about the commit it names. Sweep all of them,
+every time.
 
 For each of ThornswoodRP/Thornswood, ThornswoodRP/Thornswood-Ops and
 ThornswoodRP/skymp:
@@ -63,8 +67,8 @@ CI_TIMEOUT.
 
 Notes are in ThornswoodRP/Thornswood-Ops at `ops/claude-queue/` on main
 (`ops/README.md` has their template). The Desk's handover list is
-`ops/bramble-list.md`. Read both whenever you are woken by a merged pull
-request, and whenever you are asked to work the queue.
+`ops/bramble-list.md`. Read both on every wake, and whenever you are asked
+to work the queue.
 
 1. List them: `GET /repos/ThornswoodRP/Thornswood-Ops/contents/ops/claude-queue?ref=main`,
    then read each note.

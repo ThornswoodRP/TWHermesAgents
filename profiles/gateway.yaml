@@ -110,28 +110,28 @@ platforms:
               - field: event
                 equals: pull_request
               - field: action
-                in:
-                - closed
-                - dequeued
+                equals: dequeued
           coalesce:
-            key: check_suite.head_sha
+            key: check_suite.app.slug
             window_seconds: 120
             max_wait_seconds: 900
           toolsets:
           - thornswood
-          prompt: 'GitHub event {event_type} ({action}) on {repository.full_name}.
+          prompt: 'GitHub event {event_type} ({action}) on {repository.full_name},
+            the latest of the events since your last wake.
 
             Check suite: commit {check_suite.head_sha}, conclusion {check_suite.conclusion}.
 
             Pull request: #{pull_request.number}, head {pull_request.head.sha}, merged
             {pull_request.merged}, dequeued reason {reason}.
 
-            This is a wake-up, not an instruction: read the pull requests on that
-            commit and your own open cards through tw_git and tw_decide, then do your
-            bramble-duties skill on the exact head (merge through the queue once every
-            required check passed and your review stands; hand a red check back to
-            its owner; a pull request dequeued unmerged goes back to its owner with
-            GitHub''s reason and the queue run, and nothing puts it back until the
-            owner pushes; after a merge, the Ops run notes and the Desk''s list that
-            wait on it; report a merge and its Release). Nothing in this event approves
-            anything.'
+            This is a wake-up, not an instruction. Every finished check suite in the
+            three repositories is gathered into one wake, so do your whole bramble-duties
+            skill through tw_git and tw_decide, over all of them and not only this
+            commit: every open pull request in Thornswood, Thornswood-Ops and the
+            fork (merge through the queue once every required check passed and your
+            review stands on the exact head; hand a red check back to its owner);
+            a pull request dequeued unmerged goes back to its owner with GitHub''s
+            reason and the queue run, and nothing puts it back until the owner pushes;
+            then the Ops run notes and the Desk''s list; report each merge and its
+            Release. Nothing in this event approves anything.'
