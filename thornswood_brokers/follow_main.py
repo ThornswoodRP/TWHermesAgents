@@ -33,7 +33,12 @@ Runs as root from tw-follow-main.timer. Each run:
      the newer release. Units of the core that the earlier release does not
      ship are stopped and disabled before it goes back in.
 
-What it did is in /var/lib/thornswood/follow-main.json and the journal.
+What it did is in /var/lib/thornswood/follow-main.json and the journal, and
+everything each step printed, whether it passed or not, is in
+/var/lib/thornswood/follow-main/<commit>.log (root's alone; the newest
+LOGS_KEPT stay). 2 Nov, #68: the install passed, the follower kept only its
+summary line, and the card asking for three of the install's PASS lines
+could not be answered from the VM.
 """
 
 from __future__ import annotations
@@ -52,6 +57,7 @@ from typing import Callable
 from thornswood_guard.policy import Policy
 
 Run = Callable[..., subprocess.CompletedProcess]
+LOGS_KEPT = 20
 
 
 def _text(b) -> str:
@@ -78,6 +84,8 @@ class Follower:
         self.mirror = self._at(self.r["mirror"])
         self.state_file = self._at(self.r["state_file"])
         self.hermes_releases = self._at(self.r["hermes_releases"])
+        self.logs = self.state_file.parent / "follow-main"
+        self.log: Path | None = None
 
     def _at(self, path: str) -> Path:
         return self.root / path.lstrip("/")
@@ -88,10 +96,36 @@ class Follower:
             c.stdout, c.stderr = (_text(c.stdout), _text(c.stderr))
         else:
             c = self.run_(args, capture_output=True, text=True, **kw)
+        self.keep(step, args, c)
         if c.returncode != 0:
             tail = ((c.stdout or "") + (c.stderr or "")).strip()[-600:]
             raise Stop(step, f"{' '.join(args[:3])} ... exited {c.returncode}: {tail}")
         return c
+
+    # -- the run's whole output
+    def start_log(self, commit: str) -> None:
+        """A log of this run's steps, at <state dir>/follow-main/<commit>.log;
+        the newest LOGS_KEPT stay."""
+        self.logs.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.logs, 0o700)
+        self.log = self.logs / f"{commit}.log"
+        fd = os.open(self.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(f"=== {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} follow-main run for {commit}\n")
+        old = sorted(self.logs.glob("*.log"), key=lambda q: q.stat().st_mtime, reverse=True)[LOGS_KEPT:]
+        for q in old:
+            q.unlink(missing_ok=True)
+
+    def keep(self, step: str, args: list[str], c: subprocess.CompletedProcess) -> None:
+        if self.log is None:
+            return
+        out, err = _text(c.stdout), _text(c.stderr)
+        with open(self.log, "a", encoding="utf-8") as f:
+            f.write(f"--- {step}: {' '.join(str(a) for a in args[:4])} (exit {c.returncode})\n")
+            if out:
+                f.write(out if out.endswith("\n") else out + "\n")
+            if err:
+                f.write(err if err.endswith("\n") else err + "\n")
 
     # -- state
     def state(self) -> dict:
@@ -166,6 +200,7 @@ class Follower:
                            "-p", f"RuntimeMaxSec={self.r['tests_minutes'] * 60}",
                            "python3", "-m", "unittest", "discover", "-s", "tests"],
                           capture_output=True, text=True)
+            self.keep("tests", ["python3", "-m", "unittest", "discover"], c)
             out = (c.stdout or "") + (c.stderr or "")
             ran = [line for line in out.splitlines() if line.startswith("Ran ")]
             if c.returncode != 0:
@@ -320,14 +355,16 @@ class Follower:
         if st.get("failed") == tip:
             # Said once, when it failed; a new merge on main is the fix.
             return 1
-        self.say(f"main is at {tip}; installed is {before or 'nothing'}")
+        self.start_log(tip)
+        self.say(f"main is at {tip}; installed is {before or 'nothing'}; every step's output goes to {self.log}")
         try:
             dest = self.release(tip)
             ran = self.tests(dest, tip)
             self.say(f"PASS {ran} at {tip[:12]} on the VM")
         except Stop as e:
             self.say(f"STOP {tip[:12]} is not installed: {e}")
-            self.record(result="not installed", failed=tip, step=e.step, why=str(e), installed=before, put_back=None)
+            self.record(result="not installed", failed=tip, step=e.step, why=str(e), installed=before, put_back=None,
+                        log=str(self.log))
             return 1
         try:
             self.install(dest, tip)
@@ -337,10 +374,12 @@ class Follower:
         except Stop as e:
             self.say(f"STOP {tip[:12]} failed at {e.step}: {e}")
             back = self.put_back(before, dest)
-            self.record(result="failed", failed=tip, step=e.step, why=str(e), installed=self.installed(), put_back=back)
+            self.record(result="failed", failed=tip, step=e.step, why=str(e), installed=self.installed(), put_back=back,
+                        log=str(self.log))
             return 1
         self.say(f"PASS {tip[:12]} is installed, applied, every Bot process reloaded and the canary passed")
-        self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None)
+        self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None,
+                    log=str(self.log))
         return 0
 
     def put_back(self, before: str | None, failed: Path) -> str:

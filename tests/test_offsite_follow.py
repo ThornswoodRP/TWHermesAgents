@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -275,6 +276,63 @@ class FollowMain(unittest.TestCase):
         self.assertIn("User=tw-ci", tests)
         self.assertIn("PrivateNetwork=yes", tests)
         self.assertEqual(json.loads(f.state_file.read_text())["installed"], NEW)
+
+    # 2 Nov, #68: the install passed and only the follower's summary line was
+    # kept, so a card asking for the install's own lines could not be answered.
+    def test_every_steps_output_is_kept_when_the_install_passes(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+
+        def run(args, **kw):
+            if "install.sh" in " ".join(args):
+                return subprocess.CompletedProcess(args, 0, "PASS the App's webhook is on\n", "")
+            return vm(args, **kw)
+
+        f.run_ = run
+        self.assertEqual(f.follow(), 0, self.said)
+        st = json.loads(f.state_file.read_text())
+        log = Path(st["log"])
+        self.assertEqual(log, self.root / "var/lib/thornswood/follow-main" / f"{NEW}.log")
+        text = log.read_text()
+        self.assertIn("PASS the App's webhook is on", text)
+        self.assertIn("Ran 412 tests", text)
+        self.assertIn("--- install: bash", text)
+        self.assertIn("--- canary:", text)
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(log.parent.stat().st_mode), 0o700)
+        self.assertIn(str(log), self.said[0])
+
+    def test_a_failed_run_keeps_its_output_and_the_put_back_in_the_same_log(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        canaries = []
+
+        def run(args, **kw):
+            if args[0].endswith("tw-canary"):
+                canaries.append(1)
+                if len(canaries) == 1:
+                    return subprocess.CompletedProcess(args, 1, "FAIL attack 3", "")
+            return vm(args, **kw)
+
+        f.run_ = run
+        self.assertEqual(f.follow(), 1)
+        text = Path(json.loads(f.state_file.read_text())["log"]).read_text()
+        self.assertIn("FAIL attack 3", text)
+        self.assertIn(f"releases/{OLD}/deploy/install.sh", text)
+
+    def test_only_the_newest_logs_are_kept(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        f.logs.mkdir(parents=True)
+        for i in range(follow_main.LOGS_KEPT + 5):
+            q = f.logs / f"{i:040d}.log"
+            q.write_text("old\n")
+            os.utime(q, (1_000_000 + i, 1_000_000 + i))
+        self.assertEqual(f.follow(), 0, self.said)
+        logs = sorted(p.name for p in f.logs.glob("*.log"))
+        self.assertEqual(len(logs), follow_main.LOGS_KEPT)
+        self.assertIn(f"{NEW}.log", logs)
+        self.assertNotIn(f"{0:040d}.log", logs)
 
     def test_the_fetch_uses_only_the_read_key_and_githubs_host_keys(self):
         vm = FakeVM(OLD)
