@@ -91,8 +91,10 @@ SCHEDULED = ("cron",)
 # Bramble's sweeps. A wake (its only webhook route is GitHub's) and its
 # owed-wake check (a cron job whose prompt carries OWED_WAKE_MARK) each do
 # the whole bramble-duties sweep. One the queue turns away is owed in
-# tw-policy instead of dropped; one that runs pays what is owed. When
-# tw-policy itself does not answer, the debt waits in OWED_FILE in the
+# tw-policy instead of dropped; one that runs pays what was owed when it
+# started. One sweep runs at a time: tw-policy turns away a sweep while
+# another is running, and that wake is owed too (2 Nov, two overlapping
+# sweeps revised one card twice). When tw-policy itself does not answer, the debt waits in OWED_FILE in the
 # profile until the owed-wake check can hand it over.
 SWEEP_PLATFORMS = ("webhook",)
 OWED_WAKE_MARK = "[Thornswood owed wake]"
@@ -162,7 +164,7 @@ class TurnGate:
         try:
             while True:
                 args = {"bot": self.bot, "ticket": ticket} if ticket else \
-                    {"bot": self.bot, "task": task, "source": str(kwargs.get("platform") or "chat")}
+                    {"bot": self.bot, "task": task, "source": str(kwargs.get("platform") or "chat"), "sweep": sweep}
                 got = self.ask("policy", "admit", args)
                 ticket = got["ticket"]
                 if got["state"] == "admitted":
@@ -238,7 +240,7 @@ class TurnGate:
         # One that was stopped (agent_loop_stopped) pays nothing.
         if turn and turn.get("state") == "admitted" and turn.get("sweep"):
             try:
-                self.ask("policy", "wake_paid", {"bot": self.bot})
+                self.ask("policy", "wake_paid", {"bot": self.bot, "ticket": turn.get("ticket")})
             except BrokerRefused as e:
                 logger.warning("a sweep ran but the owed wake could not be marked paid (%s); the next check sweeps again", e)
 
