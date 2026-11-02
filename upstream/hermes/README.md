@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Seven causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Eight causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
@@ -179,6 +179,65 @@ on its own row, and no line says MISROUTED), and the id is not the Bot Chat
 id One's own gateway would mint for `bot-chat:default` (generations 0 to
 5). Which step wrote the my-hermes owner is still open; no fix is written
 for it until that is measured.
+
+## 0008: a remote dashboard's READY wait runs on the remote, not as one ssh login a second
+
+Cause, measured on 2 Nov: the box's journal showed about 40 separate ssh
+logins from One between 2:27:38 and 2:28:18 PM, which made sshd,
+systemd-logind and systemd its busiest sources. In that window two remote
+dashboards were booting (One's desktop.log: spawned 2:27:37 and 2:27:44 PM,
+bound their ports 2:28:08 and 2:28:10 PM). While one boots,
+`scrapeReadyPort` (electron/remote-lifecycle.ts) re-read its spawn log with a
+new `cat` exec every 750 ms, and Windows OpenSSH has no ControlMaster, so on
+One every exec is its own login. Boots took 26 to 58 s that afternoon.
+
+Fix: one exec waits on the remote for up to 10 s until the log names a port
+(grep only gates the wait; the Desktop's READY regex still decides), then
+prints the log. A boot costs one login per 10 s slice; the deadline is
+unchanged. `0008-desktop-ready-wait-on-remote.patch` applies on 0006 (One's
+v0.22.5 build); `0008-desktop-ready-wait-on-remote-upstream-main.patch` on
+upstream c305aedf.
+
+Tests (Linux, Node 26, 2 Nov): `npx vitest run electron/remote-ready-wait.test.ts
+electron/remote-lifecycle.test.ts electron/remote-lifecycle-profile-missing.test.ts`,
+105 passed, 1 skipped (the existing zsh probe), on both bases. The new file
+runs the real remote command through sh against a temp log. The wrapped
+command was also run through bash and dash as the login shell. eslint is
+clean, and upstream's code-health ratchet passes.
+
+## Upstream's lint on the five open pull requests
+
+Upstream's blocking "code health ratchet" (scripts/code_health) failed four
+of the five pull requests opened on 1 Nov, as its reviewer said, and failed
+0006 too. Reproduced here with upstream's own `python scripts/check --only
+health --base HEAD^1` on each branch merged into upstream main:
+
+- #147814 (0002): agent_runtime_helpers.py grew past its cap, and
+  ratelimit_headers caught every exception.
+- #147816 (0004): auxiliary_client.py and test_auxiliary_client.py grew past
+  their caps.
+- #147834 (0001): the env=None backend lookup caught every exception.
+- #147835 (0005): use-session-actions/utils.ts grew past its cap.
+- 0006: electron/main.ts grew past its cap.
+
+The follow-up commits in `followups/` fix each one at its cause (the one
+exception the code can raise is caught by name; new code goes in a topical
+sibling and existing code moves with it, as upstream's fix text asks). They
+apply on the fork branches as they are and go there as ordinary commits. On
+upstream main 8819d883 all five then pass the ratchet. Tests: tool result
+storage 60 passed; the rate-limit and error-context suites 371 passed; the
+auxiliary client suites 294 passed and 1 failed (the Anthropic messages
+adapter test, which fails the same way on upstream main here because the
+anthropic package isn't installed); session-actions, relay and chat 1,857
+passed; cron union and registry sources 11 passed; `tsc -p
+tsconfig.electron.json --noEmit` and eslint clean.
+
+Why `gh pr create` was refused for 0006 is still unknown. The same sign-in
+reads the repository (pull: true), the fork is linked to NousResearch's
+repository, other outside accounts opened pull requests all afternoon, and
+REST answered `404 Not Found` to the create. Opening it from GitHub's
+compare page in a browser is the measurement that separates the gh sign-in
+from the account.
 
 ## Test results so far
 
