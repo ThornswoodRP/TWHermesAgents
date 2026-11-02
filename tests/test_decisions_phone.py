@@ -433,10 +433,11 @@ class AppFiles(unittest.TestCase):
         # has shown (Patrick, 2 Nov: every open waited for One), deleted at sign-out; the public id of
         # this phone's fingerprint key, which its sign-in names (an id the core sends in the open,
         # never the private key, which never leaves the phone's authenticator); and whether he put
-        # the fingerprint offer off; and whether "Hey Hermes" is on for this phone (2 Nov). Never a token, a
+        # the fingerprint offer off (cleared when the core no longer has the phone's key, so it is offered
+        # again); and whether "Hey Hermes" is on for this phone (2 Nov). Never a token, a
         # private key or the CSRF value.
         uses = [ln.strip() for ln in js.splitlines() if "localStorage" in ln]
-        self.assertEqual(len(uses), 11, uses)
+        self.assertEqual(len(uses), 12, uses)
         for ln in uses:
             self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER|WAKE_KEY)\b", ln)
         self.assertIn("localStorage.setItem(PHONE_KEY, JSON.stringify(k))", js)

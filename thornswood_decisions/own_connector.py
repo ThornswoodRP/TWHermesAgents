@@ -242,18 +242,75 @@ def _iso(epoch) -> str:
 
 
 def _text(content) -> str:
-    """A message's content as plain text: a string, or the text parts of a list of parts."""
+    """A message's content as plain text: a string, or the text parts of a list of parts, with a skill's
+    loaded instructions shown as Patrick typed them (as_typed)."""
     if isinstance(content, str):
         try:
             parts = json.loads(content) if content.startswith("[") else None
         except json.JSONDecodeError:
             parts = None
         if not isinstance(parts, list):
-            return content
+            return as_typed(content)
         content = parts
     if isinstance(content, list):
-        return "\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+        return as_typed("\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"))
     return ""
+
+
+# A /skill message, as Hermes keeps it, opens with the skill's whole text ahead of what Patrick typed. Hermes
+# shows it as typed in its own titles, previews and transcripts (agent/skill_commands.py
+# describe_skill_invocation with separator " ", at the pinned commit); untitled,
+# the phone named a chat by the raw text instead (Patrick's screenshot, 2 Nov 3:13 PM: "[IMPORTANT: The user
+# has invoked the ..."). The markers are Hermes's own, byte for byte (skill_commands.py:49-81 and :336-338);
+# test_decisions_lines.py SkillMessages holds the answers Hermes's own describer gave on the same messages.
+_SKILL_PREFIX = "[IMPORTANT: The user has invoked the "
+_SKILL_NAME = re.compile(re.escape(_SKILL_PREFIX) + r'"([^"]*)"')
+_SKILL_MARKER = "The full skill content is loaded below.]"
+_SKILL_INSTRUCTION = "The user has provided the following instruction alongside the skill invocation: "
+_SKILL_RUNTIME_NOTE = "\n\n[Runtime note:"
+_BUNDLE_MARKER = " skill bundle,"
+_BUNDLE_INSTRUCTION = "\nUser instruction: "
+_BUNDLE_FIRST_BLOCK = "\n\n[Loaded as part of the "
+_AUTO_PREFIX = '[IMPORTANT: The "'
+_AUTO_DIR_NOTE_END = "then run them with the terminal tool using the absolute path."
+_AUTO_TRAILING = (("[Skill config (", "\n]"), ("[Skill setup note: ", "]\n\n"),
+                  ("[This skill has supporting files", "/scripts/foo.js`)."))
+_EXCERPT_JOINT = "\x1e"
+
+
+def _cut_after(text: str, marker: str, stop: str, find) -> str | None:
+    at = find(marker)
+    return (text[at + len(marker):].split(stop, 1)[0].strip() or None) if at >= 0 else None
+
+
+def as_typed(text: str) -> str:
+    """A /skill message as Patrick typed it ("/work fix the title"), or the text unchanged."""
+    if text.startswith(_AUTO_PREFIX):
+        name = (re.match(re.escape(_AUTO_PREFIX) + r'([^"]*)"', text) or [None, ""])[1]
+        end = text.rfind(_AUTO_DIR_NOTE_END)
+        if end == -1:
+            return f"/{name}" if name else text
+        tail = text[end + len(_AUTO_DIR_NOTE_END):].lstrip()
+        while stop := next((e for b, e in _AUTO_TRAILING if tail.startswith(b)), None):
+            cut = tail.find(stop)
+            tail = tail[cut + len(stop):].lstrip() if cut >= 0 else ""
+        return " ".join(tail.split()) or (f"/{name}" if name else text)
+    if not text.startswith(_SKILL_PREFIX):
+        return text
+    m = _SKILL_NAME.match(text)
+    name = (m.group(1) if m else "").strip()
+    label = name if name.startswith("/") else f"/{name}"
+    if _BUNDLE_MARKER in text:
+        said = _cut_after(text, _BUNDLE_INSTRUCTION, _BUNDLE_FIRST_BLOCK, text.find)
+    elif _SKILL_MARKER in text:
+        said = _cut_after(text, _SKILL_INSTRUCTION, _SKILL_RUNTIME_NOTE, text.rfind)
+    else:
+        said = None
+    if said:
+        said = " ".join(said.split(_EXCERPT_JOINT)[0].split())
+    if said:
+        return f"{label} {said}" if name else said
+    return label if name else text
 
 
 # What Patrick wrote, apart from what Hermes attached to it: Hermes keeps an @file: reference where it was
