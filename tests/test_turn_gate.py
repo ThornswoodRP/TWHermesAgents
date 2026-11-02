@@ -200,6 +200,15 @@ class Tools(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(f.seen[-1], ("git", "merge", {"bot": "rift", "repo": "ThornswoodRP/Thornswood", "number": 42}))
 
+    def test_tw_decide_names_the_bot_from_the_profile(self):
+        f = Fleet()
+        ctx = Ctx("echo")
+        brokers.register(ctx, ready_policy(), "echo", ask=f.ask)
+        out = json.loads(ctx.tools["tw_decide"][2]({"op": "my_cards", "bot": "bramble"}))
+        self.assertTrue(out["ok"])
+        self.assertEqual(f.seen[-1], ("decide", "my_cards", {"bot": "echo"}))
+        self.assertFalse(json.loads(ctx.tools["tw_decide"][2]({"op": "answer"}))["ok"], "no Bot answers a card")
+
     def test_only_the_named_ops(self):
         f = Fleet()
         ctx = Ctx("rift")
@@ -218,7 +227,7 @@ class Tools(unittest.TestCase):
         ctx = Ctx("bramble")
         brokers.register(ctx, ready_policy(), "bramble", ask=Fleet().ask)
         self.assertEqual(sorted(ctx.hooks), ["agent_loop_stopped", "on_session_end", "pre_llm_call"])
-        self.assertEqual(sorted(ctx.tools), ["tw_files", "tw_git"])
+        self.assertEqual(sorted(ctx.tools), ["tw_decide", "tw_files", "tw_git"])
         for name, (toolset, schema, _) in ctx.tools.items():
             self.assertEqual(toolset, "thornswood")
             self.assertEqual(schema["name"], name)

@@ -89,7 +89,7 @@ class Units(unittest.TestCase):
         self.assertEqual(u["User"], ["hermes"])
         self.assertEqual(u["Slice"], ["tw-hermes.slice"])
         groups = u["SupplementaryGroups"][0].split()
-        self.assertEqual(sorted(groups), ["tw-files-clients", "tw-git-clients", "tw-policy-clients"])
+        self.assertEqual(sorted(groups), ["tw-decide-bots", "tw-files-clients", "tw-git-clients", "tw-policy-clients"])
         for role in BROKERS:
             self.assertNotIn(policy().data["brokers"]["users"][role], groups)
 

@@ -96,6 +96,12 @@ fi
 members="$(getent group tw-push | cut -d: -f4)"
 [[ -z "$members" ]] || stop "the tw-push group has members ($members); it must have none."
 ok "user tw-push"
+# The Bots' route (#49): only the Bots' user may open its socket. deploy/install.sh
+# makes the group with the brokers' groups and puts hermes in it.
+getent group tw-decide-bots >/dev/null || stop "there is no tw-decide-bots group; deploy/install.sh makes it, run that first."
+members="$(getent group tw-decide-bots | cut -d: -f4)"
+[[ "$members" == hermes ]] || stop "the tw-decide-bots group's members are '$members'; it must be hermes alone."
+ok "group tw-decide-bots: hermes alone"
 
 # 2. The store's folder: tw-decide's only. The settings file: root's, no secrets.
 install -d -m 0755 -o root -g root /srv/tw /etc/thornswood
@@ -131,7 +137,7 @@ install -d -m 0755 "$opt/bin"
 for f in tw-decide tw-decide-feed tw-decide-connector tw-decide-push tw-decide-own; do
   install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
 done
-for u in tw-decide.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service \
+for u in tw-decide.service tw-decide-bots.service tw-decide-feed.service tw-decide-feed.timer tw-decide-connector.service \
          tw-decide-push.service tw-decide-own.service tw-decide-peers.service tw-decide-peers.timer; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
@@ -210,6 +216,16 @@ if command -v ss >/dev/null; then
   [[ -z "$wide" ]] || stop "something listens on port 9135 beyond loopback: $wide"
   ok "port 9135 is on loopback only"
 fi
+
+# 8b. The Bots' route (#49), on its socket only: a Bot files cards and reads
+# Patrick's answers through it, as itself, with no token.
+systemctl enable --quiet tw-decide-bots.service
+systemctl restart tw-decide-bots.service
+for _ in $(seq 1 20); do [[ -S /run/tw/decide-bots/bots.sock ]] && break; sleep 0.5; done
+[[ -S /run/tw/decide-bots/bots.sock ]] || stop "the Bots' route did not open its socket: journalctl -u tw-decide-bots -n 50"
+[[ "$(stat -c '%a %G' /run/tw/decide-bots/bots.sock)" == "660 tw-decide-bots" ]] \
+  || stop "the Bots' route's socket is $(stat -c '%a %G' /run/tw/decide-bots/bots.sock), not 660 tw-decide-bots"
+ok "the Bots' route listens on /run/tw/decide-bots/bots.sock (660, tw-decide-bots)"
 
 # 9. The feeds, once now and then once a minute, when the room is known.
 if [[ -n "$room" ]]; then

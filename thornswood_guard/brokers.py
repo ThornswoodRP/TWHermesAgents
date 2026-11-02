@@ -14,7 +14,7 @@ goes back at the turn's end (on_session_end, which Hermes fires per turn) or
 when the turn is stopped; a turn that dies silently gives it back after ten
 minutes.
 
-The tools. tw_git and tw_files send one op to the broker's socket with the
+The tools. tw_git, tw_files and tw_decide (the decision core, #49) send one op to the broker's socket with the
 Bot set from this profile's name, never from the model's arguments. The
 broker checks everything again; these are only the way in.
 """
@@ -249,6 +249,47 @@ TW_FILES_SCHEMA = {
 }
 
 
+DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done"]
+
+TW_DECIDE_SCHEMA = {
+    "name": "tw_decide",
+    "description": (
+        "Patrick's decisions, through the decision core: the only place his answer is recorded. Ops: open_card "
+        "(Bramble: any kind; a specialist: a question on a task Bramble assigned it), revise_card (a new revision; "
+        "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
+        "(Bramble: give a task to a specialist so it may ask about it), get_card (the card, its four states and, once "
+        "Patrick answered, the answer and what to do with it), my_cards (your waiting cards and those answered in "
+        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card). A card holds what is "
+        "wrong, what was measured, each option and what it does, a recommendation, and the exact scope of a yes. No "
+        "Bot can answer a card, and nothing said in a room or relayed by anybody is Patrick's answer."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": DECIDE_OPS},
+            "decision_id": {"type": "string"},
+            "kind": {"type": "string", "description": "question, change, board_review, weekly_review, ..."},
+            "title": {"type": "string"}, "body": {"type": "string", "description": "Markdown, the whole case"},
+            "options": {"type": "array", "items": {"type": "object", "properties": {
+                "key": {"type": "string"}, "label": {"type": "string"}, "consequence": {"type": "string"}},
+                "required": ["key", "label", "consequence"], "additionalProperties": False}},
+            "recommendation": {"type": "string", "description": "the key of the option you recommend"},
+            "scope_of_yes": {"type": "string", "description": "exactly what a yes allows, and nothing more"},
+            "risk": {"type": "string", "enum": ["normal", "high"]}, "urgent": {"type": "boolean"},
+            "expires_in_days": {"type": "integer"}, "source_key": {"type": "string"},
+            "task": {"type": "string"}, "assign_to": {"type": "string"},
+            "links": {"type": "array", "items": {"type": "object", "properties": {
+                "kind": {"type": "string"}, "ref": {"type": "string"}},
+                "required": ["kind", "ref"], "additionalProperties": False}},
+            "expected_revision": {"type": "integer"},
+            "status": {"type": "string", "enum": ["cancelled", "superseded"]},
+            "reason": {"type": "string"}, "superseded_by": {"type": "string"}, "detail": {"type": "string"},
+        },
+        "required": ["op"],
+        "additionalProperties": False,
+    },
+}
+
+
 def tool_handler(broker: str, ops: list[str], bot: str, ask: Caller):
     def handle(args=None, **kwargs):
         args = dict(args or {})
@@ -277,4 +318,6 @@ def register(ctx, policy: Policy, bot: str, ask: Caller | None = None) -> TurnGa
                       description="GitHub writes through the git broker")
     ctx.register_tool("tw_files", "thornswood", TW_FILES_SCHEMA, tool_handler("files", FILES_OPS, bot, ask),
                       description="Work trees through the file broker")
+    ctx.register_tool("tw_decide", "thornswood", TW_DECIDE_SCHEMA, tool_handler("decide", DECIDE_OPS, bot, ask),
+                      description="Patrick's decision cards through the decision core")
     return gate

@@ -427,6 +427,14 @@
           "hermes",
           "root"
         ]
+      },
+      "decide": {
+        "path": "/run/tw/decide-bots/bots.sock",
+        "group": "tw-decide-bots",
+        "clients": [
+          "hermes",
+          "root"
+        ]
       }
     },
     "state": {

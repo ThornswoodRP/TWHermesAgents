@@ -140,8 +140,8 @@ def self_test(plugin_dir: Path, bot: str) -> list[str]:
         # tool refused, and the Bot has its two broker tools.
         if not (out or {}).get("action") == "block" or "ticket" not in (out or {}).get("message", ""):
             problems.append(f"{bot}: with the brokers on, a tool call with no ticket from the fleet queue was not refused ({out})")
-        if sorted(ctx.tools) != ["tw_files", "tw_git"]:
-            problems.append(f"{bot}: the installed guard registered the tools {sorted(ctx.tools)}, not tw_git and tw_files")
+        if sorted(ctx.tools) != ["tw_decide", "tw_files", "tw_git"]:
+            problems.append(f"{bot}: the installed guard registered the tools {sorted(ctx.tools)}, not tw_git, tw_files and tw_decide")
         for want in ("pre_llm_call", "on_session_end", "agent_loop_stopped"):
             if len(ctx.hooks.get(want) or []) != 1:
                 problems.append(f"{bot}: the turn gate's {want} hook is not registered once")

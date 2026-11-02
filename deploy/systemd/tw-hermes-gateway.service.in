@@ -18,7 +18,7 @@ StartLimitBurst=3
 Type=simple
 User=hermes
 Group=hermes
-SupplementaryGroups=tw-policy-clients tw-git-clients tw-files-clients
+SupplementaryGroups=tw-policy-clients tw-git-clients tw-files-clients tw-decide-bots
 Slice=tw-hermes.slice
 Environment=XDG_RUNTIME_DIR=/run/user/@UID@
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus

@@ -415,6 +415,12 @@ brokers:
       path: /run/tw/files/files.sock
       group: tw-files-clients
       clients: [hermes, root]
+    # The Bots' route to the decision core (#49), served by tw-decide-bots as
+    # the core's own user.
+    decide:
+      path: /run/tw/decide-bots/bots.sock
+      group: tw-decide-bots
+      clients: [hermes, root]
   state:
     policy_db: /srv/tw/policy/policy.db
     git_mirrors: /srv/tw/git

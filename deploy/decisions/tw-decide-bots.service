@@ -1,0 +1,51 @@
+# tw-decide-bots: the Bots' route to the decision core (#49). The tw_decide
+# tool calls it on a Unix socket that only the tw-decide-bots group may open,
+# and hermes, the Bots' user, is that group's only member. Each call is
+# checked again by the caller's user from the socket's peer credentials. It
+# runs as the core's own user on the core's store, with no network at all.
+[Unit]
+Description=Thornswood decision core: the Bots' route
+After=tw-decide.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=tw-decide
+Group=tw-decide
+SupplementaryGroups=tw-decide-bots
+MemoryHigh=100M
+MemoryMax=150M
+TasksMax=32
+ExecStart=/opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db serve-bots --workspace thornswood --socket /run/tw/decide-bots/bots.sock --group tw-decide-bots
+RuntimeDirectory=tw/decide-bots
+RuntimeDirectoryMode=0755
+ReadWritePaths=/srv/tw/decide
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

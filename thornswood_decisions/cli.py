@@ -12,6 +12,7 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   flag        turn one flag on or off
   test-card   open a test card as Bramble, in a test workspace only
   serve       answer the API on 127.0.0.1
+  serve-bots  answer the Bots' tw_decide tool on a Unix socket only the Bots' user may open (#49)
   feed-token  print a new token for a feed (work, room, bots), the connector, the push worker
               or an own-Hermes connector (own-me, own-one) (replaces the old one)
   token-known whether the token on stdin is the core's for that name (the install checks its files with it)
@@ -119,6 +120,22 @@ def cmd_serve(store: Store, args) -> None:
     finally:
         server.server_close()
         api.close()
+
+
+def cmd_serve_bots(store: Store, args) -> None:
+    """The Bots' route (#49): tw_decide's socket, for the hermes user only."""
+    store.close()
+    from thornswood_brokers import wire
+    from thornswood_brokers.serve import run_until_stopped
+
+    from .bots import BotRoute
+    route = BotRoute(args.db, args.workspace)
+    server = wire.Server(args.socket, route.ops(), mode=0o660, group=args.group or None)
+    print(f"tw-decide-bots listening on {args.socket} for workspace {args.workspace}", flush=True)
+    try:
+        run_until_stopped(server, "tw-decide-bots")
+    finally:
+        route.close()
 
 
 def cmd_feed_token(store: Store, args) -> None:
@@ -282,6 +299,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--workspace", required=True)
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--origin", default=None, help="the phone app's exact origin, once Tailscale Serve gives it")
+    p = sub.add_parser("serve-bots")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--socket", required=True, help="the Unix socket the Bots' tw_decide tool calls")
+    p.add_argument("--group", default="", help="the group that may connect (the Bots' user is its only member)")
     p = sub.add_parser("feed-token")
     p.add_argument("--workspace", required=True)
     p.add_argument("--name", choices=FEED_NAMES, required=True)
@@ -304,7 +325,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"init": cmd_init, "bind-room": cmd_bind_room, "pair": cmd_pair, "flag": cmd_flag,
-            "test-card": cmd_test_card, "serve": cmd_serve, "feed-token": cmd_feed_token, "selfcheck": cmd_selfcheck,
+            "test-card": cmd_test_card, "serve": cmd_serve, "serve-bots": cmd_serve_bots, "feed-token": cmd_feed_token, "selfcheck": cmd_selfcheck,
             "token-known": cmd_token_known, "peers": cmd_peers,
             "push-reset": cmd_push_reset,
             "backup": cmd_backup, "verify": cmd_verify}

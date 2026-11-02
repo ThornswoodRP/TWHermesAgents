@@ -84,7 +84,7 @@ hermes_home="$(getent passwd hermes | cut -d: -f6)"
 
 # 1. Groups and users. The groups say who may connect; every op still checks
 # the caller's user.
-for g in tw-policy-clients tw-git-clients tw-files-clients tw-spool $(for b in $bots; do echo "tw-work-$b"; done); do
+for g in tw-policy-clients tw-git-clients tw-files-clients tw-decide-bots tw-spool $(for b in $bots; do echo "tw-work-$b"; done); do
   getent group "$g" >/dev/null || groupadd --system "$g"
 done
 mkuser() {
@@ -97,7 +97,7 @@ for u in tw-policy tw-files tw-git tw-proxy tw-backup tw-offsite tw-boxdrop tw-c
 # tw-offsite reads the VM's archives (tw-backup:tw-backup 0440) to copy them to Drive.
 usermod -a -G tw-backup tw-offsite
 for b in $workers; do mkuser "tw-$b"; usermod -a -G "tw-work-$b" "tw-$b"; done
-usermod -a -G tw-policy-clients,tw-git-clients,tw-files-clients hermes
+usermod -a -G tw-policy-clients,tw-git-clients,tw-files-clients,tw-decide-bots hermes
 usermod -a -G tw-policy-clients,tw-spool tw-git
 usermod -a -G "tw-policy-clients,tw-spool,$(for b in $bots; do printf 'tw-work-%s,' "$b"; done | sed 's/,$//')" tw-files
 usermod -a -G tw-policy-clients tw-proxy
@@ -377,7 +377,7 @@ fi
 # not by hand afterwards. Ending them also stops tw-hermes-gateway, which runs
 # as hermes and needs user@UID.service (31 Oct: a hand-run terminate-user left
 # it failed).
-client_gids=($(for g in tw-policy-clients tw-git-clients tw-files-clients; do getent group "$g" | cut -d: -f3; done))
+client_gids=($(for g in tw-policy-clients tw-git-clients tw-files-clients tw-decide-bots; do getent group "$g" | cut -d: -f3; done))
 stale="$(stale_procs /proc "$hermes_uid" "${client_gids[@]}")"
 if (( stale > 0 )); then
   gateway_was="$(systemctl is-enabled tw-hermes-gateway.service 2>/dev/null || true)"
