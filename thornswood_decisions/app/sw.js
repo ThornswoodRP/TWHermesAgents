@@ -11,7 +11,8 @@
 // The worker shows the alerts, so it takes them off too: the app tells it which
 // cards still need Patrick each time it reads Decisions, and which card was just
 // opened or answered (Patrick, 1 Nov: an answered card kept showing).
-const SHELL = 'tw-shell-v10'
+const SHELL = 'tw-shell-v11'
+const ALERTS = 'tw-alerts'  // when each card's alert reached this phone (push, below)
 const CARD_ID = /^[A-Za-z0-9_-]{1,64}$/
 const APP_PATH = /^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/
 const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/cinzel-latin.woff2',
@@ -23,7 +24,7 @@ self.addEventListener('install', event => {
 
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== SHELL).map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k !== SHELL && k !== ALERTS).map(k => caches.delete(k))))
     .then(() => self.clients.claim()))
 })
 
@@ -44,6 +45,9 @@ self.addEventListener('push', event => {
   let data = {}
   try { data = event.data ? event.data.json() : {} } catch (err) { data = {} }
   const id = typeof data.decision_id === 'string' && CARD_ID.test(data.decision_id) ? data.decision_id : null
+  // When this phone got the alert, kept on the phone only, so the card can say how long it took.
+  if (id) event.waitUntil(caches.open(ALERTS).then(c => c.put(new Request('/m/alerts/' + id),
+    new Response(JSON.stringify({ shown_at: new Date().toISOString() }), { headers: { 'Content-Type': 'application/json' } }))))
   event.waitUntil(self.registration.showNotification('Hermes needs you', {
     tag: id ? 'decision:' + id : 'thornswood',
     renotify: false,

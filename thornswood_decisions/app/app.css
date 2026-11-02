@@ -330,11 +330,11 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 
 /* Replies (redesign step 4, style A): the words a reply quotes, above the box
    while it is written, and in the sent bubble as a quote that goes back. */
-.replying { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 8px; padding: 6px 4px 6px 10px;
+.replying, .answering { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 8px; padding: 6px 4px 6px 10px;
   border-left: 3px solid var(--accent); background: var(--raised); border-radius: 0 8px 8px 0; }
-.replying .rq { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
-.replying .rq strong { display: block; font-size: 12.5px; color: var(--accent-hot); }
-.replying .back { flex: 0 0 36px; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent;
+.replying .rq, .answering .rq { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.replying .rq strong, .answering .rq strong { display: block; font-size: 12.5px; color: var(--accent-hot); }
+.replying .back, .answering .back { flex: 0 0 36px; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent;
   color: var(--fg); display: inline-flex; align-items: center; justify-content: center; }
 .chat .bub .quote { margin: 0 0 6px; padding: 4px 8px; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
   background: rgba(0, 0, 0, .22); font-size: 13.5px; }
@@ -376,3 +376,12 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 .file.bad .fstate { color: var(--warn); white-space: normal; }
 .file .ib { width: 36px; height: 36px; }
 .pick-file { display: flex; align-items: center; gap: 10px; justify-content: flex-start; }
+
+/* A Bot's cards waiting on Patrick, at the end of its Bot Chat, and the line over the box when his
+   words answer one (Pixel check, 2 Nov). */
+.answering[hidden] { display: none; }
+.chat-cards .card { margin: 10px 0 4px; }
+.chat-cards .cardhead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.chat-cards .cardhead a { color: var(--fg); text-decoration: none; min-width: 0; overflow-wrap: anywhere; }
+.chat-cards .opts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.chat-cards .opts button { flex: 1 1 auto; min-height: 44px; }

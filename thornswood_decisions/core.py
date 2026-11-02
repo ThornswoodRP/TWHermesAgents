@@ -306,6 +306,22 @@ class DecisionCore:
         self._may_read(p, row)
         return self._card(self.s.db, row)
 
+    def asked_by(self, p: Principal, bot: str) -> list[dict]:
+        """The cards waiting on Patrick that this Bot asked, oldest first: shown in its Bot Chat, where
+        his message can answer one (chat.py Chat.send)."""
+        if p.kind != "patrick":
+            raise CoreError(403, "not_patrick", "only Patrick reads the cards in a Bot Chat")
+        rows = self.s.db.execute("SELECT d.* FROM decisions d JOIN principals b ON b.id = d.requested_by "
+                                 "WHERE d.workspace_id = ? AND d.status = 'pending' AND b.bot = ? AND d.expires_at > ? "
+                                 "ORDER BY d.created_at", (p.workspace_id, bot, self.s.now())).fetchall()
+        return [self._card(self.s.db, r) for r in rows]
+
+    def asker(self, workspace_id: str, decision_id: str) -> str | None:
+        """The Bot that asked a card, or None."""
+        r = self.s.db.execute("SELECT b.bot FROM decisions d JOIN principals b ON b.id = d.requested_by "
+                              "WHERE d.id = ? AND d.workspace_id = ?", (decision_id, workspace_id)).fetchone()
+        return r["bot"] if r else None
+
     def needs_you(self, p: Principal) -> list[dict]:
         if p.kind not in ("patrick", "bramble"):
             raise CoreError(403, "not_patrick", "only Patrick and Bramble read the Needs you list")
@@ -419,4 +435,16 @@ class DecisionCore:
             "superseded_by": row["superseded_by"], "task": row["task"],
             "options": [dict(o) for o in opts], "links": [dict(x) for x in links],
             "receipt": self._receipt_for(db, row["id"]),
+            # When the card's alert went to the push service (Patrick, 2 Nov: a card reached his
+            # phone minutes after it was stored), so the card itself says where the time went.
+            "alert": self._alert_of(db, row["id"]),
         }
+
+    @staticmethod
+    def _alert_of(db, decision_id: str) -> dict | None:
+        r = db.execute("SELECT created_at, updated_at, status FROM push_outbox WHERE decision_id = ? "
+                       "ORDER BY attention_revision DESC LIMIT 1", (decision_id,)).fetchone()
+        if not r:
+            return None
+        return {"queued_at": r["created_at"], "status": r["status"],
+                "sent_at": r["updated_at"] if r["status"] == "sent" else None}

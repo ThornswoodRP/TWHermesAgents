@@ -335,7 +335,7 @@ class Api:
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1])
-            return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"))
+            return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"), data.get("answer"))
         if method == "GET" and route == ["own"]:
             return 200, OwnChat(core.s).summary(p)
         if method == "GET" and len(route) == 2 and route[0] == "own":

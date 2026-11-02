@@ -74,7 +74,7 @@ The phone answers a card with the same command Desktop sends (`POST /cards/<id>/
 | `room_send.py` | Run with Hermes's own Python: finds the running gateway without starting one and calls `groups.send` with the core's key as the event id and thread |
 | `feed_reader.py` | Now also sends the "bots" snapshot: each Bot's canonical Bot Chat, its last 40 messages from Patrick and the Bot, read only from `profiles/<id>/state.db`. Room events carry their event id |
 
-No API_SERVER_KEY, no api_server listener and no change to the gateway's settings: the connector uses the paths Hermes uses on its own machine (`contracts.json`, `bot_chat.local_send` and `room.client`). `api.py` adds `GET /chat` (the six Bots), `GET /chat/<bot or room>` (the snapshot, as of its time, and Patrick's own messages with their state), `POST /chat/<bot or room>`, and `POST /connector/claim` and `/connector/result` for the connector's token only, never a browser. The bottom bar's Bramble, Bots and Room now chat; each Bot has a deep link at `/m/bots/<bot>`. A chat message is never an answer to a card.
+No API_SERVER_KEY, no api_server listener and no change to the gateway's settings: the connector uses the paths Hermes uses on its own machine (`contracts.json`, `bot_chat.local_send` and `room.client`). `api.py` adds `GET /chat` (the six Bots), `GET /chat/<bot or room>` (the snapshot, as of its time, and Patrick's own messages with their state), `POST /chat/<bot or room>`, and `POST /connector/claim` and `/connector/result` for the connector's token only, never a browser. The bottom bar's Bramble, Bots and Room now chat; each Bot has a deep link at `/m/bots/<bot>`. A message in a Bot's Bot Chat answers a card only as "A chat answers a card" below says.
 
 ## Web Push (step 5)
 
@@ -419,6 +419,21 @@ Patrick's Pixel check of the Rooms previews and of Reply, 2 Nov: "it should rend
 - **A chat reads itself again under the box.** A chat was not read again while its box had the focus, and putting the keyboard away leaves the focus there, so a message's state stood still. Now the messages are drawn again every 15 seconds and the box, with what is in it and the keyboard, stays as it is.
 - **Tapping a pasted file's chip** opens the chip, no longer the message's actions as well.
 - **No clutter.** No line under a tab's or chat's title ("Each group chat, as of ...", "A chat is never an answer to a card", "your Hermes on One"), no "as of" footers, and no help paragraphs over the new chat box or the hidden chats. A card shows "high risk" when it is; its revision and state are in the receipt.
+
+## A chat answers a card (Pixel check, 2 Nov)
+
+Patrick, on the line "A chat is never an answer to a card": "Which is wrong anyways it should be".
+
+- **The cards in the Bot Chat.** A Bot's Bot Chat ends with the cards that Bot asked and that wait on him (`GET /chat/<bot>` `cards`, `DecisionCore.asked_by`), each with its options. A tap answers it as on Decisions, a high-risk one through the passkey screen, and he comes back to the chat. A room shows none.
+- **A message that answers.** When his words start with an option's label or key, as a whole word ("Wait, until tonight"), the line over the box says which card and which option they answer; the longest name wins, two options alike answer nothing and say so, and the x sends the words without answering. The app never guesses past that, and the core never reads an answer out of a message by itself.
+- **One answer path.** A message sent with it carries the card, the option and the revision he saw (`answer` on `POST /chat/<bot>`). `Chat.send` takes it first through `DecisionCore.answer`, with every check a tap has: only a card that Bot asked, still waiting and not expired, the exact revision, an option of that revision, and a passkey sign-in from the last minutes for a high-risk card (the app opens the passkey prompt). His words are the answer's note. Nothing is sent when it is refused. The Bot is told the answer as for a tap and gets his words as a message too. The same send again is the same answer and the same message.
+- His own Hermes and One ask no cards, so a message there still answers none.
+
+Tests: `test_decisions_card_chat.py` and the Rift step in `decisions_phone_check.js`.
+
+## Where a card's alert spent its time (2 Nov)
+
+Patrick: Bramble's #5334 card was stored at 12:47 PM and reached his phone around 12:50 PM, "there has to be a delay we need to fix", and "I shouldn't have had to do a card for that" about measuring it. The alert now goes with Urgency high (#93). Each card also says, to the second, when it was stored, when the core's worker handed its alert to the push service (`alert` on the card, from `push_outbox`), and when this phone got it (the service worker keeps that time on the phone, in the `tw-alerts` cache, never sent anywhere). A late alert shows which hop was slow, and nobody is asked to measure it.
 
 ## Photos and files on a message to his own Hermes (Pixel check, 2 Nov)
 

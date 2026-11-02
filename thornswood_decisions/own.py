@@ -380,7 +380,7 @@ def _release(here: Path | None = None) -> str | None:
 RELEASE = _release()
 
 
-DOING_STATES = ("thinking", "writing", "tool")
+DOING_STATES = ("thinking", "writing", "tool", "waiting")
 DOING_ID = re.compile(r"^own_[A-Za-z0-9_-]{1,40}$")
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
