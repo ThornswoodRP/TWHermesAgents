@@ -54,6 +54,12 @@ class Transcriber:
         return {"success": True, "transcript": "  " + self.words + "\n", "provider": "local"}
 
 
+# The voice worker runs only on the VM (Linux): it checks its caller by the Unix socket's peer credentials
+# (SO_PEERCRED) and a uid, which Windows has not; One never runs it.
+ON_THE_VM = unittest.skipIf(os.name == "nt" or not hasattr(socket, "SO_PEERCRED"),
+                            "the voice worker runs only on the VM's Linux (Unix socket peer credentials)")
+
+
 class Running:
     """A voice worker on a socket in a scratch folder, served on a thread."""
 
@@ -99,6 +105,7 @@ def patrick():
     return types.SimpleNamespace(kind="patrick", label="Patrick")
 
 
+@ON_THE_VM
 class TheWorker(unittest.TestCase):
     def setUp(self):
         self.r = Running(self)
@@ -188,6 +195,7 @@ class HermessOwnWhisper(unittest.TestCase):
             self.assertIsNone(voice_worker.hermes_whisper())
 
 
+@ON_THE_VM
 class TheCoresSide(unittest.TestCase):
     def setUp(self):
         self.r = Running(self)
@@ -287,6 +295,7 @@ class AnAnswerShowsAtOnce(unittest.TestCase):
         self.assertIsNotNone(self.pages.get(older, w.clock()))
 
 
+@ON_THE_VM
 class OverHttp(unittest.TestCase):
     def setUp(self):
         self.s = Served(self)
