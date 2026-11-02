@@ -29,11 +29,17 @@ class Fake:
         self.checks = checks
         self.mergeable = mergeable or {}
         self.calls = []
+        self.closed = []
 
     def __call__(self, method, path, body=None):
         self.calls.append((method, path, body))
         if method == "GET" and path.startswith(f"/repos/{R}/pulls?"):
-            return 200, [p for p in self.prs.values() if p["base"]["ref"] == "main"]
+            base = re.search(r"base=([^&]+)", path).group(1)
+            return 200, [p for p in self.prs.values() if p["base"]["ref"] == base]
+        m = re.match(rf"^/repos/{R}/pulls/(\d+)$", path)
+        if method == "PATCH" and m:
+            self.prs[int(m.group(1))]["base"]["ref"] = body["base"]
+            return 200, {}
         m = re.match(rf"^/repos/{R}/pulls/(\d+)$", path)
         if method == "GET" and m:
             p = dict(self.prs[int(m.group(1))])
@@ -49,9 +55,10 @@ class Fake:
             return 200, {"merged": True}
         m = re.match(rf"^/repos/{R}/git/refs/heads/(.+)$", path)
         if method == "DELETE" and m:
-            for p in self.prs.values():
+            for n, p in list(self.prs.items()):
                 if p["base"]["ref"] == m.group(1):
-                    p["base"]["ref"] = "main"  # GitHub aims a stacked pull request at main
+                    del self.prs[n]  # an API delete closes what was stacked on the branch (2 Nov, #96)
+                    self.closed.append(n)
             return 204, {}
         return 404, {"message": "not in the fake"}
 
@@ -99,6 +106,21 @@ class MergeGreen(unittest.TestCase):
                  {"s92": OK, "s95": OK, "s96": OK, "s97": [OK[0]]})
         self.run_it(f)
         self.assertEqual(f.merged(), [92, 95, 96])
+        self.assertEqual(f.closed, [], "nothing stacked was closed by a branch going")
+        self.assertEqual(f.prs[97]["base"]["ref"], "main")
+
+    def test_a_branch_whose_stacked_pull_request_could_not_be_moved_stays(self):
+        f = Fake([pr(92, "s92", ref="phone"), pr(95, "s95", base="phone", ref="chat")], {"s92": OK, "s95": [OK[0]]})
+        real = f.__call__
+        def refuse_patch(method, path, body=None):
+            if method == "PATCH":
+                f.calls.append((method, path, body))
+                return 422, {"message": "no"}
+            return real(method, path, body)
+        code = mg.run(R, call=refuse_patch, say=lambda s: None, wait=lambda s: None)
+        self.assertEqual(f.merged(), [92])
+        self.assertFalse([c for c in f.calls if c[0] == "DELETE"])
+        self.assertIn(95, f.prs)
 
     def test_the_workflow_runs_mains_script_after_the_guard_rail_tests(self):
         text = (REPO / ".github" / "workflows" / "merge-green.yml").read_text(encoding="utf-8")
