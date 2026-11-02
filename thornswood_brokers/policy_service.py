@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sqlite3
 import threading
 import uuid
@@ -436,68 +435,6 @@ class PolicyService:
             self._audit(caller, "decision_record", {"id": d.id, "kind": d.kind, "commit": d.commit})
         return {"id": d.id}
 
-    # Patrick's yes on a box-change card in the decision core (#49), recorded
-    # by the core's own user. Until 2 Nov only root wrote records, and
-    # nothing carried an answer from his phone here, so no pull request on a
-    # Patrick path could ever be merged by Bramble. The core checks that only
-    # Patrick answered, with his passkey or the phone's own key; this checks
-    # what the record may say: a box-change only (never main, publish or
-    # cutover, which stay root's), for one PR of the three repositories at one
-    # exact head, his, and no longer-lived than the policy's expiry.
-    BOX_ID = re.compile(r"^dec_[A-Za-z0-9_-]{8,64}$")
-
-    def decision_record_box(self, caller: str, args: dict) -> dict:
-        raw = args.get("decision")
-        if not isinstance(raw, dict):
-            raise Refused("a record is one decision")
-        try:
-            d = Decision(**raw)
-        except TypeError as e:
-            raise Refused(f"not a decision record: {e}") from None
-        owner = self.policy.data["decisions"]["answered_by"]
-        repos = {v for k, v in self.policy.data["repos"].items() if k != "hermes"}
-        if d.kind != "box-change":
-            raise Refused(f"the decision core records box-change yeses only, not {d.kind!r}")
-        if not isinstance(d.id, str) or not self.BOX_ID.fullmatch(d.id):
-            raise Refused("a box-change record is named by its card's id")
-        if d.repo not in repos:
-            raise Refused(f"{d.repo!r} is not a repository Bramble merges in")
-        if not isinstance(d.pr, int) or isinstance(d.pr, bool) or d.pr < 1:
-            raise Refused("a box-change record names its pull request")
-        if not isinstance(d.commit, str) or not re.fullmatch(r"[0-9a-f]{40}", d.commit):
-            raise Refused("a box-change record names the full 40-character head")
-        if not isinstance(d.revision, int) or isinstance(d.revision, bool) or d.revision < 1:
-            raise Refused("a box-change record names the card revision he answered")
-        if d.answered_by != owner:
-            raise Refused(f"only {owner} answers decisions; this one names {d.answered_by}")
-        if d.used_at or d.dead or d.notes:
-            raise Refused("a new record is unused, alive and has no notes")
-        try:
-            answered, expires = parse(d.answered_at), parse(d.expires_at)
-        except (TypeError, ValueError):
-            raise Refused("answered_at and expires_at are times") from None
-        if answered.tzinfo is None or expires.tzinfo is None:
-            raise Refused("answered_at and expires_at carry their zone")
-        if answered > self.clock() + timedelta(minutes=5):
-            raise Refused("the answer is dated in the future")
-        if not answered < expires <= answered + timedelta(hours=self.policy.data["decisions"]["default_expiry_hours"]):
-            raise Refused(f"a record lives at most {self.policy.data['decisions']['default_expiry_hours']} hours")
-        body = json.dumps(d.__dict__)
-        with self._tx():
-            row = self.db.execute("SELECT body FROM decisions WHERE id=?", (d.id,)).fetchone()
-            if row:
-                # The same answer recorded again (the core asks once per read of
-                # the card) is the same record; anything else under its id is not.
-                was = Decision(**json.loads(row[0]))
-                same = {k: v for k, v in was.__dict__.items() if k not in ("used_at", "dead", "notes")} == \
-                    {k: v for k, v in d.__dict__.items() if k not in ("used_at", "dead", "notes")}
-                if not same:
-                    raise Refused(f"decision {d.id} already exists with other contents")
-                return {"id": d.id, "existing": True, "used_at": was.used_at, "dead": was.dead}
-            self.db.execute("INSERT INTO decisions(id, body) VALUES(?, ?)", (d.id, body))
-            self._audit(caller, "decision_record_box", {"id": d.id, "repo": d.repo, "pr": d.pr, "commit": d.commit})
-        return {"id": d.id, "existing": False}
-
     def _decision(self, decision_id: str) -> Decision | None:
         row = self.db.execute("SELECT body FROM decisions WHERE id=?", (decision_id,)).fetchone()
         return Decision(**json.loads(row[0])) if row else None
@@ -743,7 +680,6 @@ class PolicyService:
             "decision_check": (self.decision_check, {git}),
             "decision_use": (self.decision_use, {git}),
             "decision_record": (self.decision_record, {"root"}),
-            "decision_record_box": (self.decision_record_box, {u["decide"]}),
             "mark_restored": (self.mark_restored, {"root"}),
             "limits_record": (self.limits_record, {"root"}),
             "route_limit": (self.route_limit, {gw, proxy}),

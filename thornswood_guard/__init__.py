@@ -51,7 +51,10 @@ def _prompt_section(policy, bot: str) -> str:
     ]
     if policy.is_router(bot):
         names = " and ".join(f"'{n}'" for n in policy.required_checks(policy.data["repos"]["app"]))
-        lines.append(f"You alone merge, and only when {names} each succeeded on the exact head.")
+        lines.append(f"In Thornswood and the fork GitHub's auto-merge merges: you turn it on for a Bot's pull request "
+                     f"at the exact head and GitHub merges once {names} succeed there, and a person's or a thread's "
+                     f"pull request is its owner's to put on auto-merge. Ops has no auto-merge: you merge there once "
+                     f"its check succeeded on the exact head.")
     else:
         lines.append("You never merge, start a release, deploy or Nexus run, or change a workflow file through your own App.")
     return "\n".join(lines)
