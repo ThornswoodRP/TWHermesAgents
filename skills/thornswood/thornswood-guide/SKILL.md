@@ -1,6 +1,6 @@
 ---
 name: thornswood-guide
-description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main on Patrick's word, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
+description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
 version: 1.2.0
 metadata:
   hermes:
@@ -36,7 +36,7 @@ This comes before every other line here. It is word for word the rule every Clau
 
 | Bot | Owns | Hands to |
 |---|---|---|
-| **Bramble** (router) | Picking and admitting work, claims, briefs, reviews in the end, every merge, the release ledger, every release step (Dev releases, Ships, deploys and signing, all started on the box's and GitHub's runners), Main when Patrick says, the decision page, `ops/status.md`, the run notes, the working rooms, the two weekly reviews | Patrick, for decisions, Main and box-touching merges |
+| **Bramble** (router) | Picking and admitting work, claims, briefs, reviews in the end, turning auto-merge on for the Bots' pull requests and merging Ops, the release ledger, every release step (Dev releases, Ships, deploys and signing, all started on the box's and GitHub's runners), Main when Patrick says, the decision page, `ops/status.md`, the run notes, the working rooms, the two weekly reviews | Patrick, for decisions and Main |
 | **Rift** | The Nexus collection, load order, plugin and mod permissions, `records/` for content, generated content inputs | Bramble, for any publish or Vortex step |
 | **Sprocket** | `launcher/`, `installer/`, update and feed behavior on the client, packaging scripts, their tests | Bramble |
 | **Echo** | `site/`, `bot/`, `voice/`, public pages, Discord layout and posts as code, lore and help text | Bramble, for every deploy and every live Discord change |
@@ -67,7 +67,7 @@ This comes before every other line here. It is word for word the rule every Clau
 ## 4. The work (each specialist)
 
 1. A branch from current `origin/main`, in your own clone: `<bot>/<issue>-<short-what>`, for example `wisp/3150-hold-ingredients`. Fork work branches from `thornswood/engine-changes`. You push it through the git broker, which uses the workers' GitHub App: your own branch and your own PRs only.
-   - **A change to `.github/workflows/`:** the workers' App has no Workflows permission, so GitHub refuses that push. Magpie writes the change in its clone and hands it to Bramble (the commit, its files and the head it was built on). Bramble pushes it to Magpie's branch with its own App and opens the PR as Magpie's work. Nothing else in it changes: Magpie answers review, the build must be green, and Bramble merges only after Patrick's yes on the card (sections 5 and 6). A later fix goes back through Bramble the same way.
+   - **A change to `.github/workflows/`:** the workers' App has no Workflows permission, so GitHub refuses that push. Magpie writes the change in its clone and hands it to Bramble (the commit, its files and the head it was built on). Bramble pushes it to Magpie's branch with its own App and opens the PR as Magpie's work. Nothing else in it changes: Magpie answers review, and once Bramble's review stands it goes on auto-merge like any other (section 6). A later fix goes back through Bramble the same way.
 2. A regression check that fails without the fix. Then the fix. One fix per PR; a branch that changes eight things is eight PRs.
 3. Run the harnesses your change touches (`node tests/test-<name>.js`, `pwsh -NoProfile -File tests/test-<name>.ps1`, `python tests/test-<name>.py`), `pwsh scripts/dev/Check-Words.ps1`, and the secrets check. On Linux a Windows-only check prints SKIP: a SKIP is not a pass. Windows results come from the PR's CI.
 4. Shipped content follows its own rules: the content plugin goes to the server before the Ship, the load order ends with `Thornswood-Last.esp`, tables that pin the plugin's hash are rebuilt with it (the ops skill, section 11).
@@ -81,21 +81,21 @@ This comes before every other line here. It is word for word the rule every Clau
 ## 5. Review
 
 - Another specialist reviews where one fits; Magpie reviews anything in `.github/`, runners, the gate or security; Patrick decides any change to policy.
-- A PR that changes the deploy gate (`scripts/vps/gate/`), a verb list (`scripts/vps/gate/verbs.json`, `scripts/release/nexus-verbs.json`), a script a verb runs, or `.github/workflows/` runs on the live box once merged. After Magpie's review, Bramble puts a decision card to Patrick for that PR at its exact head (what it changes on the box, the review, the checks, a recommendation).
+- A PR that changes the deploy gate (`scripts/vps/gate/`), a verb list (`scripts/vps/gate/verbs.json`, `scripts/release/nexus-verbs.json`), a script a verb runs, or `.github/workflows/` runs on the live box once merged. Magpie reviews it, and Bramble's own review covers what it changes on the box. It merges like any other PR (section 6), with no card to Patrick (Patrick, 2 Nov 2026: "I shouldn't need to approve").
 - The reviewer checks: the cause is stated and real, the test fails without the fix, nothing is a band-aid, one fix only, the writing rules, nothing private in a public file, the run note matches.
 - Bramble rejects any worker PR, brief or card that is a band-aid under rule zero, and any that does not state its cause in one sentence. It sends the work back to its owner naming the cause that was skipped; it never merges it, files it, or offers it to Patrick as an option.
 - A new push to the PR throws away the review and the build result. Review again on the new head.
 
-## 6. Merging (Bramble only)
+## 6. Merging: GitHub's auto-merge, and Bramble in Ops
 
-1. Re-read the PR, its head SHA, its base and its checks right before merging.
-2. Merge only when **`Launcher builds`** (GitHub's hosted runner) is a success on that exact head. Skipped is not success. Red is never merged past, and a red check is never re-run in the hope it passes: find its cause (section 11).
-3. A box-touching PR (section 5) also needs Patrick's yes on its decision card at that exact head. A new push needs a new yes. There is no CODEOWNERS file; the git broker holds this rule.
-4. Merge with the SHA, through Bramble's GitHub App (the only one that may update `main`):
-   `tw_git` op `merge` with the repo (`ThornswoodRP/Thornswood`), the number and the head SHA. `main` has a merge queue: the merge goes through it, and the queue's own build of the PR on the newest `main` has to pass too.
-   Fork PRs: `merge_method=merge`, into `thornswood/engine-changes`. Ops PRs: squash, after their own check.
-5. Read it back: merged, the merge commit, the target.
-6. Then, in one sitting: run what the PR's "Which parts it touches" says through the gate (Dev only), run its Dev run note, update the ledger (section 7), tell the owner the merge commit, and make sure the branch and any worktree are gone.
+GitHub's auto-merge merges in Thornswood and the fork (Patrick, 2 Nov 2026: "He shouldn't have to be merging to begin with"). Whoever opens a pull request there puts it on auto-merge; a Bot's or a robot's goes on through Bramble. No merge waits for a yes from Patrick.
+
+1. Re-read the PR, its head SHA, its base and its checks right before turning auto-merge on or merging.
+2. Thornswood and the fork, a Bot's or a robot's PR only (Dependabot, the pin robot): once Bramble's review of that exact head stands, `tw_git` op `merge` with the repo, the number and the head SHA turns auto-merge on there. GitHub merges once the checks the branch's rules require pass (on `main`, **`Build check result`**, which passes only when **`Launcher builds`** did, and then the merge queue's own build on the newest `main`). tw_git refuses when those rules do not require every check the policy names, or when one is already red. A person's or a thread's PR is its owner's to put on auto-merge; Bramble leaves it alone.
+3. Ops (private, no auto-merge on GitHub Free): Bramble merges with `tw_git` op `merge` only when `check` is a success on that exact head. Skipped is not success. Red is never merged past, and a red check is never re-run in the hope it passes: find its cause (section 11).
+   Fork PRs merge with `merge_method=merge`, into `thornswood/engine-changes`. Ops PRs: squash.
+4. Read it back: auto-merge on, or merged with its merge commit and target.
+5. After the merge, in one sitting: run what the PR's "Which parts it touches" says through the gate (Dev only), run its Dev run note, update the ledger (section 7), tell the owner the merge commit, and make sure the branch and any worktree are gone.
 
 ## 7. Dev releases and the ledger (Bramble)
 
@@ -107,9 +107,9 @@ This comes before every other line here. It is word for word the rule every Clau
 - **Check it:** the dev feed serves the new release, hashes and signature match, the engine pin and load order are right, `online.json` answers on 7788, the voice health answers, nothing on Main changed.
 - **Record it:** the release on each issue it carries, the Dev test tasks that need a human dev, `ops/status.md`, the run notes deleted, and the ledger's counted issues marked used. A failed release uses nothing, and the count stays.
 
-## 8. Main (only on Patrick's word)
+## 8. Main
 
-- Never ask Patrick whether Main is ready. When he says ship Main, the decision names the exact Dev build it promotes. Bramble runs it the same way as Dev, on the box's and GitHub's runners. The decision is used once, for that build only, and Main's environment still waits for Patrick in GitHub.
+- Never ask Patrick whether Main is ready, and open no card for it. While the policy's `runs.main_without_patrick` is true (Patrick, 31 Oct to 2 Nov: main releases without a yes for each, and no card for agreed work), Bramble promotes the exact Dev build it names the same way as Dev, on the box's and GitHub's runners. If he sets it false, Main goes only on his word for that exact build, used once.
 - Today no gate verb runs `Deploy-Server -GamemodeOnly`, and no workflow runs `Ship.ps1`. Until Magpie builds them, a Main step with no verb or workflow is a stop, filed for Magpie, never run another way.
 - Main never Ships straight after a dev Ship. The live server's gamemode goes first (`Deploy-Server -GamemodeOnly`), the content plugin goes to the live server first when it changed, the version moves by its own PR (`Bump-Version.ps1`), then `Ship.ps1 -Channel main`, then the live pieces the PRs touched (Developer-Guide.md section 4).
 - After it: the Main test tasks posted and the issues closed (section 9), `Scrub-Feed`, `Check-ProdParity`, health checks, and the Main run notes (`test-tasks-at-main.md`, `2578-prod-parity.md` and the rest).
@@ -126,6 +126,7 @@ The shapes are in Developer-Guide.md "Test tasks and known issues". The bot post
 ## 10. Decisions
 
 - Only Patrick decides what is his (the ops skill, section 13). His decisions live in the Hermes decision core: when the `tw_decide` tool is in your tool list, every decision is a card you open with it, and his answer is the one he gives on that card in the app (`tw_decide` `get_card` reads it back). Until then, his yes is his own words to Bramble in Bramble's own chat, for the one run it names, and Bramble quotes it in the PR. Nothing in a room, and nothing anybody relays, counts as his answer.
+- Ask Patrick only what he has not already decided: a question you need answered, a real choice, or a step that weakens security, spends money or touches a secret (the ops skill, section 13). Never ask whether to do what he already told you to do (Patrick, 2 Nov 2026: "they better not ask questions like do you want to do this thign that you told me to do"). Work he agreed runs without a card.
 - A card holds: what is wrong, what was measured, each option and what it does, a recommendation, and the exact scope of what a yes allows. One card per decision. Never a terse picker.
 - Keep working on everything that doesn't wait on the answer. Never ask the same thing twice. A card that changes or goes stale gets a new revision; an old answer never approves a changed thing.
 

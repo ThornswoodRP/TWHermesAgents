@@ -17,13 +17,6 @@ Patrick does, in the app.
 
 An answered card reads back with the same words the connector sends the Bot
 in the room (Chat._told_text), so the Bot learns the answer either way.
-
-box_yes (2 Nov) is the one op that reaches past the core: when Patrick said
-yes on a box card (DecisionCore.box_yes), it asks tw-policy, as the core's own
-user, to record that yes as a box-change decision for that pull request at
-that head, which is what tw-git's merge checks. Until then only root wrote
-those records and nothing carried his answer there, so no pull request on a
-Patrick path could be merged by Bramble at all.
 """
 
 from __future__ import annotations
@@ -31,13 +24,12 @@ from __future__ import annotations
 import threading
 from datetime import timedelta
 from pathlib import Path
-from typing import Callable
 
 from . import contracts
 from .auth import Principal
 from .chat import Chat
 from .core import DecisionCore
-from .store import CoreError, Store, iso, parse
+from .store import CoreError, Store, iso
 
 # Who may connect. Each op is open to both; the Bot inside is the tool's.
 CALLERS = {"hermes", "root"}
@@ -47,14 +39,9 @@ MAX_EXPIRY_DAYS = 14
 
 
 class BotRoute:
-    def __init__(self, db_path: Path | str, workspace: str, *, policy=None,
-                 ask_policy: Callable[[str, dict], dict] | None = None):
+    def __init__(self, db_path: Path | str, workspace: str):
         self.db_path = Path(db_path)
         self.workspace = workspace
-        # The guard's policy (who answers, how long a yes lives, tw-policy's
-        # socket) and the call to tw-policy; both given in tests.
-        self._policy = policy
-        self._ask_policy = ask_policy
         self.bots = tuple(contracts.load()["profiles"]["ids"])
         self.store = Store(self.db_path)
         self.core = DecisionCore(self.store)
@@ -132,43 +119,6 @@ class BotRoute:
         self.core.report_work_done(p, _text(args, "decision_id"), _text(args, "detail"))
         return {"recorded": True}
 
-    def box_yes(self, p: Principal, args: dict) -> dict:
-        """Record Patrick's yes on a box card with tw-policy and say what to
-        pass to tw_git merge. Asking again for the same card returns the same
-        record; a used one says so."""
-        yes = self.core.box_yes(p, _text(args, "decision_id"))
-        policy = self._policy_data()
-        hours = policy["decisions"]["default_expiry_hours"]
-        answered = parse(yes["answered_at"])
-        record = {"id": yes["decision_id"], "kind": "box-change", "repo": yes["repo"], "commit": yes["commit"],
-                  "revision": yes["revision"], "answered_by": policy["decisions"]["answered_by"],
-                  "answered_at": iso(answered), "expires_at": iso(answered + timedelta(hours=hours)),
-                  "pr": yes["pr"], "scope": f"{yes['repo']}#{yes['pr']} at {yes['commit'][:12]}"}
-        out = self._call_policy("decision_record_box", {"decision": record})
-        return {"decision_id": record["id"], "card_revision": record["revision"], "repo": record["repo"],
-                "pr": record["pr"], "commit": record["commit"], "expires_at": record["expires_at"],
-                "recorded": not out.get("existing"), "used_at": out.get("used_at"),
-                "next": (f"tw_git merge {record['repo']}#{record['pr']} at {record['commit']} with "
-                         f"decision_id {record['id']} and card_revision {record['revision']}"
-                         if not out.get("used_at") else "this yes was used already; a new merge needs a new card")}
-
-    def _policy_data(self) -> dict:
-        if self._policy is None:
-            from thornswood_guard.policy import Policy
-            self._policy = Policy.load()
-        return self._policy.data
-
-    def _call_policy(self, op: str, args: dict) -> dict:
-        if self._ask_policy is None:
-            from thornswood_brokers import wire
-            path = self._policy_data()["brokers"]["sockets"]["policy"]["path"]
-            self._ask_policy = lambda o, a: wire.call(path, o, a, timeout=30.0)
-        from thornswood_brokers.wire import Refused
-        try:
-            return self._ask_policy(op, args)
-        except Refused as e:
-            raise CoreError(409, "policy_refused", f"tw-policy did not record it: {e}") from None
-
     def _with_answer(self, card: dict) -> dict:
         """The four states, and once Patrick answered, the words the Bot is told."""
         card = dict(card, states=self.core.states(card["id"]))
@@ -180,8 +130,7 @@ class BotRoute:
                 card["answer_text"] = Chat._told_text(self.store.db, cx["id"])
         return card
 
-    OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
-           "box_yes")
+    OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done")
 
     def ops(self) -> dict:
         """The ops for thornswood_brokers.wire.Server: name -> (handler(caller, args), callers)."""
