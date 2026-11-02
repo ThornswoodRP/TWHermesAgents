@@ -356,6 +356,18 @@
     "lock_screen_text": "Thornswood needs you",
     "link": "/cards/{card_id}?rev={revision}"
   },
+  "wake": {
+    "app": "bramble",
+    "port": 8644,
+    "route": "github-checks",
+    "funnel_port": 8443,
+    "secret_file": "/etc/thornswood/github-webhook.env",
+    "repos": [
+      "app",
+      "ops",
+      "fork"
+    ]
+  },
   "decisions": {
     "answered_by": "EvilPatrick06",
     "default_expiry_hours": 72
@@ -532,14 +544,14 @@
     "ready": false
   },
   "admission": {
-    "stage": "pilot",
+    "stage": "after",
     "model_turns": {
       "pilot": 1,
-      "after": 2
+      "after": 6
     },
     "sandbox_jobs": {
       "pilot": 0,
-      "after": 1
+      "after": 2
     },
     "mutating_ops": 1,
     "room_round_turns": 6,

@@ -1,0 +1,23 @@
+# One check, for one tw-checks.socket connection. Root only to start the
+# check's own unit as the Bot's execution user; the check itself runs with
+# the limits check_argv sets (no network, its own tree, the sandbox slice).
+[Unit]
+Description=Thornswood check helper (one check)
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/thornswood-hermes/bin/tw-run-check --socket
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=11min
+Slice=tw-brokers.slice
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+LockPersonality=yes
+RestrictRealtime=yes

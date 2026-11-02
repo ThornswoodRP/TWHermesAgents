@@ -36,7 +36,7 @@ from typing import Callable
 
 from thornswood_guard.policy import Policy
 
-from .wire import Refused
+from .wire import Refused, call
 
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,60}")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
@@ -50,11 +50,14 @@ OUT_CAP = 200_000
 DIR_MODE = 0o770
 FILE_MODE = 0o660
 
+# tw-checks.socket: the root helper a check starts through (run_check.py).
+CHECK_SOCKET = "/run/tw-checks/checks.sock"
+
 
 class FilesService:
     def __init__(self, policy: Policy, ask_policy: Callable[[str, dict], dict], *, work: Path, spool: Path,
                  runner: Callable[[list[str], int], subprocess.CompletedProcess] | None = None,
-                 check_helper: list[str] | None = None):
+                 check_helper: list[str] | None = None, check_socket: str | Path = CHECK_SOCKET):
         self.policy = policy
         self.ask = ask_policy
         self.work = Path(work)
@@ -62,7 +65,10 @@ class FilesService:
         self.spool_out = Path(spool) / "out"
         self.cfg = policy.data["brokers"]["files"]
         self.runner = runner or _run
-        self.check_helper = check_helper or ["sudo", "-n", "/opt/thornswood-hermes/bin/tw-run-check"]
+        # Checks start through tw-checks.socket (run_check.py), never sudo, so
+        # tw-files keeps NoNewPrivileges. check_helper is the tests' stand-in.
+        self.check_helper = check_helper
+        self.check_socket = Path(check_socket)
         self._locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
 
@@ -516,12 +522,18 @@ class FilesService:
             raise Refused(f"the check waits: {ticket['reason']}")
         try:
             with self._lock(bot):
-                r = self.runner([*self.check_helper, bot, str(tree), *cmd], self.cfg["check_minutes"] * 60 + 30)
+                r = self._start_check(bot, tree, cmd, self.cfg["check_minutes"] * 60 + 30)
         finally:
             self.ask("finish", {"bot": bot, "ticket": ticket["ticket"]})
         lines = [l for l in (r.stdout or "").splitlines() if re.match(r"^\s*(PASS|FAIL|SKIP)\b", l)]
         return {"exit": r.returncode, "lines": lines[:2000], "tail": (r.stdout or "")[-4000:],
                 "stderr": (r.stderr or "")[-2000:]}
+
+    def _start_check(self, bot: str, tree: Path, cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+        if self.check_helper is not None:
+            return self.runner([*self.check_helper, bot, str(tree), *cmd], timeout)
+        r = call(self.check_socket, "run", {"bot": bot, "tree": str(tree), "command": cmd}, timeout=timeout + 30)
+        return subprocess.CompletedProcess(cmd, int(r["exit"]), r.get("stdout") or "", r.get("stderr") or "")
 
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]

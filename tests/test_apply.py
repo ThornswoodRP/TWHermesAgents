@@ -49,14 +49,20 @@ class Apply(unittest.TestCase):
         cls.commit = subprocess.run(["git", "-C", str(cls.repo), "rev-parse", "HEAD"], check=True,
                                     capture_output=True, text=True).stdout.strip()
 
-    def run_apply(self, home: Path, *extra, expect=None, image="present", podman=None):
+    def run_apply(self, home: Path, *extra, expect=None, image="present", podman=None, wake_secret=True):
         work = home.parent / "tw-work"
+        secret = home.parent / "github-webhook.env"
+        if wake_secret:
+            secret.write_text("WEBHOOK_SECRET=" + "0" * 64 + "\n", encoding="utf-8")
+        else:
+            secret.unlink(missing_ok=True)
         state = home.parent / "podman.state"
         state.write_text(image, encoding="utf-8")
         fake = f"{Path(sys.executable).as_posix()} {(Path(__file__).with_name('fake_podman.py')).as_posix()}"
         env = dict(os.environ, FAKE_PODMAN_STATE=str(state))
         return subprocess.run([sys.executable, str(self.repo / "scripts" / "apply.py"), "--expect", expect or self.commit,
-                               "--hermes-home", str(home), "--work-root", str(work), "--podman", podman or fake, *extra],
+                               "--hermes-home", str(home), "--work-root", str(work), "--podman", podman or fake,
+                               "--wake-secret-file", str(secret), *extra],
                               capture_output=True, text=True, env=env)
 
     def podman_log(self, home: Path) -> str:
@@ -133,6 +139,46 @@ class Apply(unittest.TestCase):
         self.assertTrue((home / "plugins" / "thornswood_guard" / "policy.json").is_file())
         self.assertIn(self.commit, (home / "local" / "thornswood-hermes" / "applied.json").read_text(encoding="utf-8"))
         self.assertEqual((home / ".env").read_text(encoding="utf-8"), "DISCORD_BOT_TOKEN=canary\n")
+
+    def test_the_gateway_takes_bramble_wake_route_with_no_secret_in_config(self):
+        home = self.home()
+        (home / "config.yaml").write_text(
+            "platforms:\n  discord:\n    enabled: true\n_config_version: 51\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        cfg = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["platforms"]["discord"], {"enabled": True})
+        hook = cfg["platforms"]["webhook"]
+        self.assertTrue(hook["enabled"])
+        self.assertEqual(hook["extra"]["host"], "127.0.0.1")
+        self.assertEqual(list(hook["extra"]["routes"]), ["github-checks"])
+        self.assertEqual(hook["extra"]["routes"]["github-checks"]["profile"], "bramble")
+        self.assertNotRegex((home / "config.yaml").read_text(encoding="utf-8"), r"(?m)^\s*secret\s*:")
+
+    def test_without_the_wake_secret_nothing_is_applied(self):
+        home = self.home()
+        r = self.run_apply(home, wake_secret=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("github-webhook.env is not there; deploy/install.sh makes it", r.stdout)
+        self.assertFalse((home / "plugins").exists())
+
+    def test_a_secret_written_into_the_gateway_config_stops_everything(self):
+        home = self.home()
+        (home / "config.yaml").write_text(
+            "platforms:\n  webhook:\n    extra:\n      secret: hunter2\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("a webhook secret is written in the gateway's config.yaml", r.stdout)
+        self.assertNotIn("hunter2", r.stdout)
+
+    def test_a_second_webhook_route_stops_everything(self):
+        home = self.home()
+        (home / "config.yaml").write_text(
+            "platforms:\n  webhook:\n    extra:\n      routes:\n        anything:\n          prompt: '{__raw__}'\n",
+            encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the gateway's webhook routes are ['anything', 'github-checks'], not only github-checks", r.stdout)
 
     def test_a_paid_helper_in_the_gateways_own_profile_stops_everything(self):
         home = self.home()

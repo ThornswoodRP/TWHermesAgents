@@ -341,6 +341,23 @@ notifications:
   lock_screen_text: "Thornswood needs you"
   link: "/cards/{card_id}?rev={revision}"
 
+# Bramble wakes when GitHub finishes a pull request's checks (Patrick's answer
+# A on q-hermes-bramble-wake, 1 Nov). Cause: nothing reached Bramble when a
+# check finished, so every merge and hand-back waited for someone to nudge it.
+# Bramble's App sends its check_suite and pull_request events to Hermes's own
+# webhook receiver on the gateway's loopback port; Tailscale Funnel publishes
+# that one path, and only it, on funnel_port. GitHub signs each event with the
+# secret in secret_file (root's alone, made by deploy/install.sh); systemd
+# hands it to the gateway, and the install gives it to the App's webhook
+# setting with the App's own key, so nobody copies it.
+wake:
+  app: bramble
+  port: 8644
+  route: github-checks
+  funnel_port: 8443
+  secret_file: /etc/thornswood/github-webhook.env
+  repos: [app, ops, fork]
+
 decisions:
   answered_by: EvilPatrick06
   # Every record is used once. Main, publish and cutover records also die
@@ -507,12 +524,23 @@ admission_proxy:
   # PR here, after the proxy's attack tests passed on the VM (06 section 6.3).
   ready: false
 
-# The fleet admission queue (08 section 7; 02 section 8.5). Pilot numbers;
-# the "after" numbers apply only after seven measured days, by a PR here.
+# The fleet admission queue (08 section 7; 02 section 8.5). Past the pilot
+# since 1 Nov (Patrick picked 6 turns and 2 checks): the pilot's one turn
+# and no checks queued every Bot behind one other and refused every
+# run_check, while what really limits the fleet is measured at each
+# admission (admit and drain below: free memory, swap, memory pressure,
+# load, disk). So the counts are ceilings with a cause, not guesses:
+# - model_turns: one turn per Bot, the most that can be useful, since each
+#   Bot's chat runs one turn at a time. The 8:46 AM 429 on 1 Nov came with
+#   no Bot running (the shared sign-in's own allowance was spent), so a
+#   lower count would not have stopped it.
+# - sandbox_jobs: as many checks as fit in tw-sandbox.slice's MemoryMax at
+#   each check's own MemoryMax (brokers.files.check_limits), 4G / 2G.
+# Tests hold both to those sources, so either moves with its cause.
 admission:
-  stage: pilot
-  model_turns: {pilot: 1, after: 2}
-  sandbox_jobs: {pilot: 0, after: 1}
+  stage: after
+  model_turns: {pilot: 1, after: 6}
+  sandbox_jobs: {pilot: 0, after: 2}
   mutating_ops: 1
   room_round_turns: 6
   queue_max_waiting: 100

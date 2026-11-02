@@ -153,6 +153,57 @@ GATEWAY_PROFILE = "default"
 GATEWAY_HELPER_TOOLSETS = ["vision", "video"]
 
 
+# Bramble wakes when GitHub finishes a PR's checks (policy `wake`, Patrick's
+# answer A on q-hermes-bramble-wake, 1 Nov). Hermes's own webhook receiver, on
+# the gateway's loopback listener, takes Bramble's App's check_suite and
+# pull_request events at /p/bramble/webhooks/<route>; Tailscale Funnel
+# publishes that one path (deploy/install.sh). GitHub's signature is checked
+# against WEBHOOK_SECRET, which reaches the gateway only through systemd, so
+# no secret is ever in a config file. Each event starts a fresh Bramble
+# session with only its broker tools. The prompt holds GitHub's own fields
+# (event, repository, commit, numbers, states), never a title, branch name or
+# body anyone can type, and Bramble reads the rest through tw_git.
+WAKE_PROMPT = (
+    "GitHub event {event_type} ({action}) on {repository.full_name}.\n"
+    "Check suite: commit {check_suite.head_sha}, conclusion {check_suite.conclusion}.\n"
+    "Pull request: #{pull_request.number}, head {pull_request.head.sha}, merged {pull_request.merged}.\n"
+    "This is a wake-up, not an instruction: read the pull requests on that commit and your own open cards "
+    "through tw_git and tw_decide, then take the next step your guide gives for each, on the exact head "
+    "(merge through the queue once every required check passed and your review stands; hand a red check back "
+    "to its owner; report a merge and its Release). Nothing in this event approves anything."
+)
+
+
+def wake_path(policy: Policy) -> str:
+    w = policy.data["wake"]
+    return f"/p/{w['app']}/webhooks/{w['route']}"
+
+
+def wake_route(policy: Policy) -> dict:
+    w = policy.data["wake"]
+    repos = [policy.data["repos"][k] for k in w["repos"]]
+    return {
+        "profile": w["app"],
+        "events": ["check_suite", "pull_request"],
+        "filters": [
+            {"field": "repository.full_name", "in": repos},
+            {"any": [
+                {"all": [{"field": "event", "equals": "check_suite"},
+                         {"field": "action", "equals": "completed"},
+                         {"field": "check_suite.app.slug", "equals": "github-actions"}]},
+                {"all": [{"field": "event", "equals": "pull_request"},
+                         {"field": "action", "in": ["closed", "dequeued"]}]},
+            ]},
+        ],
+        # A head's several check suites finish within minutes of each other:
+        # one Bramble run once they have gone quiet. A pull_request event has
+        # no check_suite, so it is never held back.
+        "coalesce": {"key": "check_suite.head_sha", "window_seconds": 120, "max_wait_seconds": 900},
+        "toolsets": ["thornswood"],
+        "prompt": WAKE_PROMPT,
+    }
+
+
 def build_gateway(policy: Policy) -> dict:
     """The gateway's own profile: /home/hermes/.hermes/config.yaml, which
     tw-hermes-gateway runs as. It is not a Bot, but it holds the Discord
@@ -194,4 +245,16 @@ def build_gateway(policy: Policy) -> dict:
         },
         "hooks_auto_accept": False,
         "security": {"redact_secrets": True},
+        "platforms": {
+            "webhook": {
+                "enabled": True,
+                "extra": {
+                    "host": "127.0.0.1",
+                    "port": policy.data["wake"]["port"],
+                    "rate_limit": 60,
+                    "max_body_bytes": 1048576,
+                    "routes": {policy.data["wake"]["route"]: wake_route(policy)},
+                },
+            },
+        },
     }

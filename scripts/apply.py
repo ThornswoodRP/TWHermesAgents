@@ -206,6 +206,8 @@ def main() -> int:
     ap.add_argument("--work-root", default=WORK_ROOT)
     ap.add_argument("--check", action="store_true", help="report only; write nothing")
     ap.add_argument("--podman", default="podman", help="the container runtime command (tests pass a stand-in)")
+    ap.add_argument("--wake-secret-file", default=None,
+                    help="where deploy/install.sh made the webhook secret (default: the policy's wake.secret_file; tests pass a stand-in)")
     a = ap.parse_args()
     podman = shlex.split(a.podman)
 
@@ -249,6 +251,12 @@ def main() -> int:
     gw_existing = (yaml.safe_load(gw_path.read_text(encoding="utf-8")) if gw_path.exists() else {}) or {}
     gw_merged = merge_into(gw_existing, build_gateway(policy))
     problems += [f"the gateway's own profile: {p}" for p in check_gateway_config(policy, gw_merged, root_env)]
+    # The gateway's webhook route needs its secret, which only systemd reads:
+    # without the file the gateway would not start (its drop-in names it). The
+    # hermes user can see that the file is there, never what is in it.
+    wake_secret = Path(a.wake_secret_file or policy.data["wake"]["secret_file"])
+    if not wake_secret.exists():
+        problems.append(f"{wake_secret} is not there; deploy/install.sh makes it, so run the install for this commit first")
     problems += scan_files(policy, home)
 
     # Every Bot's terminal runs in Hermes's sandbox image under rootless podman.

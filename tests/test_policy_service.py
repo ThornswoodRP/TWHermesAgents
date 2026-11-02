@@ -44,11 +44,18 @@ class Clock:
         self.t += timedelta(**kw)
 
 
+def pilot_data() -> dict:
+    """The policy at the pilot stage (one turn, no checks): the queue's own
+    mechanics are tested against a limit of one, whatever the stage is."""
+    import copy
+    data = copy.deepcopy(policy().data)
+    data["admission"]["stage"] = "pilot"
+    return data
+
+
 def service(host=None, clock=None, db=None, data=None) -> PolicyService:
-    p = policy()
-    if data:
-        from thornswood_guard.policy import Policy
-        p = Policy(data)
+    from thornswood_guard.policy import Policy
+    p = Policy(data if data else pilot_data())
     db = db or Path(tempfile.mkdtemp()) / "policy.db"
     return PolicyService(db, p, host_reader=host or roomy, clock=clock or Clock())
 
@@ -152,6 +159,29 @@ class Queue(unittest.TestCase):
         r = service().admit("hermes", {"bot": "rift", "task": "t", "kind": "sandbox"})
         self.assertEqual(r["state"], "waiting")
         self.assertIn("pilot", r["reason"])
+
+    def test_the_fleet_is_past_the_pilot_with_ceilings_from_their_causes(self):
+        # 1 Nov: the pilot's 1 turn and 0 checks queued every Bot behind one
+        # other. The live admission floors measure the VM; the counts are
+        # one turn per Bot, and as many checks as the sandbox slice holds.
+        p = policy().data
+        a = p["admission"]
+        self.assertEqual(a["stage"], "after")
+        self.assertEqual(a["model_turns"]["after"], len(policy().bots))
+
+        def gib(v):
+            return int(v[:-1]) * (1024 if v.endswith("G") else 1) if v[-1] in "GM" else int(v)
+        slice_mem = gib(p["slices"]["tw-sandbox.slice"]["MemoryMax"])
+        check_mem = gib(p["brokers"]["files"]["check_limits"]["MemoryMax"])
+        self.assertEqual(a["sandbox_jobs"]["after"], slice_mem // check_mem)
+
+    def test_six_turns_run_at_once_and_a_seventh_waits(self):
+        s = service(data=policy().data)
+        bots = list(policy().bots)
+        got = [s.admit("hermes", {"bot": b, "task": f"t{i}"}) for i, b in enumerate(bots)]
+        self.assertEqual([g["state"] for g in got], ["admitted"] * len(bots))
+        extra = s.admit("hermes", {"bot": bots[0], "task": "t-extra"})
+        self.assertEqual(extra["state"], "waiting")
 
     def test_16_no_sandbox_without_a_passing_limits_check(self):
         data = policy().data

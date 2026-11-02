@@ -460,6 +460,32 @@ class Checks(unittest.TestCase):
         self.assertEqual(ran[0][:3], ["helper", "sprocket", str(w.tree())])
         self.assertEqual(w.policy.status("hermes", {})["tickets"].get("admitted", 0), 0)
 
+    def test_without_a_stand_in_a_check_goes_through_the_check_socket(self):
+        # No sudo: tw-files asks tw-checks.socket, whose helper answers with
+        # the check's exit code and output.
+        import threading
+        from thornswood_brokers.wire import Server
+        data = copy.deepcopy(policy().data)
+        data["admission"]["stage"] = "after"
+        w = World(data=data)
+        w.policy.limits_record("root", {"ok": True, "problems": []})
+        w.checkout()
+        sock = Path(tempfile.mkdtemp()) / "checks.sock"
+        asked = []
+
+        def run(caller, args):
+            asked.append(args)
+            return {"exit": 0, "stdout": "PASS fence\n", "stderr": ""}
+
+        server = Server(sock, {"run": (run, {__import__("pwd").getpwuid(os.getuid()).pw_name})}, mode=0o600)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        files = FilesService(w.p, w.ask("tw-files"), work=w.work, spool=w.spool, check_socket=sock)
+        out = files.run_check("hermes", w.a(command=["node", "tests/test-fence.js"]))
+        self.assertEqual(out["exit"], 0)
+        self.assertEqual(out["lines"], ["PASS fence"])
+        self.assertEqual(asked, [{"bot": "sprocket", "tree": str(w.tree()), "command": ["node", "tests/test-fence.js"]}])
+
     def test_bramble_runs_no_checks(self):
         w = World()
         w.checkout(bot="bramble", task="5-notes")

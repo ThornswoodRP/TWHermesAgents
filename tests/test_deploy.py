@@ -215,7 +215,7 @@ class Units(unittest.TestCase):
         for unit in sorted(enabled):
             self.assertTrue((out / unit).is_file(), f"{unit} is enabled but never put in /etc/systemd/system")
         placed = {f.name for f in out.iterdir()}
-        sources = {f.name for f in (REPO / "deploy" / "systemd").iterdir()} - {"tw-hermes-gateway.service.in", "user-hermes.slice.conf"}
+        sources = {f.name for f in (REPO / "deploy" / "systemd").iterdir()} - {"tw-hermes-gateway.service.in", "user-hermes.slice.conf", "tw-hermes-gateway-webhook.conf"}
         self.assertEqual(placed, sources)
         self.assertIn("user@1007.service", "".join(
             (out / f).read_text() for f in placed))
@@ -242,11 +242,33 @@ class Units(unittest.TestCase):
         self.assertEqual(unit("tw-backup.timer")["OnCalendar"], ["*-*-* 03:30:00 America/Denver"])
         self.assertEqual(unit("tw-snapshot.timer")["OnCalendar"], ["hourly"])
 
-    def test_sudoers_names_the_helper_and_nothing_else(self):
-        lines = [l for l in (REPO / "deploy" / "sudoers" / "tw-files").read_text().splitlines()
-                 if l and not l.startswith("#")]
-        rules = [l for l in lines if not l.startswith("Defaults")]
-        self.assertEqual(rules, ["tw-files ALL=(root) NOPASSWD: /opt/thornswood-hermes/bin/tw-run-check"])
+    def test_checks_start_through_a_socket_never_sudo(self):
+        # 1 Nov: lifting tw-files' NoNewPrivileges so sudo could start checks
+        # was a weakening with no cause of its own. The helper is started by
+        # systemd per connection instead, and tw-files keeps NoNewPrivileges.
+        self.assertFalse((REPO / "deploy" / "sudoers").exists())
+        files = unit("tw-files.service")
+        self.assertEqual(files["NoNewPrivileges"], ["yes"])
+        self.assertEqual(files["RestrictSUIDSGID"], ["yes"])
+        self.assertIn("tw-checks", files["SupplementaryGroups"][0].split())
+        sock = unit("tw-checks.socket")
+        from thornswood_brokers.files_service import CHECK_SOCKET
+        self.assertEqual(sock["ListenStream"], [CHECK_SOCKET])
+        self.assertEqual((sock["SocketUser"], sock["SocketGroup"], sock["SocketMode"]), (["root"], ["tw-checks"], ["0660"]))
+        self.assertEqual(sock["Accept"], ["yes"])
+        self.assertGreaterEqual(int(sock["MaxConnections"][0]), policy().data["admission"]["sandbox_jobs"]["after"])
+        svc = unit("tw-checks@.service")
+        self.assertEqual(svc["ExecStart"], ["/opt/thornswood-hermes/bin/tw-run-check --socket"])
+        self.assertEqual((svc["StandardInput"], svc["StandardOutput"]), (["socket"], ["socket"]))
+        self.assertEqual(svc["NoNewPrivileges"], ["yes"])
+        self.assertEqual(svc["PrivateNetwork"], ["yes"])
+        minutes = policy().data["brokers"]["files"]["check_minutes"]
+        self.assertGreater(int(svc["RuntimeMaxSec"][0].rstrip("min")) * 60, minutes * 60 + 30)
+        text = (REPO / "deploy" / "install.sh").read_text()
+        self.assertNotIn("visudo", text)
+        self.assertIn("rm -f /etc/sudoers.d/tw-files", text)
+        self.assertIn('[[ "$members" == tw-files ]]', text)
+        self.assertIn("tw-checks.socket", text)
 
     def test_the_sftp_jail_is_sftp_only(self):
         text = (REPO / "deploy" / "sshd" / "50-tw-backup.conf").read_text()
@@ -450,12 +472,51 @@ class CheckHelper(unittest.TestCase):
             (["sprocket", str(self.tree) + "/../t1", "node", "tests/test-a.js"], "not a tree under"),
             (["sprocket", str(self.tree), "bash", "-c", "curl x"], "one harness"),
             (["sprocket", str(self.tree), "node", "tests/test-../../x.js"], "one harness"),
-            (["sprocket", str(self.tree)], "usage"),
+            (["sprocket", str(self.tree)], "a check is"),
         ]
         for argv, words in cases:
             with self.assertRaises(Refused, msg=argv) as e:
                 run_check.validate(self.p, argv)
             self.assertIn(words, str(e.exception), argv)
+
+    def req(self, **args):
+        a = {"bot": "sprocket", "tree": str(self.tree), "command": ["node", "tests/test-path-fence.js"]}
+        a.update(args)
+        return json.dumps({"op": "run", "args": a}).encode() + b"\n"
+
+    def test_the_socket_helper_answers_tw_files_only(self):
+        ran = []
+        for caller in ("hermes", "tw-git", "root"):
+            out = run_check.answer(self.p, caller, self.req(), run=lambda *a, **k: ran.append(a))
+            self.assertFalse(out["ok"], caller)
+            self.assertIn("only tw-files", out["reason"])
+        self.assertEqual(ran, [])
+
+    def test_the_socket_helper_runs_the_checked_line(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append((argv, kw["timeout"]))
+            return subprocess.CompletedProcess(argv, 1, "PASS a\nFAIL b\n", "")
+
+        out = run_check.answer(self.p, "tw-files", self.req(), run=run)
+        self.assertEqual(out, {"ok": True, "result": {"exit": 1, "stdout": "PASS a\nFAIL b\n", "stderr": ""}})
+        argv, timeout = seen[0]
+        self.assertEqual(argv[0], "systemd-run")
+        self.assertIn("--uid=tw-sprocket", argv)
+        self.assertEqual(timeout, self.p.data["brokers"]["files"]["check_minutes"] * 60 + 30)
+
+    def test_the_socket_helper_refuses_a_bad_request_without_running_it(self):
+        ran = []
+        for line in (b"not json\n", b'{"op": "shell", "args": {}}\n', self.req(command="node tests/test-a.js"),
+                     self.req(bot="bramble"), self.req(command=["bash", "-c", "id"])):
+            out = run_check.answer(self.p, "tw-files", line, run=lambda *a, **k: ran.append(a))
+            self.assertFalse(out["ok"], line)
+        self.assertEqual(ran, [])
+
+    def test_the_helper_runs_only_from_its_unit(self):
+        with self.assertRaises(SystemExit):
+            run_check.main(["sprocket", str(self.tree), "node", "tests/test-a.js"])
 
 
 # Attack test 21: a backup holds no secret, and it restores.

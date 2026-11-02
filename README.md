@@ -24,7 +24,7 @@ What each rule is and how it's held (code now, code waiting for its broker, a Gi
 | `scripts/send-to-oracle.sh` | The first install's half for the profiles, from a machine on the tailnet; since #2862 the VM applies each merge itself |
 | `thornswood_brokers/` | The brokers (`tw-policy`, `tw-git`, `tw-files`, the admission proxy), the boot limits check, the backups, the check helper and the live canary |
 | `thornswood_guard/brokers.py` | The gateway's side: the turn gate and the `tw_git` and `tw_files` tools |
-| `deploy/` | What `deploy/install.sh` puts on the VM: the units and slices (the slices rendered from the policy by `scripts/render_units.py`), the command wrappers, the sudoers line and the SFTP jail |
+| `deploy/` | What `deploy/install.sh` puts on the VM: the units and slices (the slices rendered from the policy by `scripts/render_units.py`), the command wrappers, the check helper's socket and the SFTP jail |
 | `scripts/install-on-oracle.sh`, `scripts/restore-on-oracle.sh` | From a machine on the tailnet: the first install (the one that brings `tw-follow-main`), and a restore |
 | `thornswood_brokers/follow_main.py` | The VM follows main by itself: fetch, test, install, apply, restart, canary, and the earlier release put back on any failure |
 | `thornswood_brokers/offsite.py` | Both kinds of backup to Google Drive from the VM, and the game box's add-only drop |
@@ -109,7 +109,7 @@ The gateway reaches them only through their sockets. `brokers.ready` is on since
 scripts/install-on-oracle.sh <the full commit main is now at> --move-gateway --quotas
 ```
 
-It refuses unless that commit is `main`'s tip, unpacks it as root into `/opt/thornswood-hermes/releases/<commit>`, and runs `deploy/install.sh` there: the broker users and groups, `/srv/tw`, the Apps' keys made `tw-git`'s alone, the Qwen address and token moved out of the `hermes` user's reach into `/etc/thornswood/proxy.env`, the units and slices, the sudoers line for `tw-run-check`, the SFTP jail for One's backup pull, each Bot's disk cap (`--quotas` turns group quotas on first), and the gateway moved into `tw-hermes.slice` (`--move-gateway`). Anything it can't do safely is a `STOP` line saying what is missing. Then `scripts/send-to-oracle.sh` with the same commit applies the profiles, as before.
+It refuses unless that commit is `main`'s tip, unpacks it as root into `/opt/thornswood-hermes/releases/<commit>`, and runs `deploy/install.sh` there: the broker users and groups, `/srv/tw`, the Apps' keys made `tw-git`'s alone, the Qwen address and token moved out of the `hermes` user's reach into `/etc/thornswood/proxy.env`, the units and slices, the check helper's socket (`tw-checks.socket`, so `tw-files` starts checks without sudo and keeps `NoNewPrivileges`), the SFTP jail for One's backup pull, each Bot's disk cap (`--quotas` turns group quotas on first), and the gateway moved into `tw-hermes.slice` (`--move-gateway`). Anything it can't do safely is a `STOP` line saying what is missing. Then `scripts/send-to-oracle.sh` with the same commit applies the profiles, as before.
 
 **Canary**, after each install, on the VM:
 
