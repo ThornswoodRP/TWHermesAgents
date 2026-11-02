@@ -11,10 +11,10 @@
 // The worker shows the alerts, so it takes them off too: the app tells it which
 // cards still need Patrick each time it reads Decisions, and which card was just
 // opened or answered (Patrick, 1 Nov: an answered card kept showing).
-const SHELL = 'tw-shell-v8'
+const SHELL = 'tw-shell-v10'
 const CARD_ID = /^[A-Za-z0-9_-]{1,64}$/
 const APP_PATH = /^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/
-const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/cinzel-title.woff2',
+const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/cinzel-latin.woff2',
   '/m/icon-192.png', '/m/icon-512.png', '/m/icon-maskable-512.png']
 
 self.addEventListener('install', event => {
@@ -47,7 +47,7 @@ self.addEventListener('push', event => {
   event.waitUntil(self.registration.showNotification('Hermes needs you', {
     tag: id ? 'decision:' + id : 'thornswood',
     renotify: false,
-    silent: true,
+    silent: false,
     icon: '/m/icon-192.png',
     data: { path: id ? '/m/decisions/' + id : '/m/decisions' }
   }))

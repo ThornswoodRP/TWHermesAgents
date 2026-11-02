@@ -14,7 +14,9 @@ from __future__ import annotations
 FLAGS_1 = ("decision_write", "mobile_read", "mobile_chat_write", "push_send", "connector_effects")
 # own_chat_write (migration 7): Patrick's chat with his own Hermes, my-hermes on
 # the VM and his Hermes on One, from the phone.
-FLAGS = FLAGS_1 + ("own_chat_write",)
+FLAGS_7 = FLAGS_1 + ("own_chat_write",)
+# session_manage_write (migration 10): rename, hide and delete Patrick's own chats from the phone.
+FLAGS = FLAGS_7 + ("session_manage_write",)
 # Patrick's own Hermes: the gateways the phone reaches beside the Bots' own.
 OWN_GATEWAYS = ("me", "one")
 
@@ -35,6 +37,22 @@ CREATE TRIGGER {table}_no_update BEFORE UPDATE ON {table}
 BEGIN SELECT RAISE(ABORT, '{table} rows are history and never change'); END;
 CREATE TRIGGER {table}_no_delete BEFORE DELETE ON {table}
 BEGIN SELECT RAISE(ABORT, '{table} rows are history and are never deleted'); END;
+"""
+
+
+# A "Bot told" message that died only because the Bots' gateway was not ready, back in the queue
+# (migrations 11 and 12).
+_REQUEUE_NOT_READY = """
+UPDATE connector_outbox
+  SET status = 'queued', lease_until = NULL, attempts = max(attempts - 1, 0),
+      reason = 'waiting for the Bots'' gateway: ' || reason,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+  WHERE status = 'dead' AND kind = 'decision.answered'
+    AND (reason IN ('could not check the Bots'' gateway', 'could not start Hermes''s Python')
+         OR reason LIKE 'the Bots'' gateway is %')
+    AND EXISTS (SELECT 1 FROM decisions d WHERE d.id = connector_outbox.decision_id AND d.status = 'resolved')
+    AND NOT EXISTS (SELECT 1 FROM effect_receipts e WHERE e.outbox = 'connector'
+                    AND e.outbox_id = connector_outbox.id AND e.outcome <> 'failed');
 """
 
 
@@ -559,6 +577,93 @@ ALTER TABLE own_gateways ADD COLUMN peer_online INTEGER CHECK (peer_online IS NU
 ALTER TABLE own_gateways ADD COLUMN peer_seen TEXT;
 ALTER TABLE own_gateways ADD COLUMN peer_checked TEXT;
 """,
+    # 9: Patrick's reaction to a message in a chat with his own Hermes or a Bot's Bot Chat (redesign
+    # step 2, plan Part 11). The chat is a session id on `me` and `one`, and the Bot's profile id on
+    # `bots`, where each Bot has one Bot Chat.
+    # One row per message: the reaction he wants there now (emoji NULL takes his off), which the
+    # connector sets in Hermes with Hermes's own store. Hermes keeps one reaction per person per
+    # message, so a row says what should be there, never a change to make: setting it twice is the
+    # same as once, and a lease that ran out is simply handed out again. `version` tells a
+    # connector's late answer from the newest wish.
+    """
+CREATE TABLE chat_reactions (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one', 'bots')),
+  chat TEXT NOT NULL CHECK (length(chat) BETWEEN 1 AND 128),
+  message_id INTEGER NOT NULL CHECK (message_id >= 1),
+  emoji TEXT CHECK (emoji IS NULL OR length(emoji) BETWEEN 1 AND 16),
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'set', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, gateway, chat, message_id)
+);
+CREATE INDEX chat_reactions_by_status ON chat_reactions(workspace_id, gateway, status, updated_at);
+""",
+    # 10: renaming, hiding (archive), bringing back and deleting one of Patrick's own chats on Hermes or
+    # One (redesign step 3, plan Part 11). A flag of its own, off in every workspace until Patrick turns
+    # it on. Each request is one row, done by that gateway's own connector with Hermes's own calls, one
+    # at a time in each chat. Each ends in the same state however often it runs (that title, hidden or
+    # not, gone), so a lease that ran out is handed out again. The new title is kept here because the
+    # connector needs it; it is never in the event chain.
+    f"""
+CREATE TABLE flags_10 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN {_in(FLAGS_7 + ("session_manage_write",))}),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  changed_at TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO flags_10 SELECT workspace_id, name, enabled, changed_at, changed_by FROM flags;
+DROP TABLE flags;
+ALTER TABLE flags_10 RENAME TO flags;
+INSERT INTO flags(workspace_id, name, enabled, changed_at, changed_by)
+  SELECT id, 'session_manage_write', 0, created_at, 'migration 10' FROM workspaces;
+
+CREATE TABLE own_session_ops (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT NOT NULL CHECK (length(session_id) BETWEEN 1 AND 128),
+  op TEXT NOT NULL CHECK (op IN ('rename', 'archive', 'unarchive', 'delete')),
+  title TEXT CHECK ((op = 'rename') = (title IS NOT NULL) AND (title IS NULL OR length(title) BETWEEN 1 AND 100)),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
+""",
+    # 11: a "Bot told" message that died only because the Bots' gateway was not ready goes back in the
+    # queue. Until this release the connector called a gateway that was not ready (starting, stopped,
+    # reloaded by an install, or its check could not run) a failure, so the message was dead after one
+    # try and the Bot that asked was never told Patrick's answer (1 Nov 2026, while an install reloaded
+    # the gateway). Nothing was sent in that case, so sending it now is its first delivery. Only rows
+    # whose one reason is a readiness check's and whose every receipt is that failure; the failed
+    # receipt stays as history. Chat messages are left as they are: Patrick saw those as not sent and
+    # may have sent them again himself.
+    _REQUEUE_NOT_READY,
+    # 12: the same rule once more, for the answer migration 11 put back on 1 Nov at 10:53 PM. The
+    # install then ran this release's migrations while the release before's connector was still
+    # running; three seconds later that old connector leased the message, met the gateway mid-reload
+    # and failed it the old way, so it was dead again with a second failed receipt. Nothing was sent
+    # either time. The install now stops every worker before the store migrates (install.sh step 6),
+    # so this cannot happen again; this puts back what it did. Same rows only: dead of a readiness
+    # check, every receipt that failure, the card still answered.
+    _REQUEUE_NOT_READY,
+    # 13: a message to his own Hermes that answers one message there (redesign step 4, reply style A):
+    # Hermes's own id of the message it answers. The quoted words are in the text itself, as sent.
+    """
+ALTER TABLE own_messages ADD COLUMN reply_to INTEGER;
+""",
 ]
 
 
@@ -628,5 +733,41 @@ ALTER TABLE own_gateways DROP COLUMN peer_seen;
 ALTER TABLE own_gateways DROP COLUMN peer_online;
 ALTER TABLE own_gateways DROP COLUMN peer_ip;
 ALTER TABLE own_gateways DROP COLUMN state;
+""", ""),
+    # A reaction already set lives in Hermes itself; only one still on its way would be lost.
+    9: ([("SELECT count(*) FROM chat_reactions WHERE status IN ('queued', 'leased')",
+          "reactions on their way to Hermes")], """
+DROP TABLE chat_reactions;
+""", ""),
+    # A request already done lives in Hermes itself; only one still on its way would be lost.
+    10: ([("SELECT count(*) FROM own_session_ops WHERE status IN ('queued', 'leased')",
+           "chat renames, hides and deletes on their way to Hermes"),
+          ("SELECT count(*) FROM flags WHERE name = 'session_manage_write' AND enabled = 1",
+           "workspaces with session_manage_write on")], f"""
+DROP TABLE own_session_ops;
+
+CREATE TABLE flags_9 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('decision_write', 'mobile_read', 'mobile_chat_write', 'push_send',
+                                     'connector_effects', 'own_chat_write')),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  changed_at TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO flags_9 SELECT workspace_id, name, enabled, changed_at, changed_by FROM flags
+  WHERE name <> 'session_manage_write';
+DROP TABLE flags;
+ALTER TABLE flags_9 RENAME TO flags;
+""", ""),
+    # A data step: no table changed, and a message it put back in the queue is one the older release
+    # sends the same way. Nothing to undo.
+    11: ([], "", ""),
+    # The same data step as 11.
+    12: ([], "", ""),
+    # The quoted words stay in each message's text; only the link back to what it answers would go.
+    13: ([("SELECT count(*) FROM own_messages WHERE reply_to IS NOT NULL",
+           "messages to his own Hermes that answer one message, with the link back to it")], """
+ALTER TABLE own_messages DROP COLUMN reply_to;
 """, ""),
 }

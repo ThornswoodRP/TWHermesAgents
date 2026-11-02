@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS ledger (
   release TEXT NOT NULL DEFAULT '', at TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
   UNIQUE(repo, issue, event, release));
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, caller TEXT NOT NULL, op TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS owed_wakes (
+  bot TEXT PRIMARY KEY, since TEXT NOT NULL, last_at TEXT NOT NULL, refused INTEGER NOT NULL, reason TEXT NOT NULL);
 """
 
 TICKET_SEEN_TIMEOUT = timedelta(minutes=10)
@@ -181,13 +183,9 @@ class PolicyService:
                 task = str(args.get("task") or "")
                 if not task:
                     raise Refused("a ticket names the task it is for")
-                waiting = self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='waiting'").fetchone()[0]
-                if waiting >= self.rules["queue_max_waiting"]:
-                    raise Refused(f"{waiting} tickets are already waiting; the queue holds at most {self.rules['queue_max_waiting']}")
-                hour_ago = iso(self.clock() - timedelta(hours=1))
-                new = self.db.execute("SELECT COUNT(*) FROM tickets WHERE created_at >= ?", (hour_ago,)).fetchone()[0]
-                if new >= self.rules["queue_new_per_hour"]:
-                    raise Refused(f"{new} tickets were made in the last hour; the queue takes at most {self.rules['queue_new_per_hour']} an hour")
+                full = self._queue_full()
+                if full:
+                    raise Refused(full)
                 risk_row = self.db.execute("SELECT risk FROM task_risk WHERE task=?", (task,)).fetchone()
                 risk = risk_row[0] if risk_row else "high"
                 ticket = uuid.uuid4().hex
@@ -203,7 +201,18 @@ class PolicyService:
             self._audit(caller, "admit", {"ticket": ticket, "bot": bot, "kind": kind})
             return {"ticket": ticket, "state": "admitted", "reason": ""}
 
-    def _why_not_now(self, kind: str, ticket: str) -> str:
+    def _queue_full(self) -> str:
+        """Why the queue takes no new ticket now, or "" when it would."""
+        waiting = self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='waiting'").fetchone()[0]
+        if waiting >= self.rules["queue_max_waiting"]:
+            return f"{waiting} tickets are already waiting; the queue holds at most {self.rules['queue_max_waiting']}"
+        hour_ago = iso(self.clock() - timedelta(hours=1))
+        new = self.db.execute("SELECT COUNT(*) FROM tickets WHERE created_at >= ?", (hour_ago,)).fetchone()[0]
+        if new >= self.rules["queue_new_per_hour"]:
+            return f"{new} tickets were made in the last hour; the queue takes at most {self.rules['queue_new_per_hour']} an hour"
+        return ""
+
+    def _why_not_now(self, kind: str, ticket: str | None) -> str:
         if kind == "sandbox":
             limit = self._stage_limit("sandbox_jobs")
             if limit == 0:
@@ -215,10 +224,15 @@ class PolicyService:
         # Only tickets still asking hold the line: one whose turn went away
         # without a word (no ask for ten minutes) keeps its place in the count
         # but lets the next one by, so a lost turn never stalls the fleet.
+        # With no ticket, the question is for a new one, at the back of the line.
         fresh = iso(self.clock() - TICKET_SEEN_TIMEOUT)
-        ahead = self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='waiting' AND kind=? "
-                                "AND COALESCE(seen_at, created_at) >= ? "
-                                "AND rowid < (SELECT rowid FROM tickets WHERE id=?)", (kind, fresh, ticket)).fetchone()[0]
+        if ticket is None:
+            ahead = self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='waiting' AND kind=? "
+                                    "AND COALESCE(seen_at, created_at) >= ?", (kind, fresh)).fetchone()[0]
+        else:
+            ahead = self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='waiting' AND kind=? "
+                                    "AND COALESCE(seen_at, created_at) >= ? "
+                                    "AND rowid < (SELECT rowid FROM tickets WHERE id=?)", (kind, fresh, ticket)).fetchone()[0]
         if ahead:
             return f"{ahead} earlier {kind} tickets are waiting first"
         active = self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='admitted' AND kind=?", (kind,)).fetchone()[0]
@@ -261,6 +275,56 @@ class PolicyService:
                                 (iso(self.clock()), str(args.get("why") or "the Bots were reloaded"))).rowcount
             self._audit(caller, "release_turns", {"released": n})
         return {"released": n}
+
+    # Owed wakes. A wake is GitHub telling Bramble that something finished;
+    # its work is a sweep of every repository's state, so any later sweep does
+    # it. 1 Nov, 10:02 PM on: every wake the queue turned away was dropped, and
+    # nothing woke Bramble again until the next event, so Ops #205 and #206
+    # sat green and unswept. Now a turned-away wake is owed here, where it
+    # outlives a gateway restart, and Bramble's owed-wake check (a Hermes cron
+    # script that spends no model turn) wakes it once the queue has room. Any
+    # whole sweep that runs pays it.
+
+    def _router(self, args: dict) -> str:
+        bot = _bot(self.policy, args)
+        if not self.policy.is_router(bot):
+            raise Refused(f"only the router is woken by GitHub; {bot} owes no wake")
+        return bot
+
+    def owe_wake(self, caller: str, args: dict) -> dict:
+        bot = self._router(args)
+        reason = str(args.get("reason") or "not admitted")[:300]
+        t = iso(self.clock())
+        with self._tx():
+            self.db.execute("INSERT INTO owed_wakes(bot, since, last_at, refused, reason) VALUES(?,?,?,1,?) "
+                            "ON CONFLICT(bot) DO UPDATE SET last_at=excluded.last_at, refused=refused+1, reason=excluded.reason",
+                            (bot, t, t, reason))
+            self._audit(caller, "owe_wake", {"bot": bot, "reason": reason})
+            row = self.db.execute("SELECT since, refused FROM owed_wakes WHERE bot=?", (bot,)).fetchone()
+        return {"owed": True, "since": row[0], "refused": row[1]}
+
+    def wake_due(self, caller: str, args: dict) -> dict:
+        """Whether an owed wake should run now: one is owed and a new ticket
+        would be admitted at once. Asks nothing of the queue and spends nothing."""
+        bot = self._router(args)
+        with self._tx():
+            self._expire_silent()
+            row = self.db.execute("SELECT since, last_at, refused, reason FROM owed_wakes WHERE bot=?", (bot,)).fetchone()
+            if row is None:
+                return {"owed": False, "due": False}
+            why_not = self._queue_full() or self._why_not_now("turn", None)
+        return {"owed": True, "due": not why_not, "why_not": why_not, "since": row[0], "last_at": row[1],
+                "refused": row[2], "reason": row[3]}
+
+    def wake_paid(self, caller: str, args: dict) -> dict:
+        bot = self._router(args)
+        with self._tx():
+            row = self.db.execute("SELECT since, refused FROM owed_wakes WHERE bot=?", (bot,)).fetchone()
+            if row is None:
+                return {"paid": False}
+            self.db.execute("DELETE FROM owed_wakes WHERE bot=?", (bot,))
+            self._audit(caller, "wake_paid", {"bot": bot, "since": row[0], "refused": row[1]})
+        return {"paid": True, "since": row[0], "refused": row[1]}
 
     def active(self, bot: str) -> dict | None:
         self._expire_silent()
@@ -627,6 +691,9 @@ class PolicyService:
             "lease_release": (self.lease_release, {proxy, git, files}),
             "ledger_event": (self.ledger_event, {git}),
             "ledger_pending": (lambda c, a: self.ledger_pending(), {gw, git, "root"}),
+            "owe_wake": (self.owe_wake, {gw}),
+            "wake_due": (self.wake_due, {gw}),
+            "wake_paid": (self.wake_paid, {gw}),
         }
         return {name: (self._one_at_a_time(handler), users) for name, (handler, users) in table.items()}
 

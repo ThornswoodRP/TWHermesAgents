@@ -13,13 +13,21 @@ everything first and writes nothing if any check fails. With --check it only
 reports.
 
 For each Bot it:
-  1. checks the profile, its SOUL.md and its two Thornswood skills exist;
+  1. checks the profile and its SOUL.md exist;
   2. builds the Bot's config from the policy and merges it into config.yaml;
   3. checks the merged config can reach no route the Bot may not use;
   4. checks every .env by name against what may sit on the Oracle box;
   5. installs the guard plugin into plugins/thornswood_guard;
-  6. makes the Bot's working folder;
-  7. loads the installed plugin and checks it refuses what it must.
+  6. makes the Bot's working folder, and installs the skills this repository
+     owns for it (OWN_SKILLS: Bramble's bramble-duties);
+  7. installs the two Thornswood skills from skills/thornswood/ (until 1 Nov
+     they lived only in each profile, so a stale line could be fixed by no PR);
+  8. loads the installed plugin and checks it refuses what it must.
+
+For the Bot GitHub wakes (Bramble) it also installs the owed-wake check: the
+script into the profile's scripts/ and the cron job tw-owed-wake, made or
+brought up to date through the `hermes` command (thornswood_guard/owed_wake.py
+says what it does). A job Patrick paused stays paused.
 
 The gateway's own profile (the hermes user's default profile, which
 tw-hermes-gateway runs as) is not a Bot, but it holds the Discord connection
@@ -34,6 +42,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -54,6 +63,12 @@ from thornswood_guard.routes import check_config, check_gateway_config, proxy_re
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
 SKILLS = ("thornswood-ops", "thornswood-guide")
+SKILLS_DIR = REPO / "skills" / "thornswood"
+# Skills this repository owns and installs, by Bot, from skills/<name>/SKILL.md
+# into the profile's skills/thornswood/<name>/. 2 Nov: Bramble had merge
+# authority but nothing told it to merge, hand back a dropped pull request, or
+# run the Ops run notes, so fork #147 and Ops #200 and #201 sat green.
+OWN_SKILLS = {"bramble": ("bramble-duties",)}
 SKIP_SCAN = {"hermes-agent", "sessions", "logs", "cache", "image_cache", "audio_cache",
              "document_cache", "node_modules", "backups", "checkpoints"}
 
@@ -140,8 +155,8 @@ def self_test(plugin_dir: Path, bot: str) -> list[str]:
         # tool refused, and the Bot has its two broker tools.
         if not (out or {}).get("action") == "block" or "ticket" not in (out or {}).get("message", ""):
             problems.append(f"{bot}: with the brokers on, a tool call with no ticket from the fleet queue was not refused ({out})")
-        if sorted(ctx.tools) != ["tw_files", "tw_git"]:
-            problems.append(f"{bot}: the installed guard registered the tools {sorted(ctx.tools)}, not tw_git and tw_files")
+        if sorted(ctx.tools) != ["tw_decide", "tw_files", "tw_git"]:
+            problems.append(f"{bot}: the installed guard registered the tools {sorted(ctx.tools)}, not tw_git, tw_files and tw_decide")
         for want in ("pre_llm_call", "on_session_end", "agent_loop_stopped"):
             if len(ctx.hooks.get(want) or []) != 1:
                 problems.append(f"{bot}: the turn gate's {want} hook is not registered once")
@@ -187,6 +202,121 @@ def install_guard(pdir: Path) -> None:
         shutil.rmtree(old)
 
 
+def check_skills() -> list[str]:
+    """Each skill in this commit is a SKILL.md whose front matter Hermes can read
+    and names the skill its folder does."""
+    problems = []
+    for skill in SKILLS:
+        path = SKILLS_DIR / skill / "SKILL.md"
+        if not path.is_file():
+            problems.append(f"the {skill} skill is not in this commit at {path.relative_to(REPO)}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        parts = text.split("---\n", 2) if text.startswith("---\n") else []
+        meta = yaml.safe_load(parts[1]) if len(parts) == 3 else None
+        if not isinstance(meta, dict) or meta.get("name") != skill or not meta.get("description"):
+            problems.append(f"the {skill} skill's front matter does not name it or describe it")
+    return problems
+
+
+def install_skills(pdir: Path) -> list[str]:
+    """Write each skill over the profile's copy, one file at a time, never half a file."""
+    changed = []
+    for skill in SKILLS:
+        src = (SKILLS_DIR / skill / "SKILL.md").read_bytes()
+        dest_dir = pdir / "skills" / "thornswood" / skill
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "SKILL.md"
+        if dest.is_file() and dest.read_bytes() == src:
+            continue
+        fd, tmp = tempfile.mkstemp(dir=dest_dir, prefix=".SKILL-")
+        with os.fdopen(fd, "wb") as f:
+            f.write(src)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dest)
+        changed.append(skill)
+    return changed
+
+
+def install_skill(pdir: Path, name: str) -> None:
+    """The repository's skills/<name>/SKILL.md into the profile, whole, in one rename."""
+    target = pdir / "skills" / "thornswood" / name
+    target.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=target, prefix=".SKILL-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write((REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8"))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, target / "SKILL.md")
+
+
+def cron_jobs(hermes: list[str], bot: str) -> tuple[dict[str, list[dict]] | None, str]:
+    """The profile's cron jobs by name ({name: [{"id", "state"}, ...]}), read
+    with `hermes -p <bot> cron list --all`, or (None, why not)."""
+    try:
+        r = subprocess.run([*hermes, "-p", bot, "cron", "list", "--all"], capture_output=True, text=True,
+                           timeout=120, env=dict(os.environ, NO_COLOR="1"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"{shlex.join(hermes)} could not be run ({e})"
+    if r.returncode != 0:
+        return None, f"hermes -p {bot} cron list exited {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}"
+    jobs: dict[str, list[dict]] = {}
+    current = None
+    for raw in r.stdout.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+        if m := re.fullmatch(r"  (\S+) \[([a-z ]+)\]\s*", line):
+            current = {"id": m.group(1), "state": m.group(2)}
+        elif current and (m := re.fullmatch(r"    Name:\s*(.+?)\s*", line)):
+            jobs.setdefault(m.group(1), []).append(current)
+            current = None
+    return jobs, ""
+
+
+def install_owed_wake(pdir: Path, hermes: list[str], bot: str) -> list[str]:
+    """The owed-wake script into <profile>/scripts/, and its cron job made or
+    brought up to date. Returns what failed."""
+    from thornswood_guard import owed_wake
+
+    scripts = pdir / "scripts"
+    scripts.mkdir(exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=scripts, prefix=".tw-owed-wake-")
+    with os.fdopen(fd, "wb") as f:
+        f.write((REPO / "deploy" / "hermes-scripts" / owed_wake.SCRIPT).read_bytes())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, scripts / owed_wake.SCRIPT)
+
+    jobs, why = cron_jobs(hermes, bot)
+    if jobs is None:
+        return [f"{bot}: the owed-wake job could not be read: {why}"]
+    spec = ["--name", owed_wake.OWED_WAKE_JOB, "--skill", owed_wake.SKILL, "--script", owed_wake.SCRIPT,
+            "--deliver", "local"]
+    found = jobs.get(owed_wake.OWED_WAKE_JOB, [])
+    if len(found) > 1:
+        return [f"{bot}: {len(found)} cron jobs are named {owed_wake.OWED_WAKE_JOB} "
+                f"({', '.join(j['id'] for j in found)}); one must go, with hermes -p {bot} cron remove <id>"]
+    if not found:
+        argv = [*hermes, "-p", bot, "cron", "create", owed_wake.SCHEDULE, owed_wake.PROMPT, *spec]
+    else:
+        argv = [*hermes, "-p", bot, "cron", "edit", found[0]["id"], "--schedule", owed_wake.SCHEDULE,
+                "--prompt", owed_wake.PROMPT, *spec]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=dict(os.environ, NO_COLOR="1"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"{bot}: the owed-wake job could not be written ({e})"]
+    if r.returncode != 0:
+        return [f"{bot}: hermes cron {argv[4]} exited {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}"]
+    jobs, why = cron_jobs(hermes, bot)
+    found = (jobs or {}).get(owed_wake.OWED_WAKE_JOB, [])
+    if len(found) != 1:
+        return [f"{bot}: hermes cron {argv[4]} answered, but {len(found)} jobs named {owed_wake.OWED_WAKE_JOB} "
+                f"are listed after it ({why or 'one was expected'})"]
+    job = found[0]
+    if job["state"] not in ("active", "paused"):
+        return [f"{bot}: the owed-wake job {job['id']} is {job['state']}, so it never runs"]
+    print(f"{bot}: owed-wake job {job['id']} is {job['state']}"
+          + ("; Patrick paused it, so it stays paused" if job["state"] == "paused" else ""))
+    return []
+
+
 def write_config(pdir: Path, cfg_path: Path, merged: dict, commit: str, stamp: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=pdir, prefix=".config-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -206,8 +336,13 @@ def main() -> int:
     ap.add_argument("--work-root", default=WORK_ROOT)
     ap.add_argument("--check", action="store_true", help="report only; write nothing")
     ap.add_argument("--podman", default="podman", help="the container runtime command (tests pass a stand-in)")
+    ap.add_argument("--hermes", default="/home/hermes/.local/bin/hermes",
+                    help="the hermes command, for Bramble's owed-wake cron job (tests pass a stand-in)")
+    ap.add_argument("--wake-secret-file", default=None,
+                    help="where deploy/install.sh made the webhook secret (default: the policy's wake.secret_file; tests pass a stand-in)")
     a = ap.parse_args()
     podman = shlex.split(a.podman)
+    hermes = shlex.split(a.hermes)
 
     problems: list[str] = []
     head = git("rev-parse", "HEAD")
@@ -235,9 +370,9 @@ def main() -> int:
             continue
         if not (pdir / "SOUL.md").is_file():
             problems.append(f"{bot}: no SOUL.md")
-        for skill in SKILLS:
-            if not (pdir / "skills" / "thornswood" / skill / "SKILL.md").is_file():
-                problems.append(f"{bot}: the {skill} skill is missing")
+        for skill in OWN_SKILLS.get(bot, ()):
+            if not (REPO / "skills" / skill / "SKILL.md").is_file():
+                problems.append(f"{bot}: this commit has no skills/{skill}/SKILL.md to install")
         cfg_path = pdir / "config.yaml"
         existing = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
         merged = merge_into(existing or {}, build(policy, bot))
@@ -249,7 +384,21 @@ def main() -> int:
     gw_existing = (yaml.safe_load(gw_path.read_text(encoding="utf-8")) if gw_path.exists() else {}) or {}
     gw_merged = merge_into(gw_existing, build_gateway(policy))
     problems += [f"the gateway's own profile: {p}" for p in check_gateway_config(policy, gw_merged, root_env)]
+    # The gateway's webhook route needs its secret, which only systemd reads:
+    # without the file the gateway would not start (its drop-in names it). The
+    # hermes user can see that the file is there, never what is in it.
+    wake_secret = Path(a.wake_secret_file or policy.data["wake"]["secret_file"])
+    if not wake_secret.exists():
+        problems.append(f"{wake_secret} is not there; deploy/install.sh makes it, so run the install for this commit first")
     problems += scan_files(policy, home)
+    problems += check_skills()
+    # Bramble's owed-wake job is written through the hermes command, so it must
+    # answer before anything is written.
+    waker = policy.data["wake"]["app"]
+    if waker in plans:
+        _, why = cron_jobs(hermes, waker)
+        if why:
+            problems.append(f"{waker}: {why}")
 
     # Every Bot's terminal runs in Hermes's sandbox image under rootless podman.
     present, why = image_present(podman)
@@ -286,10 +435,15 @@ def main() -> int:
         work.mkdir(parents=True, exist_ok=True)
         os.chmod(work, 0o700)
         install_guard(pdir)
+        for skill in OWN_SKILLS.get(bot, ()):
+            install_skill(pdir, skill)
         write_config(pdir, cfg_path, merged, a.expect, stamp)
+        skills = install_skills(pdir)
+        print(f"{bot}: skills written: {', '.join(skills) or 'none, already current'}")
     install_guard(home)
     write_config(home, gw_path, gw_merged, a.expect, stamp)
 
+    owed = install_owed_wake(plans[waker][0], hermes, waker) if waker in plans else []
     failures = []
     for bot, (pdir, *_rest) in plans.items():
         failures += self_test(pdir / "plugins" / "thornswood_guard", bot)
@@ -297,6 +451,12 @@ def main() -> int:
     if failures:
         print("\nThe guard was installed but its self-test failed. Treat every Bot as unguarded until this is fixed:")
         for f in failures:
+            print(f"  - {f}")
+        return 1
+    if owed:
+        print("\nThe guard was installed and its self-test passed, but Bramble's owed-wake job was not written, so a "
+              "wake the fleet queue turns away waits for the next one:")
+        for f in owed:
             print(f"  - {f}")
         return 1
     print(f"\nApplied {a.expect} to {', '.join(plans)} and the gateway's own profile. The guard's self-test passed in every profile.")

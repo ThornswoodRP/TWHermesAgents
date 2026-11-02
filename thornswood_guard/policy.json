@@ -100,19 +100,27 @@
       "ThornswoodRP/Thornswood-Ops": "main",
       "ThornswoodRP/skymp": "thornswood/engine-changes"
     },
-    "patrick_paths": [
-      ".github/workflows/**",
-      "scripts/vps/gate/**",
-      "scripts/release/nexus-verbs.json"
-    ],
-    "verb_lists": [
-      "scripts/vps/gate/verbs.json",
-      "scripts/release/nexus-verbs.json"
+    "auto_merge": {
+      "ThornswoodRP/Thornswood": [
+        "Build check result"
+      ],
+      "ThornswoodRP/Thornswood-Ops": [],
+      "ThornswoodRP/skymp": [
+        "build-pr"
+      ]
+    },
+    "robot_authors": [
+      "dependabot[bot]",
+      "thornswood-pin-robot[bot]"
     ]
   },
   "runs": {
     "main_without_patrick": true,
     "ref": "main",
+    "verb_lists": [
+      "scripts/vps/gate/verbs.json",
+      "scripts/release/nexus-verbs.json"
+    ],
     "repo": "ThornswoodRP/Thornswood",
     "workflows": {
       "box-run.yml": {
@@ -123,7 +131,18 @@
         "verbs": "scripts/release/nexus-verbs.json"
       },
       "release.yml": {},
-      "release-tag.yml": {}
+      "release-tag.yml": {},
+      "tunnel.yml": {
+        "repo": "ThornswoodRP/Thornswood-Ops",
+        "required": [
+          "mode"
+        ],
+        "inputs": {
+          "mode": "install|switch|back",
+          "wait": "[0-9]{0,3}",
+          "recipient": "[A-Za-z0-9+/=<>]{0,4096}"
+        }
+      }
     },
     "refused_verbs": [
       "Set-NexusKey"
@@ -350,11 +369,22 @@
   "notifications": {
     "push_kinds": [
       "decision",
-      "main-approval",
-      "box-change"
+      "main-approval"
     ],
     "lock_screen_text": "Thornswood needs you",
     "link": "/cards/{card_id}?rev={revision}"
+  },
+  "wake": {
+    "app": "bramble",
+    "port": 8644,
+    "route": "github-checks",
+    "funnel_port": 8443,
+    "secret_file": "/etc/thornswood/github-webhook.env",
+    "repos": [
+      "app",
+      "ops",
+      "fork"
+    ]
   },
   "decisions": {
     "answered_by": "EvilPatrick06",
@@ -423,6 +453,14 @@
       "files": {
         "path": "/run/tw/files/files.sock",
         "group": "tw-files-clients",
+        "clients": [
+          "hermes",
+          "root"
+        ]
+      },
+      "decide": {
+        "path": "/run/tw/decide-bots/bots.sock",
+        "group": "tw-decide-bots",
         "clients": [
           "hermes",
           "root"
@@ -524,14 +562,14 @@
     "ready": false
   },
   "admission": {
-    "stage": "pilot",
+    "stage": "after",
     "model_turns": {
       "pilot": 1,
-      "after": 2
+      "after": 6
     },
     "sandbox_jobs": {
       "pilot": 0,
-      "after": 1
+      "after": 2
     },
     "mutating_ops": 1,
     "room_round_turns": 6,

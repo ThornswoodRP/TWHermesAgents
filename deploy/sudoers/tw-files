@@ -1,4 +1,0 @@
-# tw-files starts a Bot's check through the root helper and nothing else
-# (08 section 3). The helper checks the Bot, the tree and the command again.
-Defaults:tw-files !requiretty, env_reset, !setenv
-tw-files ALL=(root) NOPASSWD: /opt/thornswood-hermes/bin/tw-run-check

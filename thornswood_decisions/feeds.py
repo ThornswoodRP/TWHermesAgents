@@ -1,6 +1,8 @@
 """The phone's Board, Rooms and Bot Chat views: read-only snapshots the Bots' Hermes sends in.
 
-Hermes keeps the Kanban and the rooms; the core keeps no copy of either beyond
+The work feed carries Hermes's Kanban tasks and, since the Bots keep their work
+on GitHub, `items`: each issue a Bot has claimed and each pull request from a
+Bot's branch, with its stage and checks. Hermes keeps the Kanban and the rooms; the core keeps no copy of either beyond
 the latest snapshot of each, shown with the time it was read ("as of"). The
 room feed carries every bound room at once, `{source_time, rooms: [{room_id,
 events}]}`; the first shape, one room as `{source_time, room_id, events}`, is
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import secrets
 
 from .store import CoreError, Store, canonical, parse, sha256_hex
@@ -36,6 +39,14 @@ TASK_FIELDS = {"id": 64, "title": 200, "assignee": 64, "status": 32, "updated_at
 EVENT_FIELDS = {"event_id": 128, "kind": 32, "actor": 80, "text": 2000, "at": 40}
 BOT_MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
 ROLES = ("user", "assistant")
+# The Bots' work on GitHub (feed_reader.github_work): one item per claimed issue
+# or Bot pull request. The repo is kept only as owner/name, so the app's links
+# can only ever go to github.com.
+MAX_ITEMS = 200
+ITEM_FIELDS = {"title": 200, "bot": 64, "pr_title": 200, "checks_line": 80, "updated_at": 40}
+STAGES = ("claimed", "pr_open", "pr_draft", "merged", "closed")
+CHECKS = ("", "none", "running", "passed", "failing")
+REPO = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
 
 
 def _text(value, limit: int) -> str:
@@ -67,6 +78,8 @@ def clean(name: str, body: dict) -> dict:
         for t, raw in zip(out["tasks"], tasks):
             p = raw.get("priority") if isinstance(raw, dict) else None
             t["priority"] = p if isinstance(p, int) and not isinstance(p, bool) and -1000 <= p <= 1000 else 0
+        if "items" in body:
+            out["items"] = _items(body.get("items"))
     elif name == "bots":
         bots = body.get("bots")
         if not isinstance(bots, list) or len(bots) > 16:
@@ -95,6 +108,32 @@ def clean(name: str, body: dict) -> dict:
         if len(set(ids)) != len(ids):
             raise CoreError(400, "bad_feed", "the feed names a room twice")
     return out
+
+
+def _number(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10 ** 9 else 0
+
+
+def _repo(value) -> str:
+    return value if isinstance(value, str) and REPO.fullmatch(value) and ".." not in value else ""
+
+
+def _items(items) -> list[dict]:
+    if not isinstance(items, list) or len(items) > MAX_ITEMS:
+        raise CoreError(400, "bad_feed", f"items is a list of at most {MAX_ITEMS}")
+    kept = []
+    for i in items:
+        if not isinstance(i, dict):
+            raise CoreError(400, "bad_feed", "each work item is an object")
+        row = {k: _text(i.get(k), n) for k, n in ITEM_FIELDS.items()}
+        row.update(repo=_repo(i.get("repo")), number=_number(i.get("number")), pr=_number(i.get("pr")),
+                   pr_repo=_repo(i.get("pr_repo")), auto_merge=i.get("auto_merge") is True,
+                   stage=i.get("stage") if i.get("stage") in STAGES else "claimed",
+                   checks=i.get("checks") if i.get("checks") in CHECKS else "")
+        if not row["repo"]:
+            raise CoreError(400, "bad_feed", "each work item names its repo as owner/name")
+        kept.append(row)
+    return kept
 
 
 def _room(r) -> dict:

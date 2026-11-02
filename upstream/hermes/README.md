@@ -1,16 +1,16 @@
 # Fixes for Hermes itself, to send upstream
 
-Four causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Seven causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
-(`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM runs.
+(`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
 Nothing here is applied to the VM's Hermes by hand: the VM takes them in a
 Hermes release.
 
 Apply them in order on a checkout of that commit:
 
 ```
-git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch
+git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch 0005-desktop-relay-local-source-once-it-signals.patch 0006-desktop-scheduled-jobs-every-gateway.patch
 scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py tests/agent/test_codex_usage_attribution.py tests/agent/test_codex_cloudflare_headers.py tests/plugins/image_gen/test_openai_codex_provider.py tests/hermes_cli/test_auth_store_windows_encoding.py tests/gateway/test_multiplex_process_memo_scope.py
 ```
 
@@ -80,6 +80,112 @@ The first Linux run of all four (2 Nov) failed 3 tests in
 test_auxiliary_client.py: the first version passed `model=None` to every
 pick, and stand-in pools written as `select(self)` refused it. Unscoped picks
 are back to `select()`, and the Codex stand-ins take `model`.
+
+## 0005: the Desktop relays This device's Bot Chat when its main connection is remote, and reads it on its own connection
+
+0005 holds two commits. The first is the relay, the second the lookups.
+
+Cause: upstream 9cbc6a5ac0 (11 Sep) made `relayEligibleRoutes`
+(apps/desktop/src/plugins/hermes-bots/relay.ts) drop the local "This device"
+source from the bot relay whenever one remote connection is the Desktop's
+primary, so an unused local runtime is never dialed. A Desktop whose primary
+is remote can still run a Hermes on this device. Its agents queue
+`message_agent` envelopes in the local `bot_relay\outbox`, and its backend
+signals `bot_relay.outbox.pending` over the socket the window holds. The
+relay skipped that route anyway, so nothing claimed the envelopes and they
+sat there until their waiters timed out. Seen 2 Nov on One: three messages
+from This Device's Bot Chat, to Bramble and my-hermes, sat in `outbox\`
+from 4:50 PM on, with `claimed\` and `replies\` empty. One's Desktop is
+remote-primary: its "Profile bramble no longer exists" refusal comes only
+from the remote branch of `resolveRegistryLocalRoute`
+(electron/connection-registry.ts line 560).
+
+The fix: once the local source's own backend signals outbox mail, the
+relay keeps it as a peer like any other. It drains the outbox, posts the
+replies, and the roster loop tells it the other machines' agents. Until it
+signals, nothing changes: the local source of a remote-primary Desktop is
+still never polled or pinned. A signal from the primary, or an untagged one,
+does not count.
+
+The second cause: the Desktop looked This device's Bot Chat up under every
+remote Bot's name. Card 1's `desktop.log` on One (2 Nov) has
+`GET /api/sessions/local-4e2938…` with `profile=bramble` at 5:38 PM, then
+`magpie`, `rift`, `sprocket` and `wisp` at 7:43 PM. Magpie's failed after
+a 120 s wait for a remote dashboard. The other three were refused at once
+with "Profile ... no longer exists", one after another within 8 ms.
+`probeStoredSession` (apps/desktop/src/app/session/hooks/use-session-actions/utils.ts)
+took an owner only from its caller. `resolveSessionProfile` and the other
+profile-only callers name none, so even a chat whose exact owner the store
+already knew went down the cross-profile ladder. That ladder walks the
+active source's profile names, here the remote Bots'. The session read pin
+then sent each name to the chat's real connection, `local`, which has none
+of them.
+
+The fix: the probe starts from the same owner ladder that session calls use
+(tile route, the one hint, a tagged row, a proven runtime event). An exact
+owner found there is read once, and a miss there is final, as with an
+owner the caller names. A chat with no known exact owner walks the profiles
+as before.
+
+Check both with the Desktop's own tests:
+
+```
+cd apps/desktop
+npm ci --ignore-scripts
+npx vitest run src/plugins/hermes-bots/ src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
+```
+
+## 0006: the Scheduled jobs list shows every connected gateway's jobs, and each job's buttons go to its own gateway
+
+Cause: the Scheduled jobs page and the sidebar's Cron jobs section asked
+only the connection in front (`getCronJobs` in
+apps/desktop/src/api/cron.ts is `connectionScoped()`). Seen 2 Nov on One:
+the Desktop is in Advanced mode, so Simple mode hides nothing; while Patrick's
+own Hermes is in front, the list goes to that connection, which has no
+jobs. Bramble's 5 jobs are on thornswood-bots, so they showed only with
+Bramble in front on the Bots tab. Every per-job call (runs, edit, pause,
+resume, run now, delete) also went to the connection in front, so a job
+from another gateway could not be worked even once listed.
+
+The fix: the all-profiles list (`GET /api/cron/jobs` with no profile or
+`profile=all`) now joins every connected registry gateway's jobs in the
+main process, the way the unified Sessions list joins their chats
+(electron/cron-job-union.ts). Only already-pooled backends are read, so a
+refresh never dials one; a gateway already listed (the same connection, or
+the same install_id) is read once; a dead one adds nothing; an error from
+the connection in front is never hidden. Each job from another gateway
+carries the `connection_id` that served it, every per-job call goes to that
+connection under the job's own profile, and its runs are stamped with that
+connection. Rows are keyed by (connection, id), since two gateways can hold
+one id. A list for one named profile is unchanged.
+
+Upstream main has moved past v0.22.5 here: its 0e0b2328 added Stop for a
+running job and the missed-run policy, which touch the same lines of
+apps/desktop/src/api/cron.ts and the Scheduled jobs page. So the upstream
+pull request uses `0006-desktop-scheduled-jobs-every-gateway-upstream-main.patch`,
+the same change made on upstream main f0d94882 (Stop for a running job also
+goes to the job's own gateway there). It needs nothing from 0001 to 0005.
+It was first made on 4d26e0cc; upstream then moved `isNotFoundApiError` out
+of electron/main.ts beside the new block, so it was rebased on f0d94882 with
+upstream's side kept.
+
+Check it with the Desktop's own tests:
+
+```
+cd apps/desktop
+npm ci --ignore-scripts
+npx vitest run electron/cron-job-union.test.ts src/api/cron-job-owner.test.ts src/store/cron.test.ts src/app/cron src/app/chat/sidebar
+```
+
+The subagents frame on One is a separate cause and is not in 0006. Its
+measurement so far: the Desktop holds two saved owners for This device's
+Bot Chat, `{my-hermes, remote}` and `{local, local}`, so it treats the
+owner as unknown. One's `desktop.log` rules out the Bots roster as the
+writer (every roster snapshot with This device in front lists `local/default`
+on its own row, and no line says MISROUTED), and the id is not the Bot Chat
+id One's own gateway would mint for `bot-chat:default` (generations 0 to
+5). Which step wrote the my-hermes owner is still open; no fix is written
+for it until that is measured.
 
 ## 0007: a coalesced webhook delivery survives a gateway restart
 
@@ -157,3 +263,18 @@ the version the VM runs.
   there.
 - 0004 on the VM: waits on the Linux run card. The upstream pull requests
   wait on it.
+- 0005 (Linux, Node 22, 2 Nov, on 0001 to 0004): `vitest run src/plugins/hermes-bots/` 107 files, 873 passed, 0 failed (2 new; the first fails without the fix), and `tsc --noEmit` is clean.
+- 0005's second commit (Linux, Node 22, 2 Nov): resolve-stored-session.test.ts
+  24 passed (3 new; the first two fail without the fix). `vitest run` over
+  src/app/session, src/store, src/app/contrib and src/plugins/hermes-bots:
+  4,581 passed and 3 failed. The 3 are dead-session-prune's debounce test and
+  two voice-prefs tests, and they fail the same way on v0.22.5 without any
+  of these patches. `tsc -p . --noEmit` and eslint on the changed files are
+  clean.
+- 0006 (Linux, Node 26, 2 Nov, on 0001 to 0005): the five suites above, 57
+  files, 447 passed, 0 failed (the new cron-job-owner test fails 8 of 9
+  without the fix); `tsc -p . --noEmit`, `tsc -p tsconfig.electron.json
+  --noEmit` and eslint on the changed files are clean. The upstream-main
+  patch on 4d26e0cc (Linux, Node 26, 2 Nov): the same suites, 62 files, 478
+  passed, 0 failed; both tsc runs clean. Rebased on f0d94882 (2 Nov, 11 AM):
+  67 files, 492 passed, 0 failed; both tsc runs and eslint clean.

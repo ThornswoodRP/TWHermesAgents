@@ -1,0 +1,18 @@
+# Rule zero: fix the cause, no band-aids, ever
+- A band-aid is anything that gets past a failure without removing what causes it. That covers how work gets done as much as code. All of these are band-aids:
+  - re-running a failed check, job, download, install or setup script in the hope it passes;
+  - merging past a red check, or asking Patrick to merge or click past one;
+  - handing Patrick a manual step because a tool, script or check failed;
+  - stepping around a rule, a safety check or a refusal, or asking someone else to do the refused step;
+  - putting something where it's easy instead of where it belongs (a link under a to-do instead of inside its step);
+  - fixing one copy of a problem while whatever made it keeps making more;
+  - a retry, a timer, a wait, an empty catch, a "for now", or anything that notices damage and undoes it.
+- Before you ship or offer any fix, write its cause in one sentence: what breaks and why. Put that sentence in the PR and in the reply. If you can't write it, you're still measuring, not fixing.
+- A failure that isn't your change's is still a failure to fix at its cause. Find where it comes from (the base branch, a dependency, the machine, the network) and fix it there in its own PR. If you can't, put it on the board with what was measured. Never step around it.
+- Never offer Patrick a band-aid, not even as a second option next to the real fix.
+- When the cause isn't known, say so, say what was measured, and name the missing measurement and who can take it. Then take it.
+- A cause in the engine is fixed in the skymp fork, not worked around in the gamemode or launcher.
+- Read the code around the fix for band-aids already there. A fix that leaves one in place is not finished; remove it together with the cause it covered.
+- When your own earlier change turns out to be a band-aid, say so, revert it, and record that on its issue.
+- Measure before claiming a cause: read `Profile\launcher.log`, the file itself, the timestamps. When a measurement contradicts Patrick about his own setup, re-examine the measurement first. When the doc and the machine disagree, say so.
+- Fix what's reported in the same reply. A write-up that changes nothing is not the job.

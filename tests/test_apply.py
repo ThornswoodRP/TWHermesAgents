@@ -1,6 +1,7 @@
 """scripts/apply.py against a stand-in for the VM's Hermes home, the rendered
 profile files, and the repo itself holding no tokens."""
 
+import json
 import os
 import re
 import shutil
@@ -49,15 +50,27 @@ class Apply(unittest.TestCase):
         cls.commit = subprocess.run(["git", "-C", str(cls.repo), "rev-parse", "HEAD"], check=True,
                                     capture_output=True, text=True).stdout.strip()
 
-    def run_apply(self, home: Path, *extra, expect=None, image="present", podman=None):
+    def run_apply(self, home: Path, *extra, expect=None, image="present", podman=None, wake_secret=True,
+                  hermes=None):
         work = home.parent / "tw-work"
+        secret = home.parent / "github-webhook.env"
+        if wake_secret:
+            secret.write_text("WEBHOOK_SECRET=" + "0" * 64 + "\n", encoding="utf-8")
+        else:
+            secret.unlink(missing_ok=True)
         state = home.parent / "podman.state"
         state.write_text(image, encoding="utf-8")
         fake = f"{Path(sys.executable).as_posix()} {(Path(__file__).with_name('fake_podman.py')).as_posix()}"
-        env = dict(os.environ, FAKE_PODMAN_STATE=str(state))
+        fake_hermes = f"{Path(sys.executable).as_posix()} {(Path(__file__).with_name('fake_hermes.py')).as_posix()}"
+        env = dict(os.environ, FAKE_PODMAN_STATE=str(state), FAKE_HERMES_STATE=str(home.parent / "hermes.json"))
         return subprocess.run([sys.executable, str(self.repo / "scripts" / "apply.py"), "--expect", expect or self.commit,
-                               "--hermes-home", str(home), "--work-root", str(work), "--podman", podman or fake, *extra],
+                               "--hermes-home", str(home), "--work-root", str(work), "--podman", podman or fake,
+                               "--hermes", hermes or fake_hermes, "--wake-secret-file", str(secret), *extra],
                               capture_output=True, text=True, env=env)
+
+    def hermes_state(self, home: Path) -> dict:
+        f = home.parent / "hermes.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
     def podman_log(self, home: Path) -> str:
         log = home.parent / "podman.log"
@@ -113,6 +126,96 @@ class Apply(unittest.TestCase):
             self.assertTrue((home.parent / "tw-work" / bot).is_dir())
             self.assertIn(self.commit, (p / "local" / "thornswood-hermes" / "applied.json").read_text(encoding="utf-8"))
 
+    def test_bramble_gets_its_duties_skill_from_the_repo_and_no_other_bot_does(self):
+        # 2 Nov: Bramble had merge authority, and nothing told it to merge.
+        home = self.home()
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        want = (REPO / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
+        got = home / "profiles" / "bramble" / "skills" / "thornswood" / "bramble-duties" / "SKILL.md"
+        self.assertEqual(got.read_text(encoding="utf-8"), want)
+        for bot in policy().bots:
+            if bot != "bramble":
+                self.assertFalse((home / "profiles" / bot / "skills" / "thornswood" / "bramble-duties").exists(), bot)
+        got.write_text("changed on the VM\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(got.read_text(encoding="utf-8"), want, "the next apply puts the repo's copy back")
+        self.assertEqual([p.name for p in got.parent.iterdir()], ["SKILL.md"], "no half-written file is left")
+
+    def test_bramble_gets_its_owed_wake_check_once_and_no_other_bot_does(self):
+        # 1 Nov, 10:02 PM on: every wake the fleet queue turned away was
+        # dropped. The owed-wake check wakes Bramble once the queue has room.
+        from thornswood_guard import owed_wake
+        home = self.home()
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        script = home / "profiles" / "bramble" / "scripts" / "tw-owed-wake.py"
+        self.assertEqual(script.read_bytes(), (REPO / "deploy" / "hermes-scripts" / "tw-owed-wake.py").read_bytes())
+        jobs = self.hermes_state(home)["jobs"]
+        self.assertEqual(list(jobs), ["bramble"], "only Bramble's profile gets a job")
+        (job,) = jobs["bramble"]
+        self.assertEqual((job["name"], job["schedule"], job["script"], job["skills"], job["deliver"]),
+                         ("tw-owed-wake", "every 5m", "tw-owed-wake.py", ["bramble-duties"], "local"))
+        self.assertIn(owed_wake.OWED_WAKE_MARK, job["prompt"])
+        self.assertIn(f"owed-wake job {job['id']} is active", r.stdout)
+        for bot in policy().bots:
+            if bot != "bramble":
+                self.assertFalse((home / "profiles" / bot / "scripts").exists(), bot)
+        # A second apply brings the same job up to date; it never makes another.
+        state = self.hermes_state(home)
+        state["jobs"]["bramble"][0].update(schedule="every 1m", prompt="changed on the VM")
+        (home.parent / "hermes.json").write_text(json.dumps(state), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (again,) = self.hermes_state(home)["jobs"]["bramble"]
+        self.assertEqual((again["id"], again["schedule"], again["prompt"]), (job["id"], "every 5m", job["prompt"]))
+
+    def test_a_paused_owed_wake_job_stays_paused(self):
+        home = self.home()
+        self.assertEqual(self.run_apply(home).returncode, 0)
+        state = self.hermes_state(home)
+        state["jobs"]["bramble"][0]["state"] = "paused"
+        (home.parent / "hermes.json").write_text(json.dumps(state), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Patrick paused it, so it stays paused", r.stdout)
+        self.assertEqual(self.hermes_state(home)["jobs"]["bramble"][0]["state"], "paused")
+
+    def test_two_owed_wake_jobs_are_named_not_guessed_between(self):
+        home = self.home()
+        two = [{"id": i, "name": "tw-owed-wake", "schedule": "every 5m", "script": "tw-owed-wake.py"} for i in ("a1", "b2")]
+        (home.parent / "hermes.json").write_text(json.dumps({"jobs": {"bramble": two}}), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("2 cron jobs are named tw-owed-wake (a1, b2)", r.stdout)
+
+    def test_a_hermes_that_does_not_answer_stops_everything(self):
+        home = self.home()
+        (home.parent / "hermes.json").write_text(json.dumps({"broken": True}), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("bramble: hermes -p bramble cron list exited 1", r.stdout)
+        self.assertIn("Nothing was changed", r.stdout)
+        self.assertFalse((home / "profiles" / "rift" / "plugins").exists())
+
+    def test_check_reads_the_jobs_and_writes_none(self):
+        home = self.home()
+        r = self.run_apply(home, "--check")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.hermes_state(home), {})
+        log = (home.parent / "hermes.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual([json.loads(line) for line in log], [["-p", "bramble", "cron", "list", "--all"]])
+
+    def test_the_duties_skill_says_what_bramble_does(self):
+        text = (REPO / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nname: bramble-duties\n"))
+        for must in ("ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp", "dequeued", "gh-readonly-queue/main/pr-",
+                     "There is no timer and no retry", "ops/claude-queue/", "ops/bramble-list.md", "ops/status.md",
+                     "Never merge ThornswoodRP/Thornswood-Hermes", "tw_decide", "start_run"):
+            self.assertIn(must, text)
+        self.assertNotIn("\u2014", text)
+
     def test_the_gateways_own_profile_is_set_and_guarded(self):
         # 31 Oct: the gateway runs as the hermes user's default profile, which
         # had no route and no helpers of its own, so its vision helper walked
@@ -133,6 +236,46 @@ class Apply(unittest.TestCase):
         self.assertTrue((home / "plugins" / "thornswood_guard" / "policy.json").is_file())
         self.assertIn(self.commit, (home / "local" / "thornswood-hermes" / "applied.json").read_text(encoding="utf-8"))
         self.assertEqual((home / ".env").read_text(encoding="utf-8"), "DISCORD_BOT_TOKEN=canary\n")
+
+    def test_the_gateway_takes_bramble_wake_route_with_no_secret_in_config(self):
+        home = self.home()
+        (home / "config.yaml").write_text(
+            "platforms:\n  discord:\n    enabled: true\n_config_version: 51\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        cfg = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(cfg["platforms"]["discord"], {"enabled": True})
+        hook = cfg["platforms"]["webhook"]
+        self.assertTrue(hook["enabled"])
+        self.assertEqual(hook["extra"]["host"], "127.0.0.1")
+        self.assertEqual(list(hook["extra"]["routes"]), ["github-checks"])
+        self.assertEqual(hook["extra"]["routes"]["github-checks"]["profile"], "bramble")
+        self.assertNotRegex((home / "config.yaml").read_text(encoding="utf-8"), r"(?m)^\s*secret\s*:")
+
+    def test_without_the_wake_secret_nothing_is_applied(self):
+        home = self.home()
+        r = self.run_apply(home, wake_secret=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("github-webhook.env is not there; deploy/install.sh makes it", r.stdout)
+        self.assertFalse((home / "plugins").exists())
+
+    def test_a_secret_written_into_the_gateway_config_stops_everything(self):
+        home = self.home()
+        (home / "config.yaml").write_text(
+            "platforms:\n  webhook:\n    extra:\n      secret: hunter2\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("a webhook secret is written in the gateway's config.yaml", r.stdout)
+        self.assertNotIn("hunter2", r.stdout)
+
+    def test_a_second_webhook_route_stops_everything(self):
+        home = self.home()
+        (home / "config.yaml").write_text(
+            "platforms:\n  webhook:\n    extra:\n      routes:\n        anything:\n          prompt: '{__raw__}'\n",
+            encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the gateway's webhook routes are ['anything', 'github-checks'], not only github-checks", r.stdout)
 
     def test_a_paid_helper_in_the_gateways_own_profile_stops_everything(self):
         home = self.home()
@@ -169,10 +312,39 @@ class Apply(unittest.TestCase):
         self.assertFalse((home / "profiles" / "wisp").exists())
         self.assertFalse((home / "profiles" / "rift" / "plugins").exists())
 
-    def test_a_missing_skill_stops_everything(self):
-        r = self.run_apply(self.home(skip_skill="thornswood-guide"))
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("thornswood-guide skill is missing", r.stdout)
+    def test_the_skills_are_installed_from_the_commit(self):
+        # 1 Nov: the two skills lived only in each profile, so their stale
+        # lines (the old owner's repo names, "private now, going public")
+        # could be fixed by no PR. apply.py now writes the commit's copy.
+        home = self.home(skip_skill="thornswood-guide")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for bot in policy().bots:
+            for skill in ("thornswood-ops", "thornswood-guide"):
+                got = (home / "profiles" / bot / "skills" / "thornswood" / skill / "SKILL.md").read_bytes()
+                self.assertEqual(got, (REPO / "skills" / "thornswood" / skill / "SKILL.md").read_bytes(), (bot, skill))
+        again = self.run_apply(home)
+        self.assertIn("skills written: none, already current", again.stdout)
+
+    def test_check_writes_no_skill(self):
+        home = self.home(skip_skill="thornswood-guide")
+        r = self.run_apply(home, "--check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertFalse((home / "profiles" / "rift" / "skills" / "thornswood" / "thornswood-guide" / "SKILL.md").exists())
+
+    def test_the_skills_name_themselves_and_name_no_old_home(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("apply_mod", REPO / "scripts" / "apply.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.check_skills(), [])
+        for skill in ("thornswood-ops", "thornswood-guide"):
+            raw = (REPO / "skills" / "thornswood" / skill / "SKILL.md").read_bytes()
+            self.assertNotIn(b"\r", raw, f"{skill}: LF line endings, as .gitattributes keeps them")
+            text = raw.decode("utf-8")
+            self.assertNotIn("EvilPatrick06/", text, skill)
+            self.assertNotIn("going public", text, skill)
+            self.assertNotIn("Desk to merge", text, skill)
 
     def test_a_forbidden_key_stops_everything(self):
         home = self.home(env_root="NEXUS_API_KEY=canary\n")

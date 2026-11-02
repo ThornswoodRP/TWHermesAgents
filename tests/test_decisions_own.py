@@ -14,8 +14,8 @@ nothing reaches a real Hermes.
 from __future__ import annotations
 
 import json
-import re
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -372,7 +372,7 @@ class Migration7(unittest.TestCase):
         self.assertEqual(migrate(con), len(MIGRATIONS))
         flags = dict(con.execute("SELECT name, enabled FROM flags WHERE workspace_id = 'ws_1'").fetchall())
         self.assertEqual(flags, {"decision_write": 0, "mobile_read": 1, "mobile_chat_write": 0, "push_send": 0,
-                                 "connector_effects": 0, "own_chat_write": 0})
+                                 "connector_effects": 0, "own_chat_write": 0, "session_manage_write": 0})
         self.assertEqual(con.execute("SELECT name FROM feed_sources").fetchall()[0][0], "push")
         self.assertEqual(con.execute("SELECT name FROM feed_snapshots").fetchall()[0][0], "work")
         con.execute("INSERT INTO feed_sources VALUES('ws_1', 'own-one', ?, 't')", ("c" * 64,))
@@ -592,11 +592,43 @@ class TheConnector(unittest.TestCase):
 
     def test_lists_chats_the_way_hermes_pickers_do(self):
         snap = own_connector.snapshot(self.db, ["s_tg"], datetime(2026, 11, 1, tzinfo=timezone.utc))
-        self.assertEqual([c["id"] for c in snap["chats"]], ["s_plan", "s_old2", "s_tg"])
-        self.assertEqual(snap["chats"][0]["preview"], "three things")
+        # His Bot Chat first (hidden from Hermes's pickers, listed here), then the pickers' own list.
+        self.assertEqual([c["id"] for c in snap["chats"]], ["s_bot", "s_plan", "s_old2", "s_tg"])
+        self.assertEqual(snap["chats"][1]["preview"], "three things")
         plan = next(o for o in snap["open"] if o["id"] == "s_plan")
         self.assertEqual([m["text"] for m in plan["messages"]], ["what is on", "three things"])
-        self.assertEqual(clean(snap)["chats"][2]["title"], "")
+        self.assertEqual(clean(snap)["chats"][3]["title"], "")
+        self.assertEqual([c.get("bot_chat", False) for c in clean(snap)["chats"]], [True, False, False, False])
+
+    def test_the_bot_chat_is_listed_first_by_the_id_it_goes_on_as(self):
+        con = sqlite3.connect(self.db)
+        # Hermes compressed it: the titled, hidden row ended with 'compression' and goes on as s_bot2.
+        con.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 's_bot'")
+        con.execute("INSERT INTO sessions VALUES('s_bot2', 'cli', NULL, 20, 950, NULL, 's_bot', NULL, 0, 1)")
+        con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bot2', 'assistant', "
+                    "'Rift: the load order is done', 951)")
+        # A visible chat merely named like it is an ordinary chat; an archived Bot Chat is retired.
+        con.execute("INSERT INTO sessions VALUES('s_named', 'cli', 'Bot Chat old', 5, 100, NULL, NULL, NULL, 0, 0)")
+        con.commit()
+        con.close()
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        first = snap["chats"][0]
+        self.assertEqual((first["id"], first["title"], first["preview"], first["bot_chat"]),
+                         ("s_bot2", "Bot Chat", "Rift: the load order is done", True))
+        self.assertEqual([c["id"] for c in snap["chats"]].count("s_bot2"), 1)
+        self.assertIn("s_bot2", [o["id"] for o in snap["open"]])
+        page = own_connector.chats_page(self.db, None, "")
+        self.assertEqual(page["chats"][0]["id"], "s_bot2")
+        self.assertEqual(own_connector.chats_page(self.db, None, "bot")["chats"][0]["id"], "s_bot2")
+        self.assertNotIn("s_bot2", [c["id"] for c in own_connector.chats_page(self.db, None, "plan")["chats"]])
+        later = own_connector.chats_page(self.db, page["chats"][-1]["last_at"], "")
+        self.assertNotIn("s_bot2", [c["id"] for c in later["chats"]])
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE sessions SET archived = 1 WHERE id = 's_bot'")
+        con.commit()
+        con.close()
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        self.assertFalse(any(c.get("bot_chat") for c in snap["chats"]))
 
     def test_the_feed_fits_under_the_cores_size(self):
         con = sqlite3.connect(self.db)
@@ -750,7 +782,7 @@ class TheConnector(unittest.TestCase):
     def test_it_imports_nothing_from_this_repository(self):
         src = Path(own_connector.__file__).read_text(encoding="utf-8")
         self.assertNotIn("from .", src)
-        self.assertNotIn("thornswood_decisions", src.split('"""', 2)[2])
+        self.assertIsNone(re.search(r"^\s*(from|import)\s+thornswood", src, re.M))
 
 
 if __name__ == "__main__":
@@ -890,6 +922,43 @@ class OneInstall(unittest.TestCase):
         r = self.install()
         self.assertIn("PASS the connector's token is already in", r.stdout)
         self.assertFalse(self.calls.exists())
+
+    def github_origin(self, signed_in=True):
+        """origin is GitHub's address, as in Patrick's clone; git takes it from the scratch bare repo."""
+        import subprocess
+        origin = self.t / "origin.git"
+        for args in (("remote", "set-url", "origin", "https://github.com/ThornswoodRP/Thornswood-Hermes.git"),
+                     ("config", f"url.{origin}.insteadOf", "https://github.com/ThornswoodRP/Thornswood-Hermes.git")):
+            subprocess.run(["git", *args], cwd=self.clone, check=True, capture_output=True)
+        gh = self.bin / "gh"
+        gh.write_text(f"#!/bin/sh\n[ \"$1 $2\" = 'auth status' ] && exit {0 if signed_in else 1}\nexit 0\n", encoding="utf-8")
+        gh.chmod(0o755)
+        (self.t / "own-one.token").write_text("tok_already", encoding="ascii")
+        return gh
+
+    def helpers(self):
+        import subprocess
+        out = subprocess.run(["git", "config", "--local", "--get-all", "credential.https://github.com.helper"],
+                             cwd=self.clone, capture_output=True, text=True)
+        return out.stdout.splitlines()
+
+    def test_the_clone_signs_in_to_github_with_gh_so_git_never_prompts(self):
+        gh = self.github_origin()
+        r = self.install()
+        self.assertIn(f"PASS this clone signs in to GitHub with gh ({gh})", r.stdout, r.stdout + r.stderr)
+        self.assertIn("PASS own_connector.py and room_send.py from", r.stdout)
+        # The empty entry first, so the helpers set before it (One's helper selector) are dropped.
+        self.assertEqual(self.helpers(), ["", f"!'{gh}' auth git-credential"])
+        self.install()
+        self.assertEqual(self.helpers(), ["", f"!'{gh}' auth git-credential"], "set once, however often it runs")
+
+    def test_gh_not_signed_in_stops_before_any_fetch(self):
+        self.github_origin(signed_in=False)
+        r = self.install()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("FAIL gh is not signed in to github.com", r.stdout)
+        self.assertFalse((self.t / "own-connector" / "own_connector.py").exists())
+        self.assertEqual(self.helpers(), [])
 
     def test_finds_hermess_python_from_its_launcher_not_beside_it(self):
         import subprocess

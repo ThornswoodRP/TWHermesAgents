@@ -20,15 +20,16 @@ import textwrap
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from decisions_helpers import World
 from test_decisions_api import ORIGIN, Served, answer_body
 
-from thornswood_decisions import backup, connector, feed_reader
+from thornswood_decisions import backup, connector, feed_reader, store as store_mod
 from thornswood_decisions.chat import Chat, room_event_id
 from thornswood_decisions.feeds import Feeds
 from thornswood_decisions.schema import MIGRATIONS
-from thornswood_decisions.store import CoreError, Store
+from thornswood_decisions.store import CoreError, Store, migrate
 
 ROOM = "54b3ad46-3419-4adb-b60d-c79cb347fcee"
 BOTS = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
@@ -109,6 +110,13 @@ class ChatSend(unittest.TestCase):
 
 
 class ConnectorSide(unittest.TestCase):
+    def at_schema(self, n):
+        """The store as an older release left it at schema n: the stored version, and no column a later
+        migration adds (13: own_messages.reply_to), so this release's migrations run on it as they would."""
+        if n < 13:
+            self.w.store.db.execute("ALTER TABLE own_messages DROP COLUMN reply_to")
+        self.w.store.db.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(n),))
+
     def setUp(self):
         self.w = World()
         self.addCleanup(self.w.close)
@@ -207,6 +215,156 @@ class ConnectorSide(unittest.TestCase):
         self.assertIn("approves nothing by itself", items[0]["text"])
         self.chat.result(self.w.ws, self.tok, items[0]["id"], "confirmed", "turn finished")
         self.assertTrue(self.w.core.states(card["id"])["bot_told"])
+
+    def answered(self, key="key-00000001", **kw):
+        card = self.w.card(**kw)
+        self.w.core.answer(self.w.patrick(), **self.w.answer_args(card, key=key))
+        return card
+
+    def outbox(self, cx):
+        return self.w.store.db.execute("SELECT status, attempts, lease_until, reason FROM connector_outbox "
+                                       "WHERE id = ?", (cx,)).fetchone()
+
+    def receipts(self, cx):
+        return [r[0] for r in self.w.store.db.execute(
+            "SELECT outcome FROM effect_receipts WHERE outbox = 'connector' AND outbox_id = ?", (cx,))]
+
+    def test_a_helper_failure_leaves_the_answer_queued_and_names_the_helper_not_the_gateway(self):
+        # 2 Nov: the connector's helper ran under /bin/sh and every check read as the gateway.
+        flags(self.w, "connector_effects")
+        card = self.answered()
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        why = "the connector's Hermes helper failed (exit 2): room_send.py: 61: Syntax error: \"(\" unexpected"
+        self.assertEqual(self.chat.result(self.w.ws, self.tok, cx, "not_ready", reason=why)["status"], "queued")
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"], row["reason"]), ("queued", 0, why))
+        self.assertEqual(self.receipts(cx), [])
+        self.assertFalse(self.w.core.states(card["id"])["bot_told"])
+
+    def test_a_gateway_that_is_not_ready_leaves_the_answer_queued(self):
+        flags(self.w, "connector_effects")
+        card = self.answered()
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        out = self.chat.result(self.w.ws, self.tok, cx, "not_ready", reason="could not check the Bots' gateway")
+        self.assertEqual(out["status"], "queued")
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"], row["lease_until"]), ("queued", 0, None))
+        self.assertEqual(row["reason"], "waiting for the Bots' gateway: could not check the Bots' gateway")
+        self.assertEqual(self.receipts(cx), [], "a gateway that was not ready is no delivery failure")
+        self.assertTrue(self.chat.result(self.w.ws, self.tok, cx, "not_ready")["replayed"])
+        self.assertFalse(self.w.core.states(card["id"])["bot_told"])
+        # Once the gateway is ready, the same message goes, and that is "Bot told".
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([(i["id"], i["target"]) for i in items], [(cx, "bramble")])
+        self.chat.result(self.w.ws, self.tok, cx, "confirmed", "turn finished")
+        self.assertEqual((self.outbox(cx)["status"], self.outbox(cx)["attempts"]), ("sent", 1))
+        self.assertTrue(self.w.core.states(card["id"])["bot_told"])
+
+    def test_a_chat_message_waits_for_a_gateway_that_is_not_ready(self):
+        flags(self.w, "connector_effects")
+        m = self.send("rift", "hello", "key-00000020")
+        self.chat.claim(self.w.ws, self.tok)
+        self.chat.result(self.w.ws, self.tok, m, "not_ready", reason="the Bots' gateway is starting")
+        row = self.w.store.db.execute("SELECT status, attempts FROM chat_messages WHERE id = ?", (m,)).fetchone()
+        self.assertEqual(tuple(row), ("queued", 0))
+        mine = self.chat.view(self.w.patrick(), "rift")["mine"][0]
+        self.assertEqual(mine["waits"], "waiting for the Bots' gateway: the Bots' gateway is starting")
+        self.assertEqual([i["id"] for i in self.chat.claim(self.w.ws, self.tok)["items"]], [m])
+        with self.assertRaises(CoreError) as e:  # only a leased message can be put back
+            self.chat.result(self.w.ws, self.tok, "msg_nope", "not_ready")
+        self.assertEqual(e.exception.reason, "no_item")
+
+    def test_a_real_failure_of_the_answer_still_dies(self):
+        flags(self.w, "connector_effects")
+        self.answered()
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, cx, "failed", reason="could not start the hermes command")
+        self.assertEqual(self.outbox(cx)["status"], "dead")
+        self.assertEqual(self.receipts(cx), ["failed"])
+        self.assertEqual(self.chat.claim(self.w.ws, self.tok)["items"], [])
+        with self.assertRaises(CoreError) as e:
+            self.chat.result(self.w.ws, self.tok, cx, "not_ready")
+        self.assertEqual(e.exception.reason, "not_leased")
+
+    def test_migration_11_queues_again_only_answers_that_died_of_a_gateway_not_ready(self):
+        flags(self.w, "connector_effects")
+        died = {}
+        for n, reason in enumerate(("could not check the Bots' gateway", "the Bots' gateway is stopped",
+                                    "could not start the hermes command")):
+            card = self.answered(key=f"key-0000010{n}", title=f"Pick {n}")
+            cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+            self.chat.result(self.w.ws, self.tok, cx, "failed", reason=reason)
+            died[reason] = (card["id"], cx)
+        m = self.send("rift", "hello", "key-00000021")
+        self.chat.claim(self.w.ws, self.tok)
+        self.chat.result(self.w.ws, self.tok, m, "failed", reason="could not check the Bots' gateway")
+        # The store as the release before this one left it: schema 10, then this release opens it.
+        self.at_schema(10)
+        self.assertEqual(migrate(self.w.store.db), len(MIGRATIONS))
+        not_ready = [died["could not check the Bots' gateway"][1], died["the Bots' gateway is stopped"][1]]
+        for cx in not_ready:
+            row = self.outbox(cx)
+            self.assertEqual((row["status"], row["attempts"], row["lease_until"]), ("queued", 0, None))
+            self.assertTrue(row["reason"].startswith("waiting for the Bots' gateway: "))
+            self.assertEqual(self.receipts(cx), ["failed"], "the failed receipt stays as history")
+        self.assertEqual(self.outbox(died["could not start the hermes command"][1])["status"], "dead")
+        self.assertEqual(self.w.store.db.execute("SELECT status FROM chat_messages WHERE id = ?", (m,)).fetchone()[0],
+                         "dead", "a chat message Patrick saw as not sent is left for him")
+        # Through the fixed path: each goes to the Bot that asked, one at a time, and is "Bot told".
+        for _ in not_ready:
+            items = self.chat.claim(self.w.ws, self.tok)["items"]
+            self.assertEqual(len(items), 1)
+            self.assertIn(items[0]["id"], not_ready)
+            self.assertEqual(items[0]["target"], "bramble")
+            self.chat.result(self.w.ws, self.tok, items[0]["id"], "confirmed", "turn finished")
+        for reason in ("could not check the Bots' gateway", "the Bots' gateway is stopped"):
+            self.assertTrue(self.w.core.states(died[reason][0])["bot_told"])
+        self.assertFalse(self.w.core.states(died["could not start the hermes command"][0])["bot_told"])
+        self.assertTrue(self.w.store.verify_events()[0])
+
+    def test_migration_12_queues_again_the_answer_an_old_connector_failed_after_migration_11(self):
+        # 1 Nov, 10:53 PM: migration 11 put the answer back, then the release before's connector,
+        # still running, leased it and failed it the old way: dead again, a second failed receipt.
+        flags(self.w, "connector_effects")
+        card = self.answered(key="key-00000110", title="Pick A")
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, cx, "failed", reason="could not check the Bots' gateway")
+        real = self.answered(key="key-00000111", title="Pick B")
+        rx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, rx, "failed", reason="could not start the hermes command")
+        self.at_schema(10)
+        with mock.patch.object(store_mod, "MIGRATIONS", MIGRATIONS[:11]):
+            self.assertEqual(migrate(self.w.store.db), 11)
+        self.assertEqual(self.outbox(cx)["status"], "queued")
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([i["id"] for i in items], [cx])
+        self.chat.result(self.w.ws, self.tok, cx, "failed", reason="could not check the Bots' gateway")
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"]), ("dead", 1))
+        self.assertEqual(self.receipts(cx), ["failed", "failed"])
+        # This release opens the store at schema 11.
+        self.assertEqual(migrate(self.w.store.db), len(MIGRATIONS))
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"], row["lease_until"]), ("queued", 0, None))
+        self.assertEqual(row["reason"], "waiting for the Bots' gateway: could not check the Bots' gateway")
+        self.assertEqual(self.receipts(cx), ["failed", "failed"], "both failed receipts stay as history")
+        self.assertEqual(self.outbox(rx)["status"], "dead", "a real failure stays dead")
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([(i["id"], i["target"]) for i in items], [(cx, "bramble")])
+        self.chat.result(self.w.ws, self.tok, cx, "confirmed", "turn finished")
+        self.assertTrue(self.w.core.states(card["id"])["bot_told"])
+        self.assertFalse(self.w.core.states(real["id"])["bot_told"])
+        self.assertTrue(self.w.store.verify_events()[0])
+
+    def test_migration_12_leaves_a_delivered_answer_alone(self):
+        flags(self.w, "connector_effects")
+        self.answered(key="key-00000112", title="Pick C")
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, cx, "confirmed", "turn finished")
+        before = dict(self.outbox(cx))
+        self.at_schema(11)
+        self.assertEqual(migrate(self.w.store.db), len(MIGRATIONS))
+        self.assertEqual(dict(self.outbox(cx)), before)
 
     def test_a_restore_quarantines_waiting_chat(self):
         self.send("wisp", "hello", "key-00000017")
@@ -497,6 +655,8 @@ FAKE_HELPER = textwrap.dedent('''
     req = json.loads(sys.stdin.read())
     with Path(os.environ["TW_FAKE_LOG"]).open("a", encoding="utf-8") as f:
         f.write(json.dumps({"helper": req}) + "\\n")
+    if req["op"] == "ready" and os.environ.get("TW_FAKE_READY") == "crash":
+        sys.exit(1)  # Hermes's Python mid-install: no answer at all
     if req["op"] == "ready":
         print(json.dumps({"ready": os.environ.get("TW_FAKE_READY", "1") == "1", "reason": "the Bots' gateway is absent"}))
     else:
@@ -560,12 +720,56 @@ class ConnectorProcess(unittest.TestCase):
         self.c.once()
         self.assertEqual(len([x for x in self.lines() if "argv" in x]), 1)
 
-    def test_a_gateway_that_is_not_running_means_not_sent(self):
+    def test_a_gateway_that_is_not_running_keeps_the_message_queued_until_it_is(self):
         os.environ["TW_FAKE_READY"] = "0"
         m = self.send("wisp", "hi", "key-00000032")
         self.c.once()
-        self.assertEqual(tuple(self.status(m)), ("dead", "the Bots' gateway is absent"))
+        self.assertEqual(tuple(self.status(m)), ("queued", "waiting for the Bots' gateway: the Bots' gateway is absent"))
         self.assertEqual([x for x in self.lines() if "argv" in x], [])
+        self.assertEqual(self.c.waiting, {"wisp": "the Bots' gateway is absent"})
+        # While it is not ready, a round only checks it again: nothing is leased and put back.
+        leases = lambda: self.s.w.store.db.execute(  # noqa: E731
+            "SELECT count(*) FROM events WHERE kind = 'connector.leased'").fetchone()[0]
+        before = leases()
+        self.assertEqual(self.c.once(), 0)
+        self.assertEqual(leases(), before)
+        self.assertEqual(self.status(m)["status"], "queued")
+        os.environ["TW_FAKE_READY"] = "1"
+        self.assertEqual(self.c.once(), 1)
+        self.assertEqual(self.status(m)["status"], "sent")
+        self.assertEqual(self.c.waiting, {})
+        self.assertEqual(len([x for x in self.lines() if "argv" in x]), 1)
+
+    def test_an_answer_reaches_the_bot_after_a_reload_that_answered_nothing(self):
+        # 1 Nov 2026, 10:17 PM: the ready check got no answer while an install reloaded the gateway.
+        card = self.s.w.card()
+        self.s.w.core.answer(self.s.w.patrick(), **self.s.w.answer_args(card))
+        os.environ["TW_FAKE_READY"] = "crash"
+        self.c.once()
+        cx = self.s.w.store.db.execute("SELECT id, status, attempts, reason FROM connector_outbox").fetchone()
+        # It waits, and says it is the connector's helper that failed (2 Nov), not the gateway.
+        self.assertEqual((cx["status"], cx["attempts"], cx["reason"]),
+                         ("queued", 0, "the connector's Hermes helper failed (exit 1): nothing"))
+        self.assertTrue(any(x.startswith("FAIL the connector's Hermes helper failed (exit 1)") for x in self.said))
+        self.assertFalse(self.s.w.core.states(card["id"])["bot_told"])
+        os.environ["TW_FAKE_READY"] = "1"
+        self.c.once()
+        self.assertTrue(self.s.w.core.states(card["id"])["bot_told"])
+        run = [x for x in self.lines() if "argv" in x]
+        self.assertEqual(len(run), 1)
+        self.assertEqual(run[0]["argv"][:2], ["-p", "bramble"])
+        self.assertIn("Patrick answered the card", run[0]["text"])
+
+    def test_a_room_whose_gateway_cannot_be_reached_waits_too(self):
+        os.environ["TW_FAKE_ROOM"] = json.dumps({"sent": False, "ready": False,
+                                                 "reason": "could not reach the Bots' gateway"})
+        m = self.send("room", "hello all", "key-00000037")
+        self.c.once()
+        self.assertEqual(self.status(m)["status"], "queued")
+        self.assertIn("", self.c.waiting)
+        os.environ["TW_FAKE_ROOM"] = json.dumps({"sent": False, "reason": "the room's driver is not running"})
+        self.c.once()
+        self.assertEqual(tuple(self.status(m)), ("dead", "the room's driver is not running"))
 
     def test_a_room_message_goes_with_the_core_key_as_its_event_id(self):
         m = self.send("room", "hello all", "key-00000033")
@@ -691,7 +895,8 @@ class RoomHelper(unittest.TestCase):
 
     def test_not_sent_when_the_gateway_or_driver_is_not_there_or_it_refuses(self):
         req = {"op": "send", "room_id": ROOM, "event_id": "tw-chat.msg_2", "text": "hi"}
-        self.assertIs(self.run_helper(req, TW_STUB_STATE="absent")["sent"], False)
+        out = self.run_helper(req, TW_STUB_STATE="absent")
+        self.assertEqual((out["sent"], out["ready"]), (False, False))
         self.assertEqual(self.rpcs(), [])
         self.assertIs(self.run_helper(req, TW_STUB_MODE="no_driver")["sent"], False)
         self.assertNotIn("groups.send", [r["method"] for r in self.rpcs()])

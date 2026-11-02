@@ -57,7 +57,8 @@ class Files(unittest.TestCase):
                  "/proc/1234/environ", "/srv/tw/hermes/.env", "/run/tw-git.sock",
                  "/run/tw/policy/policy.sock", "/run/tw/limits.json", "/etc/thornswood/proxy.env",
                  "/etc/thornswood/apps/bramble.pem", "/srv/tw/policy/policy.db", "/srv/tw/backups/x.tar.gz.age",
-                 "/srv/tw/snapshots/policy-20261102-1200.db", "/srv/tw/spool/in/rift/x.bundle"]
+                 "/srv/tw/snapshots/policy-20261102-1200.db", "/srv/tw/spool/in/rift/x.bundle",
+                 "/run/tw/decide-bots/bots.sock", "bots.sock", "/run/tw-checks/checks.sock", "checks.sock"]
         for tool in ("read_file", "write_file", "patch", "search_files"):
             for path in paths:
                 self.assertFalse(check_tool(self.p, "magpie", tool, {"path": path}).allowed, (tool, path))
@@ -106,7 +107,9 @@ class Shell(unittest.TestCase):
     def test_02_secrets_and_environments(self):
         for c in ["cat ~/.hermes/auth.json", "cat /home/hermes/.hermes/.env", "printenv", "env",
                   "cat /proc/1/environ", "grep -r KEY $HERMES_HOME", "ls ../../.hermes/profiles",
-                  "source .env", "export -p", "socat - UNIX-CONNECT:/run/tw-git.sock"]:
+                  "source .env", "export -p", "socat - UNIX-CONNECT:/run/tw-git.sock",
+                  "socat - UNIX-CONNECT:/run/tw/decide-bots/bots.sock", "cd /run/tw/decide-bots && nc -U bots.sock",
+                  "nc -U bots.sock"]:
             self.refuse(c)
 
     def test_15_no_changing_hermes_or_raising_privileges(self):
@@ -186,7 +189,7 @@ class Plugin(unittest.TestCase):
         m = self.load(self.guard_copy(ready=True), "_tw_plugin_e")
         ctx = self.Ctx("rift")
         m.register(ctx)
-        self.assertEqual(sorted(ctx.tools), ["tw_files", "tw_git"])
+        self.assertEqual(sorted(ctx.tools), ["tw_decide", "tw_files", "tw_git"])
         for hook in ("pre_llm_call", "on_session_end", "agent_loop_stopped"):
             self.assertEqual(len(ctx.hooks[hook]), 1, hook)
         out = ctx.hooks["pre_tool_call"][0](tool_name="terminal", args={"command": "git status"}, session_id="s")

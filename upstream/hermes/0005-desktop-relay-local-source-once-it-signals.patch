@@ -1,0 +1,343 @@
+From ceb65f093dee56f911cae2f238d62a0042f111b6 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 04:37:02 +0000
+Subject: [PATCH 1/2] fix(desktop): relay a remote-primary Desktop's local
+ source once it signals outbox mail
+
+9cbc6a5ac0 left the local registry source out of the relay's peer set
+whenever one remote connection is the primary, so an unused local runtime
+is never dialed. A Desktop whose primary is remote can still run a Hermes
+on this device, though: its agents queue message_agent envelopes in the
+local bot_relay outbox, the local backend's change watcher signals
+bot_relay.outbox.pending over the socket the window holds, and the drain
+skipped the route anyway. Every such envelope sat in outbox/ until its
+waiter timed out, and the gateway's own expiry never ran because nothing
+claimed it.
+
+A signal from the local source is proof that its runtime runs and is in
+use, so from then on relayEligibleRoutes keeps it like any other peer:
+its outbox is drained, its replies are posted, and the roster loop tells
+it the other machines' agents. Until it signals, nothing changes: the
+local source of a remote-primary Desktop is still never polled or pinned.
+A signal from the primary, or an untagged one, does not count.
+---
+ .../src/plugins/hermes-bots/relay.test.ts     | 67 +++++++++++++++++++
+ apps/desktop/src/plugins/hermes-bots/relay.ts | 23 ++++++-
+ 2 files changed, 88 insertions(+), 2 deletions(-)
+
+diff --git a/apps/desktop/src/plugins/hermes-bots/relay.test.ts b/apps/desktop/src/plugins/hermes-bots/relay.test.ts
+index 8be00078d6..1b64d70bbc 100644
+--- a/apps/desktop/src/plugins/hermes-bots/relay.test.ts
++++ b/apps/desktop/src/plugins/hermes-bots/relay.test.ts
+@@ -397,6 +397,73 @@ describe('relay-route socket retention (#93594)', () => {
+     stopBotRelay()
+   })
+ 
++  it('relays the local source of a remote-primary Desktop once its runtime signals outbox mail', async () => {
++    // This device runs a Hermes of its own beside two remote connections (the primary among them). Its
++    // agent queues a message for the primary; the local backend's watcher signals over the socket this
++    // window holds. Leaving it out of the peer set left the envelope in outbox/ until it expired.
++    hostMock.profileRoutes = vi.fn(async () => [
++      route('remote-primary', { primary: true }),
++      route('remote-peer'),
++      route('local', { mode: 'local' })
++    ])
++    const pins = trackRetention()
++    const envelope = { id: 'env-1', message: 'hello', from_profile: 'default', target_connection: 'remote-primary', target_profile: 'default' }
++    const calls = respondWith(call => {
++      if (call.method === 'bot_relay.outbox.drain') {
++        return { envelopes: call.connectionId === 'local' ? [envelope] : [] }
++      }
++
++      if (call.method === 'bot_relay.deliver') {
++        return { status: 'settled', delivery_id: 'env-1', admission_id: 'adm-1', reply: 'hi back' }
++      }
++
++      return {}
++    })
++    const { startBotRelay, stopBotRelay } = await loadRelay()
++
++    startBotRelay()
++    await vi.advanceTimersByTimeAsync(0)
++    expect(calls.filter(call => call.connectionId === 'local')).toHaveLength(0)
++
++    await pushAndSettle(1, { connectionId: 'local' })
++    await vi.advanceTimersByTimeAsync(0)
++
++    expect(calls.filter(call => call.method === 'bot_relay.outbox.drain').map(call => call.connectionId)).toEqual(['local'])
++    const deliver = calls.find(call => call.method === 'bot_relay.deliver')
++    expect(deliver?.connectionId).toBe('remote-primary')
++    expect(deliver?.params.from_connection).toBe('local')
++    const reply = calls.find(call => call.method === 'bot_relay.reply')
++    expect(reply).toMatchObject({ connectionId: 'local', params: { id: 'env-1', reply: 'hi back' } })
++    expect(pins.map(pin => pin.route.connectionId)).toContain('local')
++
++    // From then on it is a peer like any other: the roster loop tells it the other machines' agents.
++    calls.length = 0
++    await vi.advanceTimersByTimeAsync(60_000)
++    expect(calls.some(call => call.connectionId === 'local' && call.method === 'bot_relay.roster.sync')).toBe(true)
++
++    stopBotRelay()
++  })
++
++  it('a signal from the primary or an untagged one does not make the local source a peer', async () => {
++    hostMock.profileRoutes = vi.fn(async () => [
++      route('remote-primary', { primary: true }),
++      route('remote-peer'),
++      route('local', { mode: 'local' })
++    ])
++    const calls = respondWith(() => ({ envelopes: [] }))
++    const { startBotRelay, stopBotRelay } = await loadRelay()
++
++    startBotRelay()
++    await vi.advanceTimersByTimeAsync(0)
++    await pushAndSettle(1, { connectionId: 'remote-primary' })
++    await pushAndSettle(1)
++    await vi.advanceTimersByTimeAsync(RELAY_DRAIN_INTERVAL_MS)
++
++    expect(calls.filter(call => call.connectionId === 'local')).toHaveLength(0)
++
++    stopBotRelay()
++  })
++
+   it('preserves local-primary, multi-remote, and fail-open peer sets', async () => {
+     for (const routes of [
+       [route('local', { mode: 'local', primary: true }), route('remote-peer')],
+diff --git a/apps/desktop/src/plugins/hermes-bots/relay.ts b/apps/desktop/src/plugins/hermes-bots/relay.ts
+index 40bd20a167..fee5aab9dd 100644
+--- a/apps/desktop/src/plugins/hermes-bots/relay.ts
++++ b/apps/desktop/src/plugins/hermes-bots/relay.ts
+@@ -109,9 +109,19 @@ function relayBotModeOn(): boolean {
+   return ID in decisions ? Boolean(decisions[ID]) : true
+ }
+ 
++// Connections whose own backend has signaled `bot_relay.outbox.pending` over a socket this window
++// holds, since the relay started. The signal is proof that connection's runtime runs and is in use:
++// relayEligibleRoutes keeps a remote-primary Desktop's local source out of the peer set only while
++// it has never spoken, so an unused local runtime is still never dialed.
++const signaledConnections = new Set<string>()
++
+ function noteRelayOutboxWork(event?: { connectionId?: string }) {
+   const id = String(event?.connectionId || '').trim()
+ 
++  if (id) {
++    signaledConnections.add(id)
++  }
++
+   routesWithOutboxWork.add(id || RELAY_OUTBOX_ANY)
+ }
+ 
+@@ -146,8 +156,11 @@ interface RelayAgentRow {
+ }
+ 
+ /** Remove the mandatory local registry source only when Electron identifies
+- * one unambiguous REMOTE primary. Older or inconsistent route inventories
+- * fail open to the prior peer set. Distinct remote peers always remain. */
++ * one unambiguous REMOTE primary and that local source has never signaled
++ * outbox mail. Once its backend signals, a Hermes runs on this device and its
++ * agents send cross-connection: leaving it out then strands every envelope it
++ * queues. Older or inconsistent route inventories fail open to the prior peer
++ * set. Distinct remote peers always remain. */
+ function relayEligibleRoutes(routes: ProfileRoute[]): ProfileRoute[] {
+   const routesByConnection = new Map<string, ProfileRoute[]>()
+ 
+@@ -196,6 +209,10 @@ function relayEligibleRoutes(routes: ProfileRoute[]): ProfileRoute[] {
+ 
+   const localId = localGroups[0][0]
+ 
++  if (signaledConnections.has(localId)) {
++    return routes
++  }
++
+   return routes.filter(route => route.connectionId !== localId)
+ }
+ 
+@@ -835,6 +852,8 @@ export function stopBotRelay() {
+   // it would fire one stale drain after restart.
+   relay.drainRerun = false
+   routesWithOutboxWork.clear()
++  // signaledConnections stays: a runtime that has spoken still runs, and the gateway never
++  // re-broadcasts a signal it already sent.
+   // Queued deliveries check `disposed` before they run; forget the lane tails
+   // so a restart starts every target fresh instead of behind stale chains.
+   relayLanes.clear()
+-- 
+2.43.0
+
+
+From c57325f64dc2d8a5e8d82cb6976197039fc2e4af Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 04:37:02 +0000
+Subject: [PATCH 2/2] fix(desktop): a stored session the store already owns is
+ read on that owner, not walked across the active source's profiles
+
+probeStoredSession took an owner only from its caller. resolveSessionProfile
+and the other profile-only callers name none, so a session whose exact owner
+the store already knew (tile route, unique hint, tagged row or proven runtime
+event) still went down the cross-profile ladder. That ladder walks $profiles,
+the ACTIVE source's names. On a remote-primary Desktop, This device's Bot Chat
+was looked up under every remote Bot's name, and the session read pin sent each
+lookup to the owner's connection ('local'), which refused each name it does not
+have ("Profile \"rift\" no longer exists") and held one lookup 120 s on a
+remote-dashboard dial.
+
+The probe now starts from the same sync owner ladder session RPCs use, and an
+exact route found there is fail-closed like an explicit one. A session with no
+known exact owner walks the profiles as before.
+---
+ .../resolve-stored-session.test.ts            | 82 ++++++++++++++++++-
+ .../hooks/use-session-actions/utils.ts        | 30 ++++++-
+ 2 files changed, 109 insertions(+), 3 deletions(-)
+
+diff --git a/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts b/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
+index 250ab7a566..8fd75438ff 100644
+--- a/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
++++ b/apps/desktop/src/app/session/hooks/use-session-actions/resolve-stored-session.test.ts
+@@ -4,11 +4,18 @@ import type * as HermesModule from '@/hermes'
+ import { getSession } from '@/hermes'
+ import { $activeGatewayProfile, $profiles } from '@/store/profile'
+ import { $projectTree } from '@/store/projects'
+-import { $cronSessions, $messagingSessions, $sessions, $unlistedSessionOwnerRows } from '@/store/session'
++import {
++  $cronSessions,
++  $messagingSessions,
++  $sessions,
++  $unlistedSessionOwnerRows,
++  _resetSessionOwnerHintsForTests,
++  setSessionOwnerHint
++} from '@/store/session'
+ import { $removedSessionIds, tombstoneSessions, untombstoneSessions } from '@/store/session-removal'
+ import type { SessionInfo } from '@/types/hermes'
+ 
+-import { cachedSessionRow, resolveStoredSession } from './utils'
++import { cachedSessionRow, probeStoredSession, resolveStoredSession } from './utils'
+ 
+ vi.mock('@/hermes', async importActual => ({
+   ...(await importActual<typeof HermesModule>()),
+@@ -342,3 +349,74 @@ describe('cachedSessionRow owner preference', () => {
+     expect(cachedSessionRow('missing')).toBeUndefined()
+   })
+ })
++
++describe('resolveStoredSession with an exact owner the store already knows', () => {
++  // This device's Bot Chat on a Desktop whose primary is a remote Bots host:
++  // $profiles is the REMOTE's list, the chat lives on 'local'/'default'.
++  beforeEach(() => {
++    $cronSessions.set([])
++    $messagingSessions.set([])
++    $sessions.set([])
++    $projectTree.set([])
++    $removedSessionIds.set(new Set())
++    $unlistedSessionOwnerRows.set([])
++    $profiles.set(profiles('bramble', 'magpie', 'rift', 'sprocket', 'wisp'))
++    $activeGatewayProfile.set('bramble')
++    _resetSessionOwnerHintsForTests()
++    setSessionOwnerHint('local-4e2938', { connectionId: 'local', profile: 'default' })
++    mockGetSession.mockReset()
++  })
++
++  afterEach(() => {
++    _resetSessionOwnerHintsForTests()
++    $profiles.set([])
++    $activeGatewayProfile.set('default')
++    $sessions.set([])
++  })
++
++  it('reads the chat once on its owner and never walks the remote profile names', async () => {
++    mockGetSession.mockImplementation(async (id, scope) => {
++      if (scope && typeof scope === 'object' && scope.connectionId === 'local' && scope.profile === 'default') {
++        return session({ id })
++      }
++
++      throw new Error(`Profile "${String(scope)}" no longer exists.`)
++    })
++
++    const resolved = await resolveStoredSession('local-4e2938')
++
++    expect(resolved?.connection_id).toBe('local')
++    expect(resolved?.profile).toBe('default')
++    expect(mockGetSession).toHaveBeenCalledTimes(1)
++    expect(mockGetSession).toHaveBeenCalledWith('local-4e2938', { connectionId: 'local', profile: 'default' })
++  })
++
++  it('fails closed on that owner instead of trying each remote profile', async () => {
++    mockGetSession.mockRejectedValue(new Error('404: Session not found'))
++
++    const result = await probeStoredSession('local-4e2938')
++
++    expect(result.status).toBe('gone')
++    expect(mockGetSession).toHaveBeenCalledTimes(1)
++
++    for (const name of ['bramble', 'magpie', 'rift', 'sprocket', 'wisp']) {
++      expect(mockGetSession).not.toHaveBeenCalledWith('local-4e2938', name)
++    }
++  })
++
++  it('still walks the profiles when the store knows no exact owner', async () => {
++    _resetSessionOwnerHintsForTests()
++    mockGetSession.mockImplementation(async (id, profile) => {
++      if (profile === 'rift') {
++        return session({ id })
++      }
++
++      throw new Error('404: Session not found')
++    })
++
++    const resolved = await resolveStoredSession('s9')
++
++    expect(resolved?.profile).toBe('rift')
++    expect(mockGetSession).toHaveBeenNthCalledWith(1, 's9', 'bramble')
++  })
++})
+diff --git a/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts b/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
+index 511010ee00..ac26e0bc02 100644
+--- a/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
++++ b/apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
+@@ -2160,6 +2160,25 @@ export function cachedSessionRow(storedSessionId: string): SessionInfo | undefin
+   )
+ }
+ 
++/** The exact (connection-bearing) owner the store already knows for a stored
++ *  id, through the same sync ladder session RPCs use; undefined when it knows
++ *  only a bare profile or nothing. */
++function knownExactOwnerRoute(storedSessionId: string): SessionProfileRoute | undefined {
++  const owner = resolveSessionRpcOwner({
++    routingSessionId: storedSessionId,
++    tileOwnerRoute: sessionTileOwnerRoute,
++    sessionOwnerHint: getSessionOwnerHint,
++    sessionRowOwner: id => knownSessionOwner(ownerLookupSessionRows(), id),
++    eventOwner: runtimeSessionOwner
++  })
++
++  if (!owner || typeof owner !== 'object' || !String(owner.connectionId ?? '').trim()) {
++    return undefined
++  }
++
++  return owner
++}
++
+ export type StoredSessionProbe = { status: 'found'; session: SessionInfo } | { status: 'gone' | 'inconclusive' }
+ 
+ export async function resolveStoredSession(
+@@ -2178,8 +2197,17 @@ export async function resolveStoredSession(
+  *  ids that live on a profile not yet listed (#125678). */
+ export async function probeStoredSession(
+   storedSessionId: string,
+-  ownerRoute?: SessionProfileRoute
++  explicitOwnerRoute?: SessionProfileRoute
+ ): Promise<StoredSessionProbe> {
++  // A caller that names no owner still gets the exact one the store already
++  // knows (tile route, unique hint, tagged row, proven runtime event). The
++  // profile ladder below walks the AMBIENT source's profile names; a session
++  // whose known owner is another connection (This device's Bot Chat on a
++  // remote-primary Desktop) has nothing to find there, and every name in that
++  // walk reached the owner's connection through the read pin, which refused
++  // or dialed each one in turn ("Profile \"rift\" no longer exists", and a
++  // 120 s remote-dashboard wait for another).
++  const ownerRoute = explicitOwnerRoute ?? knownExactOwnerRoute(storedSessionId)
+   let allGone = true
+ 
+   const recordFailure = (error: unknown) => {
+-- 
+2.43.0
+

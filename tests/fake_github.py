@@ -48,6 +48,9 @@ class FakeGitHub:
         self.refuse: dict[str, tuple[int, str]] = {}
         self.merge_queues: set[tuple[str, str]] = set()   # (repo, branch) with a merge queue
         self.queued: list[tuple[str, int, str]] = []       # (repo, number, head) put in a queue
+        # (repo, branch) -> the status checks the branch's rules require
+        self.branch_rules: dict[tuple[str, str], list[str]] = {}
+        self.auto_merged: list[tuple[str, int, str, str | None]] = []  # (repo, number, head, method) put on auto-merge
         self._next_id = 1000
 
     # Repositories on disk
@@ -129,8 +132,22 @@ class FakeGitHub:
         return resp
 
     def _graphql(self, body) -> Response:
-        """The two GraphQL shapes tw-git sends: the queue state and the enqueue."""
+        """The GraphQL shapes tw-git sends: the queue state, the enqueue and auto-merge."""
         q, v = body["query"], body["variables"]
+        if "enablePullRequestAutoMerge" in q:
+            repo, number = v["pr"].split("#")
+            pr = self.prs[(repo, int(number))]
+            if pr["head"]["sha"] != v["head"]:
+                return Response(200, {"errors": [{"message": "Expected head oid does not match"}]}, {})
+            if pr["merged"]:
+                return Response(200, {"errors": [{"message": "Pull request is already merged"}]}, {})
+            pr["auto_merge"] = {"enabled_at": "2099-01-01T00:00:00Z", "merge_method": v.get("method")}
+            self.auto_merged.append((repo, int(number), v["head"], v.get("method")))
+            if "auto_merge" in self.lose_answer:
+                self.lose_answer.discard("auto_merge")
+                raise Lost("connection reset after auto-merge was turned on")
+            return Response(200, {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
+                "autoMergeRequest": {"enabledAt": "2099-01-01T00:00:00Z"}}}}}, {})
         if "enqueuePullRequest" in q:
             repo, number = v["pr"].split("#")
             pr = self.prs[(repo, int(number))]
@@ -151,7 +168,9 @@ class FakeGitHub:
         return Response(200, {"data": {"repository": {
             "mergeQueue": {"id": f"MQ:{repo}"} if (repo, v["branch"]) in self.merge_queues else None,
             "pullRequest": None if pr is None else {"id": f"{repo}#{v['number']}", "headRefOid": pr["head"]["sha"],
-                                                    "isInMergeQueue": bool(pr.get("in_queue")), "merged": pr["merged"]}}}}, {})
+                                                    "isInMergeQueue": bool(pr.get("in_queue")), "merged": pr["merged"],
+                                                    "autoMergeRequest": ({"enabledAt": pr["auto_merge"]["enabled_at"]}
+                                                                         if pr.get("auto_merge") else None)}}}}, {})
 
     def land_queue(self, repo: str, number: int) -> None:
         """The queue's own checks passed: GitHub merges the PR."""
@@ -166,6 +185,12 @@ class FakeGitHub:
         page = int(query.get("page", "1"))
         if not rest and method == "GET":
             return Response(200, {"full_name": repo, "default_branch": "main"}, {})
+        if rest[:2] == ["rules", "branches"]:
+            branch = urllib.parse.unquote("/".join(rest[2:]))
+            names = self.branch_rules.get((repo, branch))
+            rules = [] if not names or page > 1 else [{"type": "required_status_checks", "parameters": {
+                "required_status_checks": [{"context": n, "integration_id": 15368} for n in names]}}]
+            return Response(200, rules, {})
         if rest[:3] == ["git", "ref", "heads"]:
             branch = urllib.parse.unquote("/".join(rest[3:]))
             sha = self.ref(repo, branch)

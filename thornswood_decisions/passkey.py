@@ -11,6 +11,15 @@ VM. This file only keeps the records around it:
   where the passkey keeps one, and gives a fresh session on the passkey's device;
 - five failures in 15 minutes stop passkey sign-in for 15 minutes.
 
+The phone's fingerprint (Patrick, 2 Nov) is one more passkey of the same kind,
+held by the phone's own authenticator instead of a password manager. A sign-in
+that asks for any passkey lets Android hand the request to the chosen passkey
+provider (Bitwarden), which opens its own app and then asks for the finger; a
+request that names this phone's key (`allowCredentials`, hint `client-device`)
+is answered by the phone itself, with its fingerprint sheet over the app. The
+core checks the signed challenge, the counter and user verification exactly as
+for any passkey, so it is no weaker. The passkey stays the way in on a Desktop.
+
 The relying party is the app's exact origin (`https://<name>.ts.net`) and its
 host name. Without the library installed every route here answers 503
 `passkey_unavailable`; nothing falls back to a weaker sign-in.
@@ -66,6 +75,11 @@ def _lib():
         ResidentKeyRequirement, UserVerificationRequirement
 
 
+def _phone_structs():
+    from webauthn.helpers.structs import AuthenticatorAttachment, AuthenticatorTransport, PublicKeyCredentialHint
+    return AuthenticatorAttachment, AuthenticatorTransport, PublicKeyCredentialHint
+
+
 class Passkeys:
     def __init__(self, store: Store, origin: str | None):
         self.s = store
@@ -111,22 +125,40 @@ class Passkeys:
 
     # ── adding a passkey ──────────────────────────────────────────────────
 
-    def register_options(self, p: Principal) -> dict:
+    def register_options(self, p: Principal, *, on_phone: bool = False) -> dict:
+        """on_phone: the key is made by the phone's own authenticator (its screen lock and
+        fingerprint), not a password manager, so a sign-in that names it never leaves the app."""
         self._ready()
         self.auth._need_patrick(p, fresh=True)
         if not p.device_id:
             raise CoreError(403, "no_device", "a passkey is added from a paired device")
+        if on_phone and p.device_kind != "phone":
+            raise CoreError(403, "not_a_phone", "the fingerprint sign-in is for a paired phone; a Desktop keeps its passkey")
         webauthn, options_to_json, Selection, Descriptor, Resident, UV = _lib()
         have = self.s.db.execute("SELECT credential_id FROM passkeys WHERE principal_id = ? AND revoked_at IS NULL",
                                  (p.id,)).fetchall()
         if len(have) >= MAX_PASSKEYS:
             raise CoreError(409, "too_many_passkeys", f"{MAX_PASSKEYS} passkeys at most; remove one first")
         challenge = self._challenge(p.workspace_id, "register", p.session_hash)
+        if on_phone:
+            Attachment, _, Hint = _phone_structs()
+            # The phone's platform authenticator. Sign-in names this key, so it need not be
+            # discoverable; the platform decides, and user verification stays required.
+            selection = Selection(authenticator_attachment=Attachment.PLATFORM, resident_key=Resident.PREFERRED,
+                                  user_verification=UV.REQUIRED)
+            hints = [Hint.CLIENT_DEVICE]
+            # No exclude list: the passkey this phone already has lives in a passkey app on the same
+            # phone, and Android checks an exclude list against every provider, so naming it would
+            # refuse the phone's own key as "already there". The app offers this once per phone.
+            exclude = []
+        else:
+            selection = Selection(resident_key=Resident.REQUIRED, user_verification=UV.REQUIRED)
+            hints = None
+            exclude = [Descriptor(id=unb64url(r["credential_id"])) for r in have]
         opts = webauthn.generate_registration_options(
             rp_id=self.rp_id, rp_name=RP_NAME, user_name="Patrick", user_display_name="Patrick",
             user_id=p.id.encode("utf-8"), challenge=challenge, timeout=int(CHALLENGE_LIFETIME.total_seconds() * 1000),
-            authenticator_selection=Selection(resident_key=Resident.REQUIRED, user_verification=UV.REQUIRED),
-            exclude_credentials=[Descriptor(id=unb64url(r["credential_id"])) for r in have])
+            authenticator_selection=selection, hints=hints, exclude_credentials=exclude)
         return json.loads(options_to_json(opts))
 
     def register(self, p: Principal, credential: dict, label: str) -> dict:
@@ -153,20 +185,38 @@ class Passkeys:
                        (pk, p.workspace_id, p.id, p.device_id, b64url(v.credential_id), v.credential_public_key,
                         v.sign_count, (label or "passkey")[:80], self.s.now()))
             self.s.event(db, p.workspace_id, "passkey.added", pk, "patrick", {"device": p.device_id})
-        return {"passkey_id": pk}
+        # The credential id goes back to the phone that made it, so its sign-in can name it.
+        return {"passkey_id": pk, "credential_id": b64url(v.credential_id)}
 
     # ── signing in ────────────────────────────────────────────────────────
 
-    def sign_in_options(self, workspace_id: str) -> dict:
+    def sign_in_options(self, workspace_id: str, phone_key: str | None = None) -> dict:
+        """phone_key: the credential id of a paired phone's own key (its fingerprint). The
+        request then names only that key, so the phone answers it itself and no passkey
+        provider app is opened. Without it, any of Patrick's passkeys may answer."""
         self._ready()
-        webauthn, options_to_json, _, _, _, UV = _lib()
+        webauthn, options_to_json, _, Descriptor, _, UV = _lib()
         if self.auth._locked(workspace_id, "passkey"):
             raise CoreError(429, "too_many_tries", "too many failed passkey sign-ins; wait 15 minutes")
+        allow = None
+        if phone_key is not None:
+            cred_id = b64url(unb64url(phone_key))
+            row = self.s.db.execute(
+                "SELECT 1 FROM passkeys k JOIN devices d ON d.id = k.device_id WHERE k.credential_id = ? "
+                "AND k.workspace_id = ? AND k.revoked_at IS NULL AND d.revoked_at IS NULL AND d.kind = 'phone'",
+                (cred_id, workspace_id)).fetchone()
+            if not row:
+                raise CoreError(404, "no_phone_key", "this phone's fingerprint sign-in was removed; use the passkey")
+            _, Transport, _ = _phone_structs()
+            allow = [Descriptor(id=unb64url(cred_id), transports=[Transport.INTERNAL])]
         challenge = self._challenge(workspace_id, "sign_in", None)
         opts = webauthn.generate_authentication_options(
             rp_id=self.rp_id, challenge=challenge, timeout=int(CHALLENGE_LIFETIME.total_seconds() * 1000),
-            user_verification=UV.REQUIRED)
-        return json.loads(options_to_json(opts))
+            user_verification=UV.REQUIRED, allow_credentials=allow)
+        out = json.loads(options_to_json(opts))
+        if allow:
+            out["hints"] = ["client-device"]  # WebAuthn level 3; py_webauthn 2.7 has no hints for a sign-in
+        return out
 
     def sign_in(self, workspace_id: str, credential: dict) -> tuple[str, IssuedSession]:
         self._ready()

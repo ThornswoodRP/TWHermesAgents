@@ -98,16 +98,29 @@ merge:
     ThornswoodRP/Thornswood: main
     ThornswoodRP/Thornswood-Ops: main
     ThornswoodRP/skymp: thornswood/engine-changes
-  # A PR touching any of these runs on the live box once merged, so Bramble
-  # merges it only after Patrick's yes on a card for that PR at its exact head.
-  patrick_paths:
-    - ".github/workflows/**"
-    - "scripts/vps/gate/**"
-    - "scripts/release/nexus-verbs.json"
-  # The scripts these verb lists name are Patrick paths too.
-  verb_lists:
-    - scripts/vps/gate/verbs.json
-    - scripts/release/nexus-verbs.json
+  # Where GitHub's own auto-merge does the merging (Patrick, 2 Nov 2026,
+  # 12:33 PM: "He should just merge if he absolutely has to himself I
+  # shouldn't need to approve" and "He shouldn't have to be merging to begin
+  # with"), with the checks the base branch's rules must make GitHub wait
+  # for. In these repos tw_git merge turns auto-merge on at the exact head and
+  # GitHub merges once those checks pass (Thornswood's main through its merge
+  # queue). It does so only for a Bot's own pull request, and only when
+  # GitHub's rules on the branch, read just before, require every check
+  # listed here. Thornswood's "Build check result" passes only when
+  # "Launcher builds" did (build-pr.yml), and main's ruleset requires it. A
+  # person's or a thread's pull request is its owner's to put on auto-merge.
+  # Ops is private on GitHub Free, which has no auto-merge and no rules, so
+  # its list is empty and Bramble merges an Ops pull request itself once its
+  # check passed.
+  auto_merge:
+    ThornswoodRP/Thornswood: ["Build check result"]
+    ThornswoodRP/Thornswood-Ops: []
+    ThornswoodRP/skymp: ["build-pr"]
+  # The robots' pull requests have no person or thread behind them, so
+  # Bramble reviews them and turns auto-merge on as for a Bot's: Dependabot's
+  # version bumps and the pin robot's engine pin (engine-pin.yml, where
+  # Bramble already merged them under the merge rule).
+  robot_authors: ["dependabot[bot]", "thornswood-pin-robot[bot]"]
 
 # What Bramble's release tooling may start. Nothing else, on main only.
 runs:
@@ -115,11 +128,15 @@ runs:
   # "temporarily allow main releases without asking me"; again 1 Nov 01:19Z,
   # main releases unlimited for now; and 1 Nov 8:06 PM, no yes for each step
   # of agreed work). Bramble starts a main run on the exact commit of main
-  # like a dev one. Publishing a collection revision still needs his record,
-  # and so does every merge that changes what runs on the box. Patrick sets
-  # this false by a PR here to need his word for each main release again.
+  # like a dev one. Publishing a collection revision still needs his record.
+  # Patrick sets this false by a PR here to need his word for each main
+  # release again.
   main_without_patrick: true
   ref: main
+  # The verb lists a run's gate line is checked against, read from main.
+  verb_lists:
+    - scripts/vps/gate/verbs.json
+    - scripts/release/nexus-verbs.json
   repo: ThornswoodRP/Thornswood
   workflows:
     # box-run.yml lives in the private Ops repository since the VPS runners
@@ -133,6 +150,20 @@ runs:
       verbs: scripts/release/nexus-verbs.json
     release.yml: {}
     release-tag.yml: {}
+    # The site's Cloudflare Tunnel (Thornswood #5334): one Ops run asks the
+    # box for its seal key, seals the API token to it on a hosted runner and
+    # hands it back to the box, so no key comes in from whoever starts it.
+    # It takes no gate line, so each input it takes is named here with the
+    # pattern its value must match, and the gate holds the line it builds to
+    # verbs.json again. Ops's run note says when switch goes (after the
+    # tw_decide card); back is the undo.
+    tunnel.yml:
+      repo: ThornswoodRP/Thornswood-Ops
+      required: [mode]
+      inputs:
+        mode: "install|switch|back"
+        wait: "[0-9]{0,3}"
+        recipient: "[A-Za-z0-9+/=<>]{0,4096}"
   # Never started by a Bot, whatever the request says.
   refused_verbs: [Set-NexusKey]
   # A verb that only runs with Patrick's decision record for that exact commit.
@@ -337,9 +368,26 @@ secrets:
 
 notifications:
   # Push only for a real decision, and only once per card revision.
-  push_kinds: [decision, main-approval, box-change]
+  push_kinds: [decision, main-approval]
   lock_screen_text: "Thornswood needs you"
   link: "/cards/{card_id}?rev={revision}"
+
+# Bramble wakes when GitHub finishes a pull request's checks (Patrick's answer
+# A on q-hermes-bramble-wake, 1 Nov). Cause: nothing reached Bramble when a
+# check finished, so every merge and hand-back waited for someone to nudge it.
+# Bramble's App sends its check_suite and pull_request events to Hermes's own
+# webhook receiver on the gateway's loopback port; Tailscale Funnel publishes
+# that one path, and only it, on funnel_port. GitHub signs each event with the
+# secret in secret_file (root's alone, made by deploy/install.sh); systemd
+# hands it to the gateway, and the install gives it to the App's webhook
+# setting with the App's own key, so nobody copies it.
+wake:
+  app: bramble
+  port: 8644
+  route: github-checks
+  funnel_port: 8443
+  secret_file: /etc/thornswood/github-webhook.env
+  repos: [app, ops, fork]
 
 decisions:
   answered_by: EvilPatrick06
@@ -414,6 +462,12 @@ brokers:
     files:
       path: /run/tw/files/files.sock
       group: tw-files-clients
+      clients: [hermes, root]
+    # The Bots' route to the decision core (#49), served by tw-decide-bots as
+    # the core's own user.
+    decide:
+      path: /run/tw/decide-bots/bots.sock
+      group: tw-decide-bots
       clients: [hermes, root]
   state:
     policy_db: /srv/tw/policy/policy.db
@@ -501,12 +555,23 @@ admission_proxy:
   # PR here, after the proxy's attack tests passed on the VM (06 section 6.3).
   ready: false
 
-# The fleet admission queue (08 section 7; 02 section 8.5). Pilot numbers;
-# the "after" numbers apply only after seven measured days, by a PR here.
+# The fleet admission queue (08 section 7; 02 section 8.5). Past the pilot
+# since 1 Nov (Patrick picked 6 turns and 2 checks): the pilot's one turn
+# and no checks queued every Bot behind one other and refused every
+# run_check, while what really limits the fleet is measured at each
+# admission (admit and drain below: free memory, swap, memory pressure,
+# load, disk). So the counts are ceilings with a cause, not guesses:
+# - model_turns: one turn per Bot, the most that can be useful, since each
+#   Bot's chat runs one turn at a time. The 8:46 AM 429 on 1 Nov came with
+#   no Bot running (the shared sign-in's own allowance was spent), so a
+#   lower count would not have stopped it.
+# - sandbox_jobs: as many checks as fit in tw-sandbox.slice's MemoryMax at
+#   each check's own MemoryMax (brokers.files.check_limits), 4G / 2G.
+# Tests hold both to those sources, so either moves with its cause.
 admission:
-  stage: pilot
-  model_turns: {pilot: 1, after: 2}
-  sandbox_jobs: {pilot: 0, after: 1}
+  stage: after
+  model_turns: {pilot: 1, after: 6}
+  sandbox_jobs: {pilot: 0, after: 2}
   mutating_ops: 1
   room_round_turns: 6
   queue_max_waiting: 100

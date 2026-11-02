@@ -1,18 +1,28 @@
 /* Thornswood's own colours, from the site (site/public/home.css): the night
    palette and its gold. Dark only, like the site (Patrick, 1 Nov). Measured
    contrast: gold on night 8.1 to 1, text on night 15.5 to 1, quiet text on
-   stone 6.6 to 1; "high risk" and warnings use a lighter ember, 5.2 to 1. */
+   stone 6.6 to 1; "high risk" and warnings use a lighter ember, 5.2 to 1.
+
+   The look is Patrick's approved mock-up v2 (1 Nov): every screen opens with a
+   bar, lists are full-width rows with an avatar on the left and the state on
+   the right, each agent keeps its own colour everywhere, and the tabs carry
+   the mock-up's line icons. One's teal is the mock-up's: 7.4 to 1 on night. */
 @font-face { font-family: "Cinzel"; font-weight: 600; font-display: swap;
-  src: url("/m/cinzel-title.woff2") format("woff2"); }
+  src: url("/m/cinzel-latin.woff2") format("woff2"); }
 :root {
   --bg: #0B0E0A; --card: #14180F; --raised: #1D2318; --line: #2B3323; --line2: #3D4733;
   --fg: #E4E7DA; --muted: #96A084; --faint: #7A8568;
-  --accent: #C9A24B; --accent-hot: #E4BE66; --accent-fg: #0B0E0A; --warn: #D9693F;
+  --accent: #C9A24B; --accent-hot: #E4BE66; --accent-fg: #0B0E0A; --warn: #F0A27E; --warn-line: #6B3A26;
+  --one: #6FA8A0; --one-soft: #18302D; --one-text: #9FD3CB;
+  --display: "Cinzel", Georgia, serif;
+  --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  --top-h: 61px;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--body); }
+* { scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
 /* No text may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name has no
    space to wrap at, so it pushed the page wider than the phone, and Chrome then laid the fixed tab bar
    out across that wider page, with the last tab off-screen at normal zoom. A long word breaks wherever it
@@ -20,65 +30,118 @@ html, body { margin: 0; background: var(--bg); color: var(--fg);
 body { overflow-wrap: anywhere; }
 img { max-width: 100%; height: auto; }
 body { min-height: 100vh; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
-.top { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px;
-  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); }
-.top h1 { display: flex; align-items: center; gap: 10px; margin: 0;
-  font: 600 18px/1 "Cinzel", Georgia, serif; letter-spacing: .14em; text-transform: uppercase; }
-.top h1 img { border-radius: 50%; }
-main { padding: 12px 16px; max-width: 720px; margin: 0 auto; }
-.tabs { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--card);
+button { font: inherit; color: inherit; cursor: pointer; }
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent-hot); outline-offset: 2px; }
+
+/* The app's own bar: the Thornswood mark, the name in the display face, Settings. */
+.top { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left));
+  padding-top: calc(10px + env(safe-area-inset-top));
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 3; background: var(--bg); }
+.top h1 { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--accent-hot);
+  font: 600 18px/1 var(--display); letter-spacing: .14em; text-transform: uppercase; }
+.top h1 img { border-radius: 50%; border: 1px solid var(--accent); }
+main { padding: 0 16px 12px; max-width: 720px; margin: 0 auto; }
+
+/* Icon buttons and avatars, as in the mock-up. */
+.ib { width: 40px; height: 40px; flex: 0 0 40px; border-radius: 10px; border: 0; background: transparent; color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.ib:hover { background: var(--raised); color: var(--fg); }
+.av { width: 36px; height: 36px; flex: 0 0 36px; border-radius: 18px; display: flex; align-items: center; justify-content: center;
+  font: 600 15px/1 var(--display); border: 1px solid; }
+.a-me { color: #C9A24B; background: #2A2615; border-color: #C9A24B; }
+.a-one { color: #6FA8A0; background: #18302D; border-color: #6FA8A0; }
+.a-bramble { color: #8DB36B; background: #1E2A16; border-color: #8DB36B; }
+.a-rift { color: #8F9BD6; background: #1E2236; border-color: #8F9BD6; }
+.a-sprocket { color: #D08C5A; background: #33231A; border-color: #D08C5A; }
+.a-echo { color: #6FA3D8; background: #172634; border-color: #6FA3D8; }
+.a-magpie { color: #B9A3C9; background: #2A2233; border-color: #B9A3C9; }
+.a-wisp { color: #9FC7B8; background: #1A2C27; border-color: #9FC7B8; }
+.a-room { color: var(--muted); background: var(--raised); border-color: var(--line2); }
+
+/* A screen's bar: back, avatar, the title and a line under it, and what goes on the right. */
+.bar { display: flex; align-items: center; gap: 10px; margin: 0 -16px 4px; padding: 10px 12px;
+  border-bottom: 1px solid var(--line); background: var(--bg); }
+.bar .t { flex: 1; min-width: 0; }
+.bar .t strong, .bar .t h2 { display: block; margin: 0; font-size: 16px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar .t h2 { font: 600 16px/1.3 var(--display); letter-spacing: .08em; color: var(--fg); }
+.bar .t span { display: block; font-size: 12.5px; color: var(--muted); }
+.bar .rec { margin: 0; }
+
+/* The tabs: the mock-up's icons over their names, gold for the one open. */
+.tabs { position: fixed; bottom: 0; left: 0; right: 0; z-index: 3; display: flex; background: var(--card);
   border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
-.tabs a { flex: 1; text-align: center; padding: 12px 2px; color: var(--muted); text-decoration: none; font-size: 13px; }
-.tabs a { position: relative; }
+.tabs a { flex: 1; position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 7px 2px 9px; color: var(--muted); text-decoration: none; font-size: 12.5px; line-height: 16px; }
+.tabs a svg { flex: 0 0 auto; }
 .tabs a[aria-current="page"] { color: var(--accent-hot); font-weight: 600; }
-.tabs a[aria-current="page"]::before { content: ""; position: absolute; top: -1px; left: 22%; right: 22%;
+.tabs a[aria-current="page"]::before { content: ""; position: absolute; top: -1px; left: 26%; right: 26%;
   height: 2px; background: var(--accent); }
 .badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent);
-  color: var(--accent-fg); font-size: 12px; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 10px 0; }
-.card h2 { font-size: 16px; margin: 0 0 4px; }
+  color: var(--accent-fg); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
+.tabs .badge { position: absolute; top: 3px; left: calc(50% + 6px); }
+
+/* Lists: full-width rows, avatar on the left, the lines in the middle, the state on the right. */
+.row { display: flex; width: calc(100% + 32px); align-items: center; gap: 10px; margin: 0 -16px; text-align: left;
+  background: transparent; color: var(--fg); border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+  padding: 10px 14px; min-height: 56px; font: inherit; }
+.row:hover { background: var(--card); }
+.row .t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.row .t > strong { font-weight: 600; }
+.row .t > span { display: block; font-size: 13px; }
+.row .w { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: 12px; color: var(--faint);
+  flex: 0 0 auto; max-width: 40%; text-align: right; }
+.row.done { opacity: .8; }
+/* The Board: a Bot's line, then its work, each row a link to GitHub. */
+.row.head { min-height: 48px; margin-top: 8px; border-bottom-color: var(--line2); }
+.row.head:hover { background: transparent; }
+.row.work { text-decoration: none; padding-left: 60px; }
+.row.work .warn { margin-top: 1px; }
+.row.pinned { background: var(--card); }
+.row .what { color: var(--accent); margin-top: 1px; }
+.row .quiet { color: var(--muted); }
+.rec { font-size: 12px; color: var(--one-text); border: 1px solid var(--one); border-radius: 10px; padding: 0 7px;
+  letter-spacing: .02em; white-space: nowrap; align-self: flex-start; }
+.row .t .rec { margin-top: 3px; }
+.rec.off { color: var(--warn); border-color: var(--warn-line); }
+.risk { color: var(--warn); border: 1px solid var(--warn-line); border-radius: 4px; padding: 0 5px; font-size: 12px;
+  align-self: flex-start; margin-top: 3px; }
+h2.section { margin: 14px 0 4px; font-size: 11px; font-weight: 400; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--faint); }
+.foot { margin-top: 12px; }
+
+/* Cards, buttons and fields, as the mock-up's boxes and buttons. */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 12px 0; }
+.card h2 { font: 600 16px/1.3 var(--body); margin: 0 0 6px; }
 .quiet { color: var(--muted); font-size: 14px; }
 .warn { color: var(--warn); }
-.row { display: block; width: 100%; text-align: left; background: var(--card); color: var(--fg);
-  border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 8px 0; font: inherit; }
-button { font: inherit; }
-.primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 8px; padding: 12px 16px;
-  width: 100%; margin: 8px 0; }
-.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line2); border-radius: 8px;
-  padding: 10px 14px; width: 100%; margin: 6px 0; }
+.primary { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); border-radius: 10px;
+  padding: 11px 16px; width: 100%; margin: 8px 0; font-weight: 600; }
+.secondary { background: var(--card); color: var(--fg); border: 1px solid var(--line2); border-radius: 10px;
+  padding: 9px 14px; width: 100%; margin: 6px 0; }
 .icon { background: transparent; border: 0; color: var(--fg); font-size: 20px; }
-input { font: inherit; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+input { font: inherit; width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--line2); border-radius: 10px;
   background: var(--card); color: var(--fg); }
-pre.artifact { white-space: pre-wrap; word-break: break-word; font: 14px/1.5 ui-monospace, monospace;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+textarea { font: inherit; width: 100%; padding: 10px; border: 1px solid var(--line2); border-radius: 10px;
+  background: var(--card); color: var(--fg); margin-top: 10px; resize: vertical; }
+pre.artifact { white-space: pre-wrap; word-break: break-word; font: 14px/1.5 var(--mono);
+  background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .option { border-top: 1px solid var(--line); padding: 8px 0; }
-.option .rec { font-size: 12px; color: var(--accent); margin-left: 6px; }
+.option .rec { color: var(--accent-hot); border-color: var(--accent); margin-left: 6px; }
 .msg { padding: 8px 0; border-bottom: 1px solid var(--line); }
 .msg .who { font-weight: 600; font-size: 14px; }
 .msg .text { white-space: pre-wrap; word-break: break-word; }
+.msg.mine { border-left: 3px solid var(--accent); padding-left: 8px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
-textarea { font: inherit; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px;
-  background: var(--card); color: var(--fg); margin-top: 10px; resize: vertical; }
-.msg.mine { border-left: 3px solid var(--accent); padding-left: 8px; }
-.receipt { font-weight: 600; }
-.install { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--card);
+.receipt { font-weight: 600; border-left: 3px solid var(--accent); background: var(--raised); padding: 6px 10px;
+  border-radius: 0 6px 6px 0; }
+.install { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: var(--raised);
   border-bottom: 1px solid var(--line); font-size: 14px; }
 .install[hidden] { display: none; }
 .install p { flex: 1; margin: 0; }
 .install .primary { margin: 0; }
-h2.section { font-size: 15px; margin: 18px 0 4px; color: var(--muted); }
-.row.done { opacity: 0.8; }
-.row .rec { font-size: 12px; color: var(--accent); margin-left: 8px; }
-.option .rec, .row .rec { border: 1px solid var(--accent); border-radius: 3px; padding: 0 4px;
-  letter-spacing: .04em; white-space: nowrap; }
-.receipt { border-left: 3px solid var(--accent); background: var(--raised); padding: 6px 10px; border-radius: 0 6px 6px 0; }
-h2.section { text-transform: uppercase; letter-spacing: .12em; font-size: 12px; color: var(--faint); }
-pre.artifact { background: var(--raised); }
-.install { background: var(--raised); }
-a:focus-visible, button:focus-visible { outline: 2px solid var(--accent-hot); outline-offset: 2px; }
-.row .rec.off { color: var(--warn); border-color: var(--warn); }
-.row .what { font-size: 13px; color: var(--accent); margin-top: 2px; }
 ol.steps { padding-left: 22px; margin: 10px 0; }
 ol.steps li { margin: 8px 0; }
 ol.steps pre.artifact, ol.steps input { margin-top: 6px; }
@@ -92,16 +155,9 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
    that stays above the tabs. Patrick's bubbles are gold on the right; others
    are on the left. Measured contrast: text on --mine 12.1 to 1, on --theirs 14.0
    to 1; a link on either 8.6 to 1 or more. */
-:root { --mine: #2A2615; --mine-line: #4A3F1E; --theirs: #161B12; --tabs-h: 45px; }
-.tabs a { line-height: 20px; }
+:root { --mine: #2A2615; --mine-line: #4A3F1E; --theirs: #161B12; --tabs-h: 56px; }
 .chat { display: flex; flex-direction: column; min-height: calc(100vh - 140px); }
-.chatbar { display: flex; align-items: center; gap: 8px; margin: -4px 0 8px; }
-.chatbar .back { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 10px; border: 0; background: transparent;
-  color: var(--fg); display: inline-flex; align-items: center; justify-content: center; }
-.chatbar .back:hover { background: var(--raised); }
-.chatbar .title { min-width: 0; flex: 1; }
-.chatbar .title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chatbar .title span { display: block; font-size: 12.5px; color: var(--muted); }
+.chat .bar { position: sticky; top: var(--top-h); z-index: 2; }
 .chat .msgs { flex: 1 0 auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 0 8px; }
 .chat .older { width: auto; align-self: center; margin: 0 0 6px; }
 .chat .day { align-self: center; font-size: 12px; color: var(--faint); border: 1px solid var(--line);
@@ -109,7 +165,8 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 .chat .msg { max-width: 86%; min-width: 0; display: flex; flex-direction: column; align-items: flex-start;
   padding: 0; border: 0; }
 .chat .msg.mine { align-self: flex-end; align-items: flex-end; border: 0; padding: 0; }
-.chat .msg .who { font-size: 12px; font-weight: 600; color: var(--accent); margin: 4px 0 3px 4px; }
+.chat .msg .who { font-size: 12px; font-weight: 600; margin: 4px 0 3px 4px; background: none; border: 0; }
+.chat .msg .who.a-room { color: var(--one-text); }
 .chat .bub { max-width: 100%; min-width: 0; border-radius: 16px; border-bottom-left-radius: 6px; padding: 8px 12px;
   background: var(--theirs); border: 1px solid var(--line); overflow-wrap: anywhere; }
 .chat .msg.mine .bub { background: var(--mine); border-color: var(--mine-line); border-radius: 16px; border-bottom-right-radius: 6px; }
@@ -124,15 +181,25 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 .md li > p { margin: 0; }
 .md blockquote { margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--line2); color: var(--muted); }
 .md hr { border: 0; border-top: 1px solid var(--line2); margin: 8px 0; }
-.md a { color: var(--accent-hot); text-decoration: underline; text-underline-offset: 2px; }
-.md code { font: 13px ui-monospace, "Cascadia Mono", Menlo, monospace; background: rgba(0,0,0,.35);
+.md a { color: var(--accent-hot); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+/* A file Hermes attached to his message (a long paste reads "Pasted text"): a chip that opens its text. */
+.att { margin: 2px 0 6px; border: 1px solid var(--mine-line); border-radius: 10px; background: rgba(0,0,0,.25);
+  font-size: 13px; color: var(--muted); }
+.att > summary, .att > span { display: block; padding: 6px 10px; cursor: pointer; list-style: none; }
+.att > summary::-webkit-details-marker { display: none; }
+.att > summary::before, .att > span::before { content: "\1F4C4\00A0"; }
+.att[open] > summary { border-bottom: 1px solid var(--mine-line); }
+.att pre { margin: 0; padding: 8px 10px; max-height: 50vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 12.5px/1.5 var(--mono); color: var(--fg); }
+.md code { font: 13px var(--mono); background: rgba(0,0,0,.35);
   border-radius: 4px; padding: 1px 4px; }
 .md-code { margin: 6px 0 2px; border: 1px solid var(--line); border-radius: 10px; background: #070906; overflow: hidden; }
 .md-code-bar { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px 3px 10px;
   font-size: 12px; color: var(--faint); border-bottom: 1px solid var(--line); }
 .md-code .copy { border: 1px solid var(--line2); background: transparent; color: var(--fg); border-radius: 6px;
   padding: 2px 10px; font-size: 12px; min-height: 28px; }
-.md-code pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; }
+/* A phone reads a command whole: long lines wrap, and Copy still copies it exactly as written. */
+.md-code pre { margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .md-code pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.5; }
 .md-table { overflow-x: auto; margin: 6px 0; }
 .md-table table { width: auto; min-width: 100%; }
@@ -142,11 +209,62 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 .chat .dock > .card { margin: 0 0 8px; }
 .chat .dock p { margin: 4px 0 0; }
 .chat .dock p:empty { display: none; }
-.newrow { display: block; margin: 0 auto 8px; border: 1px solid var(--accent); background: var(--mine);
-  color: var(--accent-hot); border-radius: 16px; padding: 4px 14px; font-size: 13px; font-weight: 600; }
+/* Over the box, never in the way of it: the newest message, when it is out of sight. */
+.chat .jump { position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); width: auto;
+  display: inline-flex; align-items: center; gap: 6px; margin: 0; border: 1px solid var(--accent); background: var(--mine);
+  color: var(--accent-hot); border-radius: 18px; padding: 6px 14px; font-size: 13px; font-weight: 600;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .35); white-space: nowrap; }
+.chat .jump[hidden] { display: none; }
 .composer { display: flex; gap: 8px; align-items: flex-end; }
 .composer textarea { flex: 1; min-width: 0; margin: 0; resize: none; min-height: 42px; max-height: 160px;
-  border-radius: 21px; border: 1px solid var(--line2); padding: 10px 14px; line-height: 1.35; }
+  border-radius: 21px; border: 1px solid var(--line2); background: var(--card); padding: 10px 14px; line-height: 1.35; }
 .composer .send { flex: 0 0 42px; width: 42px; height: 42px; border-radius: 21px; border: 0; background: var(--accent);
   color: var(--accent-fg); display: inline-flex; align-items: center; justify-content: center; }
 .composer .send:disabled { opacity: .6; }
+
+/* Reactions (redesign step 2): one per person under a bubble, and a message's
+   actions in a sheet over the tabs. */
+.chat .bub[tabindex] { cursor: pointer; }
+.chat .reacts { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.chat .react { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 28px;
+  padding: 0 8px; border-radius: 14px; border: 1px solid var(--line2); background: var(--card); font-size: 15px; }
+.chat .react.me { border-color: var(--accent); background: var(--mine); }
+.chat .react.pending { border-style: dashed; opacity: .75; }
+.sheet-back { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, .55); display: flex;
+  align-items: flex-end; justify-content: center; }
+.sheet { width: 100%; max-width: 520px; background: var(--card); border: 1px solid var(--line2); border-bottom: 0;
+  border-radius: 16px 16px 0 0; padding: 14px max(16px, env(safe-area-inset-left)) calc(14px + env(safe-area-inset-bottom)); }
+.sheet .emoji-row { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin-bottom: 6px; }
+.sheet .emoji-row button { height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--raised);
+  font-size: 21px; padding: 0; }
+.sheet .emoji-row button[aria-pressed="true"] { border-color: var(--accent); background: var(--mine); }
+.sheet p { margin: 6px 0; }
+
+/* Chat actions (redesign step 3): the chat bar's More, and a delete that says
+   what it removes before it runs. */
+.chatbar .more { flex-basis: 40px; }
+.danger { background: var(--warn); color: var(--accent-fg); border: 0; border-radius: 8px; padding: 12px 16px;
+  width: 100%; margin: 8px 0; font-weight: 600; }
+.danger-quiet { background: transparent; color: var(--warn); border: 1px solid var(--warn); border-radius: 8px;
+  padding: 10px 14px; width: 100%; margin: 6px 0; }
+.sheet .search input { min-width: 0; }
+.row p.receipt, .row p.warn { margin: 6px 0 0; }
+
+/* Replies (redesign step 4, style A): the words a reply quotes, above the box
+   while it is written, and in the sent bubble as a quote that goes back. */
+.replying { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 8px; padding: 6px 4px 6px 10px;
+  border-left: 3px solid var(--accent); background: var(--raised); border-radius: 0 8px 8px 0; }
+.replying .rq { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.replying .rq strong { display: block; font-size: 12.5px; color: var(--accent-hot); }
+.replying .back { flex: 0 0 36px; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent;
+  color: var(--fg); display: inline-flex; align-items: center; justify-content: center; }
+.chat .bub .quote { margin: 0 0 6px; padding: 4px 8px; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+  background: rgba(0, 0, 0, .22); font-size: 13.5px; }
+.chat .bub .quote .qwho { font-size: 12px; font-weight: 600; color: var(--accent-hot); }
+.qtext { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4;
+  -webkit-box-orient: vertical; overflow: hidden; color: var(--muted); }
+.chat .bub .quote.linked { cursor: pointer; }
+.chat .bub .quote.linked:hover { background: rgba(0, 0, 0, .32); }
+.chat .msg.flash .bub { animation: flash 1.6s ease-out; }
+@keyframes flash { from { box-shadow: 0 0 0 3px var(--accent-hot); } to { box-shadow: 0 0 0 3px transparent; } }
+@media (prefers-reduced-motion: reduce) { .chat .msg.flash .bub { animation: none; outline: 2px solid var(--accent-hot); } }

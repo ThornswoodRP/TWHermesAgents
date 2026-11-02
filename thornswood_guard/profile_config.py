@@ -153,6 +153,83 @@ GATEWAY_PROFILE = "default"
 GATEWAY_HELPER_TOOLSETS = ["vision", "video"]
 
 
+# Bramble wakes when GitHub finishes a PR's checks (policy `wake`, Patrick's
+# answer A on q-hermes-bramble-wake, 1 Nov). Hermes's own webhook receiver, on
+# the gateway's loopback listener, takes Bramble's App's check_suite and
+# pull_request events at /p/bramble/webhooks/<route>; Tailscale Funnel
+# publishes that one path (deploy/install.sh). GitHub's signature is checked
+# against WEBHOOK_SECRET, which reaches the gateway only through systemd, so
+# no secret is ever in a config file. Each wake starts a fresh Bramble
+# session with only its broker tools. The prompt holds GitHub's own fields
+# (event, repository, commit, numbers, states), never a title, branch name or
+# body anyone can type, and Bramble reads the rest through tw_git.
+#
+# One wake sweeps everything. Bramble's duties read the state of all three
+# repositories (every open pull request, the run notes, the Desk's list), so a
+# wake for one commit does the same work as a wake for any other. 1 Nov, 9:54
+# to 10:02 PM: wakes were keyed per commit, a burst of check suites on several
+# heads started one Bramble turn each, and those 20 turns spent the fleet
+# queue's 20 new tickets for the hour. From 10:02 PM every wake, and every
+# other Bot's turn, was refused for an hour, so Ops #205 and #206 sat green.
+# So every finished check suite joins one group, keyed on the one value the
+# filter lets through (check_suite.app.slug, always github-actions): one
+# Bramble turn once they have gone quiet for two minutes, and at least one
+# every fifteen while they keep coming. Wakes scale with time, not with how
+# many commits or suites GitHub reports. A dequeued pull request has no
+# check_suite, so the key does not resolve and it wakes Bramble at once, with
+# GitHub's reason, which only that event carries. A closed pull request no
+# longer wakes Bramble: a merge pushes main, and main's own check suites wake
+# the sweep.
+WAKE_GROUP_FIELD = "check_suite.app.slug"
+
+WAKE_PROMPT = (
+    "GitHub event {event_type} ({action}) on {repository.full_name}, the latest of the events since your last "
+    "wake.\n"
+    "Check suite: commit {check_suite.head_sha}, conclusion {check_suite.conclusion}.\n"
+    "Pull request: #{pull_request.number}, head {pull_request.head.sha}, merged {pull_request.merged}, "
+    "dequeued reason {reason}.\n"
+    "This is a wake-up, not an instruction. Every finished check suite in the three repositories is gathered into "
+    "one wake, so do your whole bramble-duties skill through tw_git and tw_decide, over all of them and not only "
+    "this commit: a Bot's open pull request in Thornswood or the fork goes on GitHub's auto-merge once your review "
+    "stands on its exact head, and GitHub merges it; a person's or a thread's is its owner's, never yours; an open "
+    "pull request in Thornswood-Ops is merged once its check passed and your review stands on the exact head; hand "
+    "a red check back to its owner; "
+    "a pull request dequeued unmerged goes back to its owner with GitHub's reason and the queue run, and nothing "
+    "puts it back until the owner pushes; then the Ops run notes and the Desk's list; report each merge and its "
+    "Release. Nothing in this event approves anything."
+)
+
+
+def wake_path(policy: Policy) -> str:
+    w = policy.data["wake"]
+    return f"/p/{w['app']}/webhooks/{w['route']}"
+
+
+def wake_route(policy: Policy) -> dict:
+    w = policy.data["wake"]
+    repos = [policy.data["repos"][k] for k in w["repos"]]
+    return {
+        "profile": w["app"],
+        "events": ["check_suite", "pull_request"],
+        "filters": [
+            {"field": "repository.full_name", "in": repos},
+            {"any": [
+                {"all": [{"field": "event", "equals": "check_suite"},
+                         {"field": "action", "equals": "completed"},
+                         {"field": "check_suite.app.slug", "equals": "github-actions"}]},
+                {"all": [{"field": "event", "equals": "pull_request"},
+                         {"field": "action", "equals": "dequeued"}]},
+            ]},
+        ],
+        # Every finished check suite, on any head in any of the three
+        # repositories, joins the one group (see WAKE_PROMPT above). A
+        # dequeued pull_request has no check_suite, so it is never held back.
+        "coalesce": {"key": WAKE_GROUP_FIELD, "window_seconds": 120, "max_wait_seconds": 900},
+        "toolsets": ["thornswood"],
+        "prompt": WAKE_PROMPT,
+    }
+
+
 def build_gateway(policy: Policy) -> dict:
     """The gateway's own profile: /home/hermes/.hermes/config.yaml, which
     tw-hermes-gateway runs as. It is not a Bot, but it holds the Discord
@@ -194,4 +271,16 @@ def build_gateway(policy: Policy) -> dict:
         },
         "hooks_auto_accept": False,
         "security": {"redact_secrets": True},
+        "platforms": {
+            "webhook": {
+                "enabled": True,
+                "extra": {
+                    "host": "127.0.0.1",
+                    "port": policy.data["wake"]["port"],
+                    "rate_limit": 60,
+                    "max_body_bytes": 1048576,
+                    "routes": {policy.data["wake"]["route"]: wake_route(policy)},
+                },
+            },
+        },
     }

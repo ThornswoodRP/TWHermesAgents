@@ -1,0 +1,19 @@
+# tw-checks: how tw-files starts a Bot's check without sudo (08 section 3).
+# Each connection starts one tw-checks@ instance as root, which checks the
+# caller is tw-files (SO_PEERCRED), checks the Bot, tree and command again,
+# and runs the check in its own systemd-run unit. tw-files keeps
+# NoNewPrivileges=yes: nothing it runs ever gains privileges.
+[Unit]
+Description=Thornswood check helper socket
+
+[Socket]
+ListenStream=/run/tw-checks/checks.sock
+SocketUser=root
+SocketGroup=tw-checks
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

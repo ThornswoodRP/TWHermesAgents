@@ -6,7 +6,7 @@
 #   /opt/thornswood-hermes/releases/<commit>/deploy/install.sh <commit> [--move-gateway]
 #
 # Idempotent: run it again after any merge to Thornswood-Hermes. It makes the
-# broker users and folders, puts the units, slices, sudoers line and SFTP jail
+# broker users and folders, puts the units, slices, check helper socket and SFTP jail
 # in place, points /opt/thornswood-hermes/current at this commit, and starts
 # the brokers. It never reads a secret's value: keys are moved by name and
 # checked by owner and mode. Anything it cannot do safely is a STOP line that
@@ -54,8 +54,11 @@ ok() { echo "PASS $*"; }
 # close the PAM session at logout, and it drops all its supplementary groups
 # on purpose, so it never has them and never opens a socket (31 Oct, the
 # first install with this check stopped on it).
-#   stale_procs <proc root> <uid> <gid> [<gid>...]
+# With --pids it prints their process ids, one a line, instead of the count.
+#   stale_procs [--pids] <proc root> <uid> <gid> [<gid>...]
 stale_procs() {
+  local pids=0
+  [[ "$1" == --pids ]] && { pids=1; shift; }
   local proc="$1" uid="$2"; shift 2
   local host_ns d n=0 groups g
   host_ns="$(readlink "$proc/1/ns/user" 2>/dev/null || true)"
@@ -64,9 +67,9 @@ stale_procs() {
     [[ "$(readlink "$d/ns/user" 2>/dev/null || true)" == "$host_ns" ]] || continue
     [[ "$(awk -F'\t' '/^Name:/{print $2}' "$d/status" 2>/dev/null)" == "(sd-pam)" ]] && continue
     groups=" $(awk '/^Groups:/{$1=""; print}' "$d/status" 2>/dev/null) "
-    for g in "$@"; do [[ "$groups" == *" $g "* ]] || { n=$((n + 1)); break; }; done
+    for g in "$@"; do [[ "$groups" == *" $g "* ]] || { n=$((n + 1)); (( pids )) && echo "${d##*/}"; break; }; done
   done
-  echo "$n"
+  (( pids )) || echo "$n"
 }
 
 pol() { python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d
@@ -75,7 +78,7 @@ print(json.dumps(v) if isinstance(v,(dict,list,bool)) else v)' "$here/thornswood
 
 bots="bramble rift sprocket echo magpie wisp"
 workers="rift sprocket echo magpie wisp"
-for tool in git openssl age podman systemd-run python3 visudo sshd ssh-keygen; do
+for tool in git openssl age podman systemd-run python3 sshd ssh-keygen; do
   command -v "$tool" >/dev/null || stop "$tool is not installed on the VM."
 done
 id hermes >/dev/null 2>&1 || stop "the hermes user does not exist."
@@ -84,7 +87,7 @@ hermes_home="$(getent passwd hermes | cut -d: -f6)"
 
 # 1. Groups and users. The groups say who may connect; every op still checks
 # the caller's user.
-for g in tw-policy-clients tw-git-clients tw-files-clients tw-spool $(for b in $bots; do echo "tw-work-$b"; done); do
+for g in tw-policy-clients tw-git-clients tw-files-clients tw-decide-bots tw-checks tw-spool $(for b in $bots; do echo "tw-work-$b"; done); do
   getent group "$g" >/dev/null || groupadd --system "$g"
 done
 mkuser() {
@@ -97,9 +100,9 @@ for u in tw-policy tw-files tw-git tw-proxy tw-backup tw-offsite tw-boxdrop tw-c
 # tw-offsite reads the VM's archives (tw-backup:tw-backup 0440) to copy them to Drive.
 usermod -a -G tw-backup tw-offsite
 for b in $workers; do mkuser "tw-$b"; usermod -a -G "tw-work-$b" "tw-$b"; done
-usermod -a -G tw-policy-clients,tw-git-clients,tw-files-clients hermes
+usermod -a -G tw-policy-clients,tw-git-clients,tw-files-clients,tw-decide-bots hermes
 usermod -a -G tw-policy-clients,tw-spool tw-git
-usermod -a -G "tw-policy-clients,tw-spool,$(for b in $bots; do printf 'tw-work-%s,' "$b"; done | sed 's/,$//')" tw-files
+usermod -a -G "tw-policy-clients,tw-checks,tw-spool,$(for b in $bots; do printf 'tw-work-%s,' "$b"; done | sed 's/,$//')" tw-files
 usermod -a -G tw-policy-clients tw-proxy
 for u in tw-policy tw-files tw-git tw-proxy; do
   id -nG hermes | tr ' ' '\n' | grep -qx "$u" && stop "hermes is in the $u group; it must not be."
@@ -146,6 +149,19 @@ for app in bramble workers; do
   chown tw-git:tw-git "$key"; chmod 0400 "$key"
 done
 ok "the two Apps' keys are tw-git's alone (0400)"
+
+# 3b. Bramble's wake (policy wake): the secret GitHub signs Bramble's App's
+# events with. Made here once, root's alone; systemd hands it to the gateway
+# (tw-hermes-gateway-webhook.conf) and step 8b gives it to the App's webhook
+# setting with the App's own key. It is never printed or copied by hand.
+wake_env="$(pol wake.secret_file)"
+if [[ ! -s "$wake_env" ]]; then
+  (umask 077; printf 'WEBHOOK_SECRET=%s\n' "$(openssl rand -hex 32)" > "$wake_env")
+fi
+chown root:root "$wake_env"; chmod 0600 "$wake_env"
+grep -qxE 'WEBHOOK_SECRET=[0-9a-f]{64}' "$wake_env" && [[ "$(grep -c . "$wake_env")" == 1 ]] \
+  || stop "$wake_env must hold one WEBHOOK_SECRET=<64 hex characters> line; move it aside and run this again."
+ok "the wake's webhook secret is in $wake_env, root's alone (0600)"
 
 # 4. The admission proxy's keys: moved by name out of the hermes user's reach.
 env_file="$(pol admission_proxy.env_file)"
@@ -258,10 +274,12 @@ for f in "$here"/deploy/bin/*; do install -m 0755 -o root -g root "$f" "$opt/bin
 ln -sfn "$here" "$opt/current.new" && mv -T "$opt/current.new" "$opt/current"
 ok "$opt/current is $commit"
 
-# 7. sudoers: tw-files may start the check helper, nothing else.
-install -m 0440 -o root -g root "$here/deploy/sudoers/tw-files" /etc/sudoers.d/tw-files.new
-visudo -cf /etc/sudoers.d/tw-files.new >/dev/null || { rm -f /etc/sudoers.d/tw-files.new; stop "visudo rejects the tw-files line."; }
-mv /etc/sudoers.d/tw-files.new /etc/sudoers.d/tw-files
+# 7. Checks start through tw-checks.socket (step 8), never sudo: the sudoers
+# line an earlier install made for tw-files goes, and the tw-checks group
+# holds tw-files alone.
+rm -f /etc/sudoers.d/tw-files /etc/sudoers.d/tw-files.new
+members="$(getent group tw-checks | cut -d: -f4)"
+[[ "$members" == tw-files ]] || stop "the tw-checks group holds '$members', not tw-files alone."
 
 # 7b. Disk caps: a hard group quota on each Bot's work group.
 srv_mnt="$(findmnt -n -o TARGET --target /srv/tw)"
@@ -328,7 +346,7 @@ unit_dir=/etc/systemd/system
 for f in "$here"/deploy/systemd/*; do
   name="$(basename "$f")"
   case "$name" in
-    tw-hermes-gateway.service.in|user-hermes.slice.conf) ;;  # placed below, filled in for this VM
+    tw-hermes-gateway.service.in|user-hermes.slice.conf|tw-hermes-gateway-webhook.conf) ;;  # placed below
     *.service|*.timer|*.slice|*.path|*.socket|*.target)
       sed "s/user@1002\.service/user@$hermes_uid.service/g" "$f" > "$unit_dir/$name" ;;
     *) stop "deploy/systemd/$name is not a kind of unit file the install places; add it to step 8." ;;
@@ -337,13 +355,92 @@ done
 # end of the unit copy
 install -d "/etc/systemd/system/user-$hermes_uid.slice.d"
 install -m 0644 "$here/deploy/systemd/user-hermes.slice.conf" "/etc/systemd/system/user-$hermes_uid.slice.d/50-thornswood.conf"
+install -d /etc/systemd/system/tw-hermes-gateway.service.d
+install -m 0644 "$here/deploy/systemd/tw-hermes-gateway-webhook.conf" /etc/systemd/system/tw-hermes-gateway.service.d/50-github-webhook.conf
 systemctl daemon-reload
 systemctl enable --quiet tw-limits-check.service
 systemctl restart tw-limits-check.service
-systemctl enable --quiet --now tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
+systemctl enable --quiet --now tw-checks.socket tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
   tw-offsite.timer tw-offsite.path tw-follow-main.timer
+# Each broker allows 3 starts in 15 minutes (StartLimitBurst), so a crash loop
+# stops. An install's restart is not a crash: four installs inside 15 minutes
+# (2 Nov, 10:06 PM) hit the limit, the brokers stayed down and the put-back's
+# own restart was refused too. reset-failed clears the count for this restart
+# only; a broker that then fails by itself still meets the limit.
+systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
 systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
 ok "units in place and started"
+
+# 8b. Bramble's wake: Tailscale Funnel publishes the one webhook path, and
+# only it, on wake.funnel_port, to the gateway's loopback receiver; then the
+# App's webhook is pointed there with the secret from 3b. Two things come
+# first and are Patrick's: the App's webhook turned on (Active, the URL and
+# the events, on its settings page) and the tailnet's funnel and https node
+# attributes for this machine. Until both are there this step says which is
+# missing, changes nothing and waits on nothing, and the install goes on.
+hook_py() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from thornswood_brokers.app_hook import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"; }
+wake_path="/p/$(pol wake.app)/webhooks/$(pol wake.route)"
+wake_target="http://127.0.0.1:$(pol wake.port)$wake_path"
+wake_port="$(pol wake.funnel_port)"
+funnel_ok() {
+  local f rc
+  f="$(mktemp)"
+  tailscale funnel status --json > "$f" 2>/dev/null || echo '{}' > "$f"
+  hook_py funnel "$f"; rc=$?
+  rm -f "$f"
+  return $rc
+}
+# Without the node attributes, `tailscale funnel` does not refuse: it prints
+# an approval link and waits for an admin for as long as it takes, which held
+# the #65 install on 2 Nov. So it is asked only once this machine holds them,
+# with nothing on stdin and a bound, and the rest of the install goes on.
+funnel_allowed() {
+  local f rc
+  f="$(mktemp)"
+  tailscale status --json > "$f" 2>/dev/null || echo '{}' > "$f"
+  hook_py allowed "$f"; rc=$?
+  rm -f "$f"
+  return $rc
+}
+# The App's webhook is turned on by hand (GitHub's API cannot), so it is
+# asked first: until it is on, nothing is made public and nothing is set.
+hook_rc=0
+hook_out="$(hook_py hook)" || hook_rc=$?
+if [[ $hook_rc -eq 3 ]]; then
+  echo "SKIP Bramble's wake: the App's webhook is off, so Funnel was not asked for and nothing was set:"
+  printf '  %s\n' "$hook_out"
+  echo "  That is Patrick's step on the App's settings page; then run this again."
+  wake_skipped=1
+elif [[ $hook_rc -ne 0 ]]; then
+  stop "the App's webhook could not be read: $hook_out"
+elif ! command -v tailscale >/dev/null; then
+  echo "SKIP Bramble's wake: tailscale is not installed on the VM."
+  wake_skipped=1
+elif ! funnel_ok >/dev/null; then
+  if ! allowed_out="$(funnel_allowed)"; then
+    echo "SKIP Bramble's wake: Funnel was not asked for, so nothing was made public and nothing waits:"
+    printf '  %s\n' "$allowed_out"
+    echo "  Those are the tailnet's settings (Patrick's step); then run this again."
+    wake_skipped=1
+  else
+    funnel_rc=0
+    funnel_out="$(timeout 60 tailscale funnel --bg --https="$wake_port" --set-path="$wake_path" "$wake_target" </dev/null 2>&1)" || funnel_rc=$?
+    if [[ $funnel_rc -eq 124 ]]; then
+      echo "SKIP Bramble's wake: tailscale funnel gave no answer in 60 s and was ended. It said:"
+    elif [[ $funnel_rc -ne 0 ]]; then
+      echo "SKIP Bramble's wake: Tailscale refused Funnel on port $wake_port, so nothing was made public. It said:"
+    fi
+    if [[ $funnel_rc -ne 0 ]]; then
+      printf '  %s\n' "$funnel_out"
+      wake_skipped=1
+    fi
+  fi
+fi
+if [[ -z "${wake_skipped:-}" ]]; then
+  funnel_ok || stop "Funnel is not as the wake needs it (above); tailscale funnel status shows what is public."
+  dns="$(tailscale status --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
+  hook_py set "https://$dns:$wake_port$wake_path" || stop "the App's webhook was not set; Funnel stays on, and the gateway refuses every event without the signature."
+fi
 
 # 9. The gateway, when asked.
 if [[ "$move_gateway" == "--move-gateway" ]]; then
@@ -377,18 +474,33 @@ fi
 # not by hand afterwards. Ending them also stops tw-hermes-gateway, which runs
 # as hermes and needs user@UID.service (31 Oct: a hand-run terminate-user left
 # it failed).
-client_gids=($(for g in tw-policy-clients tw-git-clients tw-files-clients; do getent group "$g" | cut -d: -f3; done))
+client_gids=($(for g in tw-policy-clients tw-git-clients tw-files-clients tw-decide-bots; do getent group "$g" | cut -d: -f3; done))
 stale="$(stale_procs /proc "$hermes_uid" "${client_gids[@]}")"
 if (( stale > 0 )); then
   gateway_was="$(systemctl is-enabled tw-hermes-gateway.service 2>/dev/null || true)"
   echo "$stale hermes processes started before hermes joined the broker groups; ending the hermes user's sessions (Hermes Desktop reconnects)."
   loginctl terminate-user hermes || true
+  # Only the processes without the groups are waited for. Desktop reconnects
+  # within seconds, and its new sessions already have the groups, so waiting
+  # for no hermes process at all never ends (2 Nov, 8:24 PM: seven dashboard
+  # sessions were back before the wait was over). One still running after
+  # SIGTERM gets SIGKILL, as systemd would give it, and is named first.
   for _ in $(seq 1 30); do
-    pgrep -u "$hermes_uid" >/dev/null || break
+    (( $(stale_procs /proc "$hermes_uid" "${client_gids[@]}") == 0 )) && break
     sleep 1
   done
+  left="$(stale_procs --pids /proc "$hermes_uid" "${client_gids[@]}")"
+  if [[ -n "$left" ]]; then
+    echo "still running 30 seconds after SIGTERM, without the groups (pid name): $(for p in $left; do printf '%s %s; ' "$p" "$(cat "/proc/$p/comm" 2>/dev/null || echo gone)"; done)"
+    kill -KILL $left 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      (( $(stale_procs /proc "$hermes_uid" "${client_gids[@]}") == 0 )) && break
+      sleep 1
+    done
+  fi
   systemctl start "user@$hermes_uid.service"
   if [[ "$gateway_was" == enabled ]]; then
+    systemctl reset-failed tw-hermes-gateway.service
     systemctl restart tw-hermes-gateway.service
     sleep 5
     systemctl is-active --quiet tw-hermes-gateway.service || stop "tw-hermes-gateway did not come back after the sessions ended: journalctl -u tw-hermes-gateway -n 50"

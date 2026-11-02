@@ -5,7 +5,8 @@ const { chromium } = require('playwright')
 // answering a card (it leaves Decisions for Answered), a high-risk card's own
 // check screen, the four tabs, the Thornswood Bots list (Hermes, One, then the
 // six Bots) and a chat with Patrick's own Hermes on One (as text, a new chat,
-// Hermes on the VM with no connector yet), the Rooms
+// Hermes on the VM with no connector yet, and reactions: Hermes's own, setting
+// one from a message's actions and taking it off), the Rooms
 // list and a room (as text), the Board,
 // the install hint, the service worker, and alerts: a "no" kept, a push shown
 // as the one quiet line with its card's tag (delivered by DevTools, with no
@@ -23,10 +24,11 @@ const base = `http://localhost:${port}`
   const page = await ctx.newPage()
   const errors = []
   page.on('pageerror', e => errors.push(String(e)))
-  // A 401 is the signed-out app asking; a 404 is said below only when it is not a chat a gateway never listed.
+  // A 401 is the signed-out app asking; a 404 is said below only when it is not one of the two that are answers.
   page.on('console', m => { if (m.type() === 'error' && !/status of (401|404)/.test(m.text())) errors.push(m.text()) })
   page.on('response', r => {
-    if (r.status() === 404 && !/\/api\/v1\/own\/(me|one)\/chats\/[^/]+\/messages$/.test(new URL(r.url()).pathname)) {
+    // Two 404s are answers, not missing routes: a chat a gateway never listed, and a fingerprint key the core no longer has.
+    if (r.status() === 404 && !/\/api\/v1\/(own\/(me|one)\/chats\/[^/]+\/messages|passkeys\/sign-in\/options)$/.test(new URL(r.url()).pathname)) {
       errors.push('404 ' + r.url())
     }
   })
@@ -183,6 +185,12 @@ const base = `http://localhost:${port}`
     const want = [...Array.from({ length: 68 }, (_, i) => `bramble ${i}`), 'How is the nightly?', 'All green <i>tonight</i>.']
     if (JSON.stringify(texts) !== JSON.stringify(want)) throw new Error(texts.length + ' ' + texts.slice(0, 2))
   })
+  await step("in a Bot Chat, the Bot's own reaction shows with its name", () =>
+    page.locator('#view .msg[data-mid="69"] .react[aria-label="Bramble\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
+  await page.locator('#view .msg[data-mid="70"] .bub').click()
+  await page.getByRole('button', { name: 'React \u2764\uFE0F' }).click()
+  await step('a reaction in a Bot Chat is set in that Bot\'s Bot Chat', () =>
+    page.locator('#view .msg[data-mid="70"] .react.me:not(.pending)').waitFor({ timeout: 25000 }))
   await page.goto(base + '/m/bramble')
   await step("Bramble's first path still opens its chat, under Bots", async () => {
     await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
@@ -197,10 +205,11 @@ const base = `http://localhost:${port}`
   await page.getByRole('link', { name: 'Bots' }).click()
   await page.getByText('Its chats show here once it is turned on.').waitFor({ timeout: 5000 })
   await page.getByText('One', { exact: true }).click()
-  await step("One's chats, with full power for 30 minutes after the passkey", async () => {
+  await step("One's chats, signed in, with no line about the passkey's 30 minutes", async () => {
     await page.getByText('Plan the week', { exact: true }).waitFor({ timeout: 5000 })
     await page.getByText('Untitled chat', { exact: true }).waitFor({ timeout: 3000 })
-    await page.getByText(/^Full power until .+, 30 minutes after your passkey sign-in\.$/).waitFor({ timeout: 3000 })
+    await page.getByLabel('Start a new chat').waitFor({ timeout: 3000 })
+    if (await page.getByText(/passkey sign-in|Full power until/).count()) throw new Error('the passkey line is back')
     if (!page.url().endsWith('/m/hermes/one')) throw new Error('url ' + page.url())
   })
   await page.getByLabel('Start a new chat').fill('Start a list for the weekend.')
@@ -214,13 +223,46 @@ const base = `http://localhost:${port}`
   await step('a chat on One, as text, on its own deep link', async () => {
     await page.getByText('<b>three</b> things').waitFor({ timeout: 15000 })
     if (!page.url().endsWith('/m/hermes/one/s_plan')) throw new Error('url ' + page.url())
-    await page.getByText(/^You can send until .+ started from the phone or has \/yolo on\.$/).waitFor({ timeout: 3000 })
+    if (await page.getByText(/You can send until|\/yolo on/).count()) throw new Error('the send-window paragraph is back')
   })
   await page.getByLabel('Message to One').fill('Add the backup check.')
   await page.getByRole('button', { name: 'Send to One' }).click()
   await step('a message to One waits for its connector', async () => {
     await page.getByText('Add the backup check.').waitFor({ timeout: 5000 })
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
+  })
+  await step("Hermes's own reaction shows on the message it is on", () =>
+    page.locator('#view .msg[data-mid="1"] .react[aria-label="Hermes\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
+  const reactBody = []
+  page.on('request', q => { if (q.method() === 'POST' && /\/own\/one\/react$/.test(q.url())) reactBody.push(JSON.parse(q.postData())) })
+  await page.locator('#view .msg[data-mid="2"] .bub').click()
+  await step('tapping a message opens its actions: eight reactions, Copy text and Close', async () => {
+    const sheet = page.getByRole('dialog', { name: 'Message actions' })
+    await sheet.waitFor({ timeout: 3000 })
+    if (await sheet.getByRole('button', { name: /^React / }).count() !== 8) throw new Error('not eight reactions')
+    await sheet.getByRole('button', { name: 'Copy text' }).waitFor({ timeout: 1000 })
+    if (await sheet.getByRole('button', { name: 'Take my reaction off' }).count()) throw new Error('take off with no reaction')
+  })
+  await page.getByRole('button', { name: 'React \u{1F44D}' }).click()
+  const mineChip = page.locator('#view .msg[data-mid="2"] .react.me')
+  await step('a reaction shows at once, and asks the core for exactly that message and emoji', async () => {
+    await mineChip.waitFor({ timeout: 5000 })
+    if (await page.getByRole('dialog').count()) throw new Error('the sheet stayed open')
+    if (JSON.stringify(reactBody) !== JSON.stringify([{ session_id: 's_plan', message_id: 2, emoji: '\u{1F44D}' }])) throw new Error(JSON.stringify(reactBody))
+  })
+  await step("once One says it is set, the chip is no longer dashed", async () => {
+    await page.locator('#view .msg[data-mid="2"] .react.me:not(.pending)').waitFor({ timeout: 25000 })
+    if (await mineChip.getAttribute('aria-label') !== 'Your reaction \u{1F44D}, tap to take it off') throw new Error(await mineChip.getAttribute('aria-label'))
+  })
+  await page.locator('#view .msg[data-mid="2"] .bub').click()
+  await step('the actions mark the reaction that is on', async () => {
+    if (await page.getByRole('button', { name: 'React \u{1F44D}' }).getAttribute('aria-pressed') !== 'true') throw new Error('not pressed')
+  })
+  await page.getByRole('button', { name: 'Take my reaction off' }).click()
+  await step('taking it off asks for none, and the chip goes once One has taken it off', async () => {
+    if (JSON.stringify(reactBody[1]) !== JSON.stringify({ session_id: 's_plan', message_id: 2, emoji: null })) throw new Error(JSON.stringify(reactBody))
+    await page.locator('#view .msg[data-mid="2"] .react').waitFor({ state: 'detached', timeout: 25000 })
+    await page.locator('#view .msg[data-mid="1"] .react').waitFor({ timeout: 1000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-own-chat.png', fullPage: true })
   await page.goto(base + '/m/hermes/one')
@@ -255,6 +297,82 @@ const base = `http://localhost:${port}`
     const want = Array.from({ length: 120 }, (_, i) => `message ${i}`)
     if (JSON.stringify(texts) !== JSON.stringify(want)) throw new Error(texts.length + ' ' + texts.slice(0, 3))
     if (await page.getByRole('button', { name: 'Older messages' }).count()) throw new Error('more offered at the first')
+  })
+  const jump = page.locator('#view .chat .jump')
+  await step('read further up, a chat offers Newest over the box, and it goes to the newest message', async () => {
+    await jump.waitFor({ state: 'visible', timeout: 3000 })
+    if ((await jump.textContent()).trim() !== 'Newest') throw new Error(await jump.textContent())
+    await jump.click()
+    await page.waitForFunction(() => innerHeight + scrollY >= document.documentElement.scrollHeight - 2, null, { timeout: 3000 })
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+    await jump.waitFor({ state: 'hidden', timeout: 3000 })
+  })
+  await step('a chat left for the list opens on its newest message again, and the list opens at its top', async () => {
+    await page.evaluate(() => scrollTo({ top: 0 }))
+    await page.getByRole('button', { name: 'All chats on One' }).click()
+    await page.getByText('A long chat', { exact: true }).waitFor({ timeout: 15000 })
+    const listAt = await page.evaluate(() => scrollY)
+    if (listAt !== 0) throw new Error('the list opened at ' + listAt)
+    await page.getByText('A long chat', { exact: true }).click()
+    await page.getByText('message 119', { exact: true }).waitFor({ timeout: 15000 })
+    await page.waitForTimeout(300)
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+    if (!(await jump.isHidden())) throw new Error('Newest is offered at the newest message')
+  })
+  await step('Back and Forward open the chat on its newest message too', async () => {
+    await page.evaluate(() => scrollTo({ top: 0 }))
+    await page.goBack()
+    await page.getByText('A long chat', { exact: true }).waitFor({ timeout: 15000 })
+    await page.goForward()
+    await page.getByText('message 119', { exact: true }).waitFor({ timeout: 15000 })
+    await page.waitForTimeout(300)
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+  })
+  // Android closes the app between opens: a fresh load keeps only the phone's copy.
+  const openTime = async () => {
+    const t0 = Date.now()
+    await page.goto(base + '/m/hermes/one/s_long')
+    await page.getByText('message 119', { exact: true }).waitFor({ timeout: 30000 })
+    return Date.now() - t0
+  }
+  await step("a chat opens at once from the phone's copy, without waiting for One", async () => {
+    const pageUrl = '**/api/v1/own/one/chats/s_long/messages*'
+    // One taking 6 seconds to answer, as a claim round trip to One can.
+    await page.route(pageUrl, r => { setTimeout(() => r.continue().catch(() => {}), 6000) })
+    await page.evaluate(() => localStorage.removeItem('hermes.kept.v1'))
+    const before = await openTime()
+    const after = await openTime()
+    await page.unroute(pageUrl)
+    await page.waitForTimeout(6500)
+    console.log(`MEASURE open a 120-message chat with One 6 s slow: no copy (as before) ${before} ms, from the phone's copy ${after} ms`)
+    if (before < 5000) throw new Error('the slow page was not waited for without a copy: ' + before + ' ms')
+    if (after > 3000) throw new Error('waited for One: ' + after + ' ms')
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+  })
+  await page.goto(base + '/m/hermes/one')
+  await step('a chat Hermes has not titled is named by its first message, and its line shows words, not a file path', async () => {
+    const row = page.locator('#view [data-chat="s_paste"]')
+    await row.waitFor({ timeout: 15000 })
+    const text = await row.textContent()
+    if (!text.includes('Here is the plan')) throw new Error(text)
+    if (/@file:|Attached Context|pasted_content/.test(text)) throw new Error(text)
+  })
+  await page.goto(base + '/m/hermes/one/s_paste')
+  await step('a pasted file shows as a chip that opens its text, never as @file paths and Attached Context', async () => {
+    const chip = page.locator('#view .msg.mine details.att')
+    await chip.waitFor({ timeout: 15000 })
+    if ((await chip.locator('summary').textContent()).trim() !== 'Pasted text \u00B7 40 tokens') throw new Error(await chip.locator('summary').textContent())
+    const mine = await page.locator('#view .msg.mine .bub').textContent()
+    if (/@file:|Attached Context|pasted_content/.test(mine)) throw new Error(mine)
+    if (!mine.includes('Here is the plan')) throw new Error(mine)
+    await chip.locator('summary').click()
+    await page.getByText(/^Step 1\. gh pr merge 55/).waitFor({ timeout: 3000 })
+  })
+  await step('a long command in a code block wraps on the phone, and Copy still copies it whole', async () => {
+    const fit = await page.locator('#view .msg.theirs .md-code pre').evaluate(n => ({ s: n.scrollWidth, c: n.clientWidth }))
+    if (fit.s > fit.c + 1) throw new Error(JSON.stringify(fit))
+    const wide = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
+    if (wide > 0) throw new Error('sideways scroll of ' + wide)
   })
   await page.goto(base + '/m/hermes/one/s_old')
   await step('a chat Hermes no longer has says so and offers no send', async () => {
@@ -300,6 +418,134 @@ const base = `http://localhost:${port}`
     if (m.dock > m.tabs + 0.5) throw new Error(`the box ends at ${m.dock}, under the tabs at ${m.tabs}`)
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-markdown.png' })
+  // Renaming, hiding, bringing back and deleting one of his own chats (redesign step 3). The scratch
+  // connector does each on its state.db and feeds the chat list again; the app reads it on its next draw.
+  const again = async (path, test) => {
+    for (let i = 0; i < 20; i++) {
+      await page.goto(base + path)
+      await page.locator('#view').filter({ hasNotText: 'Loading...' }).waitFor({ timeout: 5000 })
+      await page.waitForTimeout(250)
+      if (await test()) return
+    }
+    throw new Error('never came to pass on ' + path)
+  }
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await step('a chat of his own has its actions: Rename, Hide and Delete for good, and no reactions', async () => {
+    const sheet = page.getByRole('dialog', { name: 'Chat actions' })
+    for (const name of ['Rename', 'Hide this chat', 'Delete for good...']) await sheet.getByRole('button', { name }).waitFor({ timeout: 3000 })
+    if ((await page.getByLabel('New title').inputValue()) !== 'Markdown check') throw new Error('the title box does not hold its title')
+  })
+  await page.getByLabel('New title').fill('  Markdown   look ')
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  await step('a rename shows at once as asked, then the chat has its new name from One', async () => {
+    // The scratch connector checks in every 0.3 s, so the rename may be done before the chat redraws:
+    // then the chat shows the new name at once instead of the line saying it is on its way.
+    await page.waitForFunction(() => document.body.innerText.includes('Renaming to "Markdown look".') ||
+      document.querySelector('.chatbar .t strong')?.textContent === 'Markdown look', null, { timeout: 5000 })
+    await again('/m/hermes/one/s_md', async () => (await page.locator('.chatbar .t strong').textContent()) === 'Markdown look')
+  })
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await page.getByRole('button', { name: 'Hide this chat' }).click()
+  await step('a hidden chat says so, offers no send, and is off the chat list', async () => {
+    await again('/m/hermes/one/s_md', () => page.getByText(/^Hidden from One's chat list/).count())
+    if (await page.getByLabel('Message to One').count()) throw new Error('a composer on a hidden chat')
+    await page.goto(base + '/m/hermes/one')
+    await page.getByRole('button', { name: /^Plan the week/ }).waitFor({ timeout: 5000 })
+    if (await page.locator('#view .row[data-chat="s_md"]').count()) throw new Error('the hidden chat is still listed')
+  })
+  await page.getByRole('button', { name: 'Hidden chats' }).click()
+  await step('Hidden chats lists it from One itself, with Bring back', () =>
+    page.locator('#view .row[data-chat="s_md"]').getByRole('button', { name: 'Bring back' }).waitFor({ timeout: 8000 }))
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-hidden.png' })
+  await page.locator('#view .row[data-chat="s_md"]').getByRole('button', { name: 'Bring back' }).click()
+  await step('Bring back shows as asked, then the chat is on the list again', async () => {
+    await page.getByText(/^Bringing it back\./).waitFor({ timeout: 5000 })
+    await again('/m/hermes/one', () => page.locator('#view .row[data-chat="s_md"]').count())
+  })
+  await page.goto(base + '/m/hermes/one/s_md')
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await page.getByRole('button', { name: 'Delete for good...' }).click()
+  await step('Delete for good says exactly what goes before anything is deleted', async () => {
+    await page.getByText('Delete "Markdown look" for good?').waitFor({ timeout: 3000 })
+    await page.getByText(/all its messages, the earlier parts Hermes compressed it from, and the side tasks Hermes ran for it/).waitFor({ timeout: 3000 })
+    await page.getByText(/no other chat, no Bot and no room/).waitFor({ timeout: 3000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-delete.png' })
+  await page.getByRole('button', { name: 'Keep it' }).click()
+  await step('Keep it deletes nothing', async () => {
+    await page.waitForTimeout(800)
+    await page.goto(base + '/m/hermes/one')
+    await page.locator('#view .row[data-chat="s_md"]').waitFor({ timeout: 5000 })
+  })
+  await page.goto(base + '/m/hermes/one/s_md')
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await page.getByRole('button', { name: 'Delete for good...' }).click()
+  await page.getByRole('button', { name: 'Delete for good', exact: true }).click()
+  await step('a delete goes through, the chat says it is gone and offers no send, and it is off the list', async () => {
+    await again('/m/hermes/one/s_md', () => page.getByText('Deleted from One for good.').count())
+    if (await page.getByLabel('Message to One').count()) throw new Error('a composer on a deleted chat')
+    if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('actions on a deleted chat')
+    await page.goto(base + '/m/hermes/one')
+    await page.getByRole('button', { name: /^Plan the week/ }).waitFor({ timeout: 5000 })
+    if (await page.locator('#view .row[data-chat="s_md"]').count()) throw new Error('the deleted chat is still listed')
+  })
+  await page.goto(base + '/m/hermes/one')
+  await step("his own Bot Chat heads One's chats, marked Bot Mode", async () => {
+    const first = page.locator('#view .row[data-chat]').first()
+    if ((await first.getAttribute('data-chat')) !== 's_obc') throw new Error('the Bot Chat is not first')
+    await first.getByText('Bot Mode').waitFor({ timeout: 3000 })
+  })
+  await page.goto(base + '/m/hermes/one/s_obc')
+  await step('his own Bot Chat opens with its messages and offers no Rename, Hide or Delete', async () => {
+    await page.getByText('Rift: load order is clean').first().waitFor({ timeout: 8000 })
+    if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('chat actions on his Bot Chat')
+  })
+  // A reply to one message (redesign step 4, reply style A): the quote goes at the top of the message as
+  // sent, and the core keeps which message it answers.
+  const replyBody = []
+  page.on('request', q => { if (q.method() === 'POST' && /\/own\/one\/send$/.test(q.url())) replyBody.push(JSON.parse(q.postData())) })
+  await page.goto(base + '/m/hermes/one/s_long')
+  const last = page.locator('#view .msg.theirs', { hasText: 'message 119' })
+  await last.waitFor({ timeout: 15000 })
+  const lastMid = Number(await last.getAttribute('data-mid'))
+  await last.locator('.bub').click()
+  await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
+  await step('Reply shows the words it quotes above the box, and Cancel takes it away', async () => {
+    await page.locator('#view .replying', { hasText: 'Replying to One' }).waitFor({ timeout: 8000 })
+    await page.locator('#view .replying', { hasText: 'message 119' }).waitFor({ timeout: 1000 })
+    await page.getByRole('button', { name: 'Cancel the reply' }).click()
+    await page.locator('#view .replying').waitFor({ state: 'detached', timeout: 8000 })
+  })
+  await last.locator('.bub').click()
+  await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
+  await page.locator('#view .replying').waitFor({ timeout: 8000 })
+  await page.getByLabel('Message to One').fill('Thanks, that was the last one.')
+  await page.getByRole('button', { name: 'Send to One' }).click()
+  await step('a reply asks for exactly that message and those words, and shows the quote at the top', async () => {
+    await page.locator('#view .msg.mine .quote', { hasText: 'message 119' }).first().waitFor({ timeout: 5000 })
+    const b = replyBody[replyBody.length - 1] || {}
+    if (b.reply_to !== lastMid || b.quote !== 'message 119' || b.text !== 'Thanks, that was the last one.' || b.session_id !== 's_long') throw new Error(JSON.stringify(b))
+    if (await page.locator('#view .replying').count()) throw new Error('the reply preview stayed after sending')
+  })
+  await step("One's own copy of the reply keeps the quote, and the quote goes back to the message it answers", async () => {
+    await again('/m/hermes/one/s_long', () => page.locator('#view .msg.mine[data-mid]:not([data-status]) .quote.linked').count())
+    const copy = page.locator('#view .msg.mine[data-mid]:not([data-status])', { hasText: 'Thanks, that was the last one.' })
+    await copy.locator('.quote.linked', { hasText: 'message 119' }).click()
+    await page.locator(`#view .msg.flash[data-mid="${lastMid}"]`).waitFor({ timeout: 3000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-reply.png' })
+  await page.goto(base + '/m/bots/bramble')
+  await page.locator('#view .msg[data-mid="70"] .bub').click()
+  await step('a Bot Chat offers no reply: Hermes has none there', async () => {
+    await page.getByRole('dialog', { name: 'Message actions' }).waitFor({ timeout: 3000 })
+    if (await page.getByRole('dialog').getByRole('button', { name: 'Reply' }).count()) throw new Error('Reply in a Bot Chat')
+    await page.keyboard.press('Escape')
+  })
+  await page.goto(base + '/m/bots/bramble')
+  await step('a Bot Chat has no chat actions', async () => {
+    await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
+    if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('chat actions on a Bot Chat')
+  })
   await page.goto(base + '/m/hermes/me/s_plan')
   await step("One's chat id does not open on Hermes", () =>
     page.getByText('Hermes has not listed this chat, so it does not open here.').waitFor({ timeout: 5000 }))
@@ -311,11 +557,30 @@ const base = `http://localhost:${port}`
   })
   await page.getByRole('link', { name: 'Board' }).click()
   await step('the Board, as text', () => page.getByText('Fix the <b>launcher</b> log').waitFor({ timeout: 5000 }))
+  await step("the Board shows each Bot's GitHub work under it, linked to github.com", async () => {
+    await page.getByText('#5033 The site hub says <i>which</i> page is open').waitFor({ timeout: 5000 })
+    await page.getByText('Pull request #5367 open · checks: 18 of 20 passed, 2 failed · auto-merge on').waitFor({ timeout: 3000 })
+    await page.getByText('Claimed, no pull request yet').waitFor({ timeout: 3000 })
+    const href = await page.locator('[data-item="ThornswoodRP/Thornswood#5033"]').getAttribute('href')
+    if (href !== 'https://github.com/ThornswoodRP/Thornswood/pull/5367') throw new Error('href ' + href)
+    const issue = await page.locator('[data-item="ThornswoodRP/Thornswood#5191"]').getAttribute('href')
+    if (issue !== 'https://github.com/ThornswoodRP/Thornswood/issues/5191') throw new Error('href ' + issue)
+    const heads = await page.locator('.row.head strong').allTextContents()
+    if (JSON.stringify(heads) !== JSON.stringify(['Bramble', 'Rift', 'Sprocket', 'Echo', 'Magpie', 'Wisp'])) throw new Error(JSON.stringify(heads))
+    await page.locator('[data-bot="rift"]', { hasText: 'Nothing claimed' }).waitFor({ timeout: 3000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-board.png', fullPage: true })
   await page.getByRole('link', { name: 'Rooms' }).click()
   await step('the Rooms list has one button for each room', async () => {
     await page.getByText('Thornswood Workbench', { exact: true }).waitFor({ timeout: 5000 })
     await page.getByText('Second test room', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('Bramble: <script>alert(1)</script> hello').waitFor({ timeout: 3000 })
+  })
+  await step("a list line is the message's plain words, cut at a whole word", async () => {
+    await page.getByText(/^magpie: @bramble/).waitFor({ timeout: 3000 })
+    const line = await page.getByText(/^magpie: @bramble/).textContent()
+    const want = "magpie: @bramble it'll show up on #5367, and it'll run, not skip. Why it isn't there yet: Launcher builds has needs: pick and…"
+    if (line !== want) throw new Error(JSON.stringify(line))
   })
   await page.getByText('Second test room', { exact: true }).click()
   await step('a room opens on its own deep link', async () => {
@@ -355,13 +620,13 @@ const base = `http://localhost:${port}`
   const reg = regs.find(r => r.scopeURL === base + '/m/' && !r.isDeleted)
   const shown = async () => page.evaluate(async () => (await (await navigator.serviceWorker.getRegistration('/m/')).getNotifications())
     .map(n => ({ title: n.title, body: n.body, tag: n.tag, silent: n.silent, path: n.data && n.data.path, actions: n.actions.length })))
-  await step('a push shows only "Hermes needs you", quiet, tagged by its card', async () => {
+  await step('a push shows only "Hermes needs you", with the phone sound, tagged by its card', async () => {
     if (!reg) throw new Error('no service worker registration seen')
     await cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId: reg.registrationId,
       data: JSON.stringify({ v: 1, event_id: 'px_1', decision_id: card, attention_revision: 1, path: '/m/decisions/' + card }) })
     let list = []
     for (let i = 0; i < 50 && !list.length; i++) { list = await shown(); if (!list.length) await new Promise(ok => setTimeout(ok, 100)) }
-    const want = { title: 'Hermes needs you', body: '', tag: 'decision:' + card, silent: true, path: '/m/decisions/' + card, actions: 0 }
+    const want = { title: 'Hermes needs you', body: '', tag: 'decision:' + card, silent: false, path: '/m/decisions/' + card, actions: 0 }
     if (JSON.stringify(list) !== JSON.stringify([want])) throw new Error(JSON.stringify(list))
   })
   await step('a push with a bad card id opens only Decisions', async () => {
@@ -425,6 +690,57 @@ const base = `http://localhost:${port}`
   await step('the install hint goes away for this visit when told not now', async () => {
     if (await page.locator('#install').isVisible()) throw new Error('still shown')
   })
+  // The fingerprint on the phone (Patrick, 2 Nov): the phone's own key, named in the sign-in so the phone
+  // answers it itself instead of Android handing it to a passkey app. The virtual authenticator here is
+  // the phone's platform one (transport internal, with user verification).
+  await page.goto(base + '/m/decisions')
+  await step('on a phone, Decisions offers the fingerprint', () =>
+    page.getByText('Sign in with your fingerprint', { exact: true }).waitFor({ timeout: 5000 }))
+  await page.getByRole('button', { name: 'Use my fingerprint' }).click()
+  await step('the fingerprint is added beside the passkey, and the offer goes', async () => {
+    await page.getByText('Fingerprint sign-in is on for this phone.').waitFor({ timeout: 8000 })
+    if (await page.getByRole('button', { name: 'Use my fingerprint' }).count()) throw new Error('still offered')
+    const k = await page.evaluate(() => JSON.parse(localStorage.getItem('hermes.phoneKey.v1') || 'null'))
+    if (!k || !k.credential_id || !k.passkey_id) throw new Error('no key name kept: ' + JSON.stringify(k))
+  })
+  await page.goto(base + '/m/settings')
+  await step('settings says the fingerprint is on, and lists it', async () => {
+    await page.getByText(/^On\. This phone signs in and answers high-risk cards with your fingerprint\.$/).waitFor({ timeout: 5000 })
+    await page.getByText('Fingerprint on this phone', { exact: true }).waitFor({ timeout: 3000 })
+  })
+  const optionBodies = []
+  page.on('request', q => { if (new URL(q.url()).pathname === '/api/v1/passkeys/sign-in/options') optionBodies.push(JSON.parse(q.postData() || '{}')) })
+  await page.getByText('Sign out').click()
+  await step('signed out, the button says fingerprint and it signs in naming this phone\'s key', async () => {
+    const button = page.getByRole('button', { name: 'Sign in with your fingerprint' })
+    await button.waitFor({ timeout: 5000 })
+    await button.click()
+    await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
+    const k = await page.evaluate(() => JSON.parse(localStorage.getItem('hermes.phoneKey.v1')))
+    if (JSON.stringify(optionBodies) !== JSON.stringify([{ phone_key: k.credential_id }])) throw new Error(JSON.stringify(optionBodies))
+  })
+  await step('high-risk answers, deletes and own-Hermes sends name the fingerprint too', async () => {
+    if ((await page.evaluate(() => signInWord())) !== 'fingerprint') throw new Error('the word is not fingerprint')
+  })
+  // A key the core no longer has (removed with its phone): the app forgets its name and the passkey signs in.
+  // (Settings drops a key name the core does not list, so the name is put back after it loads.)
+  await page.goto(base + '/m/settings')
+  await page.getByText('Sign out').waitFor({ timeout: 5000 })
+  await step('settings forgets a fingerprint key the core no longer lists', async () => {
+    await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_gone' })))
+    await page.goto(base + '/m/settings')
+    await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 5000 })
+    if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('kept')
+  })
+  await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_gone' })))
+  optionBodies.length = 0
+  await page.getByText('Sign out').click()
+  await step('a removed fingerprint key falls back to the passkey and is forgotten', async () => {
+    await page.getByRole('button', { name: 'Sign in with your fingerprint' }).click()
+    await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
+    if (JSON.stringify(optionBodies) !== JSON.stringify([{ phone_key: 'AQEBAQEBAQEBAQEBAQEBAQ' }, {}])) throw new Error(JSON.stringify(optionBodies))
+    if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('the gone key is still kept')
+  })
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
   // Each signed-in view gets one in every kind of text it shows, at Pixel widths and with larger text.
@@ -432,7 +748,7 @@ const base = `http://localhost:${port}`
   for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3]]) {
     await page.setViewportSize({ width, height: 860 })
     for (const view of ['/m/bots', '/m/rooms', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',
-      '/m/hermes/one', '/m/hermes/one/s_plan', '/m/bots/bramble', '/m/room']) {
+      '/m/hermes/one', '/m/hermes/one/s_plan', '/m/hidden/one', '/m/bots/bramble', '/m/room']) {
       await page.goto(base + view)
       await page.locator('#view').filter({ hasNotText: 'Loading...' }).waitFor({ timeout: 5000 })
       await page.waitForTimeout(300)
@@ -458,6 +774,13 @@ const base = `http://localhost:${port}`
     manifest.body.start_url === '/m/decisions'
   if (!mOk) failed++
   console.log(mOk ? 'PASS manifest served: Hermes, opening on Decisions' : 'FAIL manifest ' + JSON.stringify(manifest))
+  await step("signing out deletes the phone's copy of the chats", async () => {
+    await page.goto(base + '/m/settings')
+    if (!(await page.evaluate(() => !!localStorage.getItem('hermes.kept.v1')))) throw new Error('no copy to delete')
+    await page.getByText('Sign out').click()
+    await page.getByText('Signed out.').waitFor({ timeout: 5000 })
+    if (await page.evaluate(() => localStorage.getItem('hermes.kept.v1'))) throw new Error('the copy is still there')
+  })
   const sawOwn = shownNames.length === 0
   if (!sawOwn) failed++
   console.log(sawOwn ? 'PASS every request names the gateways me and one, never Hermes or One' : 'FAIL shown names sent: ' + shownNames.join(' | '))

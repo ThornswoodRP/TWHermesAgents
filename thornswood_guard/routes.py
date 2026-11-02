@@ -126,6 +126,32 @@ def check_gateway_config(policy: Policy, config: dict, env_names: set[str]) -> l
     for toolset in GATEWAY_HELPER_TOOLSETS:
         if toolset not in off:
             problems.append(f"the {toolset} toolset is on in the gateway's own profile; its check asks for a helper the profile has no sign-in for, and Hermes then walks to the Nous Portal")
+    problems += _check_wake(policy, config)
+    return problems
+
+
+def _check_wake(policy: Policy, config: dict) -> list[str]:
+    """Bramble's wake (policy `wake`): the gateway's webhook receiver listens
+    on loopback only, holds exactly the one route this repository writes, and
+    no secret is in the file (it comes from systemd, never from config)."""
+    from .profile_config import wake_route
+    w = policy.data["wake"]
+    hook = ((config.get("platforms") or {}).get("webhook") or {})
+    extra = hook.get("extra") or {}
+    problems = []
+    if hook.get("enabled") is not True:
+        problems.append("the gateway's webhook receiver is off, so Bramble never wakes when a check finishes")
+    if extra.get("host") != "127.0.0.1":
+        problems.append(f"the gateway's webhook receiver listens on {extra.get('host')!r}, not 127.0.0.1; only Tailscale Funnel's one path may reach it")
+    if extra.get("port") != w["port"]:
+        problems.append(f"the gateway's webhook receiver is on port {extra.get('port')}, not {w['port']}, where Funnel sends Bramble's events")
+    if "secret" in extra or any("secret" in (r or {}) for r in (extra.get("routes") or {}).values()):
+        problems.append(f"a webhook secret is written in the gateway's config.yaml; it belongs only in {w['secret_file']}, which systemd hands the gateway")
+    routes = extra.get("routes") or {}
+    if set(routes) != {w["route"]}:
+        problems.append(f"the gateway's webhook routes are {sorted(routes)}, not only {w['route']}")
+    elif routes[w["route"]] != wake_route(policy):
+        problems.append(f"the {w['route']} webhook route differs from what this repository writes")
     return problems
 
 

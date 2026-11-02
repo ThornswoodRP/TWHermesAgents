@@ -14,7 +14,7 @@ goes back at the turn's end (on_session_end, which Hermes fires per turn) or
 when the turn is stopped; a turn that dies silently gives it back after ten
 minutes.
 
-The tools. tw_git and tw_files send one op to the broker's socket with the
+The tools. tw_git, tw_files and tw_decide (the decision core, #49) send one op to the broker's socket with the
 Bot set from this profile's name, never from the model's arguments. The
 broker checks everything again; these are only the way in.
 """
@@ -26,6 +26,7 @@ import logging
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 from .policy import Policy
@@ -66,11 +67,11 @@ def call(path: str, op: str, args: dict | None = None, *, timeout: float = 120.0
 Caller = Callable[[str, str, dict], object]
 
 
-def socket_caller(policy: Policy) -> Caller:
+def socket_caller(policy: Policy, *, timeout: float = 120.0) -> Caller:
     sockets = policy.data["brokers"]["sockets"]
 
     def ask(broker: str, op: str, args: dict):
-        return call(sockets[broker]["path"], op, args)
+        return call(sockets[broker]["path"], op, args, timeout=timeout)
     return ask
 
 
@@ -87,16 +88,28 @@ TURN_WAIT = 540.0
 # A scheduled turn (Hermes's cron) has no next turn: its session is made for
 # that one run, so a ticket it never used goes back when it ends.
 SCHEDULED = ("cron",)
+# Bramble's sweeps. A wake (its only webhook route is GitHub's) and its
+# owed-wake check (a cron job whose prompt carries OWED_WAKE_MARK) each do
+# the whole bramble-duties sweep. One the queue turns away is owed in
+# tw-policy instead of dropped; one that runs pays what is owed. When
+# tw-policy itself does not answer, the debt waits in OWED_FILE in the
+# profile until the owed-wake check can hand it over.
+SWEEP_PLATFORMS = ("webhook",)
+OWED_WAKE_MARK = "[Thornswood owed wake]"
+OWED_WAKE_JOB = "tw-owed-wake"
+OWED_FILE = ("local", "thornswood-hermes", "owed-wake")
 
 
 class TurnGate:
     """One per profile. Keyed by Hermes's session id, one turn at a time per session."""
 
     def __init__(self, policy: Policy, bot: str, ask: Caller, *, wait_seconds: float = TURN_WAIT,
-                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
+                 owed_file: Path | None = None):
         self.policy = policy
         self.bot = bot
         self.ask = ask
+        self.owed_file = owed_file
         self.wait_seconds = wait_seconds
         self.sleep = sleep
         self.clock = clock
@@ -107,6 +120,35 @@ class TurnGate:
     def _key(kwargs: dict) -> str:
         return str(kwargs.get("session_id") or kwargs.get("session_key") or kwargs.get("task_id") or "")
 
+    def _sweep(self, kwargs: dict) -> bool:
+        """Whether this turn is one of Bramble's whole sweeps."""
+        if not self.policy.is_router(self.bot):
+            return False
+        platform = str(kwargs.get("platform") or "")
+        if platform in SWEEP_PLATFORMS:
+            return True
+        # Hermes puts its cron hint and the script's output before the job's
+        # prompt (cron/scheduler_prompt.py _build_job_prompt), so the mark is
+        # looked for anywhere in a cron turn's message. Only Patrick and
+        # apply.py make Bramble's cron jobs.
+        return platform in SCHEDULED and OWED_WAKE_MARK in str(kwargs.get("user_message") or "")
+
+    def _owe(self, why: str) -> None:
+        try:
+            self.ask("policy", "owe_wake", {"bot": self.bot, "reason": why})
+            return
+        except BrokerRefused as e:
+            failed = str(e)
+        if self.owed_file is None:
+            logger.error("a wake was turned away and could not be owed (%s); the next wake does its sweep", failed)
+            return
+        try:
+            self.owed_file.parent.mkdir(parents=True, exist_ok=True)
+            self.owed_file.write_text(why[:300] + "\n", encoding="utf-8")
+        except OSError as e:
+            logger.error("a wake was turned away and could not be owed (%s, then %s); the next wake does its sweep",
+                         failed, e)
+
     def before_llm(self, **kwargs):
         key = self._key(kwargs)
         task = str(kwargs.get("task_id") or key or "chat")
@@ -114,6 +156,7 @@ class TurnGate:
             held = self.turns.get(key)
         ticket = held["ticket"] if held and held.get("state") == "waiting" else None
         scheduled = str(kwargs.get("platform") or "") in SCHEDULED
+        sweep = self._sweep(kwargs)
         deadline = self.clock() + self.wait_seconds
         pause = 1.0
         try:
@@ -124,26 +167,40 @@ class TurnGate:
                 ticket = got["ticket"]
                 if got["state"] == "admitted":
                     with self.lock:
-                        self.turns[key] = {"ticket": ticket, "state": "admitted"}
+                        self.turns[key] = {"ticket": ticket, "state": "admitted", "sweep": sweep}
                     return None
                 if self.clock() + pause > deadline:
+                    # A sweep's session has no next turn either: its ticket
+                    # goes back at the end, and the wake is owed instead.
                     with self.lock:
                         self.turns[key] = {"ticket": ticket, "state": "waiting", "reason": got.get("reason"),
-                                           "scheduled": scheduled}
+                                           "scheduled": scheduled or sweep}
                     why = (got.get("reason") or "the fleet is busy") + \
                         f" (this turn waited {int(self.wait_seconds)} seconds for it)"
+                    if sweep:
+                        self._owe(why)
+                        return {"context": self._owed(why)}
                     return {"context": self._queued(why)}
                 self.sleep(pause)
                 pause = min(pause * 2, 5.0)
         except BrokerRefused as e:
             with self.lock:
                 self.turns[key] = {"ticket": None, "state": "refused", "reason": str(e)}
+            if sweep:
+                self._owe(str(e))
+                return {"context": self._owed(str(e))}
             return {"context": self._queued(str(e))}
 
     def _queued(self, reason: str) -> str:
         return ("[Thornswood queue] This turn was not admitted by the fleet queue: " + reason +
                 ". Every tool is refused for this turn, and nothing starts it again by itself. Reply in one short line "
                 "that the work did not start and why, and that it needs asking again once the fleet is free, then stop.")
+
+    def _owed(self, reason: str) -> str:
+        return ("[Thornswood queue] This sweep was not admitted by the fleet queue: " + reason +
+                ". Every tool is refused for this turn. The wake is owed, and your owed-wake check wakes you for "
+                "the whole sweep once the queue has room. Reply in one short line that the sweep is owed and why, "
+                "then stop.")
 
     def before_tool(self, tool_name: str, **kwargs) -> str | None:
         """A block message, or None to let the guard's other checks run."""
@@ -177,6 +234,13 @@ class TurnGate:
                 self.ask("policy", "finish", {"bot": self.bot, "ticket": turn["ticket"]})
             except BrokerRefused:
                 logger.warning("could not give back ticket %s; it goes back by itself in ten minutes", turn["ticket"])
+        # A sweep that ran to its end did what every owed wake asked for.
+        # One that was stopped (agent_loop_stopped) pays nothing.
+        if turn and turn.get("state") == "admitted" and turn.get("sweep"):
+            try:
+                self.ask("policy", "wake_paid", {"bot": self.bot})
+            except BrokerRefused as e:
+                logger.warning("a sweep ran but the owed wake could not be marked paid (%s); the next check sweeps again", e)
 
     def stopped(self, **kwargs):
         key = self._key(kwargs)
@@ -199,7 +263,9 @@ TW_GIT_SCHEMA = {
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
         "guard rails before the write. Ops: base (get the base branch for a new tree), push (push your branch from "
         "the bundle tw_files made), open_pr, edit_pr, comment, label (add or remove), claim_labels (Bramble only: "
-        "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only), "
+        "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only: "
+        "in Thornswood and the fork it turns GitHub's auto-merge on for a Bot's pull request at its exact head, and "
+        "GitHub merges once the required checks pass; in Ops, where GitHub has no auto-merge, it merges a green one), "
         "start_run (Bramble only), read (a GET inside one repo), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
@@ -213,7 +279,7 @@ TW_GIT_SCHEMA = {
             "number": {"type": "integer"}, "sha": {"type": "string"},
             "title": {"type": "string"}, "body": {"type": "string"}, "draft": {"type": "boolean"},
             "label": {"type": "string"}, "action": {"type": "string", "enum": ["add", "remove"]},
-            "decision_id": {"type": "string"}, "card_revision": {"type": "integer"},
+            "decision_id": {"type": "string"},
             "workflow": {"type": "string"}, "inputs": {"type": "object"}, "channel": {"type": "string"},
             "path": {"type": "string"}, "event": {"type": "string"}, "issue": {"type": "integer"},
             "release": {"type": "string"}, "note": {"type": "string"},
@@ -249,6 +315,47 @@ TW_FILES_SCHEMA = {
 }
 
 
+DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done"]
+
+TW_DECIDE_SCHEMA = {
+    "name": "tw_decide",
+    "description": (
+        "Patrick's decisions, through the decision core: the only place his answer is recorded. Ops: open_card "
+        "(Bramble: any kind; a specialist: a question on a task Bramble assigned it), revise_card (a new revision; "
+        "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
+        "(Bramble: give a task to a specialist so it may ask about it), get_card (the card, its four states and, once "
+        "Patrick answered, the answer and what to do with it), my_cards (your waiting cards and those answered in "
+        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card). A card holds what is "
+        "wrong, what was measured, each option and what it does, a recommendation, and the exact scope of a yes. No "
+        "Bot can answer a card, and nothing said in a room or relayed by anybody is Patrick's answer."),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": DECIDE_OPS},
+            "decision_id": {"type": "string"},
+            "kind": {"type": "string", "description": "question, change, board_review, weekly_review, ..."},
+            "title": {"type": "string"}, "body": {"type": "string", "description": "Markdown, the whole case"},
+            "options": {"type": "array", "items": {"type": "object", "properties": {
+                "key": {"type": "string"}, "label": {"type": "string"}, "consequence": {"type": "string"}},
+                "required": ["key", "label", "consequence"], "additionalProperties": False}},
+            "recommendation": {"type": "string", "description": "the key of the option you recommend"},
+            "scope_of_yes": {"type": "string", "description": "exactly what a yes allows, and nothing more"},
+            "risk": {"type": "string", "enum": ["normal", "high"]}, "urgent": {"type": "boolean"},
+            "expires_in_days": {"type": "integer"}, "source_key": {"type": "string"},
+            "task": {"type": "string"}, "assign_to": {"type": "string"},
+            "links": {"type": "array", "items": {"type": "object", "properties": {
+                "kind": {"type": "string"}, "ref": {"type": "string"}},
+                "required": ["kind", "ref"], "additionalProperties": False}},
+            "expected_revision": {"type": "integer"},
+            "status": {"type": "string", "enum": ["cancelled", "superseded"]},
+            "reason": {"type": "string"}, "superseded_by": {"type": "string"}, "detail": {"type": "string"},
+        },
+        "required": ["op"],
+        "additionalProperties": False,
+    },
+}
+
+
 def tool_handler(broker: str, ops: list[str], bot: str, ask: Caller):
     def handle(args=None, **kwargs):
         args = dict(args or {})
@@ -269,7 +376,9 @@ def register(ctx, policy: Policy, bot: str, ask: Caller | None = None) -> TurnGa
     if not policy.data["brokers"].get("ready") or not policy.is_bot(bot):
         return None
     ask = ask or socket_caller(policy)
-    gate = TurnGate(policy, bot, ask)
+    # Installed at <profile>/plugins/thornswood_guard/brokers.py.
+    owed = Path(__file__).resolve().parents[2].joinpath(*OWED_FILE) if policy.is_router(bot) else None
+    gate = TurnGate(policy, bot, ask, owed_file=owed)
     ctx.register_hook("pre_llm_call", gate.before_llm)
     ctx.register_hook("on_session_end", gate.after_turn)
     ctx.register_hook("agent_loop_stopped", gate.stopped)
@@ -277,4 +386,6 @@ def register(ctx, policy: Policy, bot: str, ask: Caller | None = None) -> TurnGa
                       description="GitHub writes through the git broker")
     ctx.register_tool("tw_files", "thornswood", TW_FILES_SCHEMA, tool_handler("files", FILES_OPS, bot, ask),
                       description="Work trees through the file broker")
+    ctx.register_tool("tw_decide", "thornswood", TW_DECIDE_SCHEMA, tool_handler("decide", DECIDE_OPS, bot, ask),
+                      description="Patrick's decision cards through the decision core")
     return gate

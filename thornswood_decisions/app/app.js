@@ -15,6 +15,9 @@
 // sessionStorage only so that a retry after a lost reply is the same request.
 // The key is never authority: the core decides, and a failed save reads the
 // card back ("checking outcome") before it offers to try again.
+//
+// The phone keeps a copy of the chats it has shown in this browser's storage
+// (keepThread), so a chat opens at once; signing out deletes it.
 
 'use strict'
 
@@ -48,12 +51,67 @@ function el(tag, attrs, ...children) {
 function show(...nodes) {
   const view = document.getElementById('view')
   view.replaceChildren(...nodes.flat(Infinity).filter(Boolean))
+  if (pageTop) { pageTop = false; scrollTo({ top: 0 }) }
 }
 
 function when(iso) {
   if (!iso) return ''
   const d = new Date(iso)
   return isNaN(d) ? iso : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+// ── the look (Patrick's approved mock-up v2, 1 Nov) ───────────────────────
+//
+// One visual system for every screen, as the mock-up drew it: each agent has
+// its own colour and initial (app.css .a-<id>), the same in the lists, on a
+// chat's bar and on its messages; lists are full-width rows with the avatar on
+// the left and the state on the right; every screen opens with a bar; the tabs
+// and the bars use the mock-up's line icons.
+const AGENT_INITIAL = { me: 'H', one: 'O', bramble: 'B', rift: 'R', sprocket: 'S', echo: 'E', magpie: 'M', wisp: 'W' }
+const AGENT_BY_NAME = { Hermes: 'me', One: 'one', Bramble: 'bramble', Rift: 'rift', Sprocket: 'sprocket', Echo: 'echo',
+  Magpie: 'magpie', Wisp: 'wisp' }
+
+function avatar(id, label) {
+  const known = AGENT_INITIAL[id]
+  return el('div', { class: 'av a-' + (known ? id : 'room'), 'aria-hidden': 'true' },
+    known || (label || '#').trim().charAt(0).toUpperCase() || '#')
+}
+
+// The mock-up's line icons (24 by 24, drawn with the text colour).
+const ICON = {
+  back: 'M15 18l-6-6 6-6', send: 'M4 12l16-8-6 16-3-7z', x: 'M6 6l12 12M18 6L6 18', plus: 'M12 5v14M5 12h14',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
+  more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6'
+}
+function icon(name, size = 20) {
+  const ns = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(ns, 'svg')
+  for (const [k, v] of Object.entries({ width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    'stroke-width': name === 'more' ? 3 : 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v)
+  const p = document.createElementNS(ns, 'path')
+  p.setAttribute('d', ICON[name])
+  svg.append(p)
+  return svg
+}
+
+// A screen's bar: back (when there is somewhere to go back to), the agent's
+// avatar, the title (a heading on a list screen) and a line under it, and
+// whatever goes on the right.
+function screenBar({ back, backLabel, agent, label, title, heading, under, right }) {
+  return el('div', { class: 'bar' },
+    back ? el('button', { class: 'ib', type: 'button', 'aria-label': backLabel, onclick: back }, icon('back')) : null,
+    agent !== undefined ? avatar(agent, label || title) : null,
+    el('div', { class: 't' }, el(heading ? 'h2' : 'strong', {}, title), under ? el('span', {}, under) : null),
+    right || null)
+}
+
+// A row of a list: avatar, title with its tags, the lines under it, and what
+// goes on the right (a state or a time).
+function listRow(attrs, { agent, label, title, tags, lines, right }) {
+  return el('button', { type: 'button', ...attrs, class: 'row' + (attrs.class ? ' ' + attrs.class : '') },
+    agent !== undefined ? avatar(agent, label || title) : null,
+    el('div', { class: 't' }, el('strong', {}, title), tags || null, lines || null),
+    right ? el('div', { class: 'w' }, right) : null)
 }
 
 const SAID = {
@@ -66,6 +124,8 @@ const SAID = {
   decision_write_off: 'Answering is off for now. The report page is still where you answer.',
   chat_write_off: 'Chat from the phone is off for now.',
   own_chat_off: 'Chat with your own Hermes from the phone is off for now.',
+  session_manage_off: 'Renaming, hiding and deleting chats from the phone is off for now.',
+  bot_chat_kept: 'Your Bot Chat is kept as it is: Bot Mode and every Bot\'s message to you find it by its name, so it is not renamed, hidden or deleted.',
   passkey_needed: 'A message to your own Hermes runs with full power, so it needs a passkey sign-in from the last 30 minutes.',
   one_off: 'One is off',
   no_gateway: 'There is no such gateway.',
@@ -167,14 +227,94 @@ async function promptNow(button, status, then) {
   button.hidden = false
 }
 
+// ── the fingerprint on the phone (Patrick, 2 Nov) ─────────────────────────
+//
+// A sign-in that asks for any passkey lets Android hand it to the passkey
+// provider he chose (Bitwarden), which leaves the app, unlocks and comes back.
+// This phone's own key, made by its platform authenticator and named in the
+// sign-in request, is answered by the phone itself: its fingerprint sheet over
+// the app. The core checks it as it checks any passkey. A Desktop has no such
+// key and keeps the passkey.
+const PHONE_KEY = 'hermes.phoneKey.v1'
+
+function phoneKey() {
+  try {
+    const k = JSON.parse(localStorage.getItem(PHONE_KEY) || 'null')
+    return k && typeof k.credential_id === 'string' && typeof k.passkey_id === 'string' ? k : null
+  } catch (e) { return null }
+}
+
+function keepPhoneKey(k) {
+  try { localStorage.setItem(PHONE_KEY, JSON.stringify(k)); return true } catch (e) { return false }
+}
+
+function forgetPhoneKey() {
+  try { localStorage.removeItem(PHONE_KEY) } catch (e) {}
+}
+
+// The word for what signs in on this device.
+function signInWord() {
+  return phoneKey() ? 'fingerprint' : 'passkey'
+}
+
+// Whether this device can hold its own key: a paired phone whose platform
+// authenticator checks the person (fingerprint or screen lock).
+// Asked once a page load: neither changes while the app is open.
+let fingerprintable = null
+
+async function canUseFingerprint() {
+  if (fingerprintable !== null) return fingerprintable
+  try {
+    if (!window.PublicKeyCredential || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable ||
+        !(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) return (fingerprintable = false)
+  } catch (e) { return (fingerprintable = false) }
+  const me = await call('GET', '/me')
+  if (me.status !== 200) return false
+  return (fingerprintable = me.body.device_kind === 'phone')
+}
+
+// Adds this phone's own key. The core adds a key only in a fresh session, so
+// when this one is older than 5 minutes the passkey signs in first.
+async function addFingerprint() {
+  const me = await call('GET', '/me')
+  if (me.status !== 200) return { ok: false, message: said(me.body) }
+  if (!me.body.fresh) {
+    const s = await passkeySignIn()
+    if (s.status !== 200) return { ok: false, message: said(s.body) }
+  }
+  const o = await call('POST', '/passkeys/register/options', { on_phone: true })
+  if (o.status !== 200) return { ok: false, message: said(o.body) }
+  let cred
+  try {
+    cred = await navigator.credentials.create({ publicKey: creationOptions(o.body) })
+  } catch (err) {
+    return { ok: false, message: err && err.name === 'InvalidStateError'
+      ? 'This phone already holds a key for Hermes. Nothing changed.'
+      : 'The fingerprint was not added. Nothing changed.' }
+  }
+  const done = await call('POST', '/passkeys/register', { credential: credentialJSON(cred), label: 'Fingerprint on this phone' })
+  if (done.status !== 200) return { ok: false, message: said(done.body) }
+  if (!keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })) {
+    return { ok: false, message: 'This browser would not keep the fingerprint\'s name, so the app cannot ask for it. Remove it in Settings.' }
+  }
+  return { ok: true }
+}
+
 async function passkeySignIn() {
-  const o = await call('POST', '/passkeys/sign-in/options')
+  const key = phoneKey()
+  let o = await call('POST', '/passkeys/sign-in/options', key ? { phone_key: key.credential_id } : {})
+  if (key && o.status === 404 && o.body.error === 'no_phone_key') {
+    // The core no longer has this phone's key (it or the phone was removed): the passkey is the way in.
+    forgetPhoneKey()
+    o = await call('POST', '/passkeys/sign-in/options', {})
+  }
   if (o.status !== 200) return o
+  const word = o.body.allowCredentials && o.body.allowCredentials.length ? 'fingerprint' : 'passkey'
   let cred
   try {
     cred = await navigator.credentials.get({ publicKey: requestOptions(o.body) })
   } catch (err) {
-    return { status: -1, body: { message: 'The passkey did not sign in. Nothing changed.' } }
+    return { status: -1, body: { message: `The ${word} did not sign in. Nothing changed.` } }
   }
   const r = await call('POST', '/passkeys/sign-in', { credential: credentialJSON(cred) })
   if (r.status === 200) csrf = r.body.csrf
@@ -275,6 +415,7 @@ async function signInView(note) {
     csrf = r.body.csrf
     route()
   }
+  if (hasKey === false) forgetPhoneKey()
   if (hasKey === false) {
     return show(
       el('h2', {}, 'Set up this phone'),
@@ -287,12 +428,12 @@ async function signInView(note) {
   const button = el('button', { class: 'primary', type: 'button', onclick: async () => {
     status.textContent = ''
     done(await passkeySignIn())
-  } }, 'Sign in with your passkey')
+  } }, 'Sign in with your ' + signInWord())
   const auto = hasKey === true && askOnOpen
   askOnOpen = false
   show(
     el('h2', {}, 'Welcome back'),
-    el('p', { class: 'quiet' }, hasKey ? 'Your passkey is set up.' : 'Sign in with your passkey, or set up this phone below.'),
+    el('p', { class: 'quiet' }, hasKey ? `Your ${signInWord()} is set up.` : 'Sign in with your passkey, or set up this phone below.'),
     button,
     status,
     el('details', { class: 'fold', open: hasKey === null },
@@ -317,6 +458,33 @@ function refused(r) {
   return false
 }
 
+// On a phone with no fingerprint key yet, the Decisions list offers it once,
+// until it is added or put off; Settings always has it.
+const FINGERPRINT_LATER = 'hermes.fingerprintLater.v1'
+
+async function fingerprintOffer() {
+  let later = false
+  try { later = localStorage.getItem(FINGERPRINT_LATER) === '1' } catch (e) {}
+  if (later || phoneKey() || !(await canUseFingerprint())) return null
+  const note = el('p', { class: 'warn', role: 'status' })
+  const part = el('div', { class: 'card' },
+    el('p', {}, el('strong', {}, 'Sign in with your fingerprint')),
+    el('p', { class: 'quiet' }, 'The fingerprint opens right here, without going out to your passkey app. ' +
+      'When Android asks where to save it, pick Google Password Manager. Your passkey stays for a Desktop.'),
+    el('button', { class: 'primary', type: 'button', onclick: async () => {
+      note.textContent = ''
+      const k = await addFingerprint()
+      if (k.ok) { flash = 'Fingerprint sign-in is on for this phone.'; return route() }
+      note.textContent = k.message
+    } }, 'Use my fingerprint'),
+    el('button', { class: 'secondary', type: 'button', onclick: () => {
+      try { localStorage.setItem(FINGERPRINT_LATER, '1') } catch (e) {}
+      part.remove()
+    } }, 'Keep the passkey'),
+    note)
+  return part
+}
+
 async function decisionsView() {
   setTab('decisions')
   const r = await call('GET', '/cards')
@@ -329,16 +497,18 @@ async function decisionsView() {
   flash = ''
   const answered = r.body.answered || []
   show(
+    screenBar({ title: 'Decisions', heading: true }),
     note ? el('p', { class: 'receipt', role: 'status' }, note) : null,
+    await fingerprintOffer(),
     r.body.cards.length
-      ? r.body.cards.map(c => el('button', { class: 'row', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
-        el('strong', {}, c.title),
-        el('div', { class: 'quiet' }, `${c.kind}${c.risk === 'high' ? ', high risk' : ''}, answer by ${when(c.expires_at)}`)))
+      ? [el('h2', { class: 'section' }, `Waiting on you (${r.body.cards.length})`),
+        r.body.cards.map(c => listRow({ onclick: () => go('/m/decisions/' + c.id) }, {
+          title: c.title, tags: c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
+          lines: el('span', { class: 'quiet' }, `${c.kind}, answer by ${when(c.expires_at)}`) }))]
       : el('p', { class: 'quiet' }, 'Nothing needs you right now.'),
     answered.length ? el('h2', { class: 'section' }, 'Answered') : null,
-    answered.map(c => el('button', { class: 'row done', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
-      el('strong', {}, c.title),
-      el('div', { class: 'quiet' }, `You chose ${c.option}, ${when(c.answered_at)}`))))
+    answered.map(c => listRow({ class: 'done', onclick: () => go('/m/decisions/' + c.id) }, {
+      title: c.title, lines: el('span', { class: 'quiet' }, `You chose ${c.option}, ${when(c.answered_at)}`) })))
 }
 
 async function cardView(id, note) {
@@ -384,14 +554,14 @@ async function choose(c, o, status) {
   if (c.risk !== 'high') return answer(c, o, status)
   const note = el('p', { class: 'warn', role: 'status' })
   const button = el('button', { class: 'primary', type: 'button', 'data-confirm': o.key, onclick: () =>
-    promptNow(button, note, () => answer(c, o, status)) }, 'Answer ' + o.label + ' with your passkey')
+    promptNow(button, note, () => answer(c, o, status)) }, 'Answer ' + o.label + ' with your ' + signInWord())
   show(el('div', { class: 'card' },
     el('h2', {}, 'Check this answer'),
     el('p', {}, `"${c.title}" is high risk. You are choosing:`),
     el('p', {}, el('strong', {}, o.label)),
     el('p', { class: 'quiet' }, o.consequence),
     el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
-    el('p', { class: 'quiet' }, 'Your passkey answers it. Cancel the prompt to change your mind.'),
+    el('p', { class: 'quiet' }, `Your ${signInWord()} answers it. Cancel the prompt to change your mind.`),
     button, note,
     el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
   await promptNow(button, note, () => answer(c, o, status))
@@ -443,18 +613,89 @@ function answered(c, o) {
   return route()
 }
 
+// The Board: what each Bot is working on, read from GitHub (the issues it has
+// claimed and the pull requests from its branches) by the feed once in each 5
+// minutes, grouped by Bot in the Bots list's order. Hermes's Kanban tasks show
+// under them only when there are any (the Bots keep none now). Each row opens
+// the pull request while one is open, otherwise the issue, always on github.com.
+const STAGE = {
+  claimed: () => 'Claimed, no pull request yet',
+  pr_open: i => `Pull request #${i.pr} open`,
+  pr_draft: i => `Draft pull request #${i.pr}`,
+  merged: i => `Pull request #${i.pr} merged`,
+  closed: i => `Pull request #${i.pr} closed without merging`
+}
+const CHECKS = { passed: 'checks passed', failing: 'checks failing', running: 'checks running', none: 'no checks yet' }
+const REPO_SHORT = { 'ThornswoodRP/Thornswood': 'Thornswood', 'ThornswoodRP/Thornswood-Ops': 'Ops', 'ThornswoodRP/skymp': 'skymp' }
+const GH_REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/
+
+function workLink(i) {
+  const open = (i.stage === 'pr_open' || i.stage === 'pr_draft') && i.pr && GH_REPO.test(i.pr_repo)
+  if (open) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
+  if (i.number && GH_REPO.test(i.repo)) return `https://github.com/${i.repo}/issues/${i.number}`
+  if (i.pr && GH_REPO.test(i.pr_repo)) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
+  return null
+}
+
+function workRow(i) {
+  const progress = [STAGE[i.stage] ? STAGE[i.stage](i) : i.stage]
+  if (i.checks && (i.stage === 'pr_open' || i.stage === 'pr_draft')) {
+    progress.push(i.checks_line ? `checks: ${i.checks_line}` : CHECKS[i.checks] || i.checks)
+  }
+  if (i.auto_merge && i.stage === 'pr_open') progress.push('auto-merge on')
+  const href = workLink(i)
+  const attrs = href ? { href, target: '_blank', rel: 'noopener noreferrer' } : {}
+  const cls = 'row work' + (i.stage === 'merged' || i.stage === 'closed' ? ' done' : '')
+  return el(href ? 'a' : 'div', { ...attrs, class: cls, 'data-item': `${i.repo}#${i.number || 'pr' + i.pr}` },
+    el('div', { class: 't' },
+      el('strong', {}, (i.number ? `#${i.number} ` : '') + i.title),
+      el('span', { class: 'quiet' }, REPO_SHORT[i.repo] || i.repo),
+      el('span', { class: i.checks === 'failing' ? 'warn' : 'what' }, progress.join(' · '))),
+    el('div', { class: 'w' }, updated(i.updated_at)))
+}
+
+function botCount(open, done) {
+  if (!open && !done) return 'Nothing claimed'
+  return [open ? `${open} open` : null, done ? `${done} finished in the last day` : null].filter(Boolean).join(', ')
+}
+
+// Today's time alone; an older day with its date.
+function updated(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d)) return iso
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? time
+    : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
 async function boardView() {
   setTab('board')
   const r = await call('GET', '/work')
   if (refused(r)) return
-  if (!r.body.work) return show(el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
-  const tasks = r.body.work.tasks
-  show(
-    el('p', { class: 'quiet' }, `As the Bots' Hermes reported it at ${when(r.body.as_of)}. Read only.`),
-    tasks.length ? el('table', {},
-      el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
-      tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))
-      : el('p', { class: 'quiet' }, 'No open tasks.'))
+  const work = r.body.work
+  const bar = screenBar({ title: 'Board', heading: true,
+    under: work ? `The Bots' work on GitHub, as of ${when(r.body.as_of)}` : undefined })
+  if (!work) return show(bar, el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
+  const items = work.items
+  const tasks = work.tasks || []
+  const rank = b => (ORDER.indexOf(b) + 1) || ORDER.length + 1
+  const bots = [...new Set([...ORDER, ...(items || []).map(i => i.bot)])].sort((a, b) => rank(a) - rank(b))
+  show(bar,
+    items ? bots.map(b => {
+      const mine = items.filter(i => i.bot === b)
+      const open = mine.filter(i => i.stage !== 'merged' && i.stage !== 'closed').length
+      return [
+        el('div', { class: 'row head', 'data-bot': b }, avatar(b, NAMES[b] || b),
+          el('div', { class: 't' }, el('strong', {}, NAMES[b] || b),
+            el('span', { class: 'quiet' }, botCount(open, mine.length - open)))),
+        mine.map(workRow)]
+    }) : el('p', { class: 'quiet' }, "The Bots' work on GitHub shows here after the feed's next read, once in each 5 minutes."),
+    tasks.length ? [el('h2', { class: 'section' }, "Hermes's Kanban"),
+      el('table', {},
+        el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
+        tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))] : null,
+    el('p', { class: 'quiet foot' }, 'Read only. Claims are the "claimed: <Bot>" labels; pull requests are the ones from each Bot\'s own branch.'))
 }
 
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
@@ -519,20 +760,20 @@ async function botsView() {
   // Hermes, then One, then the six Bots (Patrick's mock-up answer, 1 Nov).
   const gateways = own.status === 200 ? ['me', 'one'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
   show(
-    el('h2', { class: 'section' }, 'Thornswood Bots'),
-    gateways.map(g => el('button', { class: 'row', type: 'button', 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) },
-      el('strong', {}, GATEWAY[g.gateway]), gatewayLine(g),
-      g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null,
-      el('div', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
-      el('div', { class: 'quiet' }, g.last ? `${g.last.title || 'Untitled chat'}: ${g.last.preview.slice(0, 100)}`
-        : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')))),
+    screenBar({ title: 'Thornswood Bots', heading: true }),
+    gateways.map(g => listRow({ 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) }, {
+      agent: g.gateway, title: GATEWAY[g.gateway],
+      lines: [el('span', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
+        el('span', { class: 'quiet' }, g.last ? `${chatName(g.last)}: ${preview(g.last.preview, 100)}`
+          : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.'))],
+      right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })),
     own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
-    bots.map(b => el('button', { class: 'row', type: 'button', 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) },
-      el('strong', {}, NAMES[b.bot] || b.bot),
-      b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null,
-      WHAT[b.bot] ? el('div', { class: 'what' }, WHAT[b.bot]) : null,
-      el('div', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.'))),
-    el('p', { class: 'quiet' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
+    bots.map(b => listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
+      agent: b.bot, title: NAMES[b.bot] || b.bot,
+      lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
+        el('span', { class: 'quiet' }, b.last ? preview(b.last.text) : 'No messages yet.')],
+      right: b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null })),
+    el('p', { class: 'quiet foot' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
 }
 
 // Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
@@ -540,20 +781,18 @@ async function botsView() {
 // made with full power; Hermes keeps a chat's own approval setting for good, so
 // in a chat started elsewhere a step that needs an approval is refused unless
 // that chat has /yolo on.
-function signInPart(v, status, existing) {
-  if (v.sign_in_until) {
-    const until = new Date(v.sign_in_until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    return el('p', { class: 'quiet' }, existing
-      ? `You can send until ${until}, 30 minutes after your passkey sign-in. A step that needs an approval runs only if this chat was started from the phone or has /yolo on.`
-      : `Full power until ${until}, 30 minutes after your passkey sign-in.`)
-  }
+// The passkey sign-in a send needs: nothing while it holds (the composer is the
+// sign that he can send), and a sign-in only once it has run out. Patrick, 2 Nov:
+// the paragraph that said until when he could send, on every chat, was clutter.
+function signInPart(v, status) {
+  if (v.sign_in_until) return null
   return el('div', { class: 'card' },
     el('p', { class: 'quiet' }, said({ error: 'passkey_needed' })),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       const s = await passkeySignIn()
       if (s.status === 200) return route()
       status.textContent = said(s.body)
-    } }, 'Sign in with your passkey'))
+    } }, 'Sign in with your ' + signInWord()))
 }
 
 function composer(key, label, send, status, gw) {
@@ -580,8 +819,22 @@ function composer(key, label, send, status, gw) {
 
 // The state in a sentence, unless it is ready, or turned off (said by itself below).
 function offLine(v) {
-  if (v.state === 'ready' || v.state === 'turned_off') return null
+  if (v.state === 'ready' || v.state === 'turned_off') return connectorLine(v)
   return el('p', { class: 'warn', 'data-state': v.state }, stateWords(v)[1])
+}
+
+// Which copy a gateway's connector runs, when it is not the core's own release: updating itself,
+// an update it could not do, or an old copy that does not update itself.
+function connectorLine(v) {
+  const c = v.connector
+  if (!c || c.current) return null
+  const name = GATEWAY[v.gateway] || v.name
+  const short = x => (x || '').slice(0, 7)
+  const words = c.updating ? `${name}'s connector is updating itself to ${short(c.updating)}.`
+    : c.update_why ? `${name}'s connector ${c.update_why}.`
+    : c.commit ? `${name}'s connector runs ${short(c.commit)} and updates itself to ${short(c.release)} next.`
+    : `${name}'s connector is an old copy that does not update itself. It needs its one-time update.`
+  return el('p', { class: c.update_why || !c.commit ? 'warn' : 'quiet', 'data-connector': c.updating ? 'updating' : (c.commit ? 'behind' : 'old') }, words)
 }
 
 // ── the chat layout and Markdown (redesign step 1, plan Part 11) ──────────
@@ -758,6 +1011,106 @@ function markdown(text) {
   return el('div', { class: 'text md' }, blocksMd(lines))
 }
 
+// What Patrick wrote, apart from what Hermes attached to it. Hermes keeps an
+// @file: reference where it was typed and puts the file's text under a
+// "--- Attached Context ---" line (agent/context_references.py); a long paste
+// in Hermes Desktop is such a file, composer-pastes/pasted_content_<stamp>.txt.
+// Hermes Desktop shows the words and a chip for each file
+// (chat-messages/hydration.ts); so does the phone, and the chip opens the text.
+const ATTACHED = /(?:^|\n)--- Attached Context ---[ \t]*\n/
+const WARNINGS = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
+const REF = /@(file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)/g
+const PASTE = /(?:^|[\\/])pasted_content_[\w-]+\.txt$/
+
+function refLabel(raw) {
+  const kind = raw.slice(1, raw.indexOf(':'))
+  const target = raw.slice(raw.indexOf(':') + 1).replace(/^(["'`])(.*)\1$/, '$2')
+  if (kind === 'file' && PASTE.test(target)) return 'Pasted text'
+  return target.split(/[\\/]/).filter(Boolean).pop() || target
+}
+
+function authored(text) {
+  text = String(text || '')
+  const cut = text.match(ATTACHED)
+  let words = (cut ? text.slice(0, cut.index) : text).replace(WARNINGS, '')
+  const attached = cut ? text.slice(cut.index + cut[0].length) : ''
+  const refs = [...new Set([...words.matchAll(REF), ...attached.matchAll(REF)].map(m => m[0]))]
+  // Each attached file starts "<mark> <reference> (<n> tokens)" on a line of its own.
+  const starts = refs.map(raw => {
+    let at = -1, from = 0
+    while ((at = attached.indexOf(' ' + raw + ' (', from)) !== -1) {
+      const line = attached.lastIndexOf('\n', at) + 1
+      if (!/\s/.test(attached.slice(line, at))) return { raw, at: line }
+      from = at + 1
+    }
+    return { raw, at: -1 }
+  })
+  const found = starts.filter(x => x.at !== -1).sort((a, b) => a.at - b.at)
+  const files = refs.map(raw => {
+    const k = found.findIndex(x => x.raw === raw)
+    let body = '', tokens = null
+    if (k !== -1) {
+      const block = attached.slice(found[k].at, k + 1 < found.length ? found[k + 1].at : undefined).trim()
+      const nl = block.indexOf('\n')
+      const head = nl === -1 ? block : block.slice(0, nl)
+      const n = head.match(/\((\d+) tokens\)$/)
+      tokens = n ? Number(n[1]) : null
+      body = (nl === -1 ? '' : block.slice(nl + 1)).replace(/^(`{3,})[^\n]*\n([\s\S]*?)\n\1\s*$/, '$2')
+    }
+    return { raw, label: refLabel(raw), tokens, body }
+  })
+  if (cut || refs.length) for (const raw of refs) words = words.split(raw).join('')
+  return { words: words.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(), files }
+}
+
+// A chat's name: Hermes's title, else its first message, as Hermes Desktop names
+// an untitled chat (chat-runtime.ts sessionTitle). The connector sends `first`
+// only for a chat with no title.
+function chatName(c) {
+  return (c && (c.title || (c.first && preview(c.first, 80)))) || 'Untitled chat'
+}
+
+// One line for a list: the words, else what was attached.
+// A list line is plain words. Markdown's marks are for a message shown whole; in a line cut short they
+// show as stray stars and backticks. So a line drops them, then is cut at the last whole word, with "…".
+// The core cuts what it sends longer than any line here (200 and 120), so this cut is the one shown.
+function plain(text) {
+  return String(text || '')
+    .replace(/^[ \t]*(```|~~~).*$/gm, '')                                  // code fences
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/gm, '') // a table's rule
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')                              // an image: its words
+    .replace(/\[([^\]]+)\]\((?:[^()]|\([^)]*\))*\)/g, '$1')                // a link: its words
+    .replace(/<(https?:[^>\s]+)>/g, '$1')
+    .replace(/^[ \t]{0,3}(#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+\[[ xX]\][ \t]+|[-*+][ \t]+|\d{1,9}[.)][ \t]+)/gm, '') // heading, quote, list
+    .replace(/^[ \t]{0,3}([-*_][ \t]*){3,}$/gm, '')                         // a rule
+    .replace(/\*\*|__|~~|`+/g, '')                                          // bold, strike, code
+    .replace(/(^|[\s(\[])[*_](?=\S)([^*_\n]*?\S)[*_](?=$|[\s).,!?:;\]])/gm, '$1$2') // italics
+    .replace(/^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$/gm, '')                       // a table row's outer bars
+    .replace(/[ \t]*\|[ \t]*/g, ' · ')                                     // and the bars between its cells
+}
+
+function clip(line, n) {
+  if (line.length <= n) return line
+  const cut = line.slice(0, n)
+  const at = cut.search(/\s\S*$/)
+  return (at > n / 2 ? cut.slice(0, at) : cut).replace(/[\s.,;:!?·–-]+$/, '') + '…'
+}
+
+function preview(text, n = 120) {
+  const a = authored(text)
+  const line = plain(a.words).replace(/\s+/g, ' ').trim() || a.files.map(f => f.label).join(', ')
+  return clip(line, n)
+}
+
+function fileChips(files) {
+  return files.map(f => {
+    const what = f.tokens ? `${f.label} · ${f.tokens.toLocaleString()} tokens` : f.label
+    return f.body
+      ? el('details', { class: 'att' }, el('summary', {}, what), el('pre', {}, f.body))
+      : el('div', { class: 'att' }, el('span', {}, what))
+  })
+}
+
 function clock(iso) {
   const d = new Date(iso)
   return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -773,7 +1126,10 @@ function dayWords(d) {
     year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' })
 }
 
-// Each item: { mine, who, at, text, mid, status, note, warn }.
+// Each item: { mine, who, agent, at, text, mid, status, note, warn, reactions, react, noReact }.
+// reactions: [{ emoji, by: 'patrick' or 'hermes', pending }], and agent names who 'hermes' is
+// (a Bot). react(emoji or null) sets Patrick's reaction; without it, noReact says why a message
+// here takes none.
 function bubbles(items) {
   const out = []
   let day = null, last = null
@@ -788,35 +1144,134 @@ function bubbles(items) {
     const attrs = { class: 'msg ' + (m.mine ? 'mine' : 'theirs') }
     if (m.mid !== undefined && m.mid !== null) attrs['data-mid'] = String(m.mid)
     if (m.status) attrs['data-status'] = m.status
+    // A reply starts with Hermes's own reply pointer; the quote shows above what he wrote, and his own
+    // words show with a chip for each file Hermes attached to them.
+    const ptr = m.mine ? String(m.text || '').match(POINTER) : null
+    const own = m.mine ? authored(ptr ? m.text.slice(ptr[0].length) : m.text) : null
+    const bub = el('div', { class: 'bub' },
+      ptr ? el('div', { class: 'quote' },
+        el('div', { class: 'qwho' }, ptr[1] ? 'Replying to ' + (m.agent || m.who || 'Hermes') : 'Replying to your message'),
+        el('div', { class: 'qtext' }, ptr[2])) : null,
+      own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
+    if (ptr && m.replyTo) replyLink(bub, m.replyTo)
+    if (m.mid !== undefined && m.mid !== null && !m.status) {
+      // Tapping a message (not a link or a button in it, and not while selecting text) opens its actions.
+      bub.tabIndex = 0
+      bub.title = 'Tap for reactions and copy'
+      bub.addEventListener('click', e => {
+        if (e.target.closest('a, button') || String(getSelection())) return
+        messageSheet(m)
+      })
+      bub.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === bub) messageSheet(m) })
+    }
+    const reacts = (m.reactions || []).map(r => {
+      const mineR = r.by === 'patrick'
+      const label = (mineR ? 'Your reaction ' : `${m.mine ? (m.agent || 'Hermes') : m.who}'s reaction `) + r.emoji +
+        (r.pending ? ', being set' : '')
+      return mineR && m.react
+        ? el('button', { type: 'button', class: 'react me' + (r.pending ? ' pending' : ''),
+            'aria-label': label + ', tap to take it off', onclick: () => m.react(null) }, r.emoji)
+        : el('span', { class: 'react' + (mineR ? ' me' : '') + (r.pending ? ' pending' : ''), role: 'img',
+            'aria-label': label }, r.emoji)
+    })
     out.push(el('div', attrs,
-      !m.mine && (last === null || by !== last.by) ? el('div', { class: 'who' }, m.who) : null,
-      el('div', { class: 'bub' }, markdown(m.text)),
+      !m.mine && (last === null || by !== last.by) ? el('div', { class: 'who a-' + (AGENT_BY_NAME[m.who] || 'room') }, m.who) : null,
+      bub,
+      reacts.length ? el('div', { class: 'reacts' }, reacts) : null,
       el('div', { class: 'meta' + (m.warn ? ' warn' : '') }, [clock(m.at), m.note].filter(Boolean).join(' · '))))
     last = { by }
   }
   return out
 }
 
-function svgIcon(path) {
-  const ns = 'http://www.w3.org/2000/svg'
-  const svg = document.createElementNS(ns, 'svg')
-  svg.setAttribute('viewBox', '0 0 24 24')
-  svg.setAttribute('width', '20')
-  svg.setAttribute('height', '20')
-  svg.setAttribute('aria-hidden', 'true')
-  const p = document.createElementNS(ns, 'path')
-  p.setAttribute('d', path)
-  p.setAttribute('fill', 'currentColor')
-  svg.append(p)
-  return svg
+// Hermes's own reply pointer, the line its gateway puts at the top of a message that replies to another
+// (contracts.json "replies"). A reply from the phone opens with it too (reply style A), so it shows as
+// the quote it is, from his own messages only.
+const POINTER = /^\[Replying to( your previous message)?: "([\s\S]*?)"\]\n\n/
+
+// The core keeps which message a reply answers, so its quote goes back to that message, or says where
+// it is when it is not loaded yet.
+function replyLink(bub, mid) {
+  const q = bub.querySelector('.quote')
+  if (!q) return
+  q.classList.add('linked')
+  q.tabIndex = 0
+  q.setAttribute('role', 'button')
+  q.setAttribute('aria-label', 'Go to the message this answers')
+  const note = el('div', { class: 'meta', role: 'status' })
+  const go = e => {
+    e.stopPropagation()
+    const n = document.querySelector(`#view .msg[data-mid="${CSS.escape(String(mid))}"]`)
+    if (!n) { note.textContent = 'That message is further up. Older messages, at the top, loads it.'; q.after(note); return }
+    note.remove()
+    n.scrollIntoView({ block: 'center' })
+    n.classList.remove('flash')
+    void n.offsetWidth
+    n.classList.add('flash')
+  }
+  q.addEventListener('click', go)
+  q.addEventListener('keydown', e => { if (e.key === 'Enter') go(e) })
+}
+
+// The words a reply quotes: the whole message, as Hermes quotes it (a preview would lose the rest of a
+// list or code), without the pointer it opened with, cut at the core's 2000 characters.
+function quoteOf(text) {
+  const t = String(text || '')
+  const body = t.replace(POINTER, '').trim() || t.trim()
+  return body.length <= 2000 ? body : body.slice(0, 1997) + '...'
+}
+
+// The reactions the phone offers; the core takes only these (own.py REACTIONS).
+const REACTIONS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F64F}', '\u2705', '\u{1F440}']
+
+function closeSheet() {
+  const old = document.querySelector('.sheet-back')
+  if (old) old.remove()
+}
+
+// A message's actions: a reaction (Hermes keeps one per person, so a new one
+// replaces yours and the same one again takes it off), and Copy text.
+function messageSheet(m) {
+  closeSheet()
+  const mineNow = ((m.reactions || []).find(r => r.by === 'patrick') || {}).emoji || null
+  const note = el('p', { class: 'quiet', role: 'status' })
+  const choose = emoji => { closeSheet(); m.react(emoji) }
+  const copy = el('button', { class: 'secondary', type: 'button', onclick: async () => {
+    try {
+      // His own message copies what he wrote (an attached paste's text when that is all), never Hermes's attachment block.
+      const a = m.mine ? authored(m.text) : null
+      await navigator.clipboard.writeText(a ? (a.words || a.files.map(f => f.body).join('\n\n')) : m.text)
+      note.textContent = 'Copied.'
+    } catch (e) {
+      note.textContent = 'This view does not allow copying. Press and hold the message text to copy it.'
+    }
+  } }, 'Copy text')
+  const back = el('div', { class: 'sheet-back' },
+    el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Message actions' },
+      m.react
+        ? el('div', { class: 'emoji-row' }, REACTIONS.map(e => el('button', { type: 'button', 'aria-label': 'React ' + e,
+            'aria-pressed': String(mineNow === e), onclick: () => choose(mineNow === e ? null : e) }, e)))
+        : el('p', { class: 'quiet' }, m.noReact || 'This message takes no reaction.'),
+      m.react && mineNow ? el('button', { class: 'secondary', type: 'button', onclick: () => choose(null) },
+        'Take my reaction off') : null,
+      m.reply ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); m.reply() } }, 'Reply') : null,
+      copy,
+      el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'),
+      note))
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  const first = back.querySelector('button')
+  if (first) first.focus()
 }
 
 // The bar on top of a chat: back, then the chat's name and where it lives.
-function chatBar(back, backLabel, title, under) {
-  return el('div', { class: 'chatbar' },
-    el('button', { class: 'back', type: 'button', 'aria-label': backLabel, onclick: back },
-      svgIcon('M15.4 4.6 14 3.2 5.2 12l8.8 8.8 1.4-1.4L8 12z')),
-    el('div', { class: 'title' }, el('strong', {}, title), el('span', {}, under)))
+// More, when given, opens the chat's own actions.
+function chatBar(back, backLabel, title, under, agent, label, more) {
+  const bar = screenBar({ back, backLabel, agent, label, title, under,
+    right: more ? el('button', { class: 'ib', type: 'button', 'aria-label': 'Chat actions', onclick: more }, icon('more')) : null })
+  bar.classList.add('chatbar')
+  return bar
 }
 
 // The box at the foot of a chat. It grows with what is typed, up to six
@@ -824,6 +1279,16 @@ function chatBar(back, backLabel, title, under) {
 // chat redraws. Enter is a new line; the button sends.
 function chatComposer(key, label, buttonLabel, send, status, gw) {
   const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
+  // A reply being written shows the words it quotes, which open the message as sent.
+  const replying = draft.reply ? el('div', { class: 'replying' },
+    el('div', { class: 'rq' },
+      el('strong', {}, 'Replying to ' + draft.reply.who),
+      el('div', { class: 'qtext' }, draft.reply.quote)),
+    el('button', { class: 'back', type: 'button', 'aria-label': 'Cancel the reply', onclick: () => {
+      draft.reply = null
+      draft.key = newKey()
+      route()
+    } }, icon('x'))) : null
   const box = el('textarea', { rows: '1', 'aria-label': label, placeholder: label, enterkeyhint: 'enter' })
   box.value = draft.text
   const fit = () => { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight + 2, 160) + 'px' }
@@ -837,7 +1302,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
     if (!text) { status.textContent = 'Type a message first.'; return }
     status.textContent = 'Sending...'
     button.disabled = true
-    const s = await send(text, draft.key)
+    const s = await send(text, draft.key, draft.reply)
     button.disabled = false
     if (s.status === 200) { drafts[key] = null; chatPlace.toEnd = true; return route() }
     if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
@@ -845,46 +1310,75 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
     status.textContent = s.status === 0
       ? 'Could not reach the core. Sending again sends the same message, never a second one.'
       : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
-  } }, svgIcon('M3.4 20.4 21 12 3.4 3.6 3.4 10.1 15 12 3.4 13.9z'))
-  return el('div', { class: 'composer' }, box, button)
+  } }, icon('send'))
+  return [replying, el('div', { class: 'composer' }, box, button)]
 }
 
 // Where a chat is scrolled. Opening a chat, or sending, goes to the newest
-// message. A redraw while Patrick reads further up keeps his place and says
-// how many came in below. Older messages keep the one he was looking at.
-const chatPlace = { key: null, seen: null, toEnd: false, keep: null }
+// message. A redraw while Patrick reads further up keeps his place, and the
+// button over the box takes him to the newest message, saying how many came in
+// below. Older messages keep the one he was looking at.
+//
+// Opening is a new page (a tap that goes somewhere, or Back), never "a chat
+// other than the last one drawn": he once left a chat for the list and came
+// back to the same chat, which was not "opening" by that test, so it kept the
+// list's place, at the top (2 Nov).
+const chatPlace = { key: null, seen: null, toEnd: false, keep: null, fresh: 0, last: null }
+let newPage = true    // the next route() draws a page Patrick went to, not a redraw of the one he is on
+let pageTop = false   // the next show() starts the page at its top
 
 function nearEnd() {
   return innerHeight + scrollY >= document.documentElement.scrollHeight - 120
+}
+
+function toNewest() {
+  chatPlace.fresh = 0
+  chatPlace.seen = chatPlace.last
+  scrollTo({ top: document.documentElement.scrollHeight })
+  placeJump()
+}
+
+// The button over the box: there whenever the newest message is out of sight.
+function placeJump() {
+  const jump = document.querySelector('#view .chat .jump')
+  if (!jump) return
+  if (nearEnd()) {
+    chatPlace.fresh = 0
+    chatPlace.seen = chatPlace.last
+  }
+  jump.hidden = nearEnd()
+  const n = chatPlace.fresh
+  jump.replaceChildren(icon('down', 16), n ? (n === 1 ? '1 new message' : `${n} new messages`) : 'Newest')
+  jump.setAttribute('aria-label', n ? `Go to the newest message, ${n} new` : 'Go to the newest message')
 }
 
 function showChat(key, top, list, dock, items) {
   const opening = chatPlace.key !== key
   const wasNearEnd = !opening && nearEnd()
   const mids = items.map(m => String(m.mid))
-  let fresh = 0
-  if (!opening && !wasNearEnd && !chatPlace.toEnd && chatPlace.seen !== null) {
-    const at = mids.lastIndexOf(chatPlace.seen)
-    fresh = at === -1 ? 0 : mids.length - 1 - at
-  }
   const toEnd = opening || wasNearEnd || chatPlace.toEnd
+  if (toEnd) {
+    chatPlace.fresh = 0
+  } else if (chatPlace.seen !== null) {
+    const at = mids.lastIndexOf(chatPlace.seen)
+    chatPlace.fresh = at === -1 ? 0 : mids.length - 1 - at
+  }
   const keep = chatPlace.keep
-  const row = fresh ? el('button', { class: 'newrow', type: 'button', onclick: () => {
-    row.remove()
-    chatPlace.seen = mids[mids.length - 1] ?? null
-    scrollTo({ top: document.documentElement.scrollHeight })
-  } }, fresh === 1 ? '1 new message' : `${fresh} new messages`) : null
-  show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), el('div', { class: 'dock' }, row, dock)))
+  const jump = el('button', { class: 'jump', type: 'button', onclick: toNewest })
+  jump.hidden = true
+  show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), el('div', { class: 'dock' }, jump, dock)))
   chatPlace.key = key
   chatPlace.toEnd = false
   chatPlace.keep = null
-  if (toEnd) chatPlace.seen = mids[mids.length - 1] ?? null
+  chatPlace.last = mids[mids.length - 1] ?? null
+  if (toEnd) chatPlace.seen = chatPlace.last
   if (keep) {
     const n = document.querySelector(`#view .msg[data-mid="${CSS.escape(keep)}"]`)
     if (n) n.scrollIntoView({ block: 'start' })
   } else if (toEnd) {
     scrollTo({ top: document.documentElement.scrollHeight })
   }
+  placeJump()
 }
 
 // ── full history of his own chats (step 2, plan Part 4) ────────────────────
@@ -897,6 +1391,48 @@ let viewSeq = 0          // each view, from route() and each chat render; a page
 const pickers = {}       // gw -> { q, results, more, extra }
 const threads = {}       // gw:sid -> { newest, older, olderMore, note }
 
+// The phone's copy of each chat it has shown, so a chat opens at once from it and
+// the page from Hermes then brings it up to date. Patrick, 2 Nov: every open asked
+// One again and showed nothing until One answered, because the app kept what it
+// fetched only while it stayed open, and Android closes it. The copy is this
+// browser's own storage for this app, the newest KEPT_MESSAGES of the KEPT_CHATS
+// chats opened last; signing out deletes it.
+const KEPT = 'hermes.kept.v1'
+const KEPT_CHATS = 30
+const KEPT_MESSAGES = 150
+
+function keptAll() {
+  try { return JSON.parse(localStorage.getItem(KEPT) || '{}') || {} } catch (e) { return {} }
+}
+
+// A thread as threads[] holds it, from the phone's copy, or null.
+function kept(key) {
+  const k = keptAll()[key]
+  return k && k.newest ? { newest: k.newest, older: k.older || [], olderMore: !!k.olderMore, note: '', error: null } : null
+}
+
+function keepThread(key, t) {
+  if (!t.newest || t.newest.gone) return
+  const all = keptAll()
+  const shown = (t.newest.messages || t.newest.events || []).length
+  const room = Math.max(KEPT_MESSAGES - shown, 0)
+  const older = t.older.slice(Math.max(t.older.length - room, 0))
+  all[key] = { at: Date.now(), newest: t.newest, older, olderMore: older.length < t.older.length || t.olderMore }
+  for (const k of Object.keys(all).sort((a, b) => all[b].at - all[a].at).slice(KEPT_CHATS)) delete all[k]
+  // Full storage drops the chats opened longest ago until it fits.
+  for (;;) {
+    try { localStorage.setItem(KEPT, JSON.stringify(all)); return } catch (e) {
+      const oldest = Object.keys(all).sort((a, b) => all[a].at - all[b].at)
+      if (oldest.length <= 1) return
+      delete all[oldest[0]]
+    }
+  }
+}
+
+function forgetKept() {
+  try { localStorage.removeItem(KEPT) } catch (e) {}
+}
+
 async function ownPage(path) {
   const sep = path.includes('?') ? '&' : '?'
   let r
@@ -907,11 +1443,12 @@ async function ownPage(path) {
   return r
 }
 
-function chatRow(gw, c) {
-  return el('button', { class: 'row', type: 'button', 'data-chat': c.id, onclick: () => go(`/m/hermes/${gw}/${c.id}`) },
-    el('strong', {}, c.title || 'Untitled chat'),
-    el('span', { class: 'quiet' }, '  ' + when(c.last_at)),
-    el('div', { class: 'quiet' }, c.preview.slice(0, 120)))
+function chatRow(gw, c, ops) {
+  const o = ops ? lastOp(ops, c.id) : null
+  return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
+    title: chatName(c), tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
+    lines: [el('span', { class: 'quiet' }, preview(c.preview)), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
+    right: at(c.last_at) || when(c.last_at) })
 }
 
 async function gatewayView(gw) {
@@ -924,7 +1461,8 @@ async function gatewayView(gw) {
   const pick = pickers[gw] || (pickers[gw] = { q: '', results: null, more: false, extra: [] })
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
-    el('h2', {}, name),
+    screenBar({ back: () => go('/m/bots'), backLabel: 'All Thornswood Bots', agent: gw, title: name, heading: true,
+      under: GATEWAY_WHAT[gw], right: gatewayLine(v) }),
     el('p', { class: 'quiet' }, `Your chats, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
     offLine(v)
   ]
@@ -977,18 +1515,23 @@ async function gatewayView(gw) {
     searching ? el('button', { class: 'secondary', type: 'button', onclick: () => {
       pick.q = ''; pick.results = null; pick.extra = []; route()
     } }, 'Show every chat') : null,
-    shown.length ? shown.map(c => chatRow(gw, c)) : el('p', { class: 'quiet' }, searching ? 'No chat has that in its title.' : 'No chats yet.'),
+    shown.length ? shown.map(c => chatRow(gw, c, v.ops)) : el('p', { class: 'quiet' }, searching ? 'No chat has that in its title.' : 'No chats yet.'),
     hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(shown[shown.length - 1].last_at) }, 'Older chats') : null,
-    note)
+    note,
+    el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats'))
   if (seqNow === viewSeq) show(parts)
 }
 
 // What Hermes holds of one of his own chats: notes to show above it, its
 // messages as bubbles, and the Older messages button when there are more.
-function historyPart(gw, sid, t, name) {
+function historyPart(gw, sid, t, name, feed) {
   if (t.error) return { notes: [el('p', { class: 'warn' }, t.error)], items: [], gone: false }
   if (!t.newest) {
-    return { notes: [el('p', { class: 'quiet' }, `Asking ${name} for this chat. It shows here within half a minute.`)], items: [], gone: false }
+    // Before the first page: the last messages the connector's feed sent, when it sent this chat's.
+    const items = (feed || []).map((m, k) => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: 'feed' + k,
+      noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from ' + name + '.' }))
+    return { notes: [el('p', { class: 'quiet' }, items.length ? `Asking ${name} for the rest of this chat.`
+      : `Asking ${name} for this chat. It shows here within half a minute.`)], items, gone: false }
   }
   if (t.newest.gone) {
     return { notes: [el('p', { class: 'warn' }, `This chat is gone from ${name}. Nothing sent here would reach it.`)], items: [], gone: true }
@@ -1009,11 +1552,13 @@ function historyPart(gw, sid, t, name) {
       }
       t.older = p.body.messages.concat(t.older)
       t.olderMore = p.body.more
+      keepThread(`own:${gw}:${sid}`, t)
       chatPlace.keep = String(msgs[0].mid)
       route()
     } }, 'Older messages'), olderNote)
   }
-  const items = msgs.map(m => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid }))
+  const items = msgs.map(m => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid,
+    reactions: m.reactions || [] }))
   if (!items.length) notes.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
   return { notes, items, gone: false }
 }
@@ -1021,39 +1566,109 @@ function historyPart(gw, sid, t, name) {
 // What Patrick sent from the phone, until the chat itself shows it.
 function pendingItems(mine, readAt) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
-    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status,
-      note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''),
+    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to,
+      note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
+        + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
       warn: m.status === 'dead' || m.status === 'uncertain' }))
+}
+
+// Patrick's reaction on one message, through the chat's own route (path, with what names the chat).
+async function reactTo(path, chat, mid, emoji, status) {
+  status.textContent = emoji ? 'Setting your reaction...' : 'Taking your reaction off...'
+  const r = await call('POST', path, { ...chat, message_id: mid, emoji })
+  if (r.status === 200) { status.textContent = ''; return route() }
+  if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+  const d = r.body.detail || {}
+  const gw = (path.match(/^\/own\/(me|one)\//) || [])[1]
+  status.textContent = r.status === 0 ? 'Could not reach the core. Nothing changed.'
+    : (d.state && gw ? stateWords({ gateway: gw, ...d })[1] : said(r.body))
+}
+
+// Puts Patrick's wishes (the core's rows) over the reactions a page of Hermes's shows: what he asked
+// for shows at once, and Hermes's own copy takes over once a page asked for after it was set shows
+// it. One asked for in the same instant may not hold it, so the wish stays. react(mid, emoji) sets
+// one; without it, noReact says why not.
+function withReactions(items, rows, pageAt, react, noReact) {
+  const wishes = new Map((rows || []).map(w => [w.message_id, w]))
+  for (const item of items) {
+    // A message from the feed's copy has no Hermes id yet: it says so, and takes no reaction.
+    if (String(item.mid).startsWith('feed')) { item.react = null; continue }
+    let shown = item.reactions || []
+    const w = wishes.get(item.mid)
+    if (w && (w.status === 'queued' || w.status === 'leased' || (w.status === 'set' && (!pageAt || new Date(w.updated_at) >= pageAt)))) {
+      shown = shown.filter(r => r.by !== 'patrick')
+      if (w.emoji) shown.push({ emoji: w.emoji, by: 'patrick', pending: w.status !== 'set' })
+    }
+    if (w && w.status === 'failed') { item.note = 'Your reaction was not set: ' + (w.reason || 'no reason given'); item.warn = true }
+    item.reactions = shown
+    item.react = react ? emoji => react(item.mid, emoji) : null
+    item.noReact = noReact
+  }
 }
 
 async function ownChatView(gw, sid) {
   setTab('bots')
   const seqNow = ++viewSeq
   const key = `${gw}:${sid}`
-  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false, note: '', error: null })
+  const t = threads[key] || (threads[key] = kept('own:' + key) || { newest: null, older: [], olderMore: false, note: '', error: null })
   const r = await call('GET', `/own/${gw}/${encodeURIComponent(sid)}`)
   if (refused(r)) return
   const v = r.body
   const name = GATEWAY[gw]
   const status = el('p', { class: 'warn', role: 'status' })
   function render() {
-    // The phone's copy of what Patrick sent gives way to Hermes's copy once Hermes holds it.
-    const readAt = t.newest && t.newest.read_at ? new Date(t.newest.read_at) : (v.as_of ? new Date(v.as_of) : null)
-    const h = historyPart(gw, sid, t, name)
-    const items = h.items.concat(pendingItems(v.mine, readAt))
+    // The phone's copy of what Patrick sent gives way to Hermes's copy once Hermes holds it. Both
+    // times are the core's: handed_at is when it asked for the page, and Hermes was read after that.
+    const pageAt = t.newest && t.newest.handed_at ? new Date(t.newest.handed_at) : null
+    const readAt = pageAt || (v.as_of ? new Date(v.as_of) : null)
+    const h = historyPart(gw, sid, t, name, v.history)
+    const canReact = v.can_send && v.online && !h.gone && !t.error
+    withReactions(h.items, v.reactions, pageAt, canReact ? (mid, emoji) => reactTo(`/own/${gw}/react`, { session_id: sid }, mid, emoji, status) : null,
+      `${name} is not answering, so a reaction cannot be set now.`)
+    // Reply style A: Hermes's own copy of a reply he sent shows its link back, from the core's record of
+    // exactly what was sent (Hermes has no reply link of its own).
+    const links = v.mine.filter(m => m.reply_to && m.status === 'sent').map(m => ({ text: m.text.trim(), to: m.reply_to }))
+    for (const it of h.items) {
+      if (!it.mine) continue
+      const k = links.findIndex(l => l.text === String(it.text).trim())
+      if (k >= 0) { it.replyTo = links[k].to; links.splice(k, 1) }
+    }
+    const draftKey = `own:${gw}:${sid}`
+    for (const it of h.items) {
+      it.reply = canReact ? () => {
+        const d = drafts[draftKey] || (drafts[draftKey] = { text: '', key: newKey() })
+        d.reply = { mid: it.mid, quote: quoteOf(it.text), who: it.mine ? 'yourself' : name, by: it.mine ? 'patrick' : 'hermes' }
+        d.key = newKey()
+        route().then(() => { const b = document.querySelector('#view .composer textarea'); if (b) b.focus() })
+      } : null
+    }
+    const items = h.items.concat(pendingItems(v.mine, readAt).map(m => ({ ...m, who: name })))
+    // A rename, hide or delete asked for here: how it stands, and once a hide or a delete is done, so it says.
+    const o = lastOp(v.ops, sid)
+    const ended = o && o.status === 'done' && (o.op === 'delete' || o.op === 'archive') ? o.op : null
+    // His Bot Chat is kept as it is, so it offers no Rename, Hide or Delete (the core refuses them too).
+    const manage = v.can_manage && v.online && !h.gone && !t.error && !ended && !(o && inFlight(o)) && !v.chat.bot_chat
     const top = [
-      chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, v.chat.title || 'Untitled chat',
-        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`),
+      chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
+        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`, gw, name,
+        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null),
+      ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
+      ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
+        el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats')) : null,
+      opLine(o, name),
       h.notes,
       offLine(v)
     ]
     const dock = []
-    if (v.can_send && v.online && !h.gone && !t.error) {
+    if (ended) {
+      // Nothing sent here would reach a chat that is gone or hidden.
+    } else if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
-        dock.push(signInPart(v, status, true), chatComposer(`own:${gw}:${sid}`, 'Message to ' + name, 'Send to ' + name,
-          (text, k) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k }), status, gw), status)
+        dock.push(signInPart(v, status), chatComposer(draftKey, 'Message to ' + name, 'Send to ' + name,
+          (text, k, reply) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
+            ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}) }), status, gw), status)
       } else {
-        dock.push(signInPart(v, status, true), status)
+        dock.push(signInPart(v, status), status)
       }
     } else if (!v.can_send) {
       dock.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
@@ -1078,7 +1693,178 @@ async function ownChatView(gw, sid) {
   }
   t.newest = p.body
   t.error = null
+  keepThread('own:' + key, t)
   render()
+}
+
+// ── renaming, hiding and deleting his own chats (redesign step 3) ─────────
+//
+// Each is a request the core keeps and that gateway's own connector does with
+// Hermes's own calls: a rename as `hermes sessions rename` does it, hiding and
+// bringing back as Hermes's archive (the whole chat, every message kept), and a
+// delete as `hermes sessions delete`, which Hermes refuses while a turn runs.
+// Only Hermes and One have them, never a Bot Chat or a room.
+
+const OP_WORDS = {
+  rename: ['Renaming', 'Not renamed'],
+  archive: ['Hiding this chat', 'Not hidden'],
+  unarchive: ['Bringing it back', 'Not brought back'],
+  delete: ['Deleting this chat', 'Not deleted']
+}
+
+function inFlight(o) { return o.status === 'queued' || o.status === 'leased' }
+
+// The newest request of one chat, from the core's rows (oldest first).
+function lastOp(ops, sid) {
+  for (let i = ops.length - 1; i >= 0; i--) if (ops[i].session_id === sid) return ops[i]
+  return null
+}
+
+// How the newest request of a chat stands, while it is waiting or after it failed.
+function opLine(o, name) {
+  if (!o) return null
+  const [doing, failed] = OP_WORDS[o.op]
+  if (inFlight(o)) {
+    return el('p', { class: 'receipt', role: 'status', 'data-op': o.op },
+      `${doing}${o.op === 'rename' ? ` to "${o.title}"` : ''}. ${name} does it the next time it checks in.`)
+  }
+  if (o.status === 'failed') return el('p', { class: 'warn', role: 'status', 'data-op': o.op }, `${failed}: ${o.reason || 'no reason given'}`)
+  return null
+}
+
+// One request to the core. The same request again (after no answer) carries the
+// same key, so it is one request, never a second.
+async function askSession(gw, sid, op, title, keys, note) {
+  const k = op + '\n' + (title || '')
+  keys[k] = keys[k] || newKey()
+  note.textContent = 'Asking...'
+  const r = await call('POST', `/own/${gw}/session`, { session_id: sid, op, title: op === 'rename' ? title : null,
+    idempotency_key: keys[k] })
+  if (r.status === 200) { closeSheet(); return r }
+  if (r.status === 401) { csrf = null; closeSheet(); signInView(said(r.body)); return r }
+  const d = r.body.detail || {}
+  note.textContent = r.status === 0
+    ? 'Could not reach the core. Asking again sends the same request, never a second one.'
+    : (d.state ? stateWords({ gateway: gw, ...d })[1] : (r.body.message || said(r.body)))
+  return r
+}
+
+// What deleting removes, in Hermes's own terms (contracts.json "sessions").
+function deleteWords(title, name) {
+  return [
+    el('p', {}, el('strong', {}, `Delete "${title || 'Untitled chat'}" for good?`)),
+    el('p', {}, `This deletes the chat from ${name} for good: all its messages, the earlier parts Hermes ` +
+      'compressed it from, and the side tasks Hermes ran for it. It cannot be undone.'),
+    el('p', { class: 'quiet' }, 'Nothing else changes: no other chat, no Bot and no room. A chat branched off ' +
+      'this one is kept. What you sent from the phone stays in the core\'s record. If a turn is still running ' +
+      `in it, ${name} refuses and nothing is deleted.`)
+  ]
+}
+
+// The chat's actions: Rename, Hide and Delete for good, in a sheet like a message's.
+function chatSheet(gw, sid, title, v) {
+  closeSheet()
+  const name = GATEWAY[gw]
+  const keys = {}
+  const note = el('p', { class: 'warn', role: 'status' })
+  const sheet = el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Chat actions' })
+  const back = el('div', { class: 'sheet-back' }, sheet)
+  const fill = (...nodes) => { sheet.replaceChildren(...nodes.flat().filter(n => n)); const f = sheet.querySelector('input, button'); if (f) f.focus() }
+  const done = () => route()
+  const box = el('input', { type: 'text', maxlength: '100', autocomplete: 'off', 'aria-label': 'New title' })
+  box.value = title || ''
+  // A delete needs a passkey sign-in from the last 30 minutes: without one, its prompt opens by itself.
+  let signed = !!v.sign_in_until
+  async function remove() {
+    if (!signed) {
+      const s = await passkeySignIn()
+      if (s.status !== 200) { note.textContent = said(s.body); return }
+      signed = true
+    }
+    const r = await askSession(gw, sid, 'delete', null, keys, note)
+    if (r.status === 200) return done()
+    if (r.status === 403 && r.body.error === 'passkey_needed') signed = false
+  }
+  function confirmDelete() {
+    fill(deleteWords(title, name),
+      signed ? null : el('p', { class: 'quiet' }, `Deleting needs your ${signInWord()}. Its prompt opens when you press Delete for good.`),
+      el('button', { class: 'danger', type: 'button', 'data-confirm': 'delete', onclick: remove }, 'Delete for good'),
+      el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Keep it'),
+      note)
+  }
+  fill(el('p', {}, el('strong', {}, 'This chat on ' + name)),
+    el('div', { class: 'search' }, box, el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      if (!box.value.trim()) { note.textContent = 'Type a title first.'; return }
+      if (box.value.trim() === (title || '')) { note.textContent = 'That is its title already.'; return }
+      const r = await askSession(gw, sid, 'rename', box.value.trim(), keys, note)
+      if (r.status === 200) done()
+    } }, 'Rename')),
+    el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      const r = await askSession(gw, sid, 'archive', null, keys, note)
+      if (r.status === 200) done()
+    } }, 'Hide this chat'),
+    el('p', { class: 'quiet' }, `Hiding takes it off ${name}'s chat list and keeps every message. Hidden chats, on ${name}'s page, brings it back.`),
+    el('button', { class: 'danger-quiet', type: 'button', onclick: confirmDelete }, 'Delete for good...'),
+    el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'),
+    note)
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  box.focus()
+}
+
+// The chats Hermes hides (archived), newest first, each with Bring back. Never in the chat list.
+async function hiddenView(gw) {
+  setTab('bots')
+  const seqNow = ++viewSeq
+  const r = await call('GET', '/own/' + gw)
+  if (refused(r)) return
+  const v = r.body
+  const name = GATEWAY[gw]
+  const note = el('p', { class: 'warn', role: 'status' })
+  const head = [
+    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', `${name}, ${GATEWAY_WHAT[gw]}`, gw, name),
+    el('p', { class: 'quiet' }, `The chats you hid on ${name}, with every message kept. Bring back puts one in the chat list again.`),
+    offLine(v)
+  ]
+  show(head, el('p', { class: 'quiet' }, `Asking ${name}...`))
+  const all = []
+  async function page(before) {
+    const p = await ownPage(`/own/${gw}/chats/archived` + (before ? '?' + new URLSearchParams({ before }) : ''))
+    if (seqNow !== viewSeq) return
+    if (p.status === 401) { csrf = null; return signInView(said(p.body)) }
+    if (p.status !== 200) { note.textContent = said(p.body); return draw(false) }
+    if (p.body.pending) { note.textContent = `${name} has not answered yet. Try again in a moment.`; return draw(false) }
+    all.push(...p.body.chats)
+    draw(p.body.more)
+  }
+  function draw(more) {
+    if (seqNow !== viewSeq) return
+    const keys = {}
+    const rows = all.map(c => {
+      const o = lastOp(v.ops, c.id)
+      const line = el('p', { class: 'warn', role: 'status' })
+      return el('div', { class: 'row', 'data-chat': c.id },
+        el('div', { class: 't' },
+          el('strong', {}, chatName(c)),
+          el('span', { class: 'quiet' }, preview(c.preview)),
+          opLine(o, name),
+          line),
+        el('div', { class: 'w' },
+          el('span', {}, when(c.last_at)),
+          v.can_manage && v.online && !(o && inFlight(o))
+            ? el('button', { class: 'secondary', type: 'button', onclick: async () => {
+                const a = await askSession(gw, c.id, 'unarchive', null, keys, line)
+                if (a.status === 200) { v.ops.push(a.body); draw(more) }
+              } }, 'Bring back')
+            : null))
+    })
+    show(head, all.length ? rows : el('p', { class: 'quiet' }, 'No hidden chats.'),
+      more ? el('button', { class: 'secondary', type: 'button', onclick: () => page(all[all.length - 1].last_at) }, 'Older hidden chats') : null,
+      v.can_manage ? null : el('p', { class: 'quiet' }, said({ error: 'session_manage_off' })),
+      note)
+  }
+  await page(null)
 }
 
 async function roomsView() {
@@ -1087,11 +1873,11 @@ async function roomsView() {
   if (refused(r)) return
   const rooms = r.body.rooms || []
   show(
-    el('p', { class: 'quiet' }, `Each group chat, as of ${when(r.body.rooms_as_of) || 'nothing yet'}.`),
-    rooms.length ? rooms.map(m => el('button', { class: 'row', type: 'button', onclick: () => go('/m/rooms/' + m.room_id) },
-      el('strong', {}, m.name),
-      m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
-      el('div', { class: 'quiet' }, m.last ? `${m.last.who}: ${m.last.text.slice(0, 120)}` : 'No messages yet.')))
+    screenBar({ title: 'Rooms', heading: true, under: `Each group chat, as of ${when(r.body.rooms_as_of) || 'nothing yet'}` }),
+    rooms.length ? rooms.map(m => listRow({ onclick: () => go('/m/rooms/' + m.room_id) }, {
+      agent: null, label: m.name, title: m.name,
+      tags: m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
+      lines: el('span', { class: 'quiet' }, m.last ? `${m.last.who}: ${preview(m.last.text)}` : 'No messages yet.') }))
       : el('p', { class: 'quiet' }, 'No rooms yet.'))
 }
 
@@ -1106,13 +1892,14 @@ async function chatView(target, tab) {
   const room = v.kind === 'room'
   const name = room ? v.name : (NAMES[target] || target)
   const key = 'chat:' + v.target
-  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false, note: '', error: null })
+  const t = threads[key] || (threads[key] = kept(key) || { newest: null, older: [], olderMore: false, note: '', error: null })
   const idOf = m => room ? m.seq : m.mid
   const status = el('p', { class: 'warn', role: 'status' })
   function history() {
     if (!t.newest || t.newest.gone) {
       // Before the first page, or a Bot with no Bot Chat yet: what the feed last sent.
-      return { notes: [], items: v.history.map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at, text: m.text, mid: 'feed' + k })), keyed: false }
+      return { notes: [], items: v.history.map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at, text: m.text, mid: 'feed' + k,
+        noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from Hermes.' })), keyed: false }
     }
     const seen = new Set()
     const raw = t.older.concat(room ? t.newest.events : t.newest.messages).filter(m => !seen.has(idOf(m)) && seen.add(idOf(m)))
@@ -1129,13 +1916,20 @@ async function chatView(target, tab) {
         }
         t.older = (room ? p.body.events : p.body.messages).concat(t.older)
         t.olderMore = p.body.more
+        keepThread(key, t)
         chatPlace.keep = String(idOf(raw[0]))
         route()
       } }, 'Older messages'), olderNote)
     }
+    const noRoom = 'A room has no reactions in Hermes, so a message here takes none.'
     const items = raw.map(m => room
-      ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq }
-      : { mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid })
+      ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom }
+      : { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, reactions: m.reactions })
+    if (!room) {
+      withReactions(items, v.reactions, t.newest.handed_at ? new Date(t.newest.handed_at) : null, v.can_send
+        ? (mid, emoji) => reactTo(`/chat/${encodeURIComponent(v.target)}/react`, {}, mid, emoji, status) : null,
+        said({ error: 'chat_write_off' }))
+    }
     return { notes, items, keyed: true }
   }
   function render() {
@@ -1145,7 +1939,7 @@ async function chatView(target, tab) {
     const top = [
       chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, room
         ? `A room, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
-        : `Your Bot Chat, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+        : `Your Bot Chat, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`, room ? null : v.target, name),
       h.notes
     ]
     if (!items.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
@@ -1159,6 +1953,7 @@ async function chatView(target, tab) {
   const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages`)
   if (seqNow !== viewSeq || p.status !== 200 || p.body.pending) return
   t.newest = p.body
+  keepThread(key, t)
   // Never redrawn under someone typing; the next read shows it.
   const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
   if (!typing) render()
@@ -1355,8 +2150,24 @@ async function settingsView(note) {
   }
   const name = el('input', { autocomplete: 'off', placeholder: 'This phone', 'aria-label': 'Passkey name' })
   const alerts = await alertsPart(status)
+  // This phone's fingerprint key: kept only while the core still lists it.
+  let held = phoneKey()
+  if (held && r.status === 200 && !r.body.passkeys.some(k => k.id === held.passkey_id)) { forgetPhoneKey(); held = null }
+  const finger = held
+    ? [el('p', { class: 'quiet' }, 'On. This phone signs in and answers high-risk cards with your fingerprint.')]
+    : (await canUseFingerprint())
+      ? [el('p', { class: 'quiet' }, 'Sign in with your fingerprint right here instead of going out to your passkey app. ' +
+          'When Android asks where to save it, pick Google Password Manager.'),
+        el('button', { class: 'primary', type: 'button', onclick: async () => {
+          status.textContent = ''
+          const k = await addFingerprint()
+          if (k.ok) return settingsView('Fingerprint sign-in is on for this phone.')
+          status.textContent = k.message
+        } }, 'Use my fingerprint')]
+      : null
   show(
     el('h2', {}, 'Alerts'), alerts,
+    finger ? [el('h2', {}, 'Fingerprint'), finger] : null,
     el('h2', {}, 'Passkeys'), list, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
@@ -1378,6 +2189,7 @@ async function settingsView(note) {
     } }, 'Pair a Desktop'),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       await call('POST', '/sign-out')
+      forgetKept()
       csrf = null
       askOnOpen = false
       signInView('Signed out.')
@@ -1395,6 +2207,7 @@ function badge(n) {
 
 function go(path) {
   history.pushState(null, '', path)
+  newPage = true
   route()
 }
 
@@ -1402,6 +2215,16 @@ async function route() {
   // Every route is a new view, so a page a chat asked for and gets back after
   // Patrick left it fills nothing (it once redrew a room over the Rooms list).
   viewSeq++
+  // A page he went to starts fresh: a list at its top, a chat at its newest
+  // message (showChat). A redraw of the page he is on keeps his place.
+  if (newPage) {
+    newPage = false
+    pageTop = true
+    chatPlace.key = null
+    chatPlace.keep = null
+    chatPlace.toEnd = false
+  }
+  closeSheet()
   if (!csrf) {
     const me = await call('GET', '/me')
     if (me.status !== 200) return signInView(me.status === 0 ? said(me.body) : '')
@@ -1429,12 +2252,14 @@ async function route() {
   if (path === 'bots') return botsView()
   const own = path.match(/^hermes\/(me|one)(?:\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127}))?$/)
   if (own) return own[2] ? ownChatView(own[1], own[2]) : gatewayView(own[1])
+  const hidden = path.match(/^hidden\/(me|one)$/)
+  if (hidden) return hiddenView(hidden[1])
   if (path === 'settings') return settingsView()
   return decisionsView()
 }
 
 async function poll() {
-  if (!csrf || document.visibilityState !== 'visible' || answering) return
+  if (!csrf || document.visibilityState !== 'visible' || answering || document.querySelector('.sheet-back')) return
   const path = location.pathname
   // A chat view reads itself again, unless something is being typed.
   const box = document.querySelector('textarea')
@@ -1459,7 +2284,10 @@ document.addEventListener('click', event => {
   if (a) { event.preventDefault(); go(a.getAttribute('href')) }
 })
 document.getElementById('settings').addEventListener('click', () => go('/m/settings'))
-window.addEventListener('popstate', route)
+window.addEventListener('popstate', () => { newPage = true; route() })
+// The app keeps its own place on every page, so the browser does not put back an old one.
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
+addEventListener('scroll', placeJump, { passive: true })
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') { poll(); if (csrf) checkAlerts() }
 })

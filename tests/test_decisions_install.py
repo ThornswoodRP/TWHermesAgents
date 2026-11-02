@@ -168,11 +168,17 @@ class Scripts(unittest.TestCase):
             self.assertEqual(out.returncode, 1, name)
             self.assertIn("STOP: run as root", out.stdout, name)
 
-    def test_the_core_install_turns_nothing_on(self):
+    def test_the_core_install_turns_on_the_phone_apps_flags_only(self):
+        # Patrick's switch, 2 Nov: the phone app's features are on. The Bots' own flags it never changes.
         src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
-        self.assertNotRegex(src, r"\bflag\b[^\n]*\bon\b")
+        self.assertIn('PHONE_FLAGS="mobile_read mobile_chat_write push_send own_chat_write session_manage_write"', src)
+        self.assertIn('run flag --workspace thornswood "$f" on --patrick-switched', src)
+        self.assertEqual(src.count("run flag"), 1)
+        self.assertEqual(src.count("--patrick-switched"), 1)
+        for theirs in ("decision_write", "connector_effects"):
+            self.assertNotIn(theirs + " on", src)
+            self.assertNotIn(theirs, src.split("PHONE_FLAGS=", 1)[1].split("\n", 1)[0])
         self.assertNotIn(" pair ", src)
-        self.assertNotIn("--patrick-switched", src)
         self.assertIn("readlink -f \"$opt/current\"", src)
 
     def test_the_core_install_puts_python3_venv_in_itself(self):
@@ -268,18 +274,24 @@ class PluginPackage(unittest.TestCase):
         self.assertEqual(manifest["name"], "thornswood-decisions")
         self.assertEqual(yaml_name, "thornswood-decisions")
 
-    def test_the_agent_half_registers_nothing(self):
+    def test_the_agent_half_registers_only_rule_zero(self):
+        # It gives Patrick's Hermes no tools, hooks or commands: only the rule
+        # zero prompt section (tests/test_rule_zero.py checks the text).
         import importlib.util
         spec = importlib.util.spec_from_file_location("tw_decisions_agent_half", PLUGIN / "__init__.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        called = []
 
         class Ctx:
+            def register_system_prompt_section(self, sid, text, **kw):
+                called.append(sid)
+
             def __getattr__(self, name):
                 raise AssertionError(f"the agent half called ctx.{name}")
 
         self.assertIsNone(mod.register(Ctx()))
-
+        self.assertEqual(called, ["thornswood.rule-zero"])
 
 if __name__ == "__main__":
     unittest.main()

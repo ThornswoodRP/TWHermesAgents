@@ -47,7 +47,7 @@ SECRET_PLACES = [
     (re.compile(r"(^|[\s/'\"=:])auth\.json\b"), "auth.json holds the model sign-ins"),
     (re.compile(r"(^|[\s/'\"=:])\.env(\s|$|['\";|&)])"), ".env files hold keys"),
     (re.compile(r"/proc/[^\s]*environ|\bprintenv\b|^\s*env\s*$|^\s*env\s+-0|\bexport\s+-p\b"), "a process environment can hold keys"),
-    (re.compile(r"/srv/tw/(hermes|policy|git|spool|backups|snapshots)|/run/tw[/-]|/etc/thornswood|\b(policy|git|files)\.sock\b|tw-git\.sock|tw-policy\.sock"), "the brokers' state and sockets are theirs alone"),
+    (re.compile(r"/srv/tw/(hermes|policy|git|spool|backups|snapshots)|/run/tw[/-]|/etc/thornswood|\b(policy|git|files|bots|checks)\.sock\b|tw-git\.sock|tw-policy\.sock"), "the brokers' state and sockets are theirs alone"),
     (re.compile(r"(^|\s)(sudo|su|doas|pkexec)\s"), "no Bot raises its privileges"),
     (re.compile(r"\b(systemctl|crontab|loginctl|journalctl)\b"), "services and timers are Patrick's"),
     (re.compile(r"(^|[\s;&|(])hermes\s"), "a Bot never changes Hermes, its own config, tools, skills or plugins"),

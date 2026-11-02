@@ -18,6 +18,12 @@ came of it:
   11.1, "an unclear effect blocks automatic retry"). A room message is settled
   later from the room itself, because the room's event id comes from the key
   the core gave it; a Bot Chat message stays unclear and the phone says so.
+- not_ready (an outcome, not a state): the gateway was not ready (starting,
+  stopped, reloading), or the connector's own Hermes helper failed and said
+  so (its reason begins with HELPER_FAILED), so nothing was sent. The
+  message goes back to queued as it was, its lease and that attempt undone, and
+  the phone says what it waits for. A gateway that is not ready yet is not a
+  failure of the message, so it is never dead for that.
 
 The same lease carries the connector's other job: telling the Bot that asked a
 card how Patrick answered it (`connector_outbox`, written by the answer's own
@@ -39,6 +45,9 @@ from .auth import Principal
 from .core import DecisionCore
 from .feeds import Feeds, room_events
 from .own import PAGE_TEXT, PAGES, _page_mid, clean_page, fetch_page, page_kind
+from .reactions import Reactions
+from .reactions import emoji as _emoji
+from .reactions import message_id as _message_id
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
 MAX_TEXT = 8000
@@ -49,12 +58,16 @@ SETTLES = ("question", "change")
 MOUNTAIN = ZoneInfo("America/Denver")  # Patrick's dates, as DECIDED.md writes them
 LEASE = timedelta(minutes=20)
 ROOM = "room"  # the first room bound, by its first name
-OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
+OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain", "not_ready": "queued"}
+WAITS = "waiting for the Bots' gateway: "  # the reason a message put back by not_ready carries
+# ...unless what it waits for is the connector's own Hermes helper, which failed (connector.py
+# HELPER_FAILED): then the reason is the helper's failure as the connector said it, never the gateway.
+HELPER_FAILED = "the connector's Hermes helper"
 MINE = 50
 MAX_CLAIM = 7  # the six Bots and the rooms, at most this many at once
 ROOM_PAGE = 50
 ROOM_KINDS = ("message.user", "message.member")
-PAGES_GW = "bots"   # the Bots' gateway, in the page store beside Patrick's own two
+PAGES_GW = "bots"   # the Bots' gateway, in the page store and the reactions beside Patrick's own two
 
 
 def clean_room_page(body) -> dict:
@@ -177,6 +190,22 @@ class Chat:
                        (p.workspace_id, p.id, idempotency_key, "chat.send", body_sha, canonical(receipt), now))
         return receipt
 
+    def react(self, p: Principal, target: str, message_id, emoji) -> dict:
+        """Patrick's reaction on one message of a Bot's Bot Chat: exactly this emoji, or none (null).
+
+        It rides mobile_chat_write like a message to that Bot, and the connector sets it only while
+        connector_effects is on, in that Bot's own store. Hermes keeps it on the message and tells
+        the Bot about it on a later turn only when that profile has display.message_reactions on
+        (contracts.json "reactions"). A room has no reactions in Hermes, so a room takes none."""
+        self._patrick(p)
+        if not self.s.flag(p.workspace_id, "mobile_chat_write"):
+            raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
+        target = self._target(p.workspace_id, target)
+        if target in {r["room_id"] for r in self.rooms(p.workspace_id)}:
+            raise CoreError(400, "no_room_reactions", "a room has no reactions in Hermes")
+        mid, wanted = _message_id(message_id), _emoji(emoji)
+        return {"target": target} | Reactions(self.s).want(p, PAGES_GW, target, mid, wanted)
+
     def _targets(self, workspace_id: str, target: str) -> tuple[str, ...]:
         if target in {r["room_id"] for r in self.rooms(workspace_id)}:
             return room_targets(self.s.db, workspace_id, target)
@@ -188,7 +217,11 @@ class Chat:
                                  f"WHERE workspace_id = ? AND target IN ({','.join('?' * len(targets))}) "
                                  "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                                  (workspace_id, *targets, MINE)).fetchall()
-        return [dict(r) for r in reversed(rows)]
+        mine = [dict(r) for r in reversed(rows)]
+        for m in mine:
+            if m["status"] == "queued" and (m["reason"] or "").startswith((WAITS, HELPER_FAILED)):
+                m["waits"] = m["reason"]
+        return mine
 
     def _unsettled(self, workspace_id: str, target: str) -> int:
         targets = self._targets(workspace_id, target)
@@ -218,7 +251,8 @@ class Chat:
                         "text": m["text"], "at": m["at"]} for m in (chat or {}).get("messages", [])]
             kind, name = "bot", target.capitalize()
         return {"target": target, "kind": kind, "name": name, "as_of": snap["as_of"], "history": history,
-                "mine": self._mine(p.workspace_id, target), "can_send": self.s.flag(p.workspace_id, "mobile_chat_write")}
+                "mine": self._mine(p.workspace_id, target), "can_send": self.s.flag(p.workspace_id, "mobile_chat_write"),
+                "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target) if kind == "bot" else []}
 
     def summary(self, p: Principal) -> dict:
         self._patrick(p)
@@ -324,7 +358,8 @@ class Chat:
                 item["lease_until"] = until
                 self.s.event(db, workspace_id, "connector.leased", w["id"], "connector", {"target": w["target"]})
                 items.append(item)
-        return {"items": items}
+            reactions = [{"bot": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, PAGES_GW)]
+        return {"items": items, "reactions": reactions}
 
     def _lapse(self, db, workspace_id: str) -> None:
         """A lease that ran out means the connector stopped mid-send: unclear, so never sent again by itself."""
@@ -388,13 +423,22 @@ class Chat:
                 "3. Run pwsh scripts/dev/Check-Words.ps1, node tests/test-docs-index.js and "
                 "node tests/test-3283-docs-word-number.js, then open the pull request through tw_git.")
 
+    def reacted(self, workspace_id: str, token: str | None, body) -> dict:
+        """What came of setting one reaction in a Bot's Bot Chat."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not isinstance(body, dict) or not isinstance(body.get("bot"), str):
+            raise CoreError(400, "bad_result", "a result names the Bot, the message and the version it set")
+        return Reactions(self.s).answered(workspace_id, PAGES_GW, body["bot"], body, "connector")
+
     def result(self, workspace_id: str, token: str | None, item_id: str, outcome: str, ref: str = "",
                reason: str = "") -> dict:
         Feeds(self.s).check_token(workspace_id, "connector", token)
         if outcome not in OUTCOMES:
-            raise CoreError(400, "bad_outcome", "an outcome is confirmed, failed or uncertain")
+            raise CoreError(400, "bad_outcome", "an outcome is confirmed, failed, uncertain or not_ready")
         ref, reason = str(ref)[:128], str(reason)[:200]
         state = OUTCOMES[outcome]
+        if outcome == "not_ready":
+            return self._not_ready(workspace_id, item_id, reason)
         row = self.s.db.execute("SELECT status FROM chat_messages WHERE id = ? AND workspace_id = ?",
                                 (item_id, workspace_id)).fetchone()
         if row:
@@ -421,3 +465,24 @@ class Chat:
             db.execute("UPDATE connector_outbox SET lease_until = NULL, reason = ? WHERE id = ?",
                        (reason or None, item_id))
         return {"id": item_id, "status": state}
+
+    def _not_ready(self, workspace_id: str, item_id: str, reason: str) -> dict:
+        """The gateway was not ready, so nothing was sent: back in the queue as it was, with no effect
+        receipt (there was no effect) and that attempt not counted. It goes once the gateway is ready."""
+        why = (reason if reason.startswith(HELPER_FAILED) else WAITS + (reason or "it is not ready"))[:200]
+        with self.s.tx() as db:
+            for table, kind in (("chat_messages", "chat.not_ready"), ("connector_outbox", "connector.not_ready")):
+                row = db.execute(f"SELECT status FROM {table} WHERE id = ? AND workspace_id = ?",
+                                 (item_id, workspace_id)).fetchone()
+                if not row:
+                    continue
+                if row["status"] == "queued":
+                    return {"id": item_id, "status": "queued", "replayed": True}
+                if row["status"] != "leased":
+                    raise CoreError(409, "not_leased", f"that message is {row['status']}, not leased")
+                db.execute(f"UPDATE {table} SET status = 'queued', lease_until = NULL, reason = ?, "
+                           f"attempts = max(attempts - 1, 0), updated_at = ? WHERE id = ?",
+                           (why, self.s.now(), item_id))
+                self.s.event(db, workspace_id, kind, item_id, "connector", {"reason": why})
+                return {"id": item_id, "status": "queued"}
+        raise CoreError(404, "no_item", "no such message")

@@ -53,14 +53,14 @@ APP_FILES = {
     "icon-192.png": "image/png",
     "icon-512.png": "image/png",
     "icon-maskable-512.png": "image/png",
-    "cinzel-title.woff2": "font/woff2",
+    "cinzel-latin.woff2": "font/woff2",
 }
 # The app's own views, each a deep link that loads the shell. needs-you, work
 # and room are the tabs' first names (before Decisions, Board and Rooms), kept
 # so an old alert or home screen link still opens.
 APP_VIEWS = re.compile(r"^(|decisions|board|rooms|bots|bramble|settings|needs-you|work|room|"
                        r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64}|"
-                       r"hermes/(?:me|one)|hermes/(?:me|one)/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$")
+                       r"hermes/(?:me|one)|hermes/(?:me|one)/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}|hidden/(?:me|one))$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
            "font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 # The service worker's own policy: it fetches only this origin, to keep the shell,
@@ -71,7 +71,7 @@ SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
             ("GET", "own"), ("POST", "own")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed", "page")
+OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done")
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -205,11 +205,17 @@ class Api:
                 return 200, own.feed(self.ws, route[1], token, data)
             if route[2] == "page":
                 return 200, own.page_post(self.ws, route[1], token, data)
+            if route[2] == "reacted":
+                return 200, own.reacted(self.ws, route[1], token, data)
+            if route[2] == "session_done":
+                return 200, own.session_done(self.ws, route[1], token, data)
             if route[2] == "claim":
                 # Tailscale Serve sets X-Forwarded-For to the tailnet address the connector posts from
                 # (and replaces any it was sent); the core reads the tailnet's view of that machine.
                 return 200, own.claim(self.ws, route[1], token, data.get("limit", 3), data.get("ready", False),
-                                      str(data.get("why", "")), data.get("state"), headers.get("x-forwarded-for"))
+                                      str(data.get("why", "")), data.get("state"), headers.get("x-forwarded-for"),
+                                      {k: data.get(k) for k in ("commit", "busy", "parallel", "busy_for", "updating",
+                                                                "update_why")})
             return 200, own.result(self.ws, route[1], token, str(data.get("id", "")), str(data.get("outcome", "")),
                                    str(data.get("ref", "")), str(data.get("reason", "")), data.get("session_id"))
         if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector", "push-worker"):
@@ -235,6 +241,8 @@ class Api:
                 return 200, Chat(core.s).page_post(self.ws, token, data)
             if route[1] == "claim":
                 return 200, Chat(core.s).claim(self.ws, token, data.get("limit", 7))
+            if route[1] == "reacted":
+                return 200, Chat(core.s).reacted(self.ws, token, data)
             if route[1] == "result":
                 return 200, Chat(core.s).result(self.ws, token, str(data.get("id", "")), str(data.get("outcome", "")),
                                                 str(data.get("ref", "")), str(data.get("reason", "")))
@@ -244,7 +252,10 @@ class Api:
             return 200, {"passkeys": core.auth.has_passkey(self.ws)}
         if method == "POST" and route == ["passkeys", "sign-in", "options"]:
             self._exact_origin(headers)
-            return 200, self._passkeys(core).sign_in_options(self.ws)
+            key = data.get("phone_key")
+            if key is not None and not isinstance(key, str):
+                raise CoreError(400, "bad_field", "phone_key is a credential id")
+            return 200, self._passkeys(core).sign_in_options(self.ws, key)
         if method == "POST" and route == ["passkeys", "sign-in"]:
             self._exact_origin(headers)
             dev, sess = self._passkeys(core).sign_in(self.ws, data.get("credential"))
@@ -298,6 +309,8 @@ class Api:
             return 200, Chat(core.s).summary(p)
         if method == "GET" and len(route) == 3 and route[0] == "chat" and route[2] == "messages":
             return 200, Chat(core.s).page(p, route[1], before=query.get("before"), wait=query.get("wait"))
+        if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "react":
+            return 200, Chat(core.s).react(p, route[1], data.get("message_id"), data.get("emoji"))
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1])
@@ -309,14 +322,24 @@ class Api:
         if method == "GET" and len(route) == 3 and route[0] == "own" and route[2] == "chats":
             return 200, OwnChat(core.s).page(p, route[1], "chats", before=query.get("before"), q=query.get("q"),
                                              wait=query.get("wait"))
+        if method == "GET" and len(route) == 4 and route[0] == "own" and route[2] == "chats" and route[3] == "archived":
+            return 200, OwnChat(core.s).page(p, route[1], "archived", before=query.get("before"),
+                                             wait=query.get("wait"))
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "session":
+            return 200, OwnChat(core.s).session(p, route[1], data.get("session_id"), data.get("op"),
+                                                data.get("title"), data.get("idempotency_key"))
         if method == "GET" and len(route) == 5 and route[0] == "own" and route[2] == "chats" and route[4] == "messages":
             return 200, OwnChat(core.s).page(p, route[1], "messages", chat=route[3], before=query.get("before"),
                                              wait=query.get("wait"))
         if method == "GET" and len(route) == 3 and route[0] == "own":
             return 200, OwnChat(core.s).view(p, route[1], route[2])
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "react":
+            return 200, OwnChat(core.s).react(p, route[1], data.get("session_id"), data.get("message_id"),
+                                              data.get("emoji"))
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
             return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
-                                             data.get("text"), data.get("idempotency_key"))
+                                             data.get("text"), data.get("idempotency_key"),
+                                             data.get("reply_to"), data.get("quote"), data.get("quote_by"))
         if method == "POST" and route == ["csrf"]:
             if "cookie" not in headers:
                 raise CoreError(400, "not_the_app", "only the app's cookie session asks for a new CSRF token")
@@ -325,7 +348,7 @@ class Api:
             return 200, {"passkeys": self._passkeys(core).list(p)}
         if method == "POST" and route == ["passkeys", "register", "options"]:
             self._exact_origin(headers)
-            return 200, self._passkeys(core).register_options(p)
+            return 200, self._passkeys(core).register_options(p, on_phone=data.get("on_phone") is True)
         if method == "POST" and route == ["passkeys", "register"]:
             self._exact_origin(headers)
             return 200, self._passkeys(core).register(p, data.get("credential"), str(data.get("label", ""))[:80])
