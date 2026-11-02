@@ -62,7 +62,7 @@ class FakeHermes:
         self.go = threading.Event()
         self.started = threading.Event()
 
-    def turn(self, session_id, text, doing):
+    def turn(self, session_id, text, doing, image=None):
         doing("tool", "read_file")
         self.started.set()
         self.go.wait(10)
