@@ -133,6 +133,20 @@ runs:
       verbs: scripts/release/nexus-verbs.json
     release.yml: {}
     release-tag.yml: {}
+    # The site's Cloudflare Tunnel (Thornswood #5334): one Ops run asks the
+    # box for its seal key, seals the API token to it on a hosted runner and
+    # hands it back to the box, so no key comes in from whoever starts it.
+    # It takes no gate line, so each input it takes is named here with the
+    # pattern its value must match, and the gate holds the line it builds to
+    # verbs.json again. Ops's run note says when switch goes (after the
+    # tw_decide card); back is the undo.
+    tunnel.yml:
+      repo: ThornswoodRP/Thornswood-Ops
+      required: [mode]
+      inputs:
+        mode: "install|switch|back"
+        wait: "[0-9]{0,3}"
+        recipient: "[A-Za-z0-9+/=<>]{0,4096}"
   # Never started by a Bot, whatever the request says.
   refused_verbs: [Set-NexusKey]
   # A verb that only runs with Patrick's decision record for that exact commit.

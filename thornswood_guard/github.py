@@ -265,6 +265,21 @@ class GitHubRules:
             extra = set(inputs) - {"line", "recipient"}
             if extra:
                 return Verdict.no(f"{workflow} takes only a line and a recipient, not {', '.join(sorted(extra))}")
+        elif spec.get("inputs"):
+            # A run with no gate line names each input it takes and the
+            # pattern its value must match (tunnel.yml: the mode, the wait and
+            # a recipient key). Anything else is refused before GitHub sees it.
+            kind = "main"
+            allowed = spec["inputs"]
+            extra = set(inputs) - set(allowed)
+            if extra:
+                return Verdict.no(f"{workflow} takes only {', '.join(sorted(allowed))}, not {', '.join(sorted(extra))}")
+            missing = [n for n in spec.get("required", []) if not inputs.get(n)]
+            if missing:
+                return Verdict.no(f"{workflow} needs {', '.join(missing)}")
+            for name, value in inputs.items():
+                if not re.fullmatch(allowed[name], value):
+                    return Verdict.no(f"{workflow}'s {name} must match {allowed[name]}, not {value[:40]!r}")
         else:
             kind = "main"
         if needs_patrick:
