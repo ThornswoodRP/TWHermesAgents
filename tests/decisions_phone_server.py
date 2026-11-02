@@ -3,7 +3,8 @@
     python tests/decisions_phone_server.py <port>
 
 It prints one JSON line (a phone pairing code and three card ids, the second
-high risk, the third left for the alert checks) and serves until killed. Test data only: no real workspace, no Bot,
+high risk, the third left for the alert checks, and the voice check's fake
+microphone file and words) and serves until killed. Test data only: no real workspace, no Bot,
 no deploy; nothing takes the chat messages it queues, and the push worker's
 keys are throwaway ones said straight to the core, with no worker and no push
 service. One's own-Hermes connector is stood in for by one call to the core
@@ -13,6 +14,7 @@ messages sent to it.
 """
 import json
 import sys
+import tempfile
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent)); sys.path.insert(0, str(HERE))
@@ -36,9 +38,17 @@ w.card(by=w.rift, task="load-order", title="Rebuild the load order now?", source
 f = Feeds(w.store)
 tw = f.new_token(w.ws, "work", by="t"); tr = f.new_token(w.ws, "room", by="t"); tb = f.new_token(w.ws, "bots", by="t")
 f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}]}]})
-f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [{"id": "t1", "title": "Fix the <b>launcher</b> log", "assignee": "sprocket", "status": "running"}],
-                         "items": [{"repo": "ThornswoodRP/Thornswood", "number": 5033, "title": "The site hub says <i>which</i> page is open", "bot": "echo", "stage": "pr_open", "pr": 5367, "pr_repo": "ThornswoodRP/Thornswood", "pr_title": "The hub marks its open tab", "checks": "failing", "checks_line": "18 of 20 passed, 2 failed", "auto_merge": True, "updated_at": "2026-11-01T17:30:00+00:00"},
-                                   {"repo": "ThornswoodRP/Thornswood", "number": 5191, "title": "Generated content tables are built from their sources", "bot": "magpie", "stage": "claimed", "updated_at": "2026-11-01T17:00:00+00:00"}]})
+# The live Board: Rift running a command in a session with a title, Echo thinking with none, and Sprocket's
+# two turns at once. When the test makes the file BOARD_NEXT, Rift's command has ended and it is thinking.
+BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:00"},
+         {"bot": "rift", "title": "Rebuild the <b>load order</b>", "state": "tool", "tool": "terminal",
+          "since": "2026-11-01T17:40:00+00:00"},
+         {"bot": "sprocket", "title": "Installer log", "state": "tool", "tool": "read_file",
+          "since": "2026-11-01T17:50:00+00:00"},
+         {"bot": "sprocket", "title": "Launcher news", "state": "tool", "tool": "browser_navigate",
+          "since": "2026-11-01T17:55:00+00:00"}]
+f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "doing": BOARD})
+BOARD_NEXT = Path(tempfile.mkdtemp()) / "board-next"
 # A Bot's message in Markdown, longer than a list line: the Rooms list shows its plain words, cut at a word.
 ROOM_MD = ("@bramble it'll show up on #5367, and it'll run, not skip.\n- **Why it isn't there yet:** "
            "`Launcher builds` has `needs: pick` and [the guide](https://example.invalid/g) says so.\n\n## Next\n1. merge it")
@@ -289,8 +299,65 @@ def bots_pages():
         chat.doing(w.ws, tc, {"turns": [{"id": WISP, "state": "writing"}]})
         time.sleep(0.3)
 threading.Thread(target=bots_pages, daemon=True).start()
+def board_feed():
+    # What live_reader.py does on the VM: the Board sent again when it changes.
+    while not BOARD_NEXT.exists():
+        time.sleep(0.2)
+    nxt = [dict(d, state="thinking", tool="") if d["bot"] == "rift" else d for d in BOARD]
+    Feeds(Store(w.path, clock=w.clock)).put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:05+00:00",
+                                                              "doing": nxt})
+threading.Thread(target=board_feed, daemon=True).start()
+# Voice: the browser's fake microphone plays VOICE_WAV (a second of silence, a second of a voice-like hum,
+# three of silence, over and over), and the voice worker's Whisper is a stand-in that writes every recording
+# down as VOICE_WORDS. When Bramble's Bot Chat gets those words, or the words after "Hey Hermes", Bramble
+# answers in its state.db, for voice chat to read aloud.
+import math, struct, wave
+from thornswood_decisions.voice_worker import Worker
+VOICE_WORDS = "Hey Hermes, what is on the board?"
+VOICE_REPLY = "Two Bots are working on the board."
+vdir = Path(tempfile.mkdtemp())
+VOICE_WAV = vdir / "speech.wav"
+with wave.open(str(VOICE_WAV), "wb") as wav:
+    wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+    frames = []
+    for i in range(16000 * 5):
+        t = i / 16000
+        if 1 <= t < 2:
+            env = 0.5 * (1 - math.cos(2 * math.pi * 4 * (t - 1)))
+            v = env * 0.3 * sum(math.sin(2 * math.pi * 150 * k * t) / k for k in range(1, 9))
+        else:
+            v = 0.0
+        frames.append(struct.pack("<h", int(max(-1, min(1, v)) * 32767)))
+    wav.writeframes(b"".join(frames))
+voice_worker = Worker(lambda path: {"success": True, "transcript": VOICE_WORDS}, scratch=vdir / "scratch",
+                      whisper=lambda: "faster-whisper")
+threading.Thread(target=voice_worker.serve, args=(str(vdir / "voice.sock"),), daemon=True).start()
+def bramble_answers():
+    # As the Bots' connector does it: the message taken, its turn run (Bramble's answer in its state.db),
+    # and the result told to the core, which reads the Bot Chat's newest page again for it.
+    store = Store(w.path, clock=w.clock)
+    while True:
+        heard = store.db.execute("SELECT id FROM chat_messages WHERE target = 'bramble' AND text IN (?, ?) "
+                                 "AND status = 'queued'", (VOICE_WORDS, "what is on the board?")).fetchone()
+        if heard:
+            with store.tx() as db:
+                db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                           ((w.clock() + timedelta(minutes=5)).isoformat(), heard["id"]))
+            time.sleep(1)
+            c = sqlite3.connect(bhome / "profiles" / "bramble" / "state.db")
+            c.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'assistant', ?, ?)",
+                      (VOICE_REPLY, time.time()))
+            c.commit()
+            c.close()
+            Chat(store).result(w.ws, tc, heard["id"], "confirmed")
+            return
+        time.sleep(0.2)
+threading.Thread(target=bramble_answers, daemon=True).start()
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
+api.voice_socket = str(vdir / "voice.sock")
 srv = make_server(api, "127.0.0.1", port)
-print(json.dumps({"code": code, "card": card["id"], "high": high["id"], "third": third["id"]}), flush=True)
+print(json.dumps({"code": code, "card": card["id"], "high": high["id"], "third": third["id"],
+                  "board_next": str(BOARD_NEXT), "voice_wav": str(VOICE_WAV), "voice_words": VOICE_WORDS,
+                  "voice_reply": VOICE_REPLY}), flush=True)
 srv.serve_forever()

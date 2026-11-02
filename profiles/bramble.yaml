@@ -93,6 +93,7 @@ approvals:
 plugins:
   enabled:
   - thornswood_guard
+  - thornswood_live
   auto_apply: false
   auto_update_check_hours: 0
   hook_callback_timeout: 600

@@ -17,7 +17,9 @@ For each Bot it:
   2. builds the Bot's config from the policy and merges it into config.yaml;
   3. checks the merged config can reach no route the Bot may not use;
   4. checks every .env by name against what may sit on the Oracle box;
-  5. installs the guard plugin into plugins/thornswood_guard;
+  5. installs the guard plugin into plugins/thornswood_guard, and the live
+     Board's observer into plugins/thornswood_live (it says what the Bot's
+     running turns are doing, for the phone's Board, and blocks nothing);
   6. makes the Bot's working folder, and installs the skills this repository
      owns for it (OWN_SKILLS: Bramble's bramble-duties);
   7. installs the two Thornswood skills from skills/thornswood/ (until 1 Nov
@@ -187,13 +189,14 @@ def gateway_self_test(plugin_dir: Path) -> list[str]:
             if (hooks[0](tool_name=tool, args=args) or {}).get("action") != "block"]
 
 
-def install_guard(pdir: Path) -> None:
+def install_guard(pdir: Path, name: str = "thornswood_guard") -> None:
+    """Put one of this repository's plugins in the profile whole, never half of one."""
     plugins = pdir / "plugins"
     plugins.mkdir(exist_ok=True)
-    staging = Path(tempfile.mkdtemp(dir=plugins, prefix=".thornswood_guard-"))
-    shutil.copytree(REPO / "thornswood_guard", staging / "pkg", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    target = plugins / "thornswood_guard"
-    old = plugins / f".thornswood_guard-old-{os.getpid()}"
+    staging = Path(tempfile.mkdtemp(dir=plugins, prefix=f".{name}-"))
+    shutil.copytree(REPO / name, staging / "pkg", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    target = plugins / name
+    old = plugins / f".{name}-old-{os.getpid()}"
     if target.exists():
         target.rename(old)
     (staging / "pkg").rename(target)
@@ -435,6 +438,7 @@ def main() -> int:
         work.mkdir(parents=True, exist_ok=True)
         os.chmod(work, 0o700)
         install_guard(pdir)
+        install_guard(pdir, "thornswood_live")
         for skill in OWN_SKILLS.get(bot, ()):
             install_skill(pdir, skill)
         write_config(pdir, cfg_path, merged, a.expect, stamp)

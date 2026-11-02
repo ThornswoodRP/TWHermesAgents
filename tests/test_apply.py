@@ -119,8 +119,11 @@ class Apply(unittest.TestCase):
             cfg = yaml.safe_load((p / "config.yaml").read_text(encoding="utf-8"))
             self.assertEqual(cfg["model"], {"provider": "anthropic", "default": "claude-opus-5-5"})
             self.assertEqual(cfg["_config_version"], 51)
-            self.assertEqual(cfg["plugins"]["enabled"], ["thornswood_guard"])
+            self.assertEqual(cfg["plugins"]["enabled"], ["thornswood_guard", "thornswood_live"])
             self.assertTrue((p / "plugins" / "thornswood_guard" / "policy.yaml").is_file())
+            # The live Board's observer, whole, and no copy of the guard in its folder.
+            self.assertTrue((p / "plugins" / "thornswood_live" / "plugin.yaml").is_file())
+            self.assertFalse((p / "plugins" / "thornswood_live" / "policy.yaml").exists())
             self.assertEqual((p / "SOUL.md").read_text(encoding="utf-8"), f"# SOUL.md\n\nYou're **{bot}**.\n")
             self.assertEqual((p / "memories" / "MEMORY.md").read_text(encoding="utf-8"), "I am here.\n")
             self.assertTrue((home.parent / "tw-work" / bot).is_dir())

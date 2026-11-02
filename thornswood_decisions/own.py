@@ -330,6 +330,15 @@ class _Pages:
                 out.append({"id": a["id"], "kind": kind, "chat": chat, "before": before, "q": q})
             return out
 
+    def forget(self, ws: str, gw: str, kinds: tuple, chat: str) -> None:
+        """A turn in that chat just ended, so its newest page no longer holds the answer: dropped, and an
+        ask for it handed out before now is dropped too (its page would be read before the answer). The
+        next read asks the connector again. Older pages do not change."""
+        with self.cond:
+            for d in (self.held, self.asked):
+                for k in [k for k in d if k[0] == ws and k[1] == gw and k[2] in kinds and k[3] == chat and k[4] is None]:
+                    del d[k]
+
     def answer(self, ws: str, gw: str, rid: str, page: dict, now: datetime) -> tuple:
         with self.cond:
             key = next((k for k, a in self.asked.items() if a["id"] == rid and k[0] == ws and k[1] == gw), None)
@@ -1142,6 +1151,10 @@ class OwnChat:
             return {"id": item_id, "status": state, "replayed": True}
         if row["status"] != "leased":
             raise CoreError(409, "not_leased", f"that message is {row['status']}, not leased")
+        # The turn is over and its answer is in Hermes: the chat's newest page is read again, not shown
+        # from memory for up to PAGE_FRESH without it.
+        for sid in {row["session_id"], made} - {None}:
+            PAGES.forget(workspace_id, gw, ("messages",), sid)
         with self.s.tx() as db:
             db.execute("UPDATE own_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ?, "
                        "made_session_id = coalesce(made_session_id, ?) WHERE id = ?",

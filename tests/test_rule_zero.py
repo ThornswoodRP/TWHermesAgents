@@ -152,11 +152,13 @@ class PatricksHermes(unittest.TestCase):
 
 class Installed(unittest.TestCase):
     def test_apply_copies_rule_zero_with_the_guard(self):
-        # apply.py copies the whole thornswood_guard package into each profile;
+        # apply.py copies the whole thornswood_guard package into each profile
+        # (install_guard copies a plugin's whole folder, the guard's by default);
         # rule_zero.md must not be one of the files it leaves out.
         src = (REPO / "scripts" / "apply.py").read_text(encoding="utf-8")
-        self.assertIn('shutil.copytree(REPO / "thornswood_guard"', src)
-        self.assertNotIn("*.md", src.split('shutil.copytree(REPO / "thornswood_guard"', 1)[1].split("\n", 1)[0])
+        self.assertIn('def install_guard(pdir: Path, name: str = "thornswood_guard")', src)
+        self.assertIn("shutil.copytree(REPO / name", src)
+        self.assertNotIn("*.md", src.split("shutil.copytree(REPO / name", 1)[1].split("\n", 1)[0])
 
 
 if __name__ == "__main__":

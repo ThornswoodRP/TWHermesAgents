@@ -1,0 +1,7 @@
+#!/usr/bin/python3 -I
+# Sends the core the live Board (what each Bot is doing now), as the Bots' hermes
+# user, from the root-owned copy. -I: only this copy's code is imported. Standard library only.
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_decisions.live_reader import main  # noqa: E402
+sys.exit(main(sys.argv[1:]))

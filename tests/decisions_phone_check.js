@@ -12,15 +12,27 @@ const { chromium } = require('playwright')
 // as the one quiet line with its card's tag (delivered by DevTools, with no
 // push service), the alert of an answered card taken off, the alert of an
 // opened card taken off, and the plan the app follows when the browser's
-// subscription is not the one the core has.
+// subscription is not the one the core has. And voice, with Chromium's fake
+// microphone playing a voice-like hum and the test server's stand-in Whisper:
+// dictation into the box, voice chat with an answer read aloud, Read aloud, and
+// "Hey Hermes" (off until turned on, only in an open chat, stopped when hidden).
 // Started by test_decisions_phone_browser.py.
-const [port, code, card, high, third] = process.argv.slice(2)
+const [port, code, card, high, third, boardNext, voiceWav, VOICE, VOICE_REPLY] = process.argv.slice(2)
 const base = `http://localhost:${port}`
 ;(async () => {
   // channel 'chromium': the full browser in its new headless mode. The bare
   // headless shell refuses every notification, so it cannot show an alert.
-  const browser = await chromium.launch({ channel: 'chromium', args: ['--host-resolver-rules=MAP localhost 127.0.0.1'] })
+  const browser = await chromium.launch({ channel: 'chromium', args: ['--host-resolver-rules=MAP localhost 127.0.0.1',
+    '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--use-file-for-fake-audio-capture=' + voiceWav] })
+  // The microphone is allowed by --use-fake-ui-for-media-stream, the way Patrick allows it once on his phone.
   const ctx = await browser.newContext({ viewport: { width: 412, height: 860 } })
+  // The phone's own speech, stood in for: what it would say is kept in window.__said.
+  await ctx.addInitScript(() => {
+    window.__said = []
+    const fake = { speaking: false, pending: false, getVoices: () => [], cancel () {},
+      speak (u) { window.__said.push(u.text); setTimeout(() => u.onend && u.onend(new Event('end')), 30) } }
+    Object.defineProperty(window, 'speechSynthesis', { value: fake, configurable: true })
+  })
   const page = await ctx.newPage()
   const errors = []
   page.on('pageerror', e => errors.push(String(e)))
@@ -666,18 +678,20 @@ const base = `http://localhost:${port}`
     if (await page.getByLabel('Start a new chat').count()) throw new Error('a composer while it is off')
   })
   await page.getByRole('link', { name: 'Board' }).click()
-  await step('the Board, as text', () => page.getByText('Fix the <b>launcher</b> log').waitFor({ timeout: 5000 }))
-  await step("the Board shows each Bot's GitHub work under it, linked to github.com", async () => {
-    await page.getByText('#5033 The site hub says <i>which</i> page is open').waitFor({ timeout: 5000 })
-    await page.getByText('Pull request #5367 open · checks: 18 of 20 passed, 2 failed · auto-merge on').waitFor({ timeout: 3000 })
-    await page.getByText('Claimed, no pull request yet').waitFor({ timeout: 3000 })
-    const href = await page.locator('[data-item="ThornswoodRP/Thornswood#5033"]').getAttribute('href')
-    if (href !== 'https://github.com/ThornswoodRP/Thornswood/pull/5367') throw new Error('href ' + href)
-    const issue = await page.locator('[data-item="ThornswoodRP/Thornswood#5191"]').getAttribute('href')
-    if (issue !== 'https://github.com/ThornswoodRP/Thornswood/issues/5191') throw new Error('href ' + issue)
-    const heads = await page.locator('.row.head strong').allTextContents()
-    if (JSON.stringify(heads) !== JSON.stringify(['Bramble', 'Rift', 'Sprocket', 'Echo', 'Magpie', 'Wisp'])) throw new Error(JSON.stringify(heads))
-    await page.locator('[data-bot="rift"]', { hasText: 'Nothing claimed' }).waitFor({ timeout: 3000 })
+  await step("the Board shows only the turns running now, in the Bots' order, as text", async () => {
+    await page.getByText('Rebuild the <b>load order</b>').waitFor({ timeout: 5000 })
+    const rows = await page.locator('.row.doing').evaluateAll(rs => rs.map(r => [r.dataset.bot,
+      r.querySelector('.what').textContent, (r.querySelector('.t .quiet') || {}).textContent || '']))
+    const want = [['rift', 'Running a command', 'Rebuild the <b>load order</b>'], ['sprocket', 'Reading a file', 'Installer log'],
+      ['sprocket', 'Using the browser', 'Launcher news'], ['echo', 'Thinking', '']]
+    if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(rows))
+    // Bramble, Magpie and Wisp run nothing: no row, no heading, no history.
+    if (await page.locator('[data-bot="bramble"], [data-bot="magpie"], [data-bot="wisp"]').count()) throw new Error('an idle Bot')
+    if (!/^(just now|\d+ min|\d+ h \d+ min)$/.test(await page.locator('.row.doing .w').first().textContent())) throw new Error('how long')
+  })
+  await step('the Board follows a change by itself, with no tap', async () => {
+    require('fs').writeFileSync(boardNext, '')
+    await page.locator('[data-bot="rift"] .what', { hasText: 'Thinking' }).waitFor({ timeout: 8000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-board.png', fullPage: true })
   await page.getByRole('link', { name: 'Rooms' }).click()
@@ -723,7 +737,7 @@ const base = `http://localhost:${port}`
   await step("the room's first path opens the Workbench room", () => page.getByLabel('Message to Thornswood Workbench').waitFor({ timeout: 5000 }))
   await page.goto(base + '/m/work')
   await step('the old Work path opens the Board', async () => {
-    await page.getByText('Fix the <b>launcher</b> log').waitFor({ timeout: 5000 })
+    await page.getByText('Rebuild the <b>load order</b>').waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/board')) throw new Error('url ' + page.url())
   })
   await page.goto(base + '/m/settings')
@@ -954,6 +968,71 @@ const base = `http://localhost:${port}`
     if (got.list || got.side || got.agents || got.railWidth < 400 || !got.view.includes('Plan the week')) throw new Error(JSON.stringify(got))
   })
   await page.setViewportSize({ width: 412, height: 860 })
+
+  // ── voice ──
+  const barMode = () => page.evaluate(() => { const b = document.getElementById('voicebar'); return b && !b.hidden ? b.dataset.mode : null })
+  const saidAloud = text => page.evaluate(t => window.__said.includes(t), text)
+  await page.goto(base + '/m/bots/bramble')
+  await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
+  await step('the microphone writes what he says into the box, with the bar saying so while it listens', async () => {
+    if (await barMode()) throw new Error('the bar is up before a tap: ' + await barMode())
+    await page.getByRole('button', { name: 'Speak instead of typing' }).click()
+    await page.waitForFunction(() => /^dictate:/.test((document.getElementById('voicebar') || {}).dataset?.mode || ''), null, { timeout: 3000 })
+    const words = await page.locator('#voicebar .vt').textContent()
+    if (!/^(Listening|Hearing you)/.test(words)) throw new Error(words)
+    await page.waitForFunction(w => document.querySelector('#view .composer textarea').value === w, VOICE, { timeout: 15000 })
+    if (await barMode()) throw new Error('the bar stayed up: ' + await barMode())
+  })
+  await page.getByLabel('Message to Bramble').fill('')
+  await step('voice chat sends what he says, reads the answer aloud, and listens again', async () => {
+    await page.getByRole('button', { name: 'Voice chat' }).click()
+    await page.waitForFunction(() => /Voice chat with Bramble/.test(document.querySelector('#voicebar .vt')?.textContent || ''), null, { timeout: 3000 })
+    await page.locator('#view .msg .bub').getByText(VOICE, { exact: true }).first().waitFor({ timeout: 15000 })
+    // Taken, answered and read again by itself: the chat watches a message until its turn ends.
+    await page.waitForFunction(r => window.__said.includes(r), VOICE_REPLY, { timeout: 15000 })
+    if (await page.evaluate(() => window.__said.some(t => /bramble \d|nightly/.test(t)))) throw new Error('an old message was read aloud')
+    await page.waitForFunction(() => /^chat:(listening|writing|waiting|speaking)$/.test(document.getElementById('voicebar')?.dataset.mode || ''), null, { timeout: 5000 })
+    await page.locator('#voicebar').getByRole('button', { name: 'Stop' }).click()
+    if (await barMode()) throw new Error('still on after Stop: ' + await barMode())
+  })
+  await step("Read aloud, from a message's actions", async () => {
+    await page.locator('#view .msg .bub').getByText(VOICE_REPLY, { exact: true }).click()
+    await page.getByRole('button', { name: 'Read aloud' }).click()
+    await page.waitForFunction(r => window.__said.filter(t => t === r).length === 2, VOICE_REPLY, { timeout: 3000 })
+    await page.waitForFunction(() => document.getElementById('voicebar').hidden, null, { timeout: 3000 })
+  })
+  await step('"Hey Hermes" is off until turned on, and does not listen outside a chat', async () => {
+    if (await page.evaluate(() => localStorage.getItem('hermes.wake.v1'))) throw new Error('on before it was turned on')
+    await page.locator('#settings').click()
+    await page.getByRole('button', { name: 'Turn "Hey Hermes" on' }).click()
+    await page.getByText('"Hey Hermes" is on. Open a chat to use it.').waitFor({ timeout: 3000 })
+    if (await barMode()) throw new Error('listening on Settings: ' + await barMode())
+  })
+  await step('"Hey Hermes" in an open chat: the bar says it listens, and what follows the words is sent', async () => {
+    await page.locator('#tabs a[data-tab="bots"]').click()
+    await page.getByText('Bramble', { exact: true }).click()
+    await page.waitForFunction(() => /^wake:/.test(document.getElementById('voicebar')?.dataset.mode || ''), null, { timeout: 5000 })
+    if (await barMode() === 'wake:tap') await page.locator('#voicebar').getByRole('button', { name: 'Listen' }).click()
+    if (!/Hey Hermes/.test(await page.locator('#voicebar .vt').textContent())) throw new Error(await page.locator('#voicebar .vt').textContent())
+    await page.locator('#view .msg .bub').getByText('what is on the board?', { exact: true }).first().waitFor({ timeout: 15000 })
+    await page.locator('#voicebar').getByRole('button', { name: 'Stop' }).click()
+    if (await barMode()) throw new Error('still on after Stop: ' + await barMode())
+  })
+  await step('hiding the app stops it at once, and coming back listens for "Hey Hermes" again', async () => {
+    const seen = state => page.evaluate(v => {
+      Object.defineProperty(document, 'visibilityState', { value: v, configurable: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+    }, state)
+    await seen('hidden')
+    await seen('visible')
+    await page.waitForFunction(() => /^wake:/.test(document.getElementById('voicebar')?.dataset.mode || ''), null, { timeout: 5000 })
+    await seen('hidden')
+    if (await barMode()) throw new Error('still on while hidden: ' + await barMode())
+    await page.evaluate(() => { delete document.visibilityState })
+    await page.locator('#settings').click()
+    await page.getByRole('button', { name: 'Turn "Hey Hermes" off' }).click()
+    await page.getByText('"Hey Hermes" is off.', { exact: true }).waitFor({ timeout: 3000 })
+  })
   const sw = await page.evaluate(async () => { const r = await Promise.race([navigator.serviceWorker.ready, new Promise(ok => setTimeout(() => ok(null), 5000))]); return r ? r.scope : null })
   if (!sw) failed++
   console.log(sw ? 'PASS the service worker is registered for ' + sw : 'FAIL no service worker')

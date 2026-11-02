@@ -1,0 +1,9 @@
+name: thornswood_live
+version: 1.0.0
+description: Says what each of this profile's turns is doing right now (thinking, or a tool by its name), for the phone app's live Board. Writes one small file per process in this profile's home; reads nothing and blocks nothing.
+author: Patrick
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - on_session_end

@@ -145,7 +145,7 @@ class ConnectorSide(unittest.TestCase):
                 self.chat.claim(self.w.ws, tok)
             self.assertEqual(e.exception.reason, "bad_feed_token")
         with self.assertRaises(CoreError):
-            Feeds(self.w.store).put(self.w.ws, "work", self.tok, {"source_time": "2026-11-01T18:00:00Z", "tasks": []})
+            Feeds(self.w.store).put(self.w.ws, "work", self.tok, {"source_time": "2026-11-01T18:00:00Z", "doing": []})
 
     def test_one_in_flight_for_each_chat_oldest_first(self):
         flags(self.w, "connector_effects")

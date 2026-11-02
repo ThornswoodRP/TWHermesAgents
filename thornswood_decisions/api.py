@@ -38,6 +38,7 @@ from .own import MAX_ATTACHMENT, OwnChat
 from .passkey import Passkeys
 from .push import Push
 from .store import CoreError, Store, now_utc
+from .voice import MAX_AUDIO, SOCKET as VOICE_SOCKET, Voice
 
 PREFIX = "/api/v1"
 MAX_REQUEST_BYTES = 64 * 1024
@@ -69,11 +70,13 @@ SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 # Data the phone reads only while mobile_read is on. Signing in, adding a
 # passkey and signing out work with it off, so the phone can be set up first.
 APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
-            ("GET", "own"), ("POST", "own")}
+            ("GET", "own"), ("POST", "own"), ("POST", "voice")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
 OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment")
 # A file or photo for a message to his own Hermes comes as its own bytes, not JSON (own.py attach).
 ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/own/[a-z]+/attach$")
+# A recording to dictate from comes as its own bytes too (voice.py).
+VOICE_PATH = "/api/v1/voice/transcribe"
 
 
 class Raw:
@@ -98,6 +101,7 @@ class Api:
         self.workspace = workspace
         self.origin = origin
         self.clock = clock
+        self.voice_socket = VOICE_SOCKET  # the voice worker's (tests point it at their own)
         # The server answers each request on a new thread, so a connection belongs to
         # a request, not to a thread: a request leases one and gives it back, and at
         # most IDLE are kept open between requests. Keeping one per thread left every
@@ -156,7 +160,7 @@ class Api:
                 raise CoreError(404, "no_route", "no such route")
             route = parts[2:]
             query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            if method == "POST" and ATTACH_PATH.match(url.path):
+            if method == "POST" and (ATTACH_PATH.match(url.path) or url.path == VOICE_PATH):
                 data = {"_raw": body, "_type": headers.get("content-type", "")}
             else:
                 data = self._json(body) if method == "POST" else {}
@@ -362,6 +366,8 @@ class Api:
                                              data.get("text"), data.get("idempotency_key"),
                                              data.get("reply_to"), data.get("quote"), data.get("quote_by"),
                                              data.get("attachments"))
+        if method == "POST" and route == ["voice", "transcribe"]:
+            return 200, Voice(self.voice_socket).transcribe(p, data.get("_type"), data.get("_raw") or b"")
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "attach":
             return 200, OwnChat(core.s).attach(p, route[1], query.get("name"), data.get("_type"), data.get("_raw"))
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "unattach":
@@ -441,6 +447,8 @@ class Api:
 def body_limit(path: str) -> int:
     if ATTACH_PATH.match(path):
         return MAX_ATTACHMENT
+    if path == VOICE_PATH:
+        return MAX_AUDIO
     feed = (path.startswith(PREFIX + "/feeds/") or path == PREFIX + "/connector/page"
             or (path.startswith(PREFIX + "/own/") and path.endswith(("/feed", "/page"))))
     return MAX_FEED_BYTES if feed else MAX_REQUEST_BYTES
