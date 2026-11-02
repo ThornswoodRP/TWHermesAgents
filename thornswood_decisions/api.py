@@ -53,7 +53,7 @@ APP_FILES = {
     "icon-192.png": "image/png",
     "icon-512.png": "image/png",
     "icon-maskable-512.png": "image/png",
-    "cinzel-title.woff2": "font/woff2",
+    "cinzel-latin.woff2": "font/woff2",
 }
 # The app's own views, each a deep link that loads the shell. needs-you, work
 # and room are the tabs' first names (before Decisions, Board and Rooms), kept

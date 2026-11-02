@@ -56,6 +56,60 @@ function when(iso) {
   return isNaN(d) ? iso : d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
 }
 
+// ── the look (Patrick's approved mock-up v2, 1 Nov) ───────────────────────
+//
+// One visual system for every screen, as the mock-up drew it: each agent has
+// its own colour and initial (app.css .a-<id>), the same in the lists, on a
+// chat's bar and on its messages; lists are full-width rows with the avatar on
+// the left and the state on the right; every screen opens with a bar; the tabs
+// and the bars use the mock-up's line icons.
+const AGENT_INITIAL = { me: 'H', one: 'O', bramble: 'B', rift: 'R', sprocket: 'S', echo: 'E', magpie: 'M', wisp: 'W' }
+const AGENT_BY_NAME = { Hermes: 'me', One: 'one', Bramble: 'bramble', Rift: 'rift', Sprocket: 'sprocket', Echo: 'echo',
+  Magpie: 'magpie', Wisp: 'wisp' }
+
+function avatar(id, label) {
+  const known = AGENT_INITIAL[id]
+  return el('div', { class: 'av a-' + (known ? id : 'room'), 'aria-hidden': 'true' },
+    known || (label || '#').trim().charAt(0).toUpperCase() || '#')
+}
+
+// The mock-up's line icons (24 by 24, drawn with the text colour).
+const ICON = {
+  back: 'M15 18l-6-6 6-6', send: 'M4 12l16-8-6 16-3-7z', x: 'M6 6l12 12M18 6L6 18', plus: 'M12 5v14M5 12h14',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
+  more: 'M12 5h.01M12 12h.01M12 19h.01'
+}
+function icon(name, size = 20) {
+  const ns = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(ns, 'svg')
+  for (const [k, v] of Object.entries({ width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    'stroke-width': name === 'more' ? 3 : 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v)
+  const p = document.createElementNS(ns, 'path')
+  p.setAttribute('d', ICON[name])
+  svg.append(p)
+  return svg
+}
+
+// A screen's bar: back (when there is somewhere to go back to), the agent's
+// avatar, the title (a heading on a list screen) and a line under it, and
+// whatever goes on the right.
+function screenBar({ back, backLabel, agent, label, title, heading, under, right }) {
+  return el('div', { class: 'bar' },
+    back ? el('button', { class: 'ib', type: 'button', 'aria-label': backLabel, onclick: back }, icon('back')) : null,
+    agent !== undefined ? avatar(agent, label || title) : null,
+    el('div', { class: 't' }, el(heading ? 'h2' : 'strong', {}, title), under ? el('span', {}, under) : null),
+    right || null)
+}
+
+// A row of a list: avatar, title with its tags, the lines under it, and what
+// goes on the right (a state or a time).
+function listRow(attrs, { agent, label, title, tags, lines, right }) {
+  return el('button', { type: 'button', ...attrs, class: 'row' + (attrs.class ? ' ' + attrs.class : '') },
+    agent !== undefined ? avatar(agent, label || title) : null,
+    el('div', { class: 't' }, el('strong', {}, title), tags || null, lines || null),
+    right ? el('div', { class: 'w' }, right) : null)
+}
+
 const SAID = {
   mobile_read_off: 'The phone app is off for now. The report page is still where you answer.',
   signed_out: 'You are signed out.',
@@ -329,16 +383,17 @@ async function decisionsView() {
   flash = ''
   const answered = r.body.answered || []
   show(
+    screenBar({ title: 'Decisions', heading: true }),
     note ? el('p', { class: 'receipt', role: 'status' }, note) : null,
     r.body.cards.length
-      ? r.body.cards.map(c => el('button', { class: 'row', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
-        el('strong', {}, c.title),
-        el('div', { class: 'quiet' }, `${c.kind}${c.risk === 'high' ? ', high risk' : ''}, answer by ${when(c.expires_at)}`)))
+      ? [el('h2', { class: 'section' }, `Waiting on you (${r.body.cards.length})`),
+        r.body.cards.map(c => listRow({ onclick: () => go('/m/decisions/' + c.id) }, {
+          title: c.title, tags: c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
+          lines: el('span', { class: 'quiet' }, `${c.kind}, answer by ${when(c.expires_at)}`) }))]
       : el('p', { class: 'quiet' }, 'Nothing needs you right now.'),
     answered.length ? el('h2', { class: 'section' }, 'Answered') : null,
-    answered.map(c => el('button', { class: 'row done', type: 'button', onclick: () => go('/m/decisions/' + c.id) },
-      el('strong', {}, c.title),
-      el('div', { class: 'quiet' }, `You chose ${c.option}, ${when(c.answered_at)}`))))
+    answered.map(c => listRow({ class: 'done', onclick: () => go('/m/decisions/' + c.id) }, {
+      title: c.title, lines: el('span', { class: 'quiet' }, `You chose ${c.option}, ${when(c.answered_at)}`) })))
 }
 
 async function cardView(id, note) {
@@ -447,9 +502,10 @@ async function boardView() {
   setTab('board')
   const r = await call('GET', '/work')
   if (refused(r)) return
-  if (!r.body.work) return show(el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
+  const bar = screenBar({ title: 'Board', heading: true })
+  if (!r.body.work) return show(bar, el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
   const tasks = r.body.work.tasks
-  show(
+  show(bar,
     el('p', { class: 'quiet' }, `As the Bots' Hermes reported it at ${when(r.body.as_of)}. Read only.`),
     tasks.length ? el('table', {},
       el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
@@ -519,20 +575,20 @@ async function botsView() {
   // Hermes, then One, then the six Bots (Patrick's mock-up answer, 1 Nov).
   const gateways = own.status === 200 ? ['me', 'one'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
   show(
-    el('h2', { class: 'section' }, 'Thornswood Bots'),
-    gateways.map(g => el('button', { class: 'row', type: 'button', 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) },
-      el('strong', {}, GATEWAY[g.gateway]), gatewayLine(g),
-      g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null,
-      el('div', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
-      el('div', { class: 'quiet' }, g.last ? `${g.last.title || 'Untitled chat'}: ${g.last.preview.slice(0, 100)}`
-        : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')))),
+    screenBar({ title: 'Thornswood Bots', heading: true }),
+    gateways.map(g => listRow({ 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) }, {
+      agent: g.gateway, title: GATEWAY[g.gateway],
+      lines: [el('span', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
+        el('span', { class: 'quiet' }, g.last ? `${g.last.title || 'Untitled chat'}: ${g.last.preview.slice(0, 100)}`
+          : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.'))],
+      right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })),
     own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
-    bots.map(b => el('button', { class: 'row', type: 'button', 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) },
-      el('strong', {}, NAMES[b.bot] || b.bot),
-      b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null,
-      WHAT[b.bot] ? el('div', { class: 'what' }, WHAT[b.bot]) : null,
-      el('div', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.'))),
-    el('p', { class: 'quiet' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
+    bots.map(b => listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
+      agent: b.bot, title: NAMES[b.bot] || b.bot,
+      lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
+        el('span', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.')],
+      right: b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null })),
+    el('p', { class: 'quiet foot' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
 }
 
 // Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
@@ -827,7 +883,7 @@ function bubbles(items) {
             'aria-label': label }, r.emoji)
     })
     out.push(el('div', attrs,
-      !m.mine && (last === null || by !== last.by) ? el('div', { class: 'who' }, m.who) : null,
+      !m.mine && (last === null || by !== last.by) ? el('div', { class: 'who a-' + (AGENT_BY_NAME[m.who] || 'room') }, m.who) : null,
       bub,
       reacts.length ? el('div', { class: 'reacts' }, reacts) : null,
       el('div', { class: 'meta' + (m.warn ? ' warn' : '') }, [clock(m.at), m.note].filter(Boolean).join(' · '))))
@@ -877,26 +933,11 @@ function messageSheet(m) {
   if (first) first.focus()
 }
 
-function svgIcon(path) {
-  const ns = 'http://www.w3.org/2000/svg'
-  const svg = document.createElementNS(ns, 'svg')
-  svg.setAttribute('viewBox', '0 0 24 24')
-  svg.setAttribute('width', '20')
-  svg.setAttribute('height', '20')
-  svg.setAttribute('aria-hidden', 'true')
-  const p = document.createElementNS(ns, 'path')
-  p.setAttribute('d', path)
-  p.setAttribute('fill', 'currentColor')
-  svg.append(p)
-  return svg
-}
-
 // The bar on top of a chat: back, then the chat's name and where it lives.
-function chatBar(back, backLabel, title, under) {
-  return el('div', { class: 'chatbar' },
-    el('button', { class: 'back', type: 'button', 'aria-label': backLabel, onclick: back },
-      svgIcon('M15.4 4.6 14 3.2 5.2 12l8.8 8.8 1.4-1.4L8 12z')),
-    el('div', { class: 'title' }, el('strong', {}, title), el('span', {}, under)))
+function chatBar(back, backLabel, title, under, agent, label) {
+  const bar = screenBar({ back, backLabel, agent, label, title, under })
+  bar.classList.add('chatbar')
+  return bar
 }
 
 // The box at the foot of a chat. It grows with what is typed, up to six
@@ -925,7 +966,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
     status.textContent = s.status === 0
       ? 'Could not reach the core. Sending again sends the same message, never a second one.'
       : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
-  } }, svgIcon('M3.4 20.4 21 12 3.4 3.6 3.4 10.1 15 12 3.4 13.9z'))
+  } }, icon('send'))
   return el('div', { class: 'composer' }, box, button)
 }
 
@@ -988,11 +1029,9 @@ async function ownPage(path) {
 }
 
 function chatRow(gw, c) {
-  return el('button', { class: 'row', type: 'button', 'data-chat': c.id, onclick: () => go(`/m/hermes/${gw}/${c.id}`) },
-    el('strong', {}, c.title || 'Untitled chat'),
-    c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
-    el('span', { class: 'quiet' }, '  ' + when(c.last_at)),
-    el('div', { class: 'quiet' }, c.preview.slice(0, 120)))
+  return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
+    title: c.title || 'Untitled chat', tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
+    lines: el('span', { class: 'quiet' }, c.preview.slice(0, 120)), right: at(c.last_at) || when(c.last_at) })
 }
 
 async function gatewayView(gw) {
@@ -1005,7 +1044,8 @@ async function gatewayView(gw) {
   const pick = pickers[gw] || (pickers[gw] = { q: '', results: null, more: false, extra: [] })
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
-    el('h2', {}, name),
+    screenBar({ back: () => go('/m/bots'), backLabel: 'All Thornswood Bots', agent: gw, title: name, heading: true,
+      under: GATEWAY_WHAT[gw], right: gatewayLine(v) }),
     el('p', { class: 'quiet' }, `Your chats, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
     offLine(v)
   ]
@@ -1163,7 +1203,7 @@ async function ownChatView(gw, sid) {
     const items = h.items.concat(pendingItems(v.mine, readAt))
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, v.chat.title || 'Untitled chat',
-        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`),
+        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`, gw),
       h.notes,
       offLine(v)
     ]
@@ -1207,11 +1247,11 @@ async function roomsView() {
   if (refused(r)) return
   const rooms = r.body.rooms || []
   show(
-    el('p', { class: 'quiet' }, `Each group chat, as of ${when(r.body.rooms_as_of) || 'nothing yet'}.`),
-    rooms.length ? rooms.map(m => el('button', { class: 'row', type: 'button', onclick: () => go('/m/rooms/' + m.room_id) },
-      el('strong', {}, m.name),
-      m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
-      el('div', { class: 'quiet' }, m.last ? `${m.last.who}: ${m.last.text.slice(0, 120)}` : 'No messages yet.')))
+    screenBar({ title: 'Rooms', heading: true, under: `Each group chat, as of ${when(r.body.rooms_as_of) || 'nothing yet'}` }),
+    rooms.length ? rooms.map(m => listRow({ onclick: () => go('/m/rooms/' + m.room_id) }, {
+      agent: null, label: m.name, title: m.name,
+      tags: m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
+      lines: el('span', { class: 'quiet' }, m.last ? `${m.last.who}: ${m.last.text.slice(0, 120)}` : 'No messages yet.') }))
       : el('p', { class: 'quiet' }, 'No rooms yet.'))
 }
 
@@ -1272,7 +1312,7 @@ async function chatView(target, tab) {
     const top = [
       chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, room
         ? `A room, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
-        : `Your Bot Chat, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+        : `Your Bot Chat, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`, room ? null : v.target, name),
       h.notes
     ]
     if (!items.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
