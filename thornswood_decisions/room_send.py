@@ -53,6 +53,17 @@ title, is already hidden or shown, or is already gone is done. It prints
 hidden chat titled exactly "Bot Chat", with every part Hermes compressed it
 into) is never changed. It needs no gateway.
 
+When Hermes is not installed into the Python that runs this (Hermes's own
+launcher keeps its source in a folder it puts first on the path itself), the
+connector names that folder, and this puts it first on the path, and runs
+Hermes's own bootstrap from it (which puts Hermes's dependencies on the path),
+before it imports any of Hermes:
+
+    <hermes python> -I room_send.py --hermes-root <Hermes's source folder> < {...}
+
+Run inside Hermes's own bootstrap (`hermes --print-runtime-command`) it needs
+no folder: the bootstrap has put it there already.
+
 It imports nothing from this repository.
 """
 
@@ -203,5 +214,28 @@ def main() -> int:
     return 0
 
 
+def use_root(argv: list[str]) -> None:
+    """--hermes-root <folder>: Hermes's source folder, put first on the path before any of Hermes is imported."""
+    if "--hermes-root" not in argv:
+        return
+    i = argv.index("--hermes-root")
+    root = argv[i + 1] if i + 1 < len(argv) else ""
+    import os
+    if not (os.path.isabs(root) and os.path.isdir(root)):
+        raise SystemExit(f"--hermes-root must name Hermes's source folder by its full path, not {root!r}")
+    for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+        os.environ.pop(name, None)
+    sys.path.insert(0, root)
+    if os.path.isfile(os.path.join(root, "hermes_bootstrap.py")):
+        # What Hermes's own runtime command does next (hermes_cli/_launchers.py runtime_command): its
+        # bootstrap puts Hermes's dependencies on the path (2 Nov on the VM: without it, ruamel is missing).
+        sys._hermes_pin_default_home = True
+        import hermes_bootstrap  # noqa: F401
+        if not os.environ.get("HERMES_HOME"):
+            from hermes_constants import get_default_hermes_root
+            os.environ["HERMES_HOME"] = str(get_default_hermes_root())
+
+
 if __name__ == "__main__":
+    use_root(sys.argv[1:])
     sys.exit(main())

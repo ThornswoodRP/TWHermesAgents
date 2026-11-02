@@ -24,6 +24,11 @@ For each Bot it:
      they lived only in each profile, so a stale line could be fixed by no PR);
   8. loads the installed plugin and checks it refuses what it must.
 
+For the Bot GitHub wakes (Bramble) it also installs the owed-wake check: the
+script into the profile's scripts/ and the cron job tw-owed-wake, made or
+brought up to date through the `hermes` command (thornswood_guard/owed_wake.py
+says what it does). A job Patrick paused stays paused.
+
 The gateway's own profile (the hermes user's default profile, which
 tw-hermes-gateway runs as) is not a Bot, but it holds the Discord connection
 and makes the gateway's own helper calls. It gets one route, the helpers on
@@ -37,6 +42,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -243,6 +249,74 @@ def install_skill(pdir: Path, name: str) -> None:
     os.replace(tmp, target / "SKILL.md")
 
 
+def cron_jobs(hermes: list[str], bot: str) -> tuple[dict[str, list[dict]] | None, str]:
+    """The profile's cron jobs by name ({name: [{"id", "state"}, ...]}), read
+    with `hermes -p <bot> cron list --all`, or (None, why not)."""
+    try:
+        r = subprocess.run([*hermes, "-p", bot, "cron", "list", "--all"], capture_output=True, text=True,
+                           timeout=120, env=dict(os.environ, NO_COLOR="1"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"{shlex.join(hermes)} could not be run ({e})"
+    if r.returncode != 0:
+        return None, f"hermes -p {bot} cron list exited {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}"
+    jobs: dict[str, list[dict]] = {}
+    current = None
+    for raw in r.stdout.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+        if m := re.fullmatch(r"  (\S+) \[([a-z ]+)\]\s*", line):
+            current = {"id": m.group(1), "state": m.group(2)}
+        elif current and (m := re.fullmatch(r"    Name:\s*(.+?)\s*", line)):
+            jobs.setdefault(m.group(1), []).append(current)
+            current = None
+    return jobs, ""
+
+
+def install_owed_wake(pdir: Path, hermes: list[str], bot: str) -> list[str]:
+    """The owed-wake script into <profile>/scripts/, and its cron job made or
+    brought up to date. Returns what failed."""
+    from thornswood_guard import owed_wake
+
+    scripts = pdir / "scripts"
+    scripts.mkdir(exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=scripts, prefix=".tw-owed-wake-")
+    with os.fdopen(fd, "wb") as f:
+        f.write((REPO / "deploy" / "hermes-scripts" / owed_wake.SCRIPT).read_bytes())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, scripts / owed_wake.SCRIPT)
+
+    jobs, why = cron_jobs(hermes, bot)
+    if jobs is None:
+        return [f"{bot}: the owed-wake job could not be read: {why}"]
+    spec = ["--name", owed_wake.OWED_WAKE_JOB, "--skill", owed_wake.SKILL, "--script", owed_wake.SCRIPT,
+            "--deliver", "local"]
+    found = jobs.get(owed_wake.OWED_WAKE_JOB, [])
+    if len(found) > 1:
+        return [f"{bot}: {len(found)} cron jobs are named {owed_wake.OWED_WAKE_JOB} "
+                f"({', '.join(j['id'] for j in found)}); one must go, with hermes -p {bot} cron remove <id>"]
+    if not found:
+        argv = [*hermes, "-p", bot, "cron", "create", owed_wake.SCHEDULE, owed_wake.PROMPT, *spec]
+    else:
+        argv = [*hermes, "-p", bot, "cron", "edit", found[0]["id"], "--schedule", owed_wake.SCHEDULE,
+                "--prompt", owed_wake.PROMPT, *spec]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=dict(os.environ, NO_COLOR="1"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"{bot}: the owed-wake job could not be written ({e})"]
+    if r.returncode != 0:
+        return [f"{bot}: hermes cron {argv[4]} exited {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}"]
+    jobs, why = cron_jobs(hermes, bot)
+    found = (jobs or {}).get(owed_wake.OWED_WAKE_JOB, [])
+    if len(found) != 1:
+        return [f"{bot}: hermes cron {argv[4]} answered, but {len(found)} jobs named {owed_wake.OWED_WAKE_JOB} "
+                f"are listed after it ({why or 'one was expected'})"]
+    job = found[0]
+    if job["state"] not in ("active", "paused"):
+        return [f"{bot}: the owed-wake job {job['id']} is {job['state']}, so it never runs"]
+    print(f"{bot}: owed-wake job {job['id']} is {job['state']}"
+          + ("; Patrick paused it, so it stays paused" if job["state"] == "paused" else ""))
+    return []
+
+
 def write_config(pdir: Path, cfg_path: Path, merged: dict, commit: str, stamp: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=pdir, prefix=".config-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -262,10 +336,13 @@ def main() -> int:
     ap.add_argument("--work-root", default=WORK_ROOT)
     ap.add_argument("--check", action="store_true", help="report only; write nothing")
     ap.add_argument("--podman", default="podman", help="the container runtime command (tests pass a stand-in)")
+    ap.add_argument("--hermes", default="/home/hermes/.local/bin/hermes",
+                    help="the hermes command, for Bramble's owed-wake cron job (tests pass a stand-in)")
     ap.add_argument("--wake-secret-file", default=None,
                     help="where deploy/install.sh made the webhook secret (default: the policy's wake.secret_file; tests pass a stand-in)")
     a = ap.parse_args()
     podman = shlex.split(a.podman)
+    hermes = shlex.split(a.hermes)
 
     problems: list[str] = []
     head = git("rev-parse", "HEAD")
@@ -315,6 +392,13 @@ def main() -> int:
         problems.append(f"{wake_secret} is not there; deploy/install.sh makes it, so run the install for this commit first")
     problems += scan_files(policy, home)
     problems += check_skills()
+    # Bramble's owed-wake job is written through the hermes command, so it must
+    # answer before anything is written.
+    waker = policy.data["wake"]["app"]
+    if waker in plans:
+        _, why = cron_jobs(hermes, waker)
+        if why:
+            problems.append(f"{waker}: {why}")
 
     # Every Bot's terminal runs in Hermes's sandbox image under rootless podman.
     present, why = image_present(podman)
@@ -359,6 +443,7 @@ def main() -> int:
     install_guard(home)
     write_config(home, gw_path, gw_merged, a.expect, stamp)
 
+    owed = install_owed_wake(plans[waker][0], hermes, waker) if waker in plans else []
     failures = []
     for bot, (pdir, *_rest) in plans.items():
         failures += self_test(pdir / "plugins" / "thornswood_guard", bot)
@@ -366,6 +451,12 @@ def main() -> int:
     if failures:
         print("\nThe guard was installed but its self-test failed. Treat every Bot as unguarded until this is fixed:")
         for f in failures:
+            print(f"  - {f}")
+        return 1
+    if owed:
+        print("\nThe guard was installed and its self-test passed, but Bramble's owed-wake job was not written, so a "
+              "wake the fleet queue turns away waits for the next one:")
+        for f in owed:
             print(f"  - {f}")
         return 1
     print(f"\nApplied {a.expect} to {', '.join(plans)} and the gateway's own profile. The guard's self-test passed in every profile.")

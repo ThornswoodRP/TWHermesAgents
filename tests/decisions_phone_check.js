@@ -24,10 +24,11 @@ const base = `http://localhost:${port}`
   const page = await ctx.newPage()
   const errors = []
   page.on('pageerror', e => errors.push(String(e)))
-  // A 401 is the signed-out app asking; a 404 is said below only when it is not a chat a gateway never listed.
+  // A 401 is the signed-out app asking; a 404 is said below only when it is not one of the two that are answers.
   page.on('console', m => { if (m.type() === 'error' && !/status of (401|404)/.test(m.text())) errors.push(m.text()) })
   page.on('response', r => {
-    if (r.status() === 404 && !/\/api\/v1\/own\/(me|one)\/chats\/[^/]+\/messages$/.test(new URL(r.url()).pathname)) {
+    // Two 404s are answers, not missing routes: a chat a gateway never listed, and a fingerprint key the core no longer has.
+    if (r.status() === 404 && !/\/api\/v1\/(own\/(me|one)\/chats\/[^/]+\/messages|passkeys\/sign-in\/options)$/.test(new URL(r.url()).pathname)) {
       errors.push('404 ' + r.url())
     }
   })
@@ -534,6 +535,12 @@ const base = `http://localhost:${port}`
     await page.getByText('Second test room', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('Bramble: <script>alert(1)</script> hello').waitFor({ timeout: 3000 })
   })
+  await step("a list line is the message's plain words, cut at a whole word", async () => {
+    await page.getByText(/^magpie: @bramble/).waitFor({ timeout: 3000 })
+    const line = await page.getByText(/^magpie: @bramble/).textContent()
+    const want = "magpie: @bramble it'll show up on #5367, and it'll run, not skip. Why it isn't there yet: Launcher builds has needs: pick and…"
+    if (line !== want) throw new Error(JSON.stringify(line))
+  })
   await page.getByText('Second test room', { exact: true }).click()
   await step('a room opens on its own deep link', async () => {
     await page.getByLabel('Message to Second test room').waitFor({ timeout: 5000 })
@@ -641,6 +648,57 @@ const base = `http://localhost:${port}`
   await page.getByRole('button', { name: 'Not now' }).click()
   await step('the install hint goes away for this visit when told not now', async () => {
     if (await page.locator('#install').isVisible()) throw new Error('still shown')
+  })
+  // The fingerprint on the phone (Patrick, 2 Nov): the phone's own key, named in the sign-in so the phone
+  // answers it itself instead of Android handing it to a passkey app. The virtual authenticator here is
+  // the phone's platform one (transport internal, with user verification).
+  await page.goto(base + '/m/decisions')
+  await step('on a phone, Decisions offers the fingerprint', () =>
+    page.getByText('Sign in with your fingerprint', { exact: true }).waitFor({ timeout: 5000 }))
+  await page.getByRole('button', { name: 'Use my fingerprint' }).click()
+  await step('the fingerprint is added beside the passkey, and the offer goes', async () => {
+    await page.getByText('Fingerprint sign-in is on for this phone.').waitFor({ timeout: 8000 })
+    if (await page.getByRole('button', { name: 'Use my fingerprint' }).count()) throw new Error('still offered')
+    const k = await page.evaluate(() => JSON.parse(localStorage.getItem('hermes.phoneKey.v1') || 'null'))
+    if (!k || !k.credential_id || !k.passkey_id) throw new Error('no key name kept: ' + JSON.stringify(k))
+  })
+  await page.goto(base + '/m/settings')
+  await step('settings says the fingerprint is on, and lists it', async () => {
+    await page.getByText(/^On\. This phone signs in and answers high-risk cards with your fingerprint\.$/).waitFor({ timeout: 5000 })
+    await page.getByText('Fingerprint on this phone', { exact: true }).waitFor({ timeout: 3000 })
+  })
+  const optionBodies = []
+  page.on('request', q => { if (new URL(q.url()).pathname === '/api/v1/passkeys/sign-in/options') optionBodies.push(JSON.parse(q.postData() || '{}')) })
+  await page.getByText('Sign out').click()
+  await step('signed out, the button says fingerprint and it signs in naming this phone\'s key', async () => {
+    const button = page.getByRole('button', { name: 'Sign in with your fingerprint' })
+    await button.waitFor({ timeout: 5000 })
+    await button.click()
+    await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
+    const k = await page.evaluate(() => JSON.parse(localStorage.getItem('hermes.phoneKey.v1')))
+    if (JSON.stringify(optionBodies) !== JSON.stringify([{ phone_key: k.credential_id }])) throw new Error(JSON.stringify(optionBodies))
+  })
+  await step('high-risk answers, deletes and own-Hermes sends name the fingerprint too', async () => {
+    if ((await page.evaluate(() => signInWord())) !== 'fingerprint') throw new Error('the word is not fingerprint')
+  })
+  // A key the core no longer has (removed with its phone): the app forgets its name and the passkey signs in.
+  // (Settings drops a key name the core does not list, so the name is put back after it loads.)
+  await page.goto(base + '/m/settings')
+  await page.getByText('Sign out').waitFor({ timeout: 5000 })
+  await step('settings forgets a fingerprint key the core no longer lists', async () => {
+    await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_gone' })))
+    await page.goto(base + '/m/settings')
+    await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 5000 })
+    if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('kept')
+  })
+  await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_gone' })))
+  optionBodies.length = 0
+  await page.getByText('Sign out').click()
+  await step('a removed fingerprint key falls back to the passkey and is forgotten', async () => {
+    await page.getByRole('button', { name: 'Sign in with your fingerprint' }).click()
+    await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
+    if (JSON.stringify(optionBodies) !== JSON.stringify([{ phone_key: 'AQEBAQEBAQEBAQEBAQEBAQ' }, {}])) throw new Error(JSON.stringify(optionBodies))
+    if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('the gone key is still kept')
   })
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.

@@ -26,6 +26,7 @@ import logging
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 from .policy import Policy
@@ -66,11 +67,11 @@ def call(path: str, op: str, args: dict | None = None, *, timeout: float = 120.0
 Caller = Callable[[str, str, dict], object]
 
 
-def socket_caller(policy: Policy) -> Caller:
+def socket_caller(policy: Policy, *, timeout: float = 120.0) -> Caller:
     sockets = policy.data["brokers"]["sockets"]
 
     def ask(broker: str, op: str, args: dict):
-        return call(sockets[broker]["path"], op, args)
+        return call(sockets[broker]["path"], op, args, timeout=timeout)
     return ask
 
 
@@ -87,16 +88,28 @@ TURN_WAIT = 540.0
 # A scheduled turn (Hermes's cron) has no next turn: its session is made for
 # that one run, so a ticket it never used goes back when it ends.
 SCHEDULED = ("cron",)
+# Bramble's sweeps. A wake (its only webhook route is GitHub's) and its
+# owed-wake check (a cron job whose prompt carries OWED_WAKE_MARK) each do
+# the whole bramble-duties sweep. One the queue turns away is owed in
+# tw-policy instead of dropped; one that runs pays what is owed. When
+# tw-policy itself does not answer, the debt waits in OWED_FILE in the
+# profile until the owed-wake check can hand it over.
+SWEEP_PLATFORMS = ("webhook",)
+OWED_WAKE_MARK = "[Thornswood owed wake]"
+OWED_WAKE_JOB = "tw-owed-wake"
+OWED_FILE = ("local", "thornswood-hermes", "owed-wake")
 
 
 class TurnGate:
     """One per profile. Keyed by Hermes's session id, one turn at a time per session."""
 
     def __init__(self, policy: Policy, bot: str, ask: Caller, *, wait_seconds: float = TURN_WAIT,
-                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
+                 owed_file: Path | None = None):
         self.policy = policy
         self.bot = bot
         self.ask = ask
+        self.owed_file = owed_file
         self.wait_seconds = wait_seconds
         self.sleep = sleep
         self.clock = clock
@@ -107,6 +120,35 @@ class TurnGate:
     def _key(kwargs: dict) -> str:
         return str(kwargs.get("session_id") or kwargs.get("session_key") or kwargs.get("task_id") or "")
 
+    def _sweep(self, kwargs: dict) -> bool:
+        """Whether this turn is one of Bramble's whole sweeps."""
+        if not self.policy.is_router(self.bot):
+            return False
+        platform = str(kwargs.get("platform") or "")
+        if platform in SWEEP_PLATFORMS:
+            return True
+        # Hermes puts its cron hint and the script's output before the job's
+        # prompt (cron/scheduler_prompt.py _build_job_prompt), so the mark is
+        # looked for anywhere in a cron turn's message. Only Patrick and
+        # apply.py make Bramble's cron jobs.
+        return platform in SCHEDULED and OWED_WAKE_MARK in str(kwargs.get("user_message") or "")
+
+    def _owe(self, why: str) -> None:
+        try:
+            self.ask("policy", "owe_wake", {"bot": self.bot, "reason": why})
+            return
+        except BrokerRefused as e:
+            failed = str(e)
+        if self.owed_file is None:
+            logger.error("a wake was turned away and could not be owed (%s); the next wake does its sweep", failed)
+            return
+        try:
+            self.owed_file.parent.mkdir(parents=True, exist_ok=True)
+            self.owed_file.write_text(why[:300] + "\n", encoding="utf-8")
+        except OSError as e:
+            logger.error("a wake was turned away and could not be owed (%s, then %s); the next wake does its sweep",
+                         failed, e)
+
     def before_llm(self, **kwargs):
         key = self._key(kwargs)
         task = str(kwargs.get("task_id") or key or "chat")
@@ -114,6 +156,7 @@ class TurnGate:
             held = self.turns.get(key)
         ticket = held["ticket"] if held and held.get("state") == "waiting" else None
         scheduled = str(kwargs.get("platform") or "") in SCHEDULED
+        sweep = self._sweep(kwargs)
         deadline = self.clock() + self.wait_seconds
         pause = 1.0
         try:
@@ -124,26 +167,40 @@ class TurnGate:
                 ticket = got["ticket"]
                 if got["state"] == "admitted":
                     with self.lock:
-                        self.turns[key] = {"ticket": ticket, "state": "admitted"}
+                        self.turns[key] = {"ticket": ticket, "state": "admitted", "sweep": sweep}
                     return None
                 if self.clock() + pause > deadline:
+                    # A sweep's session has no next turn either: its ticket
+                    # goes back at the end, and the wake is owed instead.
                     with self.lock:
                         self.turns[key] = {"ticket": ticket, "state": "waiting", "reason": got.get("reason"),
-                                           "scheduled": scheduled}
+                                           "scheduled": scheduled or sweep}
                     why = (got.get("reason") or "the fleet is busy") + \
                         f" (this turn waited {int(self.wait_seconds)} seconds for it)"
+                    if sweep:
+                        self._owe(why)
+                        return {"context": self._owed(why)}
                     return {"context": self._queued(why)}
                 self.sleep(pause)
                 pause = min(pause * 2, 5.0)
         except BrokerRefused as e:
             with self.lock:
                 self.turns[key] = {"ticket": None, "state": "refused", "reason": str(e)}
+            if sweep:
+                self._owe(str(e))
+                return {"context": self._owed(str(e))}
             return {"context": self._queued(str(e))}
 
     def _queued(self, reason: str) -> str:
         return ("[Thornswood queue] This turn was not admitted by the fleet queue: " + reason +
                 ". Every tool is refused for this turn, and nothing starts it again by itself. Reply in one short line "
                 "that the work did not start and why, and that it needs asking again once the fleet is free, then stop.")
+
+    def _owed(self, reason: str) -> str:
+        return ("[Thornswood queue] This sweep was not admitted by the fleet queue: " + reason +
+                ". Every tool is refused for this turn. The wake is owed, and your owed-wake check wakes you for "
+                "the whole sweep once the queue has room. Reply in one short line that the sweep is owed and why, "
+                "then stop.")
 
     def before_tool(self, tool_name: str, **kwargs) -> str | None:
         """A block message, or None to let the guard's other checks run."""
@@ -177,6 +234,13 @@ class TurnGate:
                 self.ask("policy", "finish", {"bot": self.bot, "ticket": turn["ticket"]})
             except BrokerRefused:
                 logger.warning("could not give back ticket %s; it goes back by itself in ten minutes", turn["ticket"])
+        # A sweep that ran to its end did what every owed wake asked for.
+        # One that was stopped (agent_loop_stopped) pays nothing.
+        if turn and turn.get("state") == "admitted" and turn.get("sweep"):
+            try:
+                self.ask("policy", "wake_paid", {"bot": self.bot})
+            except BrokerRefused as e:
+                logger.warning("a sweep ran but the owed wake could not be marked paid (%s); the next check sweeps again", e)
 
     def stopped(self, **kwargs):
         key = self._key(kwargs)
@@ -310,7 +374,9 @@ def register(ctx, policy: Policy, bot: str, ask: Caller | None = None) -> TurnGa
     if not policy.data["brokers"].get("ready") or not policy.is_bot(bot):
         return None
     ask = ask or socket_caller(policy)
-    gate = TurnGate(policy, bot, ask)
+    # Installed at <profile>/plugins/thornswood_guard/brokers.py.
+    owed = Path(__file__).resolve().parents[2].joinpath(*OWED_FILE) if policy.is_router(bot) else None
+    gate = TurnGate(policy, bot, ask, owed_file=owed)
     ctx.register_hook("pre_llm_call", gate.before_llm)
     ctx.register_hook("on_session_end", gate.after_turn)
     ctx.register_hook("agent_loop_stopped", gate.stopped)

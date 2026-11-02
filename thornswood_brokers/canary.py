@@ -19,6 +19,10 @@ and exits 1 when any check fails.
       only, and each Tailscale one refuses a request with no sign-in
   one executor: as hermes, a Bramble merge through tw-git's socket is refused
       by the one-executor rule until the cutover (policy.yaml executor)
+  connector: where the decision core is installed, its connector's Hermes
+      helper (room_send.py, in Hermes's own runtime) answers {"ready": true}
+      for Bramble, as hermes (30 Oct to 2 Nov it ran under /bin/sh, failed every
+      check, and Patrick's answers waited unseen as "gateway not ready")
 """
 
 from __future__ import annotations
@@ -159,6 +163,29 @@ echo DONE
 '''
 
 
+def connector_problem(code: int, out: str, err: str) -> str | None:
+    """None when the connector's readiness check printed {"ready": true} and exited 0."""
+    lines = out.strip().splitlines()
+    try:
+        got = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError:
+        got = None
+    if code == 0 and isinstance(got, dict) and got.get("ready") is True:
+        return None
+    said = (lines[-1] if lines else "") or " ".join(err.split())[-300:] or "nothing"
+    return f"exit {code}: {said[-300:]}"
+
+
+def gateway_waiting(out: str) -> bool:
+    """The check ran and the gateway is not ready yet ({"ready": false, ...} from the helper itself)."""
+    lines = out.strip().splitlines()
+    try:
+        got = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError:
+        return False
+    return isinstance(got, dict) and got.get("ready") is False and not got.get("helper_failed")
+
+
 def parse_probe(out: str, paths: list[str]) -> list[str]:
     """What a Tier B probe got that it never should."""
     bad = [l for l in out.splitlines() if l.startswith("READ ")]
@@ -242,6 +269,7 @@ class Canary:
         self.run = run or (lambda argv, **kw: subprocess.run(argv, capture_output=True, text=True, **kw))
         self.results: list[Result] = []
         self.cleanup: list[Callable[[], None]] = []
+        self.sleep: Callable[[float], None] = __import__("time").sleep
 
     def check(self, name: str, problems: list[str] | str | None) -> None:
         if isinstance(problems, str):
@@ -377,6 +405,33 @@ class Canary:
                    + (" until the cutover" if executor != "bramble" else ""),
                    executor_problem(executor, r.stdout or r.stderr or ""))
 
+    def connector_helper(self, env_file: Path = Path("/etc/thornswood/tw-decide.env"),
+                         launcher: str = "/opt/thornswood-hermes/bin/tw-decide-connector", bot: str = "bramble") -> None:
+        """The decision connector's own readiness check for one Bot, run as the hermes user the way its unit
+        runs it (the same hermes command and runtime directory). It must answer {"ready": true}: anything
+        else means Patrick's messages and answers cannot reach the Bots."""
+        if not env_file.exists():
+            return  # the decision core is not installed on this VM
+        conf = dict(line.partition("=")[::2] for line in env_file.read_text().splitlines() if "=" in line)
+        hermes_bin = conf.get("TW_HERMES_BIN", "").strip()
+        user = self.policy.data["brokers"]["users"]["gateway"]
+        name = f"connector: its Hermes helper answers ready for {bot}, as {user}"
+        if not hermes_bin:
+            self.check(name, f"{env_file} names no TW_HERMES_BIN")
+            return
+        pw = pwd.getpwnam(user)
+        argv = ["runuser", "-u", user, "--", "env", f"HOME={pw.pw_dir}", f"XDG_RUNTIME_DIR=/run/user/{pw.pw_uid}",
+                launcher, "--hermes", hermes_bin, "--check-ready", bot]
+        # A gateway reloaded a moment ago may still be starting: that answer is asked again for up to a
+        # minute. A helper that failed is not the gateway, and fails at once.
+        for attempt in range(7):
+            r = self.run(argv, timeout=150, cwd=pw.pw_dir)
+            problem = connector_problem(r.returncode, r.stdout or "", r.stderr or "")
+            if problem is None or not gateway_waiting(r.stdout or "") or attempt == 6:
+                break
+            self.sleep(10)
+        self.check(name, problem)
+
     def services_up(self) -> None:
         units = ["tw-policy", "tw-git", "tw-files", "tw-proxy"]
         gw = "tw-hermes-gateway" if self.run(["systemctl", "is-enabled", "--quiet", "tw-hermes-gateway.service"]).returncode == 0 else None
@@ -439,6 +494,7 @@ def main() -> int:
         c.tier_a(SANDBOX_IMAGE)
         c.listeners()
         c.one_executor()
+        c.connector_helper()
         c.services_up()
     except Exception as e:
         c.check("the canary ran to the end", f"{type(e).__name__}: {e}")

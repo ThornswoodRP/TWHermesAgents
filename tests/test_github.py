@@ -396,6 +396,70 @@ class Runs(unittest.TestCase):
 
 
 
+class TunnelRun(unittest.TestCase):
+    """tunnel.yml (Ops, Thornswood #5334) takes no gate line: its mode, wait
+    and recipient are each held to the pattern policy.yaml names."""
+
+    def setUp(self):
+        self.p = policy()
+        self.s = store(self.p)
+        self.r = rules(self.p, self.s)
+        self.lists = verb_lists()
+
+    def run_(self, inputs, bot="bramble"):
+        return self.r.start_run(bot, APP, "tunnel.yml", "main", inputs, self.lists, commit=HEAD)
+
+    def test_it_lives_in_ops(self):
+        self.assertEqual(self.p.data["runs"]["workflows"]["tunnel.yml"]["repo"], "ThornswoodRP/Thornswood-Ops")
+
+    def test_each_mode_runs(self):
+        for mode in ("install", "switch", "back"):
+            v = self.run_({"mode": mode})
+            self.assertTrue(v.allowed, (mode, v.reason))
+        self.assertTrue(self.run_({"mode": "switch", "wait": "120"}).allowed)
+        self.assertTrue(self.run_({"mode": "install", "wait": "", "recipient": ""}).allowed)
+
+    def test_a_mode_it_does_not_have_is_refused(self):
+        for mode in ("delete", "switch -Back", "install;whoami", "Install", ""):
+            self.assertFalse(self.run_({"mode": mode}).allowed, mode)
+
+    def test_the_mode_is_needed(self):
+        v = self.run_({"wait": "120"})
+        self.assertFalse(v.allowed)
+        self.assertIn("needs mode", v.reason)
+
+    def test_wait_is_up_to_three_digits(self):
+        for wait in ("1000", "2m", "-1", "12 -Back"):
+            self.assertFalse(self.run_({"mode": "switch", "wait": wait}).allowed, wait)
+
+    def test_no_line_and_no_seal_key_come_in(self):
+        for extra in ({"line": "Install-Tunnel -Switch"}, {"seal_key": "<RSAKeyValue/>"}, {"sealed": "abc"}):
+            v = self.run_({"mode": "install", **extra})
+            self.assertFalse(v.allowed, extra)
+            self.assertIn("takes only", v.reason)
+
+    def test_a_recipient_is_a_key_and_nothing_else(self):
+        self.assertTrue(self.run_({"mode": "install", "recipient": "<RSAKeyValue><Modulus>ab+/=</Modulus></RSAKeyValue>"}).allowed)
+        self.assertFalse(self.run_({"mode": "install", "recipient": "a b"}).allowed)
+        self.assertFalse(self.run_({"mode": "install", "recipient": "x\"; rm"}).allowed)
+
+    def test_only_bramble_starts_it(self):
+        for bot in ("rift", "sprocket", "echo", "magpie", "wisp"):
+            self.assertFalse(self.run_({"mode": "install"}, bot=bot).allowed, bot)
+
+    def test_a_pattern_that_does_not_compile_stops_the_policy(self):
+        from thornswood_guard.policy import Policy, PolicyError
+        import copy
+        data = copy.deepcopy(self.p.data)
+        data["runs"]["workflows"]["tunnel.yml"]["inputs"]["mode"] = "install|("
+        with self.assertRaises(PolicyError):
+            Policy(data)
+        data = copy.deepcopy(self.p.data)
+        data["runs"]["workflows"]["tunnel.yml"]["required"] = ["line"]
+        with self.assertRaises(PolicyError):
+            Policy(data)
+
+
 class MainWithoutAYes(unittest.TestCase):
     """Patrick, 31 Oct and 1 Nov: main releases go out without his yes for
     each one, for now. What still needs him stays as it was."""

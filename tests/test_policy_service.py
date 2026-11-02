@@ -231,6 +231,87 @@ class Queue(unittest.TestCase):
             service().admit("hermes", {"bot": "ops", "task": "t"})
 
 
+class OwedWakes(unittest.TestCase):
+    """1 Nov, 10:02 PM on: each of Bramble's wakes the queue turned away was
+    dropped, so Ops #205 and #206 sat green and unswept. A turned-away wake is
+    owed here instead, and the owed-wake check asks when it can run."""
+
+    def burst(self, s, n=20):
+        for i in range(n):
+            t = s.admit("hermes", {"bot": "rift", "task": f"t{i}"})["ticket"]
+            s.finish("hermes", {"bot": "rift", "ticket": t})
+
+    def test_nothing_is_owed_at_first(self):
+        self.assertEqual(service().wake_due("hermes", {"bot": "bramble"}), {"owed": False, "due": False})
+
+    def test_an_owed_wake_waits_out_the_hours_cap_and_is_due_after_it(self):
+        clock = Clock()
+        s = service(clock=clock)
+        self.burst(s)
+        with self.assertRaises(Refused):
+            s.admit("hermes", {"bot": "bramble", "task": "wake", "source": "webhook"})
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "20 tickets were made in the last hour"})
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "again"})
+        due = s.wake_due("hermes", {"bot": "bramble"})
+        self.assertTrue(due["owed"])
+        self.assertFalse(due["due"])
+        self.assertIn("20 an hour", due["why_not"])
+        self.assertEqual((due["refused"], due["reason"]), (2, "again"))
+        clock.advance(hours=1, seconds=1)
+        due = s.wake_due("hermes", {"bot": "bramble"})
+        self.assertTrue(due["due"], due)
+        self.assertEqual(due["why_not"], "")
+
+    def test_asking_spends_no_ticket(self):
+        s = service()
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        for _ in range(30):
+            s.wake_due("hermes", {"bot": "bramble"})
+        self.assertEqual(s.db.execute("SELECT COUNT(*) FROM tickets").fetchone()[0], 0)
+
+    def test_a_running_turn_or_one_waiting_first_keeps_it_not_due(self):
+        s = service()
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        running = s.admit("hermes", {"bot": "rift", "task": "a"})["ticket"]
+        self.assertIn("at most 1 at once", s.wake_due("hermes", {"bot": "bramble"})["why_not"])
+        s.admit("hermes", {"bot": "wisp", "task": "b"})
+        s.finish("hermes", {"bot": "rift", "ticket": running})
+        self.assertIn("waiting first", s.wake_due("hermes", {"bot": "bramble"})["why_not"])
+
+    def test_a_drained_host_keeps_it_not_due(self):
+        low = lambda: HostState(1.2, 0, 0, 0, 0.1, 80, 80)
+        s = service(host=low)
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        self.assertFalse(s.wake_due("hermes", {"bot": "bramble"})["due"])
+
+    def test_a_sweep_pays_it_once(self):
+        s = service()
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        paid = s.wake_paid("hermes", {"bot": "bramble"})
+        self.assertEqual((paid["paid"], paid["refused"]), (True, 1))
+        self.assertEqual(s.wake_paid("hermes", {"bot": "bramble"}), {"paid": False})
+        self.assertFalse(s.wake_due("hermes", {"bot": "bramble"})["owed"])
+
+    def test_it_outlives_a_restart_and_a_reload(self):
+        db = Path(tempfile.mkdtemp()) / "policy.db"
+        s = service(db=db)
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        s.release_turns("root", {"why": "tw-reload-bots"})
+        again = service(db=db)
+        self.assertTrue(again.wake_due("hermes", {"bot": "bramble"})["owed"])
+
+    def test_only_the_router_owes_a_wake_and_only_the_gateway_asks(self):
+        s = service()
+        for op in (s.owe_wake, s.wake_due, s.wake_paid):
+            with self.assertRaises(Refused):
+                op("hermes", {"bot": "rift"})
+        for name in ("owe_wake", "wake_due", "wake_paid"):
+            self.assertEqual(s.ops()[name][1], {s.policy.data["brokers"]["users"]["gateway"]}, name)
+
+    def test_the_hours_cap_is_not_raised(self):
+        self.assertEqual(policy().data["admission"]["queue_new_per_hour"], 20)
+
+
 class Operations(unittest.TestCase):
     def begin(self, s, **kw):
         args = dict(bot="bramble", task="t1", action="merge", repo=APP, target="pr/42", commit=HEAD)

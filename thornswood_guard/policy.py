@@ -71,6 +71,14 @@ class Policy:
         for wf, spec in self.data["runs"]["workflows"].items():
             if (spec or {}).get("repo", self.data["runs"]["repo"]) not in known:
                 raise PolicyError(f"runs.workflows.{wf}.repo must be one of the repos, not {spec.get('repo')!r}")
+            named = (spec or {}).get("inputs") or {}
+            for name, pattern in named.items():
+                try:
+                    re.compile(pattern)
+                except (re.error, TypeError) as e:
+                    raise PolicyError(f"runs.workflows.{wf}.inputs.{name} is not a pattern: {e}") from None
+            if set((spec or {}).get("required") or []) - set(named):
+                raise PolicyError(f"runs.workflows.{wf}.required names an input it does not take")
         if self.data.get("executor") not in EXECUTORS:
             raise PolicyError(f"executor must be one of {', '.join(EXECUTORS)}, not {self.data.get('executor')!r}")
         checks = self.data.get("merge", {}).get("required_checks") or {}

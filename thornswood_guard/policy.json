@@ -123,7 +123,18 @@
         "verbs": "scripts/release/nexus-verbs.json"
       },
       "release.yml": {},
-      "release-tag.yml": {}
+      "release-tag.yml": {},
+      "tunnel.yml": {
+        "repo": "ThornswoodRP/Thornswood-Ops",
+        "required": [
+          "mode"
+        ],
+        "inputs": {
+          "mode": "install|switch|back",
+          "wait": "[0-9]{0,3}",
+          "recipient": "[A-Za-z0-9+/=<>]{0,4096}"
+        }
+      }
     },
     "refused_verbs": [
       "Set-NexusKey"

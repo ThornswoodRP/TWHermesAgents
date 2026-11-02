@@ -246,3 +246,114 @@ class Tools(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwedSweeps(unittest.TestCase):
+    """1 Nov, 10:02 PM on: Bramble's wakes were refused with "already took its
+    20 tickets this hour" and dropped. A sweep the queue turns away is owed in
+    tw-policy; a sweep that runs to its end pays it."""
+
+    def full(self, f):
+        for i in range(20):
+            t = f.policy.admit("hermes", {"bot": "rift", "task": f"t{i}"})["ticket"]
+            f.policy.finish("hermes", {"bot": "rift", "ticket": t})
+
+    def owed(self, f):
+        return f.policy.wake_due("hermes", {"bot": "bramble"})
+
+    def test_a_refused_wake_is_owed_not_dropped(self):
+        f = Fleet()
+        self.full(f)
+        g = gate(f, "bramble")
+        out = g.before_llm(session_id="w1", task_id="wake", platform="webhook")
+        self.assertIn("is owed", out["context"])
+        self.assertNotIn("nothing starts it again", out["context"])
+        self.assertIn("Refused by the Thornswood queue", g.before_tool("tw_git", session_id="w1"))
+        g.after_turn(session_id="w1")
+        owed = self.owed(f)
+        self.assertTrue(owed["owed"])
+        self.assertIn("20 an hour", owed["reason"])
+
+    def test_a_wake_that_waited_out_its_time_is_owed_and_gives_its_ticket_back(self):
+        f = Fleet()
+        gate(f, "rift").before_llm(session_id="r1")
+        g = gate(f, "bramble")
+        out = g.before_llm(session_id="w1", platform="webhook")
+        self.assertIn("is owed", out["context"])
+        g.after_turn(session_id="w1")
+        self.assertTrue(self.owed(f)["owed"])
+        left = f.policy.db.execute("SELECT state FROM tickets WHERE bot='bramble'").fetchall()
+        self.assertEqual([r[0] for r in left], ["done"], "its session has no next turn")
+
+    def test_a_sweep_that_runs_pays_and_a_stopped_one_does_not(self):
+        f = Fleet()
+        f.policy.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        g = gate(f, "bramble")
+        self.assertIsNone(g.before_llm(session_id="w1", platform="webhook"))
+        g.stopped(session_key="w1")
+        self.assertTrue(self.owed(f)["owed"], "a stopped sweep did not do the work")
+        self.assertIsNone(g.before_llm(session_id="w2", platform="webhook"))
+        g.after_turn(session_id="w2")
+        self.assertFalse(self.owed(f)["owed"])
+
+    def test_the_owed_wake_check_pays_and_other_cron_jobs_do_not(self):
+        from thornswood_guard.owed_wake import PROMPT
+        f = Fleet()
+        f.policy.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        g = gate(f, "bramble")
+        self.assertIsNone(g.before_llm(session_id="cron_b_1", platform="cron", user_message="Board review, weekly"))
+        g.after_turn(session_id="cron_b_1")
+        self.assertTrue(self.owed(f)["owed"])
+        # Hermes puts its cron hint and the script's output first.
+        message = "[cron hint]\n## Script Output\n...\n```\n1 wake(s)\n```\n\n" + PROMPT
+        self.assertIsNone(g.before_llm(session_id="cron_o_1", platform="cron", user_message=message))
+        g.after_turn(session_id="cron_o_1")
+        self.assertFalse(self.owed(f)["owed"])
+
+    def test_a_refused_owed_wake_check_stays_owed(self):
+        from thornswood_guard.owed_wake import PROMPT
+        f = Fleet()
+        f.policy.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        self.full(f)
+        g = gate(f, "bramble")
+        self.assertIn("is owed", g.before_llm(session_id="c", platform="cron", user_message=PROMPT)["context"])
+        g.after_turn(session_id="c")
+        self.assertEqual(self.owed(f)["refused"], 2)
+
+    def test_only_brambles_wakes_are_owed(self):
+        f = Fleet()
+        self.full(f)
+        for bot, platform in (("rift", "webhook"), ("bramble", "desktop"), ("bramble", "discord")):
+            out = gate(f, bot).before_llm(session_id=f"{bot}-{platform}", platform=platform)
+            self.assertIn("nothing starts it again", out["context"], (bot, platform))
+        self.assertFalse(self.owed(f)["owed"])
+
+    def test_with_tw_policy_down_the_debt_waits_in_the_profile_and_the_check_hands_it_over(self):
+        import tempfile
+        from pathlib import Path
+        from thornswood_guard import owed_wake
+
+        home = Path(tempfile.mkdtemp())
+
+        def down(broker, op, args):
+            raise BrokerRefused("the broker at /run/tw/policy.sock is not answering")
+        g = TurnGate(ready_policy(), "bramble", down, wait_seconds=0, sleep=lambda s: None,
+                     owed_file=home.joinpath(*brokers.OWED_FILE))
+        self.assertIn("is owed", g.before_llm(session_id="w", platform="webhook")["context"])
+        self.assertIn("not answering", home.joinpath(*brokers.OWED_FILE).read_text(encoding="utf-8"))
+        f = Fleet()
+        lines = owed_wake.check(home, "bramble", f.ask)
+        self.assertNotEqual(lines[-1], owed_wake.SLEEP, "the debt is due once tw-policy answers")
+        self.assertFalse(home.joinpath(*brokers.OWED_FILE).exists())
+        self.assertIn("not answering", self.owed(f)["reason"])
+
+    def test_registering_gives_only_bramble_an_outbox_in_its_profile(self):
+        from pathlib import Path
+        for bot in ("bramble", "rift"):
+            ctx = Ctx(bot)
+            g = brokers.register(ctx, ready_policy(), bot, Fleet().ask)
+            if bot == "bramble":
+                self.assertEqual(g.owed_file.parts[-3:], brokers.OWED_FILE)
+                self.assertEqual(g.owed_file.parents[2], Path(brokers.__file__).resolve().parents[2])
+            else:
+                self.assertIsNone(g.owed_file)
