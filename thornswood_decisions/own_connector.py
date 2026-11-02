@@ -122,51 +122,110 @@ RUNTIME_ENTRY = "runpy.run_module('hermes_cli.main', run_name='__main__', alter_
 HELPER = Path(__file__).with_name("room_send.py")
 
 
-def helper_command(hermes_bin: str, helper: Path = HELPER, python: str | None = None) -> list[str]:
-    """How to run the readiness helper inside this Hermes's own Python, with its packages.
+def helper_command(hermes_bin: str, helper: Path = HELPER, python: str | None = None,
+                   root: str | None = None) -> list[str]:
+    """How to run the helper (room_send.py) inside this Hermes's own runtime: its real Python, with Hermes's
+    source on the path.
 
-    Hermes's launcher says how it starts its runtime (`hermes --print-runtime-command`): on One
-    that is a Python kept in Hermes's own store, started with a bootstrap that puts Hermes on its
-    path, and nothing lies beside hermes.exe. The helper runs in that same bootstrap, with the
-    helper's file in place of Hermes's own entry. A launcher too old to answer is a plain script
-    or a venv's hermes.exe, whose interpreter the command names (hermes_python)."""
+    Hermes's launcher says how it starts its runtime (`hermes --print-runtime-command`): a Python kept in
+    Hermes's own store, started with a bootstrap that puts Hermes's source folder on its path (on One, and
+    on the VM since its launcher became a /bin/sh wrapper on 30 Oct). The helper runs in that same
+    bootstrap, with the helper's file in place of Hermes's own entry. A launcher too old to answer is
+    followed by hand (hermes_runtime): a venv's hermes.exe or #! script, or a /bin/sh wrapper that execs
+    Hermes's Python. A given --hermes-python (and --hermes-root) is used as it is, never a shell."""
     if python:
-        return [python, "-I", str(helper)]
+        if is_shell(python):
+            raise SystemExit(f"STOP: --hermes-python {python} is a shell, not a Python; give Hermes's own Python")
+        return _direct(python, root, helper)
     try:
         out = subprocess.run([hermes_bin, "--print-runtime-command"], capture_output=True, timeout=60, **quiet(),
                              check=False, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SystemExit(f"STOP: {hermes_bin} --print-runtime-command did not run ({type(exc).__name__})")
     if out.returncode != 0:
-        return [hermes_python(hermes_bin), "-I", str(helper)]
+        exe, found_root = hermes_runtime(hermes_bin)
+        return _direct(exe, root or found_root, helper)
     try:
         cmd = json.loads(out.stdout.decode("utf-8", "replace"))
     except json.JSONDecodeError:
         cmd = None
     if (not isinstance(cmd, list) or len(cmd) != 4 or not all(isinstance(c, str) for c in cmd)
             or cmd[1:3] != ["-I", "-c"] or not cmd[3].endswith(RUNTIME_ENTRY)
-            or not os.path.isabs(cmd[0]) or not os.path.isfile(cmd[0])):
+            or not os.path.isabs(cmd[0]) or not os.path.isfile(cmd[0]) or is_shell(cmd[0])):
         raise SystemExit(f"STOP: {hermes_bin} --print-runtime-command answered a command this connector does "
                          "not know; check contracts.json own_chat against this Hermes")
     run_helper = f"runpy.run_path({json.dumps(str(helper))}, run_name='__main__')"
     return [cmd[0], "-I", "-c", cmd[3][:-len(RUNTIME_ENTRY)] + run_helper]
 
 
+def _direct(python: str, root: str | None, helper: Path) -> list[str]:
+    """The helper run straight with a Python; with Hermes's source folder, when Hermes is not installed
+    into that Python, given to the helper, which puts it first on its path (room_send.py --hermes-root)."""
+    return [python, "-I", str(helper), *(["--hermes-root", root] if root else [])]
+
+
+# The shells a launcher may be written for. A shell is never Hermes's Python: run as `<shell> -I
+# room_send.py` it fails at the first parenthesis (30 Oct to 2 Nov, every readiness check of the Bots'
+# connector, read as "could not check the Bots' gateway").
+SHELLS = {"sh", "bash", "dash", "ash", "ksh", "mksh", "zsh", "busybox", "fish", "csh", "tcsh"}
+_PYTHON = re.compile(r"^(python|pypy)(\d+(\.\d+)*)?(\.exe)?$", re.I)
+_EXEC = re.compile(r"^[ \t]*exec[ \t]+(?=\S)", re.M)
+_ROOT = re.compile(r"""sys\.path\.insert\(\s*0\s*,\s*(['"])([^'"]+)\1\s*\)""")
+
+
+def is_shell(exe: str) -> bool:
+    name = re.split(r"[\\/]", exe)[-1].lower()
+    return name.removesuffix(".exe") in SHELLS
+
+
 def hermes_python(hermes_bin: str) -> str:
-    """The interpreter an older `hermes` command runs with: python.exe beside a venv's hermes.exe, or its #! line."""
+    """The real Python an older `hermes` command runs with (hermes_runtime), never a shell."""
+    return hermes_runtime(hermes_bin)[0]
+
+
+def hermes_runtime(hermes_bin: str, _depth: int = 0) -> tuple[str, str | None]:
+    """(Python, Hermes's source folder or None) the `hermes` command runs Hermes with, read from the files.
+
+    python.exe beside a venv's hermes.exe; a #! script's interpreter (Hermes installed into it, so no
+    folder); or, for a #! shell wrapper, the command its `exec` line runs: another wrapper is followed in
+    turn, and a Python's bootstrap names the folder it puts first on the path
+    (`sys.path.insert(0, '<folder>')`, the shape Hermes's launcher writes). A shell is never the answer."""
     path = Path(hermes_bin)
     if path.suffix.lower() == ".exe":
         py = path.with_name("python.exe")
         if not py.exists():
             raise SystemExit(f"STOP: no python.exe beside {hermes_bin}; pass --hermes-python")
-        return str(py)
-    first = path.read_bytes()[:400].split(b"\n", 1)[0].decode("utf-8", "replace")
+        return str(py), None
+    text = path.read_bytes()[:256 * 1024].decode("utf-8", "replace")
+    first = text.split("\n", 1)[0]
     if not first.startswith("#!"):
-        raise SystemExit(f"STOP: {hermes_bin} does not start with #!; pass --hermes-python")
-    exe = first[2:].strip().split()[0]
+        raise SystemExit(f"STOP: {hermes_bin} does not start with #!; pass --hermes-python and --hermes-root")
+    exe = first[2:].strip().split()[0] if first[2:].strip() else ""
     if not exe.startswith("/") or exe.rsplit("/", 1)[-1] == "env":
         raise SystemExit(f"STOP: {hermes_bin} does not name its Python by path; pass --hermes-python")
-    return exe
+    if not is_shell(exe):
+        return exe, None
+    if _depth >= 5:
+        raise SystemExit(f"STOP: {hermes_bin} is one shell wrapper too many deep; pass --hermes-python and "
+                         "--hermes-root")
+    import shlex
+    m = _EXEC.search(text)
+    try:
+        argv = shlex.split(text[m.end():], comments=False, posix=True) if m else []
+    except ValueError:
+        argv = []
+    target = argv[0] if argv else ""
+    if not target.startswith("/"):
+        raise SystemExit(f"STOP: {hermes_bin} is a {exe} script, not a Python, and this connector cannot "
+                         "follow its exec line; pass --hermes-python and --hermes-root")
+    name = target.rsplit("/", 1)[-1]
+    if _PYTHON.match(name):
+        found = next((_ROOT.search(a) for a in argv[1:] if _ROOT.search(a)), None)
+        return target, (found.group(2) if found else None)
+    if is_shell(target):
+        raise SystemExit(f"STOP: {hermes_bin} runs a shell ({target}), not Hermes's Python; pass --hermes-python "
+                         "and --hermes-root")
+    return hermes_runtime(target, _depth + 1)
 
 
 def _iso(epoch) -> str:
@@ -457,13 +516,18 @@ class Hermes:
         try:
             out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
                                  timeout=60, cwd=str(self.home_dir), check=False)
-            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
             return "check_failed", "the readiness check did not answer in a minute"
-        except (OSError, IndexError, json.JSONDecodeError):
+        except OSError:
             return "check_failed", "could not run the readiness check with Hermes's Python"
+        try:
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            got = None
         if not isinstance(got, dict):
-            return "check_failed", "the readiness check did not answer in its shape"
+            # The helper itself failed (a shell for a Python, Hermes not on its path): never "gateway down".
+            said = " ".join(out.stderr.decode("utf-8", "replace").split())[-160:] or "nothing"
+            return "check_failed", f"the readiness helper failed (exit {out.returncode}): {said}"[:200]
         if got.get("ready") is True:
             return "ready", ""
         return "gateway_down", str(got.get("reason") or f"{self.name} is not ready")[:200]
@@ -956,6 +1020,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--gateway", required=True, choices=sorted(GATEWAYS))
     ap.add_argument("--hermes", required=True, help="the hermes command this user runs")
     ap.add_argument("--hermes-python", help="a Python with Hermes's packages, in place of asking the hermes command")
+    ap.add_argument("--hermes-root", help="with --hermes-python: Hermes's source folder, when it is not installed "
+                                          "into that Python")
     ap.add_argument("--hermes-home", help="Hermes's state folder for this user (default: as Hermes finds it)")
     ap.add_argument("--token", help="this connector's token file")
     ap.add_argument("--core", default=LOCAL_CORE, help="the core's API: loopback on the VM, the VM's ts.net on One")
@@ -976,7 +1042,7 @@ def main(argv: list[str]) -> int:
     else:
         token = Path.home() / ".config" / "thornswood" / f"own-{args.gateway}.token"
     home = Path(args.hermes_home) if args.hermes_home else hermes_home()
-    hermes = Hermes([args.hermes], helper_command(args.hermes, python=args.hermes_python), Path.home(),
+    hermes = Hermes([args.hermes], helper_command(args.hermes, python=args.hermes_python, root=args.hermes_root), Path.home(),
                     GATEWAYS[args.gateway])
     here = Path(__file__).resolve().parent
     updater = Updater(Path(args.clone), args.git, here) if args.clone else None

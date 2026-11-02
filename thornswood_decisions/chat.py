@@ -19,7 +19,8 @@ came of it:
   later from the room itself, because the room's event id comes from the key
   the core gave it; a Bot Chat message stays unclear and the phone says so.
 - not_ready (an outcome, not a state): the gateway was not ready (starting,
-  stopped, reloading, or its check could not run), so nothing was sent. The
+  stopped, reloading), or the connector's own Hermes helper failed and said
+  so (its reason begins with HELPER_FAILED), so nothing was sent. The
   message goes back to queued as it was, its lease and that attempt undone, and
   the phone says what it waits for. A gateway that is not ready yet is not a
   failure of the message, so it is never dead for that.
@@ -59,6 +60,9 @@ LEASE = timedelta(minutes=20)
 ROOM = "room"  # the first room bound, by its first name
 OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain", "not_ready": "queued"}
 WAITS = "waiting for the Bots' gateway: "  # the reason a message put back by not_ready carries
+# ...unless what it waits for is the connector's own Hermes helper, which failed (connector.py
+# HELPER_FAILED): then the reason is the helper's failure as the connector said it, never the gateway.
+HELPER_FAILED = "the connector's Hermes helper"
 MINE = 50
 MAX_CLAIM = 7  # the six Bots and the rooms, at most this many at once
 ROOM_PAGE = 50
@@ -215,7 +219,7 @@ class Chat:
                                  (workspace_id, *targets, MINE)).fetchall()
         mine = [dict(r) for r in reversed(rows)]
         for m in mine:
-            if m["status"] == "queued" and (m["reason"] or "").startswith(WAITS):
+            if m["status"] == "queued" and (m["reason"] or "").startswith((WAITS, HELPER_FAILED)):
                 m["waits"] = m["reason"]
         return mine
 
@@ -465,7 +469,7 @@ class Chat:
     def _not_ready(self, workspace_id: str, item_id: str, reason: str) -> dict:
         """The gateway was not ready, so nothing was sent: back in the queue as it was, with no effect
         receipt (there was no effect) and that attempt not counted. It goes once the gateway is ready."""
-        why = (WAITS + (reason or "it is not ready"))[:200]
+        why = (reason if reason.startswith(HELPER_FAILED) else WAITS + (reason or "it is not ready"))[:200]
         with self.s.tx() as db:
             for table, kind in (("chat_messages", "chat.not_ready"), ("connector_outbox", "connector.not_ready")):
                 row = db.execute(f"SELECT status FROM {table} WHERE id = ? AND workspace_id = ?",

@@ -20,6 +20,19 @@ way Hermes itself does:
 - the room: `room_send.py` with Hermes's own Python, which calls `groups.send`
   on the running gateway with the core's key as the event id.
 
+The helper (room_send.py: readiness, room, reactions) runs inside Hermes's own
+runtime: its real Python, with Hermes's source on the path, found the way
+own_connector.py finds it (`hermes --print-runtime-command`, else the launcher
+followed by hand, never a shell). Since 30 Oct the Bots' `hermes` is a /bin/sh
+wrapper, and taking its #! line for the Python ran the helper with /bin/sh:
+every readiness check failed and read as "could not check the Bots' gateway"
+until 2 Nov. A helper that does not start or does not answer in JSON is a
+failure of the helper, said as one (a FAIL line in the journal, and the
+message's reason, with the tail of what it wrote to stderr), never a gateway
+that is not ready. Nothing was sent, so the message still goes back in the
+queue as it was (an install that is replacing Hermes's Python is the same
+case, 1 Nov), and the connector claims nothing more until the helper answers.
+
 Every few seconds, whatever connector_effects says, it also answers the pages of
 full history the phone asked for (`POST /api/v1/connector/pages`, then
 `/connector/page`): a Bot's Bot Chat from that profile's state.db and a room
@@ -31,7 +44,7 @@ For each message, it tells the core what came of it (`POST /api/v1/connector/res
 confirmed only when Hermes said so, failed only when nothing was sent, and
 uncertain for everything else. An uncertain message is never sent again by
 itself. A gateway that is not ready (it is starting, stopped, being reloaded by
-an install, or its check could not run) is not a failure of the message:
+an install, or its check did not answer in time) is not a failure of the message:
 nothing was sent, so the outcome is not_ready and the core puts the message back
 in the queue as it was. The connector then claims nothing more until that
 gateway's readiness check says ready, once each round, and the message goes
@@ -66,6 +79,8 @@ CHECK_SECONDS = 60
 PARALLEL = 3
 BOT_CHAT = "Bot Chat"
 PAGE_BYTES = 480 * 1024  # under the core's 512 KB
+HELPER = Path(__file__).with_name("room_send.py")
+HELPER_FAILED = "the connector's Hermes helper"  # how a helper failure's reason begins (chat.py HELPER_FAILED)
 ROOM_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -119,49 +134,77 @@ def read_token(path: Path) -> str:
 
 
 def hermes_python(hermes_bin: str) -> str:
-    """The interpreter the `hermes` command runs with, read from its first line."""
-    first = Path(hermes_bin).read_bytes()[:400].split(b"\n", 1)[0].decode("utf-8", "replace")
-    if not first.startswith("#!"):
-        raise SystemExit(f"STOP: {hermes_bin} does not start with #!; pass --hermes-python")
-    exe = first[2:].strip().split()[0]
-    if not exe.startswith("/") or exe.rsplit("/", 1)[-1] == "env":
-        raise SystemExit(f"STOP: {hermes_bin} does not name its Python by path; pass --hermes-python")
-    return exe
+    """The real Python the `hermes` command runs Hermes with (own_connector.hermes_runtime), never a shell."""
+    from .own_connector import hermes_python as find
+    return find(hermes_bin)
+
+
+def helper_command(hermes_bin: str, python: str | None = None, root: str | None = None,
+                   helper: Path = HELPER) -> list[str]:
+    """How the helper runs inside Hermes's own runtime (own_connector.helper_command)."""
+    from .own_connector import helper_command as find
+    return find(hermes_bin, helper, python=python, root=root)
+
+
+def _tail(data: bytes, n: int = 160) -> str:
+    text = " ".join(data.decode("utf-8", "replace").split())
+    return text[-n:] if text else "nothing"
 
 
 class Hermes:
     """The two stock ways into the Bots' Hermes."""
 
-    def __init__(self, hermes_cmd: list[str], python: str, home: Path,
-                 helper: Path = Path(__file__).with_name("room_send.py")):
-        self.cmd, self.python, self.home, self.helper = list(hermes_cmd), python, home, helper
+    def __init__(self, hermes_cmd: list[str], helper_cmd: list[str] | str, home: Path, helper: Path = HELPER):
+        # A Python's path alone (the tests' stand-ins) runs the helper file straight with it.
+        self.cmd, self.home = list(hermes_cmd), home
+        self.helper_cmd = [helper_cmd, "-I", str(helper)] if isinstance(helper_cmd, str) else list(helper_cmd)
 
     def _helper(self, req: dict, timeout: float) -> dict | None:
+        """The helper's one JSON answer; None when it did not answer in time. A helper that could not start,
+        or did not answer in JSON, answers {"helper_failed": True, "reason": ...} with its stderr's tail."""
         try:
-            out = subprocess.run([self.python, "-I", str(self.helper)], input=json.dumps(req).encode("utf-8"),
+            out = subprocess.run(self.helper_cmd, input=json.dumps(req).encode("utf-8"),
                                  capture_output=True, timeout=timeout, cwd=str(self.home), check=False)
         except subprocess.TimeoutExpired:
             return None
-        except OSError:
-            return {"sent": False, "ready": False, "reason": "could not start Hermes's Python"}
+        except OSError as exc:
+            return {"helper_failed": True, "started": False,
+                    "reason": f"{HELPER_FAILED} did not start ({type(exc).__name__}: {self.helper_cmd[0]})"}
         try:
-            line = out.stdout.decode("utf-8", "replace").strip().splitlines()[-1]
-            return json.loads(line)
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except (IndexError, json.JSONDecodeError):
-            return {"bad": out.returncode}
+            got = None
+        if not isinstance(got, dict):
+            return {"helper_failed": True, "started": True,
+                    "reason": f"{HELPER_FAILED} failed (exit {out.returncode}): {_tail(out.stderr)}"}
+        return got
+
+    def check(self, profile: str) -> tuple[str, str]:
+        """(state, why) of that profile's gateway, found without starting one: "ready", "not_ready" (the check
+        ran and found it not running or not taking connections, or did not answer in time), or "failed"
+        (the helper itself failed: nothing about the gateway is known)."""
+        got = self._helper({"op": "ready", "profile": profile}, CHECK_SECONDS)
+        if got is None:
+            return "not_ready", "the gateway's readiness check did not answer in a minute"
+        if got.get("helper_failed"):
+            return "failed", str(got.get("reason"))[:200]
+        if got.get("ready") is True:
+            return "ready", ""
+        return "not_ready", str(got.get("reason") or "the Bots' gateway is not ready")[:200]
 
     def ready(self, profile: str) -> tuple[bool, str]:
-        """(ready, why not): whether that profile's gateway is running, found without starting one. A check
-        that could not run or answer says not ready too: either way nothing can be sent to it yet."""
-        got = self._helper({"op": "ready", "profile": profile}, CHECK_SECONDS)
-        if got and got.get("ready") is True:
-            return True, ""
-        return False, str((got or {}).get("reason") or "could not check the Bots' gateway")[:200]
+        """(ready, why not), from check."""
+        state, why = self.check(profile)
+        return state == "ready", why
 
     def to_room(self, room_id: str, send_key: str, text: str) -> tuple[str, str, str]:
         got = self._helper({"op": "send", "room_id": room_id, "event_id": send_key, "text": text}, CHECK_SECONDS)
         if got is None:
             return "uncertain", "", "no answer from the room helper in a minute"
+        if got.get("helper_failed"):
+            # Never started: nothing was sent, so it waits for the helper. Started and said nothing readable:
+            # groups.send may have gone, and the room settles it from its own feed.
+            return ("uncertain" if got.get("started") else "not_ready"), "", str(got.get("reason"))[:200]
         if got.get("sent") is True:
             return "confirmed", f"seq {got.get('seq')}", ""
         if got.get("sent") is False and got.get("ready") is False:
@@ -182,8 +225,9 @@ class Hermes:
         return "failed", str(got.get("reason") or "not set")[:200]
 
     def to_bot(self, bot: str, text: str) -> tuple[str, str, str]:
-        ready, why = self.ready(bot)
-        if not ready:
+        state, why = self.check(bot)
+        if state != "ready":
+            # Nothing was sent: the message waits, with why (the gateway, or the helper's own failure).
             return "not_ready", "", why
         with tempfile.TemporaryDirectory(prefix="tw-chat-") as folder:
             os.chmod(folder, 0o700)
@@ -293,11 +337,13 @@ class Connector:
         """After a message came back not_ready: check each such gateway once this round. True while any is
         still not ready, so nothing more is claimed (and leased, and put back) until it is."""
         for profile in list(self.waiting):
-            ready, why = self.hermes.ready(profile)
-            if ready:
+            state, why = self.hermes.check(profile)
+            if state == "ready":
                 del self.waiting[profile]
                 self.say(f"PASS {profile or 'the room'}'s gateway is ready; its messages go now")
             else:
+                if state == "failed" and why != self.waiting[profile]:
+                    self.say(f"FAIL {why}")
                 self.waiting[profile] = why
         return bool(self.waiting)
 
@@ -333,9 +379,14 @@ class Connector:
             t.join()
         gateway = {i["id"]: "" if i["target"] == "room" else i["target"] for i in items}
         for r in results:
+            helper = r["reason"].startswith(HELPER_FAILED)
+            if helper and r["outcome"] != "not_ready":
+                self.say(f"FAIL {r['id']}: {r['reason']}")
             if r["outcome"] == "not_ready" and r["id"] in gateway:
                 if gateway[r["id"]] not in self.waiting:
-                    self.say(f"NOTE {gateway[r['id']] or 'the room'}'s gateway is not ready ({r['reason']}); "
+                    self.say(f"FAIL {r['reason']}; {gateway[r['id']] or 'the room'}'s messages wait in the queue"
+                             if helper else
+                             f"NOTE {gateway[r['id']] or 'the room'}'s gateway is not ready ({r['reason']}); "
                              "its messages wait in the queue")
                 self.waiting[gateway[r["id"]]] = r["reason"]
         self.unsaid.extend(results)
@@ -387,12 +438,23 @@ def main(argv: list[str]) -> int:
     home = Path(os.environ.get("HOME", "~")).expanduser()
     ap = argparse.ArgumentParser(prog="thornswood_decisions.connector")
     ap.add_argument("--hermes", required=True, help="the hermes command the Bots' user runs")
-    ap.add_argument("--hermes-python", help="its Python, when its first line does not name it")
+    ap.add_argument("--hermes-python", help="Hermes's own Python, in place of asking the hermes command")
+    ap.add_argument("--hermes-root", help="with --hermes-python: Hermes's source folder, when it is not installed "
+                                          "into that Python")
+    ap.add_argument("--check-ready", metavar="BOT",
+                    help="run the helper's readiness check for one Bot, print its answer and stop: exit 0 only "
+                         "when it says ready (tw-canary)")
     ap.add_argument("--token", default=str(home / ".config" / "thornswood" / "connector.token"))
     ap.add_argument("--core", default=CORE)
     ap.add_argument("--once", action="store_true", help="one round, then stop")
     args = ap.parse_args(argv)
-    hermes = Hermes([args.hermes], args.hermes_python or hermes_python(args.hermes), home)
+    hermes = Hermes([args.hermes], helper_command(args.hermes, args.hermes_python, args.hermes_root), home)
+    if args.check_ready is not None:
+        if not PROFILE_ID.match(args.check_ready):
+            raise SystemExit("STOP: --check-ready takes a Bot's profile name")
+        got = hermes._helper({"op": "ready", "profile": args.check_ready}, CHECK_SECONDS)
+        print(json.dumps(got if got is not None else {"ready": False, "reason": "no answer in a minute"}))
+        return 0 if got and got.get("ready") is True else 1
     conn = Connector(Core(args.core, read_token(Path(args.token))), hermes, hermes_home=home / ".hermes")
     if args.once:
         n = conn.once()

@@ -222,6 +222,18 @@ class ConnectorSide(unittest.TestCase):
         return [r[0] for r in self.w.store.db.execute(
             "SELECT outcome FROM effect_receipts WHERE outbox = 'connector' AND outbox_id = ?", (cx,))]
 
+    def test_a_helper_failure_leaves_the_answer_queued_and_names_the_helper_not_the_gateway(self):
+        # 2 Nov: the connector's helper ran under /bin/sh and every check read as the gateway.
+        flags(self.w, "connector_effects")
+        card = self.answered()
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        why = "the connector's Hermes helper failed (exit 2): room_send.py: 61: Syntax error: \"(\" unexpected"
+        self.assertEqual(self.chat.result(self.w.ws, self.tok, cx, "not_ready", reason=why)["status"], "queued")
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"], row["reason"]), ("queued", 0, why))
+        self.assertEqual(self.receipts(cx), [])
+        self.assertFalse(self.w.core.states(card["id"])["bot_told"])
+
     def test_a_gateway_that_is_not_ready_leaves_the_answer_queued(self):
         flags(self.w, "connector_effects")
         card = self.answered()
@@ -728,8 +740,10 @@ class ConnectorProcess(unittest.TestCase):
         os.environ["TW_FAKE_READY"] = "crash"
         self.c.once()
         cx = self.s.w.store.db.execute("SELECT id, status, attempts, reason FROM connector_outbox").fetchone()
+        # It waits, and says it is the connector's helper that failed (2 Nov), not the gateway.
         self.assertEqual((cx["status"], cx["attempts"], cx["reason"]),
-                         ("queued", 0, "waiting for the Bots' gateway: could not check the Bots' gateway"))
+                         ("queued", 0, "the connector's Hermes helper failed (exit 1): nothing"))
+        self.assertTrue(any(x.startswith("FAIL the connector's Hermes helper failed (exit 1)") for x in self.said))
         self.assertFalse(self.s.w.core.states(card["id"])["bot_told"])
         os.environ["TW_FAKE_READY"] = "1"
         self.c.once()

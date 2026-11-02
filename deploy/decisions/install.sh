@@ -87,7 +87,7 @@ id hermes >/dev/null 2>&1 || stop "the hermes user does not exist."
 # The hermes command the Bots' user runs, as its own login shell finds it.
 hermes_bin="$(runuser -l hermes -c 'command -v hermes' 2>/dev/null || true)"
 [[ "$hermes_bin" == /* && -x "$hermes_bin" ]] || stop "the hermes user's login shell does not find the hermes command."
-head -n1 "$hermes_bin" | grep -q '^#!/' || stop "$hermes_bin does not name its Python on its first line."
+head -n1 "$hermes_bin" | grep -q '^#!/' || stop "$hermes_bin does not start with #!, so the connector cannot follow it to Hermes's Python."
 
 # 1. The user. Nobody else is in its group, the Bots' user least of all.
 if ! id tw-decide >/dev/null 2>&1; then
@@ -310,7 +310,7 @@ if id "$own" >/dev/null 2>&1; then
   [[ "$own" != hermes ]] || stop "my-hermes's connector never runs as the Bots' user."
   own_bin="$(runuser -l "$own" -c 'command -v hermes' 2>/dev/null || true)"
   [[ "$own_bin" == /* && -x "$own_bin" ]] || stop "the $own user's login shell does not find the hermes command."
-  head -n1 "$own_bin" | grep -q '^#!/' || stop "$own_bin does not name its Python on its first line."
+  head -n1 "$own_bin" | grep -q '^#!/' || stop "$own_bin does not start with #!, so the connector cannot follow it to Hermes's Python."
   oh="$(getent passwd "$own" | cut -d: -f6)"
   tok="$oh/.config/thornswood/own-me.token"
   # A file whose token the core no longer keeps (a downgrade past schema 7 forgets it) is made again.
