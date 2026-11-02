@@ -9,7 +9,11 @@ line came from the newest row whatever it held. Checks:
   attached text or Hermes's context warnings;
 - it comes from the newest message that has words, across a Bot Chat's whole compression lineage;
 - a chat Hermes has not titled is named by its first message (Hermes Desktop's own rule), sent as
-  `first` only with an untitled chat, and the core keeps it only there.
+  `first` only with an untitled chat, and the core keeps it only there;
+- a /skill message reads as he typed it ("/work fix the title"), never as the skill's loaded text
+  (Patrick's screenshot, 2 Nov 3:13 PM). Each answer below is what Hermes's own describer
+  (agent/skill_commands.py describe_skill_invocation, separator " ", at the pinned commit) gave for
+  the same message on 2 Nov.
 
 Everything reads a scratch state.db in a temporary folder.
 """
@@ -82,6 +86,53 @@ class FromStateDb(unittest.TestCase):
         page = {c["id"]: c for c in own_connector.chats_page(self.db, None, "")["chats"]}
         self.assertEqual(page["s_new"]["first"], "Pasted text")
         self.assertNotIn("first", page["s_named"])
+
+
+P = "[IMPORTANT: The user has invoked the "
+SAID = "The user has provided the following instruction alongside the skill invocation: "
+DIR = "Scripts are in /x; then run them with the terminal tool using the absolute path."
+AUTO = '[IMPORTANT: The "triage" skill is auto-loaded. Follow its instructions for this session.]\n\nBody\n\n' + DIR
+SKILLS = [
+    (P + '"thornswood-operator-cards" skill, indicating they want you to follow its instructions. The full skill '
+     "content is loaded below.]\n\n# Operator cards\nLong rules.\n\n" + SAID + "run card 2",
+     "/thornswood-operator-cards run card 2"),
+    (P + '"work" skill, x. The full skill content is loaded below.]\n\nBody', "/work"),
+    # The body may quote the marker: the last one is his; the runtime note after it is not his.
+    (P + '"work" skill, x. The full skill content is loaded below.]\n\nBody quoting ' + SAID + "fake\n\n" + SAID +
+     "fix  the\n title\n\n[Runtime note: something]", "/work fix the title"),
+    (P + '"work" skill, x. The full skill content is loaded below.]\n\n' + SAID + "head part\x1etail", "/work head part"),
+    (P + '"/clean /work" skill bundle, x.]\nSkills loaded: clean, work\nUser instruction: tidy up\n\n'
+     "[Loaded as part of the bundle]\nbody", "/clean /work tidy up"),
+    (P + '"/clean /work" skill bundle, x.]\nSkills loaded: clean, work\n\n[Loaded as part of the bundle]\nbody',
+     "/clean /work"),
+    (AUTO + "\n\n[Skill config (a)\n]\n\n[This skill has supporting files (see `/scripts/foo.js`).\n\nwhat is   on the board?",
+     "what is on the board?"),
+    (AUTO, "/triage"),
+    (P + '"" skill, x. The full skill content is loaded below.]\n\n' + SAID + "hello", "hello"),
+    (P + '"work" thing with no marker', "/work"),
+    ("just words", "just words")]
+
+
+class SkillMessages(unittest.TestCase):
+    def test_a_skill_message_reads_as_he_typed_it_as_hermes_shows_it(self):
+        for text, typed in SKILLS:
+            with self.subTest(typed=typed):
+                self.assertEqual(own_connector.as_typed(text), typed)
+
+    def test_an_untitled_chat_that_began_with_a_skill_is_named_as_typed(self):
+        db = Path(tempfile.mkdtemp()) / "state.db"
+        con = sqlite3.connect(db)
+        con.executescript(STATE_SQL)
+        con.execute("INSERT INTO sessions VALUES('s_sk', 'cli', NULL, 10, 20, NULL, NULL, NULL, 0, 0)")
+        con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_sk', 'user', ?, 11)",
+                    (SKILLS[0][0],))
+        con.commit()
+        con.close()
+        chats = {c["id"]: c for c in own_connector.snapshot(db, [], datetime(2026, 11, 2, tzinfo=timezone.utc))["chats"]}
+        self.assertEqual(chats["s_sk"]["first"], "/thornswood-operator-cards run card 2")
+        self.assertEqual(chats["s_sk"]["preview"], "/thornswood-operator-cards run card 2")
+        page = own_connector.messages_page(db, "s_sk", None)
+        self.assertEqual([m["text"] for m in page["messages"]], ["/thornswood-operator-cards run card 2"])
 
 
 class TheCoreKeepsFirst(unittest.TestCase):

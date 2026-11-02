@@ -117,6 +117,7 @@ class AlertTimes(unittest.TestCase):
         w.store.db.execute("UPDATE push_outbox SET status = 'sent', updated_at = ?", (w.store.now(),))
         a = w.core.get_card(w.patrick(), card["id"])["alert"]
         self.assertEqual((a["status"], a["sent_at"]), ("sent", w.store.now()))
+        self.assertEqual(a["attention_revision"], 1, "the phone matches its own time to this alert by it")
 
 
 class OverHttp(unittest.TestCase):

@@ -1022,7 +1022,28 @@ class OneInstall(unittest.TestCase):
         self.assertIn("PASS the VM made the connector's token", r.stdout, r.stderr)
         token = home / ".config" / "Thornswood" / "own-one.token"
         self.assertEqual(token.read_text(encoding="ascii"), "tok_" + "x" * 43)
-        self.assertTrue((home / ".local" / "share" / "Thornswood" / "own-connector" / "own_connector.py").exists())
+        self.assertTrue((home / ".local" / "share" / "Thornswood-Hermes" / "own-connector" / "own_connector.py").exists())
+        self.assertFalse((home / ".local" / "share" / "Thornswood").exists(), "nothing goes in the launcher's folder")
+
+    def test_refuses_a_folder_inside_a_velopack_install(self):
+        """Velopack's Setup.exe deletes its whole folder on a reinstall; on 2 Nov the launcher's took the connector
+        with it, and One's connector stopped at 2:58 PM with nothing left to start."""
+        import subprocess
+        env, home = self.fresh_home()
+        root = self.t / "SomeApp"
+        (root / "current").mkdir(parents=True)
+        (root / "Update.exe").write_bytes(b"")
+        for folder, inside in ((root / "own-connector", root), (home / ".local" / "share" / "Thornswood" / "own-connector",
+                                                                home / ".local" / "share" / "Thornswood")):
+            with self.subTest(folder=str(folder)):
+                r = subprocess.run(["pwsh", "-NoProfile", "-File", str(self.clone / "scripts/one/Install-OwnConnector.ps1"),
+                                    "-Core", "https://hermes.tail0000.ts.net/api/v1", "-Hermes", str(self.hermes),
+                                    "-HermesPython", sys.executable, "-Folder", str(folder), "-NoTask"],
+                                   capture_output=True, text=True, env=env, timeout=120)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"FAIL {folder} is inside {inside}, a Velopack install", r.stdout)
+                self.assertFalse(folder.exists())
+                self.assertFalse(self.calls.exists(), "refused before any token is made")
 
     def test_never_replaces_a_task_it_does_not_own(self):
         from helpers import REPO

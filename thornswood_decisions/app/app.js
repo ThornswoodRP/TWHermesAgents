@@ -94,7 +94,15 @@ const ICON = {
   panel: 'M3 4h18v16H3zM9 4v16', file: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6',
   image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', dec: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9',
   mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3',
-  talk: 'M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4'
+  talk: 'M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4',
+  // The kinds of link a message can hold (linkKind), each with its own mark, as the Claude apps show them.
+  thread: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z',
+  session: 'M4 5h16v14H4zM7 9l3 3-3 3M12 15h5',
+  artifact: 'M4 4h16v16H4zM4 9h16M9 9v11',
+  pr: 'M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9v3a3 3 0 0 1-3 3H9',
+  issue: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+  web: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18',
+  phone: 'M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z'
 }
 function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg'
@@ -133,13 +141,14 @@ const SAID = {
   session_expired: 'Your sign-in ran out. Sign in again.',
   too_many_tries: 'Too many tries. Wait 15 minutes, then try again.',
   wrong_code: 'That code did not work.',
-  sign_in_again: 'This needs a fresh sign-in with your passkey.',
+  // What signs in is this phone's fingerprint once it has one (signInWord), never "passkey" there.
+  sign_in_again: () => `This needs a fresh sign-in with your ${signInWord()}.`,
   decision_write_off: 'Answering is off for now. The report page is still where you answer.',
   chat_write_off: 'Chat from the phone is off for now.',
   own_chat_off: 'Chat with your own Hermes from the phone is off for now.',
   session_manage_off: 'Renaming, hiding and deleting chats from the phone is off for now.',
   bot_chat_kept: 'Your Bot Chat is kept as it is: Bot Mode and every Bot\'s message to you find it by its name, so it is not renamed, hidden or deleted.',
-  passkey_needed: 'A message to your own Hermes runs with full power, so it needs a passkey sign-in from the last 30 minutes.',
+  passkey_needed: () => `This runs with full power on your own Hermes, so it needs a sign-in with your ${signInWord()} from the last 30 minutes.`,
   one_off: 'One is off',
   no_gateway: 'There is no such gateway.',
   stale_revision: 'This card changed since you opened it. Read it again before you answer.',
@@ -155,7 +164,8 @@ const SAID = {
 }
 
 function said(body) {
-  return (body && (SAID[body.error] || body.message)) || 'Something went wrong.'
+  const w = body && SAID[body.error]
+  return (typeof w === 'function' ? w() : w) || (body && body.message) || 'Something went wrong.'
 }
 
 async function call(method, path, body) {
@@ -267,6 +277,15 @@ function forgetPhoneKey() {
   try { localStorage.removeItem(PHONE_KEY) } catch (e) {}
 }
 
+// The core no longer lists this phone's key: forgotten here, said once on the Decisions list, and the
+// fingerprint offered there again even if he had put it off.
+const LOST_KEY = "This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add the fingerprint again below."
+function lostPhoneKey() {
+  forgetPhoneKey()
+  try { localStorage.removeItem(FINGERPRINT_LATER) } catch (e) {}
+  flash = LOST_KEY
+}
+
 // The word for what signs in on this device.
 function signInWord() {
   return phoneKey() ? 'fingerprint' : 'passkey'
@@ -319,8 +338,9 @@ async function passkeySignIn() {
   const key = phoneKey()
   let o = await call('POST', '/passkeys/sign-in/options', key ? { phone_key: key.credential_id } : {})
   if (key && o.status === 404 && o.body.error === 'no_phone_key') {
-    // The core no longer has this phone's key (it or the phone was removed): the passkey is the way in.
-    forgetPhoneKey()
+    // The core no longer has this phone's key (it or the phone was removed): the passkey is the way in,
+    // and he is told so, with the fingerprint offered again, never switched to the passkey unsaid.
+    lostPhoneKey()
     o = await call('POST', '/passkeys/sign-in/options', {})
   }
   if (o.status !== 200) return o
@@ -566,20 +586,45 @@ async function cardView(id, note) {
 // stored): when the card was stored, when the core's worker handed its alert to the push service, and
 // when this phone got it (the service worker keeps that time on the phone, sw.js). To the second, so a
 // late alert says which hop was slow without anyone being asked to measure it.
+//
+// The phone's time goes beside the alert it belongs to: a revised card is alerted again, so the time
+// an earlier alert reached the phone is said as that (Patrick's screenshot, 2 Nov 4:01 PM: "card
+// 4:01:27 PM, not sent (queued), on this phone 4:01:21 PM"). While the alert is still on its way the
+// line follows it, read again from the core, so a card opened in the seconds before the worker's next
+// round does not keep saying "not sent" after it went.
+const ALERT_FOLLOW_MS = 3000
+const ALERT_FOLLOW_TRIES = 40
 function alertTimes(c) {
   if (!c.alert) return null
   const t = iso => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
   const line = el('p', { class: 'quiet alert-times', 'data-alert': c.alert.status })
-  const say = shown => {
-    line.textContent = 'Alert: card ' + t(c.alert.queued_at) +
-      (c.alert.sent_at ? ', sent ' + t(c.alert.sent_at) : ', not sent (' + c.alert.status + ')') +
-      (shown ? ', on this phone ' + t(shown) : '')
+  let alert = c.alert
+  let seen = null
+  const say = () => {
+    line.dataset.alert = alert.status
+    const mine = seen && (seen.attention_revision == null || seen.attention_revision === alert.attention_revision)
+    line.textContent = 'Alert: card ' + t(alert.queued_at) +
+      (alert.sent_at ? ', sent ' + t(alert.sent_at) : ', not sent (' + alert.status + ')') +
+      (seen ? (mine ? ', on this phone ' : ', an earlier alert on this phone ') + t(seen.shown_at) : '')
   }
-  say(null)
-  if ('caches' in window) {
-    caches.open('tw-alerts').then(k => k.match('/m/alerts/' + c.id)).then(r => r ? r.json() : null)
-      .then(j => { if (j && j.shown_at) say(j.shown_at) }).catch(() => {})
+  const look = () => 'caches' in window
+    ? caches.open('tw-alerts').then(k => k.match('/m/alerts/' + c.id)).then(r => r ? r.json() : null)
+      .then(j => { if (j && j.shown_at) seen = j }).catch(() => {})
+    : Promise.resolve()
+  say()
+  look().then(say)
+  const follow = async tries => {
+    if (tries <= 0 || !(alert.status === 'queued' || alert.status === 'leased')) return
+    await new Promise(r => setTimeout(r, ALERT_FOLLOW_MS))
+    if (!line.isConnected) return
+    const r = await call('GET', '/cards/' + encodeURIComponent(c.id))
+    if (r.status !== 200 || !r.body.alert || !line.isConnected) return
+    alert = r.body.alert
+    await look()
+    say()
+    follow(tries - 1)
   }
+  follow(ALERT_FOLLOW_TRIES)
   return line
 }
 
@@ -846,26 +891,6 @@ function composer(key, label, send, status, gw) {
   return [box, button]
 }
 
-// The state in a sentence, unless it is ready, or turned off (said by itself below).
-function offLine(v) {
-  if (v.state === 'ready' || v.state === 'turned_off') return connectorLine(v)
-  return el('p', { class: 'warn', 'data-state': v.state }, stateWords(v)[1])
-}
-
-// Which copy a gateway's connector runs, when it is not the core's own release: updating itself,
-// an update it could not do, or an old copy that does not update itself.
-function connectorLine(v) {
-  const c = v.connector
-  if (!c || c.current) return null
-  const name = GATEWAY[v.gateway] || v.name
-  const short = x => (x || '').slice(0, 7)
-  const words = c.updating ? `${name}'s connector is updating itself to ${short(c.updating)}.`
-    : c.update_why ? `${name}'s connector ${c.update_why}.`
-    : c.commit ? `${name}'s connector runs ${short(c.commit)} and updates itself to ${short(c.release)} next.`
-    : `${name}'s connector is an old copy that does not update itself. It needs its one-time update.`
-  return el('p', { class: c.update_why || !c.commit ? 'warn' : 'quiet', 'data-connector': c.updating ? 'updating' : (c.commit ? 'behind' : 'old') }, words)
-}
-
 // ── the chat layout and Markdown (redesign step 1, plan Part 11) ──────────
 //
 // Messages are bubbles: Patrick's on the right in gold, everyone else's on the
@@ -876,24 +901,54 @@ function connectorLine(v) {
 // filled with text; nothing in a message is ever read as HTML, so a message
 // cannot run script or load anything (the page's CSP allows images from this
 // origin only, and no image is drawn from a message). A link opens only an
-// http or https address, in a new tab, with no referrer.
+// http or https address, in a new tab, with no referrer, or a phone number (tel:)
+// in the phone's own dialer.
 
 const INLINE = new RegExp([
   '`([^`\\n]+)`',                                                // 1 code
   '\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)',              // 2 text, 3 address
-  '(https?:\\/\\/[^\\s<>()]*[^\\s<>().,;:!?\'"\\]])',             // 4 a bare address
+  '((?:https?:\\/\\/|(?<![\\w.@/])www\\.)[^\\s<>()]*[^\\s<>().,;:!?\'"\\]])', // 4 a bare address (www. too)
   '\\*\\*(?=\\S)([^\\n]+?)(?<=\\S)\\*\\*',                        // 5 bold
   '(?<!\\w)__(?=\\S)([^\\n]+?)(?<=\\S)__(?!\\w)',                 // 6 bold
   '~~(?=\\S)([^\\n]+?)(?<=\\S)~~',                                // 7 struck
   '(?<![\\w*])\\*(?=[^\\s*])([^*\\n]+?)(?<=\\S)\\*(?![\\w*])',    // 8 italic
   '(?<!\\w)_(?=[^\\s_])([^_\\n]+?)(?<=\\S)_(?!\\w)',              // 9 italic, never inside a_name
   '(?<![\\w/])(@(?:file|folder|url|image|tool|terminal|git):(?:"[^"\\n]+"|\'[^\'\\n]+\'|`[^`\\n]+`|\\S+))', // 10 a reference
-  '(?<![\\w@/])@([A-Za-z][\\w-]{0,30})(?![\\w:@-])'               // 11 a mention
+  '(?<![\\w@/])@([A-Za-z][\\w-]{0,30})(?![\\w:@-])',              // 11 a mention
+  // 12 a phone number: + and a country code, or ten digits in the US way, with its spaces, dots or dashes
+  '(?<![\\w+/#.-])((?:\\+\\d{1,3}[\\s.-]?)?\\(?\\d{3}\\)?[\\s.-]\\d{3}[\\s.-]\\d{4})(?![\\w-])'
 ].join('|'), 'g')
+
+// What a link is, for its mark and its words (Patrick, 2 Nov: "it shows the little chat logo and it changes
+// based on what the link is"): a project thread, a Claude session or chat, an artifact, a pull request or
+// an issue on GitHub, or any other site. Each opens where it lives, in a new tab or its own app.
+function linkKind(href) {
+  let u
+  try { u = new URL(href) } catch (e) { return null }
+  const host = u.hostname.replace(/^www\./, '')
+  if (host === 'claude.ai') {
+    if (u.searchParams.get('thread')) return { kind: 'thread', words: 'Thread' }
+    if (/^\/(code\/)?artifact\//.test(u.pathname)) return { kind: 'artifact', words: 'Artifact' }
+    if (/^\/code\/session_/.test(u.pathname)) return { kind: 'session', words: 'Session' }
+    if (/^\/(chat|code\/project|project)\//.test(u.pathname)) return { kind: 'thread', words: 'Chat' }
+    return null
+  }
+  const gh = host === 'github.com' && u.pathname.match(/^\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)/)
+  if (gh) return { kind: gh[3] === 'pull' ? 'pr' : 'issue', words: `${gh[2]} #${gh[4]}` }
+  return null
+}
+
+function linkChip(words, href, kind) {
+  return el('a', { class: 'chip-link', href, target: '_blank', rel: 'noopener noreferrer' }, icon(kind, 15), words)
+}
 
 // Who a mention names, as the app names them, with their colour (app.css .a-<id>).
 const MENTIONED = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp',
   hermes: 'Hermes', one: 'One', patrick: 'Patrick' }
+
+// Where a mention goes: Hermes and One to their chat lists, a Bot to its Bot Chat. Patrick is himself.
+const MENTION_GOES = { me: '/m/hermes/me', one: '/m/hermes/one', bramble: '/m/bots/bramble', rift: '/m/bots/rift',
+  sprocket: '/m/bots/sprocket', echo: '/m/bots/echo', magpie: '/m/bots/magpie', wisp: '/m/bots/wisp' }
 
 function link(text, href) {
   return el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, text)
@@ -908,8 +963,14 @@ function inlineMd(text, still = false) {
   for (const m of text.matchAll(INLINE)) {
     if (m.index > last) out.push(text.slice(last, m.index))
     if (m[1] !== undefined) out.push(el('code', {}, m[1]))
-    else if (m[2] !== undefined) out.push(to(m[2], m[3]))
-    else if (m[4] !== undefined) out.push(to(m[4], m[4]))
+    else if (m[2] !== undefined || m[4] !== undefined) {
+      const href = m[3] ?? (/^www\./i.test(m[4]) ? 'https://' + m[4] : m[4])
+      const k = !still && linkKind(href)
+      out.push(k ? linkChip(m[2] ?? k.words, href, k.kind) : to(m[2] ?? m[4], href))
+    }
+    else if (m[12] !== undefined) {
+      out.push(still ? m[12] : el('a', { class: 'chip-link', href: 'tel:' + m[12].replace(/[^\d+]/g, '') }, icon('phone', 15), m[12]))
+    }
     else if (m[5] !== undefined || m[6] !== undefined) out.push(el('strong', {}, inlineMd(m[5] ?? m[6], still)))
     else if (m[7] !== undefined) out.push(el('s', {}, inlineMd(m[7], still)))
     else if (m[8] !== undefined || m[9] !== undefined) out.push(el('em', {}, inlineMd(m[8] ?? m[9], still)))
@@ -918,7 +979,11 @@ function inlineMd(text, still = false) {
     else {
       const who = MENTIONED[m[11].toLowerCase()]
       const id = who && (AGENT_BY_NAME[who] || (who === 'Patrick' ? 'patrick' : null))
-      out.push(el('span', { class: 'mention' + (id ? ' a-' + id : '') }, '@' + (who || m[11])))
+      // A mention of Hermes, One or a Bot opens that chat, in the app (Patrick, 2 Nov: "I can't click on the @s").
+      const to = MENTION_GOES[id]
+      out.push(to && !still
+        ? el('a', { href: to, 'data-go': '', class: 'mention a-' + id }, '@' + who)
+        : el('span', { class: 'mention' + (id ? ' a-' + id : '') }, '@' + (who || m[11])))
     }
     last = m.index + m[0].length
   }
@@ -1209,6 +1274,7 @@ function dayWords(d) {
 // here takes none.
 function bubbles(items) {
   const out = []
+  if (!slideReady) { slideReady = true; slideForTimes() }
   let day = null, last = null
   for (const m of items) {
     const d = new Date(m.at)
@@ -1233,14 +1299,10 @@ function bubbles(items) {
       own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
     if (ptr && m.replyTo) replyLink(bub, m.replyTo)
     if (m.mid !== undefined && m.mid !== null && !m.status) {
-      // Tapping a message (not a link or a button in it, and not while selecting text) opens its actions.
+      // Pressing and holding a message opens its actions, as in any messaging app (Patrick, 2 Nov: a tap
+      // opened them). A tap does nothing here, so a link, a mention or a file's chip in it opens as itself.
       bub.tabIndex = 0
-      bub.title = 'Tap for reactions and copy'
-      bub.addEventListener('click', e => {
-        // Opening a pasted file's chip opens the chip, not the actions too.
-        if (e.target.closest('a, button, summary') || String(getSelection())) return
-        messageSheet(m)
-      })
+      holdForActions(bub, () => messageSheet(m))
       bub.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === bub) messageSheet(m) })
     }
     const reacts = (m.reactions || []).map(r => {
@@ -1257,7 +1319,10 @@ function bubbles(items) {
       !m.mine && (last === null || by !== last.by) ? el('div', { class: 'who a-' + (AGENT_BY_NAME[m.who] || 'room') }, m.who) : null,
       bub,
       reacts.length ? el('div', { class: 'reacts' }, reacts) : null,
-      el('div', { class: 'meta' + (m.warn ? ' warn' : '') }, [clock(m.at), m.note].filter(Boolean).join(' · '))))
+      // The time shows only while the chat is slid left (slideForTimes), as in any messaging app; what is
+      // happening to his own message (In queue, Sent, a failure) stays under it.
+      m.note ? el('div', { class: 'meta' + (m.warn ? ' warn' : '') }, m.note) : null,
+      clock(m.at) ? el('time', { class: 'at', datetime: m.at }, clock(m.at)) : null))
     last = { by }
   }
   return out
@@ -1309,6 +1374,63 @@ function quoteOf(text) {
 // The reactions the phone offers; the core takes only these (own.py REACTIONS).
 const REACTIONS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F64F}', '\u2705', '\u{1F440}']
 
+// Message times stay out of the way until the chat is slid left with a finger, as in the Claude app
+// (Patrick, 2 Nov: "it shouldn't show time by default ... if you slide it does"). The messages follow the
+// finger up to the width of the times and spring back when it lets go; a Desktop shows a message's time
+// when the mouse is over it. One listener on the page serves every chat.
+const SLIDE_MAX = 72
+let slideReady = false
+function slideForTimes() {
+  let list = null, start = null, sliding = false
+  const reset = () => {
+    if (list) { list.classList.remove('sliding'); list.style.transform = '' }
+    list = null; start = null; sliding = false
+  }
+  document.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return
+    const msgs = e.target.closest('.chat .msgs')
+    if (!msgs) return
+    list = msgs; start = [e.clientX, e.clientY]; sliding = false
+  })
+  document.addEventListener('pointermove', e => {
+    if (!list || !start) return
+    const dx = e.clientX - start[0], dy = e.clientY - start[1]
+    if (!sliding) {
+      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return reset()   // scrolling the chat
+      if (dx > -10 || Math.abs(dx) <= Math.abs(dy)) return
+      sliding = true
+      list.classList.add('sliding')
+    }
+    list.style.transform = `translateX(${Math.max(dx, -SLIDE_MAX)}px)`
+  })
+  for (const ev of ['pointerup', 'pointercancel']) document.addEventListener(ev, reset)
+}
+
+// Press and hold (about half a second, the finger kept still) on a phone, or a right click on a Desktop:
+// Android's own long press says it as a contextmenu event, which the timer stands in for where it does not
+// come. Either opens `open` once; the browser's own menu and text selection stay away from the message.
+const HOLD_MS = 450
+function holdForActions(node, open) {
+  let timer = null, start = null, opened = 0
+  const stop = () => { clearTimeout(timer); timer = null }
+  const fire = () => { stop(); if (Date.now() - opened > 800) { opened = Date.now(); open() } }
+  node.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' || e.target.closest('a, button, summary')) return
+    start = [e.clientX, e.clientY]
+    stop()
+    timer = setTimeout(fire, HOLD_MS)
+  })
+  node.addEventListener('pointermove', e => {
+    if (timer && start && Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 10) stop()
+  })
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) node.addEventListener(ev, stop)
+  node.addEventListener('contextmenu', e => {
+    if (e.target.closest('a')) return
+    e.preventDefault()
+    fire()
+  })
+}
+
 function closeSheet() {
   const old = document.querySelector('.sheet-back')
   if (old) old.remove()
@@ -1328,7 +1450,7 @@ function messageSheet(m) {
       await navigator.clipboard.writeText(a ? (a.words || a.files.map(f => f.body).join('\n\n')) : m.text)
       note.textContent = 'Copied.'
     } catch (e) {
-      note.textContent = 'This view does not allow copying. Press and hold the message text to copy it.'
+      note.textContent = 'This view does not allow copying.'
     }
   } }, 'Copy text')
   const back = el('div', { class: 'sheet-back' },
@@ -1737,7 +1859,7 @@ async function ownPage(path) {
 function chatRow(gw, c, ops) {
   const o = ops ? lastOp(ops, c.id) : null
   return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
-    title: chatName(c), tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
+    title: chatName(c),
     lines: [snippet(c.preview), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
     right: at(c.last_at) || when(c.last_at) })
 }
@@ -1754,8 +1876,7 @@ async function gatewayView(gw, into = 'view') {
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
     screenBar({ back: into === 'view' ? () => go('/m/bots') : null, backLabel: 'All Thornswood Bots', agent: gw, title: name, heading: true,
-      right: gatewayLine(v), live: gatewayLive(v) }),
-    offLine(v)
+      right: gatewayLine(v), live: gatewayLive(v) })
   ]
   if (v.can_send && v.online) {
     parts.push(signInPart(v, status))
@@ -2012,8 +2133,7 @@ async function ownChatView(gw, sid) {
       ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
         el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats')) : null,
       opLine(o, name),
-      h.notes,
-      offLine(v)
+      h.notes
     ]
     const dock = []
     if (ended) {
@@ -2187,8 +2307,7 @@ async function hiddenView(gw) {
   const name = GATEWAY[gw]
   const note = el('p', { class: 'warn', role: 'status' })
   const head = [
-    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', undefined, gw, name),
-    offLine(v)
+    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', undefined, gw, name)
   ]
   show(head, el('p', { class: 'quiet' }, `Asking ${name}...`))
   const all = []
@@ -2524,7 +2643,12 @@ async function settingsView(note) {
   const alerts = await alertsPart(status)
   // This phone's fingerprint key: kept only while the core still lists it.
   let held = phoneKey()
-  if (held && r.status === 200 && !r.body.passkeys.some(k => k.id === held.passkey_id)) { forgetPhoneKey(); held = null }
+  if (held && r.status === 200 && !r.body.passkeys.some(k => k.id === held.passkey_id)) {
+    lostPhoneKey()
+    flash = ''
+    held = null
+    status.textContent = "This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add it again here."
+  }
   const finger = held
     ? [el('p', { class: 'quiet' }, 'On. This phone signs in and answers high-risk cards with your fingerprint.')]
     : (await canUseFingerprint())

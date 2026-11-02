@@ -168,6 +168,19 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
   background: var(--theirs); border: 1px solid var(--line); overflow-wrap: anywhere; }
 .chat .msg.mine .bub { background: var(--mine); border-color: var(--mine-line); border-radius: 16px; border-bottom-right-radius: 6px; }
 .chat .meta { font-size: 11.5px; color: var(--faint); margin: 3px 6px 0; }
+/* Times sit just past the right edge, shown only while the chat is slid left (app.js slideForTimes). */
+.chat { overflow-x: clip; }
+.chat .msgs { position: relative; touch-action: pan-y; transition: transform .2s ease-out; }
+.chat .msgs.sliding { transition: none; }
+.chat .msg .at { position: absolute; right: -64px; width: 56px; font-size: 11.5px; color: var(--faint);
+  white-space: nowrap; margin-top: 10px; }
+/* A mouse: the time beside the message under it, outside its bubble. */
+@media (hover: hover) and (pointer: fine) {
+  .chat .msg { position: relative; }
+  .chat .msg .at { right: auto; left: calc(100% + 8px); opacity: 0; transition: opacity .15s; pointer-events: none; }
+  .chat .msg.mine .at { left: auto; right: calc(100% + 8px); text-align: right; }
+  .chat .msg:hover .at { opacity: 1; }
+}
 .chat .meta.warn { color: var(--warn); }
 .md { white-space: normal; word-break: normal; line-height: 1.45; }
 .md p { margin: 2px 0; }
@@ -357,6 +370,11 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 .snip .sender { font-weight: 650; background: none; border: 0; }
 .snip .sender:not([class*="a-"]), .snip .sender.a-room { color: var(--fg); }
 .mention { font-weight: 600; color: var(--accent-hot); background: none; border: 0; }
+a.mention { text-decoration: none; }
+/* A link to a thread, session, artifact, pull request, issue or phone number: its mark and its words. */
+.chip-link { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px 0 5px; border: 1px solid var(--line2);
+  border-radius: 999px; color: var(--accent-hot); text-decoration: none; vertical-align: baseline; line-height: 1.5; }
+.chip-link svg { flex: none; }
 .ref { display: inline-block; padding: 0 6px; border: 1px solid var(--line2); border-radius: 6px; font-size: .92em;
   color: var(--fg); background: var(--raised); }
 

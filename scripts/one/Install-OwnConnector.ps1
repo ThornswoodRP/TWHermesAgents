@@ -16,7 +16,13 @@ VM (1 Nov, answer A): nothing listens on One, and the VM never reaches in.
      token never shows on screen or in a log. Only Patrick's user can read
      that file.
   3. It copies own_connector.py and room_send.py from this clone into
-     %LOCALAPPDATA%\Thornswood\own-connector, with the commit they came from.
+     %LOCALAPPDATA%\Thornswood-Hermes\own-connector, with the commit they came from.
+     Never inside %LOCALAPPDATA%\Thornswood: that is the launcher's Velopack
+     folder, and Velopack's Setup.exe, run over an install, stops what runs
+     from it, renames it away and deletes it (velopack install.rs). On 2 Nov
+     a launcher install did that to the connector there, and it stopped at
+     2:58 PM with no file left to start. The script refuses any folder inside
+     a Velopack install.
   4. It runs one round (--once) to check the token, the address and Hermes.
   5. It adds the task "Thornswood Own Hermes Connector" to Task Scheduler,
      which starts the connector at every sign-in, and starts it now. The task
@@ -52,7 +58,7 @@ param(
     [string]$SshHost = 'thornswood-bots',
     [string]$Hermes = '',
     [string]$HermesPython = '',
-    # Default: %LOCALAPPDATA%\Thornswood\own-connector.
+    # Default: %LOCALAPPDATA%\Thornswood-Hermes\own-connector, outside the launcher's Velopack folder.
     [string]$Folder = '',
     # Default: %APPDATA%\Thornswood\own-one.token.
     [string]$TokenFile = '',
@@ -80,7 +86,28 @@ function AppFolder([string]$which, [string]$sub, [string]$leaf) {
     if (-not $base) { Fail "this user has no $which folder; pass -Folder and -TokenFile" }
     Join-Path (Join-Path $base $sub) $leaf
 }
-if (-not $Folder) { $Folder = AppFolder 'LocalApplicationData' 'Thornswood' 'own-connector' }
+if (-not $Folder) { $Folder = AppFolder 'LocalApplicationData' 'Thornswood-Hermes' 'own-connector' }
+
+# Never inside a Velopack install: its Setup.exe deletes the whole folder when the app is installed
+# again (velopack src/bins/src/commands/install.rs: force_stop_package, rename, remove_dir_all), and
+# its root holds Update.exe and current\. The launcher's is %LOCALAPPDATA%\Thornswood, even before
+# it is installed, so that one is refused by name as well.
+$launcherRoot = AppFolder 'LocalApplicationData' 'Thornswood' ''
+function Under([string]$path, [string]$root) {
+    $p = [IO.Path]::GetFullPath($path).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $r = [IO.Path]::GetFullPath($root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $p.StartsWith($r, [StringComparison]::OrdinalIgnoreCase)
+}
+$velopack = $null
+if (Under $Folder $launcherRoot) { $velopack = $launcherRoot.TrimEnd('\', '/') }
+$up = [IO.Path]::GetFullPath($Folder)
+while (-not $velopack -and $up) {
+    if ((Test-Path (Join-Path $up 'Update.exe') -PathType Leaf) -and (Test-Path (Join-Path $up 'current') -PathType Container)) { $velopack = $up }
+    $up = Split-Path $up
+}
+if ($velopack) {
+    Fail "$Folder is inside $velopack, a Velopack install, whose Setup.exe deletes it when the app is installed again; leave -Folder out or pick a folder outside it"
+}
 if (-not $TokenFile) { $TokenFile = AppFolder 'ApplicationData' 'Thornswood' 'own-one.token' }
 
 # 1. Hermes on One.

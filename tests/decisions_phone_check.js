@@ -141,6 +141,17 @@ const base = `http://localhost:${port}`
     const t = await page.locator('.alert-times').textContent({ timeout: 3000 })
     if (!/^Alert: card \d{1,2}:\d{2}:\d{2}\s?[AP]M, not sent \(\w+\)$/.test(t)) throw new Error('alert line ' + JSON.stringify(t))
   })
+  await step("the phone's time goes with its own alert: one from an earlier alert of the card is said as that", async () => {
+    const put = rev => page.evaluate(([id, rev]) => caches.open('tw-alerts').then(k => k.put(new Request('/m/alerts/' + id),
+      new Response(JSON.stringify({ shown_at: '2026-11-02T23:01:21Z', attention_revision: rev })))), [card, rev])
+    await put(0)
+    await page.reload()
+    await page.locator('.alert-times', { hasText: ', an earlier alert on this phone ' }).waitFor({ timeout: 5000 })
+    await put(1)
+    await page.reload()
+    await page.locator('.alert-times', { hasText: /, on this phone \d/ }).waitFor({ timeout: 5000 })
+    if ((await page.locator('.alert-times').textContent()).includes('earlier')) throw new Error('its own alert said as an earlier one')
+  })
   await step('an answered card offers no more choices', async () => {
     if (await page.getByRole('button', { name: /^Choose: / }).count()) throw new Error('choices on an answered card')
   })
@@ -223,7 +234,7 @@ const base = `http://localhost:${port}`
   })
   await step("in a Bot Chat, the Bot's own reaction shows with its name", () =>
     page.locator('#view .msg[data-mid="69"] .react[aria-label="Bramble\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
-  await page.locator('#view .msg[data-mid="70"] .bub').click()
+  await page.locator('#view .msg[data-mid="70"] .bub').click({ button: 'right' })
   await page.getByRole('button', { name: 'React \u2764\uFE0F' }).click()
   await step('a reaction in a Bot Chat is set in that Bot\'s Bot Chat', () =>
     page.locator('#view .msg[data-mid="70"] .react.me:not(.pending)').waitFor({ timeout: 25000 }))
@@ -314,7 +325,7 @@ const base = `http://localhost:${port}`
     page.locator('#view .msg[data-mid="1"] .react[aria-label="Hermes\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
   const reactBody = []
   page.on('request', q => { if (q.method() === 'POST' && /\/own\/one\/react$/.test(q.url())) reactBody.push(JSON.parse(q.postData())) })
-  await page.locator('#view .msg[data-mid="2"] .bub').click()
+  await page.locator('#view .msg[data-mid="2"] .bub').click({ button: 'right' })
   await step('tapping a message opens its actions: eight reactions, Copy text and Close', async () => {
     const sheet = page.getByRole('dialog', { name: 'Message actions' })
     await sheet.waitFor({ timeout: 3000 })
@@ -333,7 +344,7 @@ const base = `http://localhost:${port}`
     await page.locator('#view .msg[data-mid="2"] .react.me:not(.pending)').waitFor({ timeout: 25000 })
     if (await mineChip.getAttribute('aria-label') !== 'Your reaction \u{1F44D}, tap to take it off') throw new Error(await mineChip.getAttribute('aria-label'))
   })
-  await page.locator('#view .msg[data-mid="2"] .bub').click()
+  await page.locator('#view .msg[data-mid="2"] .bub').click({ button: 'right' })
   await step('the actions mark the reaction that is on', async () => {
     if (await page.getByRole('button', { name: 'React \u{1F44D}' }).getAttribute('aria-pressed') !== 'true') throw new Error('not pressed')
   })
@@ -450,7 +461,7 @@ const base = `http://localhost:${port}`
   await step("a reply to a paste quotes the paste's words, drawn as they are, and never its file reference", async () => {
     const mine = page.locator('#view .msg.mine', { hasText: 'Here is the plan' })
     if (await page.locator('.sheet-back').count()) throw new Error("opening the chip opened the message's actions too")
-    await mine.locator('.bub .md').click()
+    await mine.locator('.bub .md').click({ button: 'right' })
     await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
     const quote = page.locator('#view .replying .qtext')
     await quote.waitFor({ timeout: 8000 })
@@ -526,6 +537,73 @@ const base = `http://localhost:${port}`
     if (m.dock > m.tabs + 0.5) throw new Error(`the box ends at ${m.dock}, under the tabs at ${m.tabs}`)
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-markdown.png' })
+  await page.goto(base + '/m/hermes/one/s_links')
+  const linked = page.locator('#view .msg[data-mid]', { hasText: 'Ask' }).first()
+  await step('links show what they are: a thread, an artifact and a pull request each with its own mark', async () => {
+    await linked.waitFor({ timeout: 15000 })
+    const chips = await linked.locator('a.chip-link').evaluateAll(ns => ns.map(a => [a.textContent, a.getAttribute('href'), !!a.querySelector('svg')]))
+    const want = [['plan thread', 'https://claude.ai/code/project/chan_1?thread=cmsg_9', true],
+      ['Artifact', 'https://claude.ai/artifact/AbC123', true], ['Thornswood-Hermes #96', 'https://github.com/ThornswoodRP/Thornswood-Hermes/pull/96', true],
+      ['720-555-0199', 'tel:7205550199', true]]
+    if (JSON.stringify(chips) !== JSON.stringify(want)) throw new Error(JSON.stringify(chips))
+    const www = linked.locator('a', { hasText: 'www.example.com' })
+    if (await www.getAttribute('href') !== 'https://www.example.com') throw new Error('the www link')
+  })
+  await step('a tap on a message opens nothing; pressing and holding opens its actions', async () => {
+    await linked.locator('.bub').click({ position: { x: 4, y: 4 } })
+    await page.waitForTimeout(700)
+    if (await page.getByRole('dialog', { name: 'Message actions' }).count()) throw new Error('a tap opened the actions')
+    await linked.locator('.bub').evaluate(b => {
+      const r = b.getBoundingClientRect()
+      b.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', clientX: r.left + 4, clientY: r.top + 4 }))
+    })
+    await page.getByRole('dialog', { name: 'Message actions' }).waitFor({ timeout: 2000 })
+    await page.keyboard.press('Escape')
+    await page.evaluate(() => { const b = document.querySelector('.sheet-back'); if (b) b.remove() })
+  })
+  await step("on a phone, a message's time is out of sight until the chat is slid left, and goes when let go", async () => {
+    // A touch screen of its own, signed in as this one is, since the times sit differently under a mouse.
+    const touch = await browser.newContext({ viewport: { width: 412, height: 860 }, hasTouch: true, isMobile: true,
+      storageState: await ctx.storageState() })
+    try {
+      const tp = await touch.newPage()
+      await tp.goto(base + '/m/hermes/one/s_links')
+      await tp.locator('#view .msg[data-mid] time.at').first().waitFor({ state: 'attached', timeout: 15000 })
+      const moved = await tp.evaluate(async () => {
+        if (matchMedia('(hover: hover) and (pointer: fine)').matches) return 'not a touch screen'
+        const list = document.querySelector('#view .chat .msgs')
+        const edge = document.querySelector('#view .chat').getBoundingClientRect().right
+        const time = document.querySelector('#view .chat .msg[data-mid] time.at')
+        const seen = () => time.getBoundingClientRect().left < edge
+        const r = list.getBoundingClientRect()
+        const ev = (type, x) => list.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerType: 'touch', clientX: x, clientY: r.top + 40 }))
+        const before = seen()
+        ev('pointerdown', r.right - 20); ev('pointermove', r.right - 60); ev('pointermove', r.right - 140)
+        const during = [list.style.transform, seen()]
+        ev('pointerup', r.right - 140)
+        return [before, ...during, list.style.transform]
+      })
+      if (JSON.stringify(moved) !== JSON.stringify([false, 'translateX(-72px)', true, ''])) throw new Error(JSON.stringify(moved))
+      const wide = await tp.evaluate(() => document.documentElement.scrollWidth - innerWidth)
+      if (wide > 0) throw new Error('the times push the page sideways by ' + wide)
+    } finally { await touch.close() }
+  })
+  await step("under a mouse, a message's time shows only while the pointer is on it", async () => {
+    const at = linked.locator('time.at')
+    await page.mouse.move(2, 2)
+    await page.waitForTimeout(250)
+    if (await at.evaluate(n => getComputedStyle(n).opacity) !== '0') throw new Error('the time shows by itself')
+    await linked.locator('.bub').hover()
+    await page.waitForFunction(() => getComputedStyle(document.querySelector('#view .msg[data-mid] time.at')).opacity === '1', null, { timeout: 2000 })
+  })
+  await step('a mention of a Bot opens that Bot\'s chat', async () => {
+    const m = linked.locator('a.mention', { hasText: '@Rift' })
+    if (await m.getAttribute('href') !== '/m/bots/rift') throw new Error('the mention goes to ' + await m.getAttribute('href'))
+    await m.click()
+    await page.waitForURL(/\/m\/bots\/rift$/, { timeout: 5000 })
+  })
+  await page.goto(base + '/m/hermes/one/s_md')
+  await page.locator('.chatbar .t strong', { hasText: 'Markdown check' }).waitFor({ timeout: 15000 })
   // Renaming, hiding, bringing back and deleting one of his own chats (redesign step 3). The scratch
   // connector does each on its state.db and feeds the chat list again; the app reads it on its next draw.
   const again = async (path, test) => {
@@ -598,10 +676,19 @@ const base = `http://localhost:${port}`
     if (await page.locator('#view .row[data-chat="s_md"]').count()) throw new Error('the deleted chat is still listed')
   })
   await page.goto(base + '/m/hermes/one')
-  await step("his own Bot Chat heads One's chats, marked Bot Mode", async () => {
+  await step("his own Bot Chat heads One's chats, with no chip under its name", async () => {
     const first = page.locator('#view .row[data-chat]').first()
     if ((await first.getAttribute('data-chat')) !== 's_obc') throw new Error('the Bot Chat is not first')
-    await first.getByText('Bot Mode').waitFor({ timeout: 3000 })
+    if (await first.getByText('Bot Mode').count()) throw new Error('a Bot Mode chip')
+  })
+  await step("a chat Hermes has not titled that began with a /skill is named as he typed it, not by the skill's text", async () => {
+    const row = page.locator('#view .row[data-chat="s_skill"]')
+    await row.waitFor({ timeout: 5000 })
+    const t = await row.locator('strong').first().textContent()
+    if (t !== '/thornswood-operator-cards run card 2') throw new Error('named ' + t)
+  })
+  await step("One's screen has no line of words under its bar: the bar's own state says it", async () => {
+    if (await page.locator('#view p.warn[data-state], #view p[data-connector]').count()) throw new Error('a state line')
   })
   await page.goto(base + '/m/hermes/one/s_obc')
   await step('his own Bot Chat opens with its messages and offers no Rename, Hide or Delete', async () => {
@@ -616,7 +703,7 @@ const base = `http://localhost:${port}`
   const last = page.locator('#view .msg.theirs', { hasText: 'message 119' })
   await last.waitFor({ timeout: 15000 })
   const lastMid = Number(await last.getAttribute('data-mid'))
-  await last.locator('.bub').click()
+  await last.locator('.bub').click({ button: 'right' })
   await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
   await step('Reply shows the words it quotes above the box, and Cancel takes it away', async () => {
     await page.locator('#view .replying', { hasText: 'Replying to One' }).waitFor({ timeout: 8000 })
@@ -624,7 +711,7 @@ const base = `http://localhost:${port}`
     await page.getByRole('button', { name: 'Cancel the reply' }).click()
     await page.locator('#view .replying').waitFor({ state: 'detached', timeout: 8000 })
   })
-  await last.locator('.bub').click()
+  await last.locator('.bub').click({ button: 'right' })
   await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply' }).click()
   await page.locator('#view .replying').waitFor({ timeout: 8000 })
   await page.getByLabel('Message to One').fill('Thanks, that was the last one.')
@@ -657,7 +744,7 @@ const base = `http://localhost:${port}`
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-reply.png' })
   await page.goto(base + '/m/bots/bramble')
-  await page.locator('#view .msg[data-mid="70"] .bub').click()
+  await page.locator('#view .msg[data-mid="70"] .bub').click({ button: 'right' })
   await step('a Bot Chat offers no reply: Hermes has none there', async () => {
     await page.getByRole('dialog', { name: 'Message actions' }).waitFor({ timeout: 3000 })
     if (await page.getByRole('dialog').getByRole('button', { name: 'Reply' }).count()) throw new Error('Reply in a Bot Chat')
@@ -674,7 +761,8 @@ const base = `http://localhost:${port}`
   await page.goto(base + '/m/hermes/me')
   await step('Hermes on the VM, with no connector yet, says so and offers no send', async () => {
     await page.locator('#view h2', { hasText: /^Hermes$/ }).waitFor({ timeout: 5000 })
-    await page.getByText('The connector on the VM is not installed yet.').waitFor({ timeout: 5000 })
+    await page.locator('#view').getByText('Connector missing', { exact: true }).first().waitFor({ timeout: 5000 })
+    if (await page.getByText('The connector on the VM is not installed yet.').count()) throw new Error('a state line under the bar')
     if (await page.getByLabel('Start a new chat').count()) throw new Error('a composer while it is off')
   })
   await page.getByRole('link', { name: 'Board' }).click()
@@ -867,6 +955,7 @@ const base = `http://localhost:${port}`
     await page.goto(base + '/m/settings')
     await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 5000 })
     if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('kept')
+    await page.getByText("This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add it again here.").waitFor({ timeout: 3000 })
   })
   await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_gone' })))
   optionBodies.length = 0
@@ -876,6 +965,17 @@ const base = `http://localhost:${port}`
     await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
     if (JSON.stringify(optionBodies) !== JSON.stringify([{ phone_key: 'AQEBAQEBAQEBAQEBAQEBAQ' }, {}])) throw new Error(JSON.stringify(optionBodies))
     if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('the gone key is still kept')
+  })
+  await page.evaluate(() => localStorage.setItem('hermes.fingerprintLater.v1', '1'))
+  await page.goto(base + '/m/decisions')
+  await step('the switch to the passkey is said, and the fingerprint is offered again even if put off before', async () => {
+    // The list drawn first, so its own first draw does not take the line before the redraw below shows it.
+    await page.locator('#view').getByText(/^(Nothing needs you right now\.|Waiting on you)/).first().waitFor({ timeout: 8000 })
+    await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_gone' })))
+    await page.evaluate(() => passkeySignIn())
+    await page.evaluate(() => route())
+    await page.getByText("This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add the fingerprint again below.").waitFor({ timeout: 8000 })
+    await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 5000 })
   })
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
@@ -996,7 +1096,7 @@ const base = `http://localhost:${port}`
     if (await barMode()) throw new Error('still on after Stop: ' + await barMode())
   })
   await step("Read aloud, from a message's actions", async () => {
-    await page.locator('#view .msg .bub').getByText(VOICE_REPLY, { exact: true }).click()
+    await page.locator('#view .msg .bub').getByText(VOICE_REPLY, { exact: true }).click({ button: 'right' })
     await page.getByRole('button', { name: 'Read aloud' }).click()
     await page.waitForFunction(r => window.__said.filter(t => t === r).length === 2, VOICE_REPLY, { timeout: 3000 })
     await page.waitForFunction(() => document.getElementById('voicebar').hidden, null, { timeout: 3000 })

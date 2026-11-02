@@ -124,6 +124,22 @@ con.execute("INSERT INTO sessions VALUES('s_md', 'cli', 'Markdown check', ?, ?, 
             (epoch("2026-10-31T11:00:00+00:00"), epoch("2026-10-31T12:00:00+00:00")))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_md', 'assistant', ?, ?)",
             (MD, epoch("2026-10-31T12:00:00+00:00")))
+# Links of each kind, a mention and a phone number (Patrick, 2 Nov 3:18 PM and 3:21 PM); and a chat Hermes has
+# not titled that began with a /skill, kept with the skill's whole text ahead of what he typed.
+LINKS = ("Ask @Rift. The [plan thread](https://claude.ai/code/project/chan_1?thread=cmsg_9), "
+         "https://claude.ai/artifact/AbC123, https://github.com/ThornswoodRP/Thornswood-Hermes/pull/96, "
+         "www.example.com and call 720-555-0199.")
+con.execute("INSERT INTO sessions VALUES('s_links', 'cli', 'Links check', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-31T10:00:00+00:00"), epoch("2026-10-31T10:30:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_links', 'assistant', ?, ?)",
+            (LINKS, epoch("2026-10-31T10:30:00+00:00")))
+SKILL = ('[IMPORTANT: The user has invoked the "thornswood-operator-cards" skill, indicating they want you to '
+         'follow its instructions. The full skill content is loaded below.]\n\n# Operator cards\nLong rules.\n\n'
+         'The user has provided the following instruction alongside the skill invocation: run card 2')
+con.execute("INSERT INTO sessions VALUES('s_skill', 'cli', NULL, ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-31T09:00:00+00:00"), epoch("2026-10-31T09:05:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_skill', 'user', ?, ?)",
+            (SKILL, epoch("2026-10-31T09:00:00+00:00")))
 for i in range(120):
     con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_long', ?, ?, ?)",
                 ("user" if i % 2 == 0 else "assistant", f"message {i}", epoch("2026-11-01T10:00:00+00:00") + i))
@@ -144,7 +160,14 @@ con.execute("INSERT INTO sessions VALUES('s_work', 'cli', 'Check the build', ?, 
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_work', 'assistant', 'earlier', ?)",
             (epoch("2026-10-28T12:00:00+00:00"),))
 con.commit()
+# The two new chats are listed as One's connector lists them, by its own row maker, so the /skill chat's
+# name is what own_connector makes of the skill's text, not a name written here.
+con.row_factory = sqlite3.Row
+for sid in ("s_links", "s_skill"):
+    CHATS.append(own_connector._row(con, con.execute(
+        "SELECT id, title, coalesce(last_activity_at, started_at) AS last_at FROM sessions WHERE id = ?", (sid,)).fetchone()))
 con.close()
+one_feed()
 # His message in s_work, taken by the stand-in connector, whose turn is running a command; each claim the loop
 # below makes says so, as One's connector does while a turn runs (own_connector.OwnConnector.busy).
 from test_decisions_own import passkey
