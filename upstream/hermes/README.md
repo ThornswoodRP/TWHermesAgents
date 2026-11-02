@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Seven causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Eight causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
@@ -231,6 +231,38 @@ its requests went to a route with a real HMAC secret unsigned, so the
 adapter answered 401 and nothing was ever coalesced or spooled. The test
 now signs them and checks each answer is `202 coalesced` and the spool holds
 the group before the stop. Upstream without 0007 passed 71 of 71.
+
+## 0008: the Bot Screen watcher reads each home under its own terminal policy
+
+Made against upstream main `013bde47` (2 Nov 2026), in `on-main/`. The file
+it changes is the same in v0.22.5, so it applies there too.
+
+Cause of the container burst (1 Nov, 3:50:00 PM). Bramble's Bot Screen came
+up at 3:49:59 PM. Within 0.4 s, five new containers labelled
+`profile_bramble`, each mounting Bramble's home but another Bot's work folder
+at `/workspace`, and one local environment were built. There was one build
+in each serve process on the VM that watched Bramble's home, and all of them
+logged to Bramble's `agent.log`. The serve backend's watcher
+(`tui_gateway/methods_display_watch.py`) re-reads every served home's screen
+when its files move, and every 30 s it checks for idle screens. It did both
+under HERMES_HOME alone. The status read re-attaches a sandbox-hosted screen
+(`runtime._owned_sandbox_env`, which acquires a terminal environment), so it
+ran on the LAUNCH profile's terminal policy. Each process built a container
+keyed and mounted as Bramble but rooted at its own Bot's `terminal.cwd`.
+
+The fix binds the watched home's full runtime scope (home, secrets, terminal)
+for each poll body. That is what `@_profile_scoped` binds for a `display.*`
+call, and what `methods_profiles._hermes_home_scope` already binds for config
+reads (upstream #120726). The re-attach then finds the profile's own
+container. Two new tests in `tests/tui_gateway/test_display_watch.py` cover
+the runtime-file poll and the idle check: each body sees the watched home's
+own `TERMINAL_CWD`, not the launch profile's.
+
+```
+git am on-main/0008-display-watch-profile-scope.patch
+python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
+HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/tui_gateway/test_display_watch.py tests/tui_gateway/test_display_methods.py -q -rfE
+```
 
 ## On upstream main
 
