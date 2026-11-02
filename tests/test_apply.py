@@ -214,6 +214,7 @@ class Apply(unittest.TestCase):
                      "There is no timer and no retry", "ops/claude-queue/", "ops/bramble-list.md", "ops/status.md",
                      "Never merge ThornswoodRP/Thornswood-Hermes", "tw_decide", "start_run"):
             self.assertIn(must, text)
+        self.assertIn("whoever did it", text)
         self.assertNotIn("\u2014", text)
 
     def test_the_gateways_own_profile_is_set_and_guarded(self):
