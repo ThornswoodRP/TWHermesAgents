@@ -173,15 +173,22 @@ class Units(unittest.TestCase):
         r = subprocess.run(["bash", "-c", f"set -euo pipefail\n{fn}stale_procs {proc} 1001 2001 2002 2003"],
                            capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "2"), r.stderr)
+        r = subprocess.run(["bash", "-c", f"set -euo pipefail\n{fn}stale_procs --pids {proc} 1001 2001 2002 2003"],
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, sorted(r.stdout.split())), (0, ["201", "202"]), r.stderr)
 
     def test_the_install_ends_stale_hermes_sessions_and_brings_the_gateway_back(self):
         text = (REPO / "deploy" / "install.sh").read_text()
         step = text[text.index("# 9b."):text.index("# 10.")]
-        order = ["stale_procs /proc", "loginctl terminate-user hermes", 'systemctl start "user@$hermes_uid.service"',
+        order = ["stale_procs /proc", "loginctl terminate-user hermes", "stale_procs --pids /proc", "kill -KILL $left",
+                 'systemctl start "user@$hermes_uid.service"',
                  "systemctl restart tw-hermes-gateway.service", "systemctl is-active --quiet tw-hermes-gateway.service"]
         at = [step.index(s) for s in order]
         self.assertEqual(at, sorted(at))
         self.assertIn("tw-policy-clients tw-git-clients tw-files-clients", step)
+        # 2 Nov: Desktop's reconnected sessions have the groups; the wait is for
+        # the processes without them, never for no hermes process at all.
+        self.assertNotIn("pgrep -u", step)
         self.assertLess(text.index("usermod -a -G tw-policy-clients"), text.index("# 9b."))
 
     def _place_units(self, systemd_dir: Path) -> tuple[subprocess.CompletedProcess, Path]:

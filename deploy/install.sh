@@ -54,8 +54,11 @@ ok() { echo "PASS $*"; }
 # close the PAM session at logout, and it drops all its supplementary groups
 # on purpose, so it never has them and never opens a socket (31 Oct, the
 # first install with this check stopped on it).
-#   stale_procs <proc root> <uid> <gid> [<gid>...]
+# With --pids it prints their process ids, one a line, instead of the count.
+#   stale_procs [--pids] <proc root> <uid> <gid> [<gid>...]
 stale_procs() {
+  local pids=0
+  [[ "$1" == --pids ]] && { pids=1; shift; }
   local proc="$1" uid="$2"; shift 2
   local host_ns d n=0 groups g
   host_ns="$(readlink "$proc/1/ns/user" 2>/dev/null || true)"
@@ -64,9 +67,9 @@ stale_procs() {
     [[ "$(readlink "$d/ns/user" 2>/dev/null || true)" == "$host_ns" ]] || continue
     [[ "$(awk -F'\t' '/^Name:/{print $2}' "$d/status" 2>/dev/null)" == "(sd-pam)" ]] && continue
     groups=" $(awk '/^Groups:/{$1=""; print}' "$d/status" 2>/dev/null) "
-    for g in "$@"; do [[ "$groups" == *" $g "* ]] || { n=$((n + 1)); break; }; done
+    for g in "$@"; do [[ "$groups" == *" $g "* ]] || { n=$((n + 1)); (( pids )) && echo "${d##*/}"; break; }; done
   done
-  echo "$n"
+  (( pids )) || echo "$n"
 }
 
 pol() { python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d
@@ -383,10 +386,24 @@ if (( stale > 0 )); then
   gateway_was="$(systemctl is-enabled tw-hermes-gateway.service 2>/dev/null || true)"
   echo "$stale hermes processes started before hermes joined the broker groups; ending the hermes user's sessions (Hermes Desktop reconnects)."
   loginctl terminate-user hermes || true
+  # Only the processes without the groups are waited for. Desktop reconnects
+  # within seconds, and its new sessions already have the groups, so waiting
+  # for no hermes process at all never ends (2 Nov, 8:24 PM: seven dashboard
+  # sessions were back before the wait was over). One still running after
+  # SIGTERM gets SIGKILL, as systemd would give it, and is named first.
   for _ in $(seq 1 30); do
-    pgrep -u "$hermes_uid" >/dev/null || break
+    (( $(stale_procs /proc "$hermes_uid" "${client_gids[@]}") == 0 )) && break
     sleep 1
   done
+  left="$(stale_procs --pids /proc "$hermes_uid" "${client_gids[@]}")"
+  if [[ -n "$left" ]]; then
+    echo "still running 30 seconds after SIGTERM, without the groups (pid name): $(for p in $left; do printf '%s %s; ' "$p" "$(cat "/proc/$p/comm" 2>/dev/null || echo gone)"; done)"
+    kill -KILL $left 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      (( $(stale_procs /proc "$hermes_uid" "${client_gids[@]}") == 0 )) && break
+      sleep 1
+    done
+  fi
   systemctl start "user@$hermes_uid.service"
   if [[ "$gateway_was" == enabled ]]; then
     systemctl restart tw-hermes-gateway.service
