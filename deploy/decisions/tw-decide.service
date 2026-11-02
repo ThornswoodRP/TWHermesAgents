@@ -12,6 +12,8 @@ StartLimitBurst=3
 Type=simple
 User=tw-decide
 Group=tw-decide
+# The voice worker's socket (tw-decide-voice.service) is this group's.
+SupplementaryGroups=tw-decide-voice
 MemoryHigh=150M
 MemoryMax=200M
 TasksMax=64

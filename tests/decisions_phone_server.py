@@ -3,7 +3,8 @@
     python tests/decisions_phone_server.py <port>
 
 It prints one JSON line (a phone pairing code and three card ids, the second
-high risk, the third left for the alert checks) and serves until killed. Test data only: no real workspace, no Bot,
+high risk, the third left for the alert checks, and the voice check's fake
+microphone file and words) and serves until killed. Test data only: no real workspace, no Bot,
 no deploy; nothing takes the chat messages it queues, and the push worker's
 keys are throwaway ones said straight to the core, with no worker and no push
 service. One's own-Hermes connector is stood in for by one call to the core
@@ -306,9 +307,57 @@ def board_feed():
     Feeds(Store(w.path, clock=w.clock)).put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:05+00:00",
                                                               "doing": nxt})
 threading.Thread(target=board_feed, daemon=True).start()
+# Voice: the browser's fake microphone plays VOICE_WAV (a second of silence, a second of a voice-like hum,
+# three of silence, over and over), and the voice worker's Whisper is a stand-in that writes every recording
+# down as VOICE_WORDS. When Bramble's Bot Chat gets those words, or the words after "Hey Hermes", Bramble
+# answers in its state.db, for voice chat to read aloud.
+import math, struct, wave
+from thornswood_decisions.voice_worker import Worker
+VOICE_WORDS = "Hey Hermes, what is on the board?"
+VOICE_REPLY = "Two Bots are working on the board."
+vdir = Path(tempfile.mkdtemp())
+VOICE_WAV = vdir / "speech.wav"
+with wave.open(str(VOICE_WAV), "wb") as wav:
+    wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+    frames = []
+    for i in range(16000 * 5):
+        t = i / 16000
+        if 1 <= t < 2:
+            env = 0.5 * (1 - math.cos(2 * math.pi * 4 * (t - 1)))
+            v = env * 0.3 * sum(math.sin(2 * math.pi * 150 * k * t) / k for k in range(1, 9))
+        else:
+            v = 0.0
+        frames.append(struct.pack("<h", int(max(-1, min(1, v)) * 32767)))
+    wav.writeframes(b"".join(frames))
+voice_worker = Worker(lambda path: {"success": True, "transcript": VOICE_WORDS}, scratch=vdir / "scratch",
+                      whisper=lambda: "faster-whisper")
+threading.Thread(target=voice_worker.serve, args=(str(vdir / "voice.sock"),), daemon=True).start()
+def bramble_answers():
+    # As the Bots' connector does it: the message taken, its turn run (Bramble's answer in its state.db),
+    # and the result told to the core, which reads the Bot Chat's newest page again for it.
+    store = Store(w.path, clock=w.clock)
+    while True:
+        heard = store.db.execute("SELECT id FROM chat_messages WHERE target = 'bramble' AND text IN (?, ?) "
+                                 "AND status = 'queued'", (VOICE_WORDS, "what is on the board?")).fetchone()
+        if heard:
+            with store.tx() as db:
+                db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                           ((w.clock() + timedelta(minutes=5)).isoformat(), heard["id"]))
+            time.sleep(1)
+            c = sqlite3.connect(bhome / "profiles" / "bramble" / "state.db")
+            c.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'assistant', ?, ?)",
+                      (VOICE_REPLY, time.time()))
+            c.commit()
+            c.close()
+            Chat(store).result(w.ws, tc, heard["id"], "confirmed")
+            return
+        time.sleep(0.2)
+threading.Thread(target=bramble_answers, daemon=True).start()
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
+api.voice_socket = str(vdir / "voice.sock")
 srv = make_server(api, "127.0.0.1", port)
 print(json.dumps({"code": code, "card": card["id"], "high": high["id"], "third": third["id"],
-                  "board_next": str(BOARD_NEXT)}), flush=True)
+                  "board_next": str(BOARD_NEXT), "voice_wav": str(VOICE_WAV), "voice_words": VOICE_WORDS,
+                  "voice_reply": VOICE_REPLY}), flush=True)
 srv.serve_forever()

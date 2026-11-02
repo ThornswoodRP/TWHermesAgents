@@ -92,7 +92,9 @@ const ICON = {
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
   more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6',
   panel: 'M3 4h18v16H3zM9 4v16', file: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6',
-  image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', dec: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9'
+  image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', dec: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9',
+  mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3',
+  talk: 'M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4'
 }
 function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg'
@@ -147,7 +149,9 @@ const SAID = {
   setup_expired: 'Setting up this phone ran out: a pairing gives 5 minutes to add the first passkey. Get a new code, pair again and add the passkey straight after.',
   passkey_unavailable: 'Passkeys are not set up on the core yet.',
   no_origin: 'The core does not know its address yet, so passkeys cannot work.',
-  offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.'
+  offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.',
+  voice_off: 'Dictation is not running on the VM.',
+  voice_slow: 'Whisper on the VM took too long with that. Try a shorter recording.'
 }
 
 function said(body) {
@@ -1347,6 +1351,8 @@ function messageSheet(m) {
       m.react && mineNow ? el('button', { class: 'secondary', type: 'button', onclick: () => choose(null) },
         'Take my reaction off') : null,
       m.reply ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); m.reply() } }, 'Reply') : null,
+      canSpeak() && spoken(m) ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); readAloud(m) } },
+        'Read aloud') : null,
       copy,
       el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'),
       note))
@@ -1426,7 +1432,8 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
       if (a) { toWorker({ close: a.c.id }); badgeNow() }
       drafts[key] = null
       chatPlace.toEnd = true
-      return route()
+      route()
+      return true
     }
     if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
     if (a && s.status === 403 && s.body.error === 'sign_in_again') {
@@ -1444,11 +1451,25 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
   const button = el('button', { class: 'send', type: 'button', 'aria-label': buttonLabel, onclick: sendIt }, icon('send'))
   const plus = attach ? el('button', { class: 'plus', type: 'button', 'aria-label': 'Add photos or files',
     onclick: () => attachSheet(attach, draft, status) }, icon('plus')) : null
-  return [replying, answering, attach ? attachStrip(attach, draft, status) : null,
-    el('div', { class: 'composer', 'data-reply': draft.reply ? String(draft.reply.mid) : '',
-      'data-files': draft.files.map(f => f.local + ':' + f.state).join(' '),
-      'data-cards': (cards || []).map(c => c.id + ':' + c.revision + ':' + c.attention_revision).join(' ') },
-    plus, box, button)]
+  // The microphone: what he says is written down into the box by the VM's Whisper (dictate).
+  const speak = canRecord() ? el('button', { class: 'mic', type: 'button', 'aria-label': 'Speak instead of typing',
+    'aria-pressed': String(voice.mode === 'dictate' && voice.key === key), onclick: () => dictate(comp.voice) }, icon('mic')) : null
+  const comp = el('div', { class: 'composer', 'data-reply': draft.reply ? String(draft.reply.mid) : '',
+    'data-files': draft.files.map(f => f.local + ':' + f.state).join(' '),
+    'data-cards': (cards || []).map(c => c.id + ':' + c.revision + ':' + c.attention_revision).join(' ') },
+  plus, box, speak, button)
+  // What voice needs of this box: words added to it as typed, and sent as the send button sends them.
+  const put = words => {
+    box.value = (box.value.trim() ? box.value.replace(/\s+$/, '') + ' ' : '') + words
+    box.dispatchEvent(new Event('input'))
+  }
+  comp.voice = { key, name: label.replace(/^Message to /, ''), status, add: put,
+    send: async words => {
+      put(words)
+      if (draft.answer) return 'card'
+      return (await sendIt()) === true
+    } }
+  return [replying, answering, attach ? attachStrip(attach, draft, status) : null, comp]
 }
 
 // Which card and option his words answer: the words start with an option's label or key, as a whole
@@ -1655,6 +1676,11 @@ function showChat(key, top, list, dock, items) {
     scrollTo({ top: document.documentElement.scrollHeight })
   }
   placeJump()
+  const c = openComposer()
+  if (c) c.chat = key
+  voiceButtons()
+  voiceSaw(key, items)
+  wakeCheck()
 }
 
 // ── full history of his own chats (step 2, plan Part 4) ────────────────────
@@ -1873,22 +1899,24 @@ function workingItem(name, agent, doing) {
       el('span', { class: 'doing' }, doingWords(doing))))
 }
 // While a turn runs in the open chat, its line follows every two seconds, reading only this chat's state;
-// when the turn ends the chat is drawn again with the reply. One watch at a time, ended by any new page.
+// when the turn ends the chat is drawn again with the reply. A message still waiting to go is watched the
+// same way, so the chat is drawn again the moment it is taken and its turn's line shows (2 Nov: it waited
+// for the next 15-second read). One watch at a time, ended by any new page.
 let turnWatch = null
-function watchTurn(path, seqNow, turnId, name) {
+function watchTurn(path, seqNow, turnId, name, was = 'leased') {
   clearTimeout(turnWatch)
   turnWatch = setTimeout(async () => {
     if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
     const r = await call('GET', path)
     if (seqNow !== viewSeq || r.status !== 200) return
     const m = r.body.mine.find(x => x.id === turnId)
-    if (!m || m.status !== 'leased') {
+    if (!m || m.status !== was) {
       const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
       if (!typing) return route()
     }
     const line = document.querySelector('#view .msg.working .doing')
-    if (line && m) line.textContent = doingWords(m.doing)
-    watchTurn(path, seqNow, turnId, name)
+    if (line && m && was === 'leased') line.textContent = doingWords(m.doing)
+    watchTurn(path, seqNow, turnId, name, was)
   }, 2000)
 }
 
@@ -2007,7 +2035,8 @@ async function ownChatView(gw, sid) {
     const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing)] : bubbles(items)
     if (seqNow === viewSeq) {
       showChat('own:' + key, top, list, dock, items)
-      if (turn) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, turn.id, name)
+      const waits = turn || v.mine.find(m => m.status === 'queued')
+      if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status)
     }
   }
   render()
@@ -2287,7 +2316,8 @@ async function chatView(target, tab) {
       room ? null : chatCards(v.cards, location.pathname)]
     if (seqNow === viewSeq) {
       showChat(key, top, list, dock, items)
-      if (turn) watchTurn('/chat/' + encodeURIComponent(v.target), seqNow, turn.id, name)
+      const waits = room ? null : turn || v.mine.find(m => m.status === 'queued')
+      if (waits) watchTurn('/chat/' + encodeURIComponent(v.target), seqNow, waits.id, name, waits.status)
     }
   }
   render()
@@ -2510,6 +2540,7 @@ async function settingsView(note) {
   show(
     el('h2', {}, 'Alerts'), alerts,
     finger ? [el('h2', {}, 'Fingerprint'), finger] : null,
+    el('h2', {}, 'Voice'), wakeSetting(),
     el('h2', {}, 'Passkeys'), list, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
@@ -2537,6 +2568,483 @@ async function settingsView(note) {
       signInView('Signed out.')
     } }, 'Sign out'),
     status)
+}
+
+// ── voice (Patrick, 2 Nov) ────────────────────────────────────────────────
+//
+// Dictation, Read aloud, voice chat and "Hey Hermes", all at no cost: the words come from the VM's own
+// Whisper (POST /voice/transcribe, voice.py and voice_worker.py), and reading aloud is this phone's own
+// speech (speechSynthesis). The microphone opens only after a tap (the microphone in the box, Voice chat
+// in a chat's bar) or with "Hey Hermes" turned on in Settings, only while the app is the page in front,
+// and the bar under the top says so the whole time it is open. Hiding the app or locking the phone stops
+// listening and reading at once, so nothing is read out on a locked phone. "Hey Hermes" listens only in
+// an open chat, never in the background.
+
+const WAKE_KEY = 'hermes.wake.v1'
+// "Hey Hermes", as Whisper writes it down: a greeting, then the name, then what he asks.
+const WAKE = /^[\s"'“]*(?:hey|hi|hello|okay|ok)[\s,.!-]+hermes\b[\s,.!?:;-]*/i
+const voice = { gen: 0, mode: null, state: null, key: null, path: null, name: '', queue: [], heard: null,
+  fromWake: false, paused: false, rec: null }
+const mic = { stream: null, ctx: null, an: null, buf: null }
+
+function canRecord() {
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)
+}
+
+function canSpeak() {
+  return 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window
+}
+
+function wakeOn() {
+  try { return localStorage.getItem(WAKE_KEY) === '1' } catch (e) { return false }
+}
+
+async function micOn() {
+  if (mic.stream) return null
+  try {
+    mic.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true,
+      autoGainControl: true } })
+  } catch (e) {
+    return e.name === 'NotAllowedError'
+      ? 'The microphone is blocked for this app. Allow it in the site settings for this app, then try again.'
+      : e.name === 'NotFoundError' ? 'This phone has no microphone the app can use.'
+        : 'The microphone did not start (' + (e.name || 'no reason given') + ').'
+  }
+  const AC = window.AudioContext || window.webkitAudioContext
+  if (AC) {
+    mic.ctx = new AC()
+    mic.an = mic.ctx.createAnalyser()
+    mic.an.fftSize = 2048
+    mic.ctx.createMediaStreamSource(mic.stream).connect(mic.an)
+    if (mic.ctx.state !== 'running') { try { await mic.ctx.resume() } catch (e) {} }
+  }
+  return null
+}
+
+function micOff() {
+  if (mic.stream) for (const t of mic.stream.getTracks()) t.stop()
+  if (mic.ctx) mic.ctx.close().catch(() => {})
+  Object.assign(mic, { stream: null, ctx: null, an: null, buf: null })
+}
+
+// How loud the room is now (the root mean square of the last few hundredths of a second).
+function level() {
+  if (!mic.an || !mic.ctx || mic.ctx.state !== 'running') return 0
+  const buf = mic.buf || (mic.buf = new Float32Array(mic.an.fftSize))
+  mic.an.getFloatTimeDomainData(buf)
+  let s = 0
+  for (const v of buf) s += v * v
+  return Math.sqrt(s / buf.length)
+}
+
+// Whether this phone can tell where speech starts and ends: voice chat and "Hey Hermes" need it.
+function hearsSpeech() {
+  return !!(mic.an && mic.ctx && mic.ctx.state === 'running')
+}
+
+function recType() {
+  for (const t of ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm']) {
+    if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t
+  }
+  return ''
+}
+
+// One recording from the open microphone. It records at once and hears where speech starts and ends: the
+// loudness against the room's own level, through WebAudio's analyser (nothing loaded, nothing sent). It
+// gives the recording once he has been quiet for `quiet` ms after speaking, or Done was tapped (rec.done),
+// or `most` ms passed. Nothing said for `wait` ms (0: no limit) gives null, as does rec.drop().
+function utterance({ quiet = 1500, most = 120000, wait = 0 } = {}) {
+  return new Promise(resolve => {
+    const type = recType()
+    const rec = new MediaRecorder(mic.stream, type ? { mimeType: type } : undefined)
+    const chunks = []
+    const started = Date.now()
+    let floor = null, loud = 0, lastLoud = 0, keep = false
+    const r = { spoke: false }
+    const stop = k => { keep = k; if (rec.state !== 'inactive') rec.stop() }
+    r.done = () => stop(true)
+    r.drop = () => stop(false)
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data) }
+    rec.onstop = () => {
+      clearInterval(tick)
+      if (voice.rec === r) voice.rec = null
+      resolve(keep && chunks.length ? new Blob(chunks, { type: (rec.mimeType || type || 'audio/webm').split(';')[0] }) : null)
+    }
+    const tick = setInterval(() => {
+      const now = Date.now()
+      const l = level()
+      if (floor === null) floor = l
+      const gate = Math.max(0.015, floor * 3)
+      if (l > gate) {
+        loud += 50
+        lastLoud = now
+        if (loud >= 150 && !r.spoke) { r.spoke = true; paintVoice() }
+      } else {
+        loud = 0
+        if (!r.spoke) floor = floor * 0.9 + l * 0.1
+      }
+      if (r.spoke && now - lastLoud > quiet) stop(true)
+      else if (now - started > most) stop(r.spoke || voice.mode === 'dictate')
+      else if (wait && !r.spoke && now - started > wait) stop(false)
+    }, 50)
+    voice.rec = r
+    rec.start(250)
+  })
+}
+
+async function transcribe(blob) {
+  const headers = { 'Content-Type': blob.type || 'audio/webm' }
+  if (csrf) headers['X-CSRF-Token'] = csrf
+  try {
+    const resp = await fetch(API + '/voice/transcribe', { method: 'POST', headers, credentials: 'same-origin',
+      cache: 'no-store', body: blob })
+    let out = {}
+    try { out = await resp.json() } catch (e) { out = {} }
+    return { status: resp.status, body: out }
+  } catch (e) {
+    return { status: 0, body: { error: 'offline' } }
+  }
+}
+
+// Reading aloud, on this phone, a sentence or so at a time (a long run in one go can stop partway).
+function pieces(text) {
+  const out = []
+  for (const s of String(text).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s+/)) {
+    for (let rest = s; rest; ) {
+      const cut = rest.length <= 220 ? rest.length : Math.max(rest.lastIndexOf(' ', 220), 1)
+      out.push(rest.slice(0, cut).trim())
+      rest = rest.slice(cut).trim()
+    }
+  }
+  return out.filter(Boolean)
+}
+
+async function speakText(text, g) {
+  if (!canSpeak()) return false
+  for (const p of pieces(text)) {
+    if (g !== voice.gen) return false
+    const ok = await new Promise(resolve => {
+      const u = new SpeechSynthesisUtterance(p)
+      u.lang = navigator.language || 'en-US'
+      u.onend = () => resolve(true)
+      u.onerror = () => resolve(false)
+      speechSynthesis.speak(u)
+    })
+    if (!ok) return false
+  }
+  return g === voice.gen
+}
+
+// What a message says, to read out: his own words or a reply's, as plain words.
+function spoken(m) {
+  const a = authored(m.text)
+  return plain(a.words || '').replace(/\s+/g, ' ').trim()
+}
+
+// The bar under the top: there the whole time the microphone is open or the phone reads aloud.
+function paintVoice() {
+  let bar = document.getElementById('voicebar')
+  if (!voice.mode) {
+    if (bar) bar.hidden = true
+    paintVoiceButtons()
+    return
+  }
+  if (!bar) {
+    bar = el('div', { id: 'voicebar', class: 'voicebar', role: 'status' })
+    document.querySelector('header.top').after(bar)
+  }
+  const n = voice.name || 'Hermes'
+  const hearing = voice.rec && voice.rec.spoke
+  const words = {
+    'dictate:listening': hearing ? 'Hearing you. Tap Done when you finish.' : 'Listening. Speak, then tap Done.',
+    'dictate:writing': 'Writing down what you said...',
+    'chat:listening': hearing ? `Voice chat with ${n}: hearing you` : `Voice chat with ${n}: listening`,
+    'chat:writing': `Voice chat with ${n}: writing down what you said...`,
+    'chat:waiting': `Voice chat with ${n}: waiting for the answer`,
+    'chat:speaking': `Voice chat with ${n}: reading the answer aloud`,
+    'wake:listening': hearing ? 'Hearing you. Listening for "Hey Hermes"' : 'Listening for "Hey Hermes"',
+    'wake:writing': 'Listening for "Hey Hermes"',
+    'wake:tap': '"Hey Hermes" is on. This phone wants a tap before it listens.',
+    'read:speaking': 'Reading aloud'
+  }[voice.mode + ':' + voice.state] || ''
+  const buttons = []
+  if (voice.mode === 'wake' && voice.state === 'tap') {
+    buttons.push(el('button', { class: 'primary', type: 'button', onclick: async () => {
+      if (mic.ctx) { try { await mic.ctx.resume() } catch (e) {} }
+      wakeLoop(voice.gen)
+    } }, 'Listen'))
+  }
+  if (voice.mode === 'dictate' && voice.state === 'listening') {
+    buttons.push(el('button', { class: 'primary', type: 'button', onclick: () => voice.rec && voice.rec.done() }, 'Done'))
+  }
+  buttons.push(el('button', { class: 'secondary', type: 'button', onclick: () => voiceStop(true) },
+    voice.mode === 'dictate' ? 'Cancel' : 'Stop'))
+  bar.className = 'voicebar' + (voice.state === 'listening' ? ' hot' : '') + (hearing ? ' hearing' : '')
+  bar.dataset.mode = voice.mode + ':' + voice.state
+  bar.replaceChildren(el('span', { class: 'vdot', 'aria-hidden': 'true' }), el('span', { class: 'vt' }, words), ...buttons)
+  bar.hidden = false
+  paintVoiceButtons()
+}
+
+function paintVoiceButtons() {
+  for (const b of document.querySelectorAll('#view .composer .mic')) {
+    b.setAttribute('aria-pressed', String(voice.mode === 'dictate'))
+  }
+  for (const b of document.querySelectorAll('#view .chatbar .talk')) {
+    b.setAttribute('aria-pressed', String(voice.mode === 'chat'))
+  }
+}
+
+// Everything stops: the recording is dropped, the reading cut off, the microphone closed. Stop tapped
+// (byHim) also keeps "Hey Hermes" quiet until he next comes back to the app.
+function voiceStop(byHim) {
+  voice.gen++
+  if (voice.rec) voice.rec.drop()
+  if (canSpeak()) speechSynthesis.cancel()
+  micOff()
+  Object.assign(voice, { mode: null, state: null, key: null, path: null, queue: [], heard: null, fromWake: false, rec: null })
+  if (byHim) voice.paused = true
+  paintVoice()
+}
+
+function voiceState(state) {
+  voice.state = state
+  paintVoice()
+}
+
+// The open chat's box: its draft's key, who it goes to, where it says how things went, and its send.
+function openComposer() {
+  const c = document.querySelector('#view .dock .composer')
+  return c && c.voice ? c.voice : null
+}
+
+// The microphone in the box: what he says goes into the box, where he reads it before sending.
+async function dictate(c) {
+  if (voice.mode === 'dictate') { if (voice.rec) voice.rec.done(); return }
+  if (voice.mode) voiceStop(false)
+  const g = voice.gen
+  Object.assign(voice, { mode: 'dictate', key: c.key, path: location.pathname, name: c.name })
+  voiceState('listening')
+  const no = await micOn()
+  if (g !== voice.gen) return
+  if (no) { voiceStop(false); c.status.textContent = no; return }
+  const blob = await utterance({ quiet: 2500, most: 240000 })
+  if (g !== voice.gen) return
+  micOff()
+  if (!blob) { voiceStop(false); c.status.textContent = 'Nothing was recorded.'; return wakeCheck() }
+  voiceState('writing')
+  const r = await transcribe(blob)
+  if (g !== voice.gen) return
+  voiceStop(false)
+  if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+  if (r.status !== 200) { c.status.textContent = r.status === 0 ? 'Could not reach the core. Nothing was written down.' : said(r.body); return wakeCheck() }
+  const text = String(r.body.text || '').trim()
+  if (!text) c.status.textContent = 'Whisper heard no words in that.'
+  else {
+    const now = openComposer()
+    ;(now && now.key === c.key ? now : c).add(text)
+  }
+  wakeCheck()
+}
+
+// Voice chat in the open chat: he talks, his words are sent, the answer is read aloud, and it listens again.
+async function talk(c, first) {
+  if (voice.mode === 'chat') return voiceStop(true)
+  if (voice.mode === 'wake') {
+    // From "Hey Hermes", or the button while it listens: the microphone stays open.
+    if (voice.rec) voice.rec.drop()
+    voice.gen++
+  } else if (voice.mode) voiceStop(false)
+  const g = voice.gen
+  Object.assign(voice, { mode: 'chat', key: c.key, path: location.pathname, name: c.name, queue: [],
+    heard: new Set(lastItems.key === c.chat ? lastItems.items.filter(m => !m.mine).map(m => String(m.text).trim()) : []),
+    fromWake: !!first })
+  voiceState('listening')
+  const no = await micOn()
+  if (g !== voice.gen) return
+  if (no) { voiceStop(false); c.status.textContent = no; return }
+  if (!hearsSpeech()) {
+    voiceStop(false)
+    c.status.textContent = 'This phone cannot tell here where you stop speaking, so voice chat cannot work. The microphone in the box still writes down what you say.'
+    return
+  }
+  if (first) return sendHeard(g, first)
+  listen(g)
+}
+
+async function listen(g) {
+  if (g !== voice.gen || voice.mode !== 'chat') return
+  if (voice.queue.length) return speakQueue(g)
+  voiceState('listening')
+  // Started by "Hey Hermes": a minute with nothing said goes back to listening for it.
+  const blob = await utterance({ quiet: 1300, most: 60000, wait: voice.fromWake ? 60000 : 30000 })
+  if (g !== voice.gen || voice.mode !== 'chat' || voice.state !== 'listening') return
+  if (!blob) {
+    if (voice.fromWake) return backToWake()
+    return listen(g)
+  }
+  voiceState('writing')
+  const r = await transcribe(blob)
+  if (g !== voice.gen) return
+  if (r.status !== 200) return voiceFailed(r)
+  const text = String(r.body.text || '').trim()
+  if (!text) return listen(g)
+  sendHeard(g, text)
+}
+
+async function sendHeard(g, text) {
+  const c = openComposer()
+  if (!c || c.key !== voice.key) return voiceStop(false)
+  voiceState('waiting')
+  const sent = await c.send(text)
+  if (g !== voice.gen) return
+  if (sent === 'card') {
+    // Words that answer a card are never sent by voice alone: they wait in the box, with the line over it.
+    voiceStop(true)
+    c.status.textContent = 'What you said answers a card. Read the line over the box, then send it or take the answer off.'
+    return
+  }
+  if (!sent) return voiceStop(false)
+  if (voice.queue.length) speakQueue(g)
+}
+
+function voiceFailed(r) {
+  const c = openComposer()
+  voiceStop(false)
+  if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+  if (c) c.status.textContent = r.status === 0 ? 'Could not reach the core. Voice chat stopped.' : said(r.body)
+}
+
+async function speakQueue(g) {
+  if (voice.state === 'speaking') return
+  voiceState('speaking')
+  while (voice.queue.length && g === voice.gen) {
+    const text = voice.queue.shift()
+    if (!await speakText(text, g)) break
+  }
+  if (g === voice.gen && voice.mode === 'chat') listen(g)
+}
+
+// Each time a chat is drawn: in voice chat, the new answers in it are read aloud. One that comes while he
+// has not started speaking is read at once; one that comes while he speaks waits until his words are sent.
+let lastItems = { key: null, items: [] }
+function voiceSaw(key, items) {
+  lastItems = { key, items }
+  if (voice.mode !== 'chat' || !voice.heard) return
+  const c = openComposer()
+  if (!c || c.chat !== key || c.key !== voice.key) return
+  for (const m of items) {
+    if (m.mine || m.status || !m.text) continue
+    const sig = String(m.text).trim()
+    if (voice.heard.has(sig)) continue
+    voice.heard.add(sig)
+    const words = spoken(m)
+    if (words) voice.queue.push(words)
+  }
+  if (!voice.queue.length) return
+  if (voice.state === 'waiting') speakQueue(voice.gen)
+  else if (voice.state === 'listening' && voice.rec && !voice.rec.spoke) { voice.state = 'queued'; voice.rec.drop(); speakQueue(voice.gen) }
+}
+
+// "Hey Hermes": on only when he turned it on in Settings, only in an open chat, only while the app is in
+// front, and never after he tapped Stop until he next comes back to the app. Each thing said is written
+// down by the VM's Whisper; only words that start with "Hey Hermes" do anything.
+function wakeCheck() {
+  if (!wakeOn() || voice.paused || voice.mode || document.visibilityState !== 'visible' || !canRecord()) return
+  const c = openComposer()
+  if (!c) return
+  wakeStart(c)
+}
+
+async function wakeStart(c) {
+  const g = voice.gen
+  Object.assign(voice, { mode: 'wake', key: c.key, path: location.pathname, name: c.name })
+  voiceState('listening')
+  const no = await micOn()
+  if (g !== voice.gen) return
+  if (no) { voiceStop(true); c.status.textContent = '"Hey Hermes" cannot listen: ' + no; return }
+  if (!mic.an) { voiceStop(true); c.status.textContent = 'This phone cannot tell here where you stop speaking, so "Hey Hermes" cannot work.'; return }
+  wakeLoop(g)
+}
+
+async function wakeLoop(g) {
+  if (g !== voice.gen || voice.mode !== 'wake') return
+  if (!hearsSpeech()) return voiceState('tap')
+  voiceState('listening')
+  const blob = await utterance({ quiet: 1000, most: 20000, wait: 20000 })
+  if (g !== voice.gen || voice.mode !== 'wake') return
+  if (!blob) return wakeLoop(g)
+  voiceState('writing')
+  const r = await transcribe(blob)
+  if (g !== voice.gen || voice.mode !== 'wake') return
+  if (r.status !== 200) return voiceFailed(r)
+  const text = String(r.body.text || '')
+  const m = text.match(WAKE)
+  if (!m) return wakeLoop(g)
+  const c = openComposer()
+  if (!c) return voiceStop(false)
+  talk(c, text.slice(m[0].length).trim() || null)
+}
+
+// A voice chat "Hey Hermes" started, with nothing said for a minute: back to listening for it.
+function backToWake() {
+  if (!wakeOn() || document.visibilityState !== 'visible') return voiceStop(false)
+  if (voice.rec) voice.rec.drop()
+  if (canSpeak()) speechSynthesis.cancel()
+  const g = ++voice.gen
+  Object.assign(voice, { mode: 'wake', queue: [], heard: null, fromWake: false })
+  wakeLoop(g)
+}
+
+// Leaving the page a voice chat or a dictation is on stops it; "Hey Hermes" starts again in the next chat.
+function voiceLeft() {
+  if (voice.mode && voice.path !== location.pathname) voiceStop(false)
+}
+
+// Voice chat's button in an open chat's bar.
+function voiceButtons() {
+  const bar = document.querySelector('#view .chatbar')
+  const c = openComposer()
+  if (!bar || !c || !canRecord() || bar.querySelector('.talk')) return
+  const b = el('button', { class: 'ib talk', type: 'button', 'aria-label': 'Voice chat', 'aria-pressed': String(voice.mode === 'chat'),
+    onclick: () => { const now = openComposer(); if (now) talk(now) } }, icon('talk'))
+  const more = bar.querySelector('.ib[aria-label="Chat actions"]')
+  bar.insertBefore(b, more)
+}
+
+function readAloud(m) {
+  if (voice.mode) voiceStop(false)
+  const g = voice.gen
+  Object.assign(voice, { mode: 'read', path: location.pathname })
+  voiceState('speaking')
+  speakText(spoken(m), g).then(() => { if (g === voice.gen) { voiceStop(false); wakeCheck() } })
+}
+
+function wakeSetting() {
+  const on = wakeOn()
+  const note = el('p', { class: 'quiet', role: 'status' })
+  return [
+    el('p', { class: 'quiet' }, 'The microphone in a chat\'s box writes down what you say with Whisper on the VM, ' +
+      'and Voice chat in a chat\'s bar talks with it. Read aloud is in a message\'s actions.'),
+    el('p', { class: 'quiet' }, on
+      ? '"Hey Hermes" is on for this phone: while a chat is open and the app is in front, it listens, with the bar ' +
+        'at the top saying so. It never listens in the background or with the phone locked.'
+      : '"Hey Hermes" is off. Turned on, it listens while a chat is open and the app is in front, with the bar at ' +
+        'the top saying so. It never listens in the background or with the phone locked.'),
+    canRecord() ? el('button', { class: on ? 'secondary' : 'primary', type: 'button', onclick: () => {
+      try {
+        if (on) localStorage.removeItem(WAKE_KEY)
+        else localStorage.setItem(WAKE_KEY, '1')
+      } catch (e) {
+        note.textContent = 'This phone did not keep the setting.'
+        return
+      }
+      if (on && voice.mode === 'wake') voiceStop(false)
+      voice.paused = false
+      settingsView(on ? '"Hey Hermes" is off.' : '"Hey Hermes" is on. Open a chat to use it.')
+    } }, on ? 'Turn "Hey Hermes" off' : 'Turn "Hey Hermes" on') : el('p', { class: 'warn' }, 'This browser cannot record, so voice does not work here.'),
+    note
+  ]
 }
 
 // ── routing and polling ───────────────────────────────────────────────────
@@ -2573,6 +3081,7 @@ async function route() {
     chatPlace.toEnd = false
   }
   closeSheet()
+  voiceLeft()
   if (!csrf) {
     const me = await call('GET', '/me')
     if (me.status !== 200) return signInView(me.status === 0 ? said(me.body) : '')
@@ -2746,8 +3255,17 @@ window.addEventListener('popstate', () => { newPage = true; route() })
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
 addEventListener('scroll', placeJump, { passive: true })
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { poll(); if (csrf) checkAlerts() }
+  if (document.visibilityState === 'visible') {
+    poll()
+    if (csrf) checkAlerts()
+    voice.paused = false
+    wakeCheck()
+  } else {
+    // Hidden or locked: no listening and nothing read out.
+    voiceStop(false)
+  }
 })
+addEventListener('pagehide', () => voiceStop(false))
 window.addEventListener('beforeinstallprompt', event => {
   event.preventDefault()
   installPrompt = event
