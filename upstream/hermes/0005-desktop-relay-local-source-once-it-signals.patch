@@ -1,0 +1,166 @@
+From 8646330c129e124234bd71e1146013fbf267c63d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 2 Nov 2026 02:55:18 +0000
+Subject: [PATCH] fix(desktop): relay a remote-primary Desktop's local source
+ once it signals outbox mail
+
+9cbc6a5ac0 left the local registry source out of the relay's peer set
+whenever one remote connection is the primary, so an unused local runtime
+is never dialed. A Desktop whose primary is remote can still run a Hermes
+on this device, though: its agents queue message_agent envelopes in the
+local bot_relay outbox, the local backend's change watcher signals
+bot_relay.outbox.pending over the socket the window holds, and the drain
+skipped the route anyway. Every such envelope sat in outbox/ until its
+waiter timed out, and the gateway's own expiry never ran because nothing
+claimed it.
+
+A signal from the local source is proof that its runtime runs and is in
+use, so from then on relayEligibleRoutes keeps it like any other peer:
+its outbox is drained, its replies are posted, and the roster loop tells
+it the other machines' agents. Until it signals, nothing changes: the
+local source of a remote-primary Desktop is still never polled or pinned.
+A signal from the primary, or an untagged one, does not count.
+---
+ .../src/plugins/hermes-bots/relay.test.ts     | 67 +++++++++++++++++++
+ apps/desktop/src/plugins/hermes-bots/relay.ts | 23 ++++++-
+ 2 files changed, 88 insertions(+), 2 deletions(-)
+
+diff --git a/apps/desktop/src/plugins/hermes-bots/relay.test.ts b/apps/desktop/src/plugins/hermes-bots/relay.test.ts
+index 8be00078d6..1b64d70bbc 100644
+--- a/apps/desktop/src/plugins/hermes-bots/relay.test.ts
++++ b/apps/desktop/src/plugins/hermes-bots/relay.test.ts
+@@ -397,6 +397,73 @@ describe('relay-route socket retention (#93594)', () => {
+     stopBotRelay()
+   })
+ 
++  it('relays the local source of a remote-primary Desktop once its runtime signals outbox mail', async () => {
++    // This device runs a Hermes of its own beside two remote connections (the primary among them). Its
++    // agent queues a message for the primary; the local backend's watcher signals over the socket this
++    // window holds. Leaving it out of the peer set left the envelope in outbox/ until it expired.
++    hostMock.profileRoutes = vi.fn(async () => [
++      route('remote-primary', { primary: true }),
++      route('remote-peer'),
++      route('local', { mode: 'local' })
++    ])
++    const pins = trackRetention()
++    const envelope = { id: 'env-1', message: 'hello', from_profile: 'default', target_connection: 'remote-primary', target_profile: 'default' }
++    const calls = respondWith(call => {
++      if (call.method === 'bot_relay.outbox.drain') {
++        return { envelopes: call.connectionId === 'local' ? [envelope] : [] }
++      }
++
++      if (call.method === 'bot_relay.deliver') {
++        return { status: 'settled', delivery_id: 'env-1', admission_id: 'adm-1', reply: 'hi back' }
++      }
++
++      return {}
++    })
++    const { startBotRelay, stopBotRelay } = await loadRelay()
++
++    startBotRelay()
++    await vi.advanceTimersByTimeAsync(0)
++    expect(calls.filter(call => call.connectionId === 'local')).toHaveLength(0)
++
++    await pushAndSettle(1, { connectionId: 'local' })
++    await vi.advanceTimersByTimeAsync(0)
++
++    expect(calls.filter(call => call.method === 'bot_relay.outbox.drain').map(call => call.connectionId)).toEqual(['local'])
++    const deliver = calls.find(call => call.method === 'bot_relay.deliver')
++    expect(deliver?.connectionId).toBe('remote-primary')
++    expect(deliver?.params.from_connection).toBe('local')
++    const reply = calls.find(call => call.method === 'bot_relay.reply')
++    expect(reply).toMatchObject({ connectionId: 'local', params: { id: 'env-1', reply: 'hi back' } })
++    expect(pins.map(pin => pin.route.connectionId)).toContain('local')
++
++    // From then on it is a peer like any other: the roster loop tells it the other machines' agents.
++    calls.length = 0
++    await vi.advanceTimersByTimeAsync(60_000)
++    expect(calls.some(call => call.connectionId === 'local' && call.method === 'bot_relay.roster.sync')).toBe(true)
++
++    stopBotRelay()
++  })
++
++  it('a signal from the primary or an untagged one does not make the local source a peer', async () => {
++    hostMock.profileRoutes = vi.fn(async () => [
++      route('remote-primary', { primary: true }),
++      route('remote-peer'),
++      route('local', { mode: 'local' })
++    ])
++    const calls = respondWith(() => ({ envelopes: [] }))
++    const { startBotRelay, stopBotRelay } = await loadRelay()
++
++    startBotRelay()
++    await vi.advanceTimersByTimeAsync(0)
++    await pushAndSettle(1, { connectionId: 'remote-primary' })
++    await pushAndSettle(1)
++    await vi.advanceTimersByTimeAsync(RELAY_DRAIN_INTERVAL_MS)
++
++    expect(calls.filter(call => call.connectionId === 'local')).toHaveLength(0)
++
++    stopBotRelay()
++  })
++
+   it('preserves local-primary, multi-remote, and fail-open peer sets', async () => {
+     for (const routes of [
+       [route('local', { mode: 'local', primary: true }), route('remote-peer')],
+diff --git a/apps/desktop/src/plugins/hermes-bots/relay.ts b/apps/desktop/src/plugins/hermes-bots/relay.ts
+index 40bd20a167..fee5aab9dd 100644
+--- a/apps/desktop/src/plugins/hermes-bots/relay.ts
++++ b/apps/desktop/src/plugins/hermes-bots/relay.ts
+@@ -109,9 +109,19 @@ function relayBotModeOn(): boolean {
+   return ID in decisions ? Boolean(decisions[ID]) : true
+ }
+ 
++// Connections whose own backend has signaled `bot_relay.outbox.pending` over a socket this window
++// holds, since the relay started. The signal is proof that connection's runtime runs and is in use:
++// relayEligibleRoutes keeps a remote-primary Desktop's local source out of the peer set only while
++// it has never spoken, so an unused local runtime is still never dialed.
++const signaledConnections = new Set<string>()
++
+ function noteRelayOutboxWork(event?: { connectionId?: string }) {
+   const id = String(event?.connectionId || '').trim()
+ 
++  if (id) {
++    signaledConnections.add(id)
++  }
++
+   routesWithOutboxWork.add(id || RELAY_OUTBOX_ANY)
+ }
+ 
+@@ -146,8 +156,11 @@ interface RelayAgentRow {
+ }
+ 
+ /** Remove the mandatory local registry source only when Electron identifies
+- * one unambiguous REMOTE primary. Older or inconsistent route inventories
+- * fail open to the prior peer set. Distinct remote peers always remain. */
++ * one unambiguous REMOTE primary and that local source has never signaled
++ * outbox mail. Once its backend signals, a Hermes runs on this device and its
++ * agents send cross-connection: leaving it out then strands every envelope it
++ * queues. Older or inconsistent route inventories fail open to the prior peer
++ * set. Distinct remote peers always remain. */
+ function relayEligibleRoutes(routes: ProfileRoute[]): ProfileRoute[] {
+   const routesByConnection = new Map<string, ProfileRoute[]>()
+ 
+@@ -196,6 +209,10 @@ function relayEligibleRoutes(routes: ProfileRoute[]): ProfileRoute[] {
+ 
+   const localId = localGroups[0][0]
+ 
++  if (signaledConnections.has(localId)) {
++    return routes
++  }
++
+   return routes.filter(route => route.connectionId !== localId)
+ }
+ 
+@@ -835,6 +852,8 @@ export function stopBotRelay() {
+   // it would fire one stale drain after restart.
+   relay.drainRerun = false
+   routesWithOutboxWork.clear()
++  // signaledConnections stays: a runtime that has spoken still runs, and the gateway never
++  // re-broadcasts a signal it already sent.
+   // Queued deliveries check `disposed` before they run; forget the lane tails
+   // so a restart starts every target fresh instead of behind stale chains.
+   relayLanes.clear()
+-- 
+2.43.0
+

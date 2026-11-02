@@ -1,16 +1,16 @@
 # Fixes for Hermes itself, to send upstream
 
-Four causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Five causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
-(`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM runs.
+(`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
 Nothing here is applied to the VM's Hermes by hand: the VM takes them in a
 Hermes release.
 
 Apply them in order on a checkout of that commit:
 
 ```
-git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch
+git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch 0005-desktop-relay-local-source-once-it-signals.patch
 scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py
 ```
 
@@ -74,6 +74,38 @@ The fix passes the model to the pick in both Codex callers. The year-long
 bench on a slug the account really cannot use is upstream's design (#71970)
 and stays; it now benches only that slug.
 
+## 0005: the Desktop relays This device's Bot Chat when its main connection is remote
+
+Cause: upstream 9cbc6a5ac0 (11 Sep) made `relayEligibleRoutes`
+(apps/desktop/src/plugins/hermes-bots/relay.ts) drop the local "This device"
+source from the bot relay whenever one remote connection is the Desktop's
+primary, so an unused local runtime is never dialed. A Desktop whose primary
+is remote can still run a Hermes on this device. Its agents queue
+`message_agent` envelopes in the local `bot_relay\outbox`, and its backend
+signals `bot_relay.outbox.pending` over the socket the window holds. The
+relay skipped that route anyway, so nothing claimed the envelopes and they
+sat there until their waiters timed out. Seen 2 Nov on One: three messages
+from This Device's Bot Chat, to Bramble and my-hermes, sat in `outbox\`
+from 4:50 PM on, with `claimed\` and `replies\` empty. One's Desktop is
+remote-primary: its "Profile bramble no longer exists" refusal comes only
+from the remote branch of `resolveRegistryLocalRoute`
+(electron/connection-registry.ts line 560).
+
+The fix: once the local source's own backend signals outbox mail, the
+relay keeps it as a peer like any other. It drains the outbox, posts the
+replies, and the roster loop tells it the other machines' agents. Until it
+signals, nothing changes: the local source of a remote-primary Desktop is
+still never polled or pinned. A signal from the primary, or an untagged one,
+does not count.
+
+Check it with the Desktop's own tests:
+
+```
+cd apps/desktop
+npm ci --ignore-scripts
+npx vitest run src/plugins/hermes-bots/
+```
+
 ## Test results so far
 
 - Windows (One, Python 3.14, 1 Nov), 0001 and 0002: test_tool_result_storage
@@ -83,4 +115,5 @@ and stays; it now benches only that slug.
 - Linux (the VM, python:3.14 container, 2 Nov), 0001 to 0003: 72 passed,
   0 failed.
 - 0004: not run yet. The upstream pull requests wait on a Linux run of all
-  four.
+  five.
+- 0005 (Linux, Node 22, 2 Nov, on 0001 to 0004): `vitest run src/plugins/hermes-bots/` 107 files, 873 passed, 0 failed (2 new; the first fails without the fix), and `tsc --noEmit` is clean.
