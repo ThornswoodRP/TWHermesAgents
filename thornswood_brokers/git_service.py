@@ -41,6 +41,10 @@ WRITE = {
     "pulls": {"pull_requests": "write", "contents": "read", "metadata": "read"},
     "merge": {"contents": "write", "pull_requests": "write", "metadata": "read"},
     "issues": {"issues": "write", "metadata": "read"},
+    # A label or a comment on a pull request goes through the issues API but
+    # GitHub holds it to pull_requests write: issues write alone is a 403
+    # (measured on Thornswood-Ops #220, 2 Nov 2026).
+    "pr_conversation": {"pull_requests": "write", "metadata": "read"},
     "actions": {"actions": "write", "contents": "read", "metadata": "read"},
 }
 READ = {"contents": "read", "pull_requests": "read", "issues": "read", "actions": "read", "checks": "read", "metadata": "read"}
@@ -246,7 +250,8 @@ class GitService:
         raw = self.gh.get("workers", repo, f"/repos/{repo}/issues/{int(number)}")
         return Issue(repo=repo, number=int(number), author_login=raw["user"]["login"],
                      assignees=[a["login"] for a in raw.get("assignees", [])],
-                     labels=[l["name"] for l in raw.get("labels", [])], open=raw.get("state") == "open")
+                     labels=[l["name"] for l in raw.get("labels", [])], open=raw.get("state") == "open",
+                     pull_request=bool(raw.get("pull_request")))
 
     def _ref_sha(self, repo: str, branch: str) -> str | None:
         try:
@@ -400,6 +405,7 @@ class GitService:
             if not (own or self.policy.is_router(bot)):
                 raise Refused(f"{self.policy.bot_name(bot)} comments only on issues it has claimed")
         app = "bramble" if bot == "bramble" else self._app(bot)
+        perms = WRITE["pr_conversation"] if issue_raw.get("pull_request") else WRITE["issues"]
         digest = hashlib.sha256(body.encode()).hexdigest()[:16]
         marker = f"<!-- tw:{digest} -->"
 
@@ -410,7 +416,7 @@ class GitService:
             return None
 
         def write():
-            r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues/{number}/comments", {"body": f"{body}\n\n{marker}"})
+            r = self.gh.call(app, repo, perms, "POST", f"/repos/{repo}/issues/{number}/comments", {"body": f"{body}\n\n{marker}"})
             if r.status != 201:
                 raise GitHubError(r.status, str(r.body))
             return {"comment": r.body["id"]}
@@ -430,12 +436,13 @@ class GitService:
             raise Refused("a label is added or removed")
         self._check(v)
         app = "bramble" if bot == "bramble" else self._app(bot)
+        perms = WRITE["pr_conversation"] if issue.pull_request else WRITE["issues"]
 
         def write():
             if action == "add":
-                r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues/{number}/labels", {"labels": [label]})
+                r = self.gh.call(app, repo, perms, "POST", f"/repos/{repo}/issues/{number}/labels", {"labels": [label]})
             else:
-                r = self.gh.call(app, repo, WRITE["issues"], "DELETE", f"/repos/{repo}/issues/{number}/labels/{quote(label)}")
+                r = self.gh.call(app, repo, perms, "DELETE", f"/repos/{repo}/issues/{number}/labels/{quote(label)}")
             if r.status not in (200, 204):
                 raise GitHubError(r.status, str(r.body))
             return {"status": r.status}
@@ -570,26 +577,31 @@ class GitService:
     def start_run(self, caller: str, args: dict) -> dict:
         bot, task = self._bot(args), self._task(args)
         repo = self.policy.data["runs"]["repo"]
+        # Every run starts on the policy's branch (main). tw_git takes no ref
+        # from the caller, so it is the policy's: reading it from the call
+        # left it empty, and every run was refused as "not on main" (2 Nov,
+        # #5334's tunnel run).
+        ref = self.policy.data["runs"]["ref"]
         workflow = str(args.get("workflow") or "")
         inputs = args.get("inputs") or {}
         if not isinstance(inputs, dict) or not all(isinstance(v, str) for v in inputs.values()):
             raise Refused("a run's inputs are named strings")
-        commit = self._ref_sha(repo, "main")
+        commit = self._ref_sha(repo, ref)
         lists = self._verb_lists(repo, commit)
         channel = str(args.get("channel") or "dev")
         decision_id = args.get("decision_id")
-        self._check(self.rules.start_run(bot, repo, workflow, str(args.get("ref") or ""), inputs, lists,
+        self._check(self.rules.start_run(bot, repo, workflow, ref, inputs, lists,
                                          commit=commit, channel=channel, decision_id=decision_id))
         # Where the workflow itself lives: Thornswood, or Ops for box-run.yml
         # (policy runs.workflows.<name>.repo). The line was checked against
         # Thornswood's main above; the run starts on main of its own repo.
         where = (self.policy.data["runs"]["workflows"][workflow] or {}).get("repo", repo)
-        at = commit if where == repo else self._ref_sha(where, "main")
+        at = commit if where == repo else self._ref_sha(where, ref)
         digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:16]
         started: dict = {}
 
         def find():
-            runs = self.gh.get("bramble", where, f"/repos/{where}/actions/workflows/{quote(workflow)}/runs?event=workflow_dispatch&branch=main&head_sha={at}&per_page=20")
+            runs = self.gh.get("bramble", where, f"/repos/{where}/actions/workflows/{quote(workflow)}/runs?event=workflow_dispatch&branch={quote(ref)}&head_sha={at}&per_page=20")
             for run in runs.get("workflow_runs", []):
                 if run.get("head_sha") == at and (not started or run.get("created_at", "") >= started.get("at", "")):
                     return {"run": run["id"], "url": run.get("html_url")}
@@ -599,7 +611,7 @@ class GitService:
             from datetime import datetime, timezone
             started["at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             r = self.gh.call("bramble", where, WRITE["actions"], "POST", f"/repos/{where}/actions/workflows/{quote(workflow)}/dispatches",
-                             {"ref": "main", "inputs": inputs})
+                             {"ref": ref, "inputs": inputs})
             if r.status != 204:
                 raise GitHubError(r.status, str(r.body))
             return {"dispatched": True}

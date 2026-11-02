@@ -1,0 +1,36 @@
+# tw-decide-live: the phone's Board, live (Patrick, 2 Nov: "only what each is
+# currently doing"). Reads the files the thornswood_live plugin writes in each
+# Bot's profile, and each Bot's state.db read-only for a session's title, as the
+# Bots' hermes user, every 2 seconds, and sends the core the work feed when it
+# changes and at least once in each 30 seconds. Loopback only, no credential
+# but the work feed's token.
+[Unit]
+Description=Thornswood decision core: the live Board
+After=tw-decide.service
+StartLimitIntervalSec=15min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=hermes
+ExecStart=/opt/thornswood-hermes/bin/tw-decide-live
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+MemoryHigh=60M
+MemoryMax=100M
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

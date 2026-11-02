@@ -1,4 +1,4 @@
-# Once a minute: the phone's Work and Room views say how old they are ("as of").
+# Once a minute: the phone's Room and Bot Chat views.
 [Unit]
 Description=Thornswood decision core feeds, once a minute
 

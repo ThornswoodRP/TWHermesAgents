@@ -1,19 +1,16 @@
-"""Reads the Bots' work, the rooms and the six Bot Chats, and sends the core a snapshot of each.
+"""Reads the rooms and the six Bot Chats, and sends the core a snapshot of each.
 
 Runs on the VM as the Bots' `hermes` user, once a minute from
 tw-decide-feed.timer:
 
     python3 -I -m thornswood_decisions.feed_reader --room <room id> [--room <another room id>]
 
-It opens Hermes's own stores read-only (`kanban.db` and `shared-state.db`
-under ~/.hermes, and each Bot's `profiles/<id>/state.db`; the tables named in
-contracts.json), keeps only what the phone's Board, Room and Bot Chat views
-show, and sends each to the core on 127.0.0.1 with that feed's token
-(~/.config/thornswood/feed-<name>.token, 0600). The Board's work also comes
-from GitHub (`github_work`): the issues each Bot has claimed and the pull
-requests from its branches, read through tw-git's `read` op once in each 5
-minutes. It writes nothing to Hermes or GitHub, holds no other credential and
-logs no message text.
+It opens Hermes's own stores read-only (`shared-state.db` under ~/.hermes, and
+each Bot's `profiles/<id>/state.db`; the tables named in contracts.json), keeps
+only what the phone's Room and Bot Chat views show, and sends each to the core
+on 127.0.0.1 with that feed's token (~/.config/thornswood/feed-<name>.token,
+0600). It writes nothing to Hermes, holds no other credential and logs no
+message text. The Board is live_reader.py's: what each Bot is doing now.
 """
 
 from __future__ import annotations
@@ -21,18 +18,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sqlite3
 import stat
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 CORE = "http://127.0.0.1:9135/api/v1"
-GIT_SOCKET = "/run/tw/git/git.sock"   # policy.yaml brokers.sockets.git
 ROOM_KINDS = ("message.user", "message.member")
 BOT_CHAT_TITLE = "Bot Chat"
 BOT_MESSAGES = 40
@@ -48,173 +42,6 @@ def _iso(epoch) -> str:
     if epoch is None:
         return ""
     return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
-
-
-def work_snapshot(kanban_db: Path, now: datetime) -> dict:
-    con = _ro(kanban_db)
-    try:
-        rows = con.execute("SELECT id, title, assignee, status, priority, created_at, started_at, completed_at "
-                           "FROM tasks WHERE status != 'archived' ORDER BY priority DESC, created_at DESC "
-                           "LIMIT 500").fetchall()
-    finally:
-        con.close()
-    return {"source_time": now.isoformat(), "tasks": [
-        {"id": r["id"], "title": r["title"], "assignee": r["assignee"] or "", "status": r["status"],
-         "priority": int(r["priority"] or 0),
-         "updated_at": _iso(r["completed_at"] or r["started_at"] or r["created_at"])} for r in rows]}
-
-
-# The Bots' work on GitHub (Patrick, 1 Nov: the Board was empty while the Bots
-# worked, because they keep no Hermes Kanban). A Bot's work is recorded there in
-# two ways the guard rails already enforce: its claim label on an issue
-# (policy.yaml `claim_label`, put on by tw-git's `label` op) and its branch,
-# `<bot>/<issue>-<what>` (policy.yaml `branches.pattern`), which is the head of
-# every pull request it opens. The reads go through tw-git's `read` op over its
-# socket, which `hermes` may already call: GETs inside the three work repos, as
-# the workers' App. The feed gets no GitHub credential of its own and the
-# service keeps its loopback-only network. tw-git needs a Bot name for a read;
-# the feed reads as Bramble, the Bot that routes all the work.
-READ_AS = "bramble"
-GITHUB_EVERY = 300           # seconds: GitHub is read once in each 5 minutes,
-GITHUB_WINDOW = 65           # in the first run of each window (the timer runs about once a minute)
-RECENT = 24 * 3600           # a Bot PR closed or merged in the last day still shows, as finished
-MAX_ITEMS = 200
-FAILED = ("failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale")
-STAGE_RANK = {"pr_open": 0, "pr_draft": 1, "claimed": 2, "merged": 3, "closed": 4}
-
-
-def github_due(now: datetime, every: int = GITHUB_EVERY, window: int = GITHUB_WINDOW) -> bool:
-    """Whether this run reads GitHub. The timer runs about once a minute; reading
-    the work repos each time would spend the workers' App's hourly limit, which
-    the five worker Bots share. So only a run in the first `window` seconds of each
-    `every` reads it (once or twice a window, never none)."""
-    return now.timestamp() % every < window
-
-
-def _ts(value: str) -> float:
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return 0.0
-
-
-def _checks(runs: list) -> tuple[str, str]:
-    """A PR head's check runs as one state and a short line."""
-    if not runs:
-        return "none", "no checks yet"
-    running = sum(1 for c in runs if c.get("status") != "completed")
-    failed = sum(1 for c in runs if c.get("status") == "completed" and c.get("conclusion") in FAILED)
-    passed = len(runs) - running - failed
-    parts = [f"{passed} of {len(runs)} passed"]
-    if failed:
-        parts.append(f"{failed} failed")
-    if running:
-        parts.append(f"{running} running")
-    state = "failing" if failed else "running" if running else "passed"
-    return state, ", ".join(parts)
-
-
-def github_work(policy, ask, now: datetime) -> list[dict]:
-    """Every issue a Bot has claimed and every pull request from a Bot's branch
-    (open, or closed in the last day), one item each, newest first within a Bot.
-
-    `ask(repo, path)` is one GET through tw-git; it raises on any refusal, and a
-    refusal fails the whole read, so a half-read board is never sent."""
-    repos = policy.data["repos"]
-    bots = list(policy.bots)
-    labels = {v["claim_label"]: bot for bot, v in policy.bots.items()}
-    branch = re.compile(r"^([a-z]+)/([0-9]+)-")
-
-    prs = []
-    for repo in (repos["app"], repos["ops"], repos["fork"]):
-        seen = set()
-        for path in (f"/repos/{repo}/pulls?state=open&per_page=100",
-                     f"/repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=50"):
-            for p in ask(repo, path):
-                head = p.get("head") or {}
-                ref = str(head.get("ref") or "")
-                owner = policy.branch_owner(ref)
-                if not owner or (head.get("repo") or {}).get("full_name") != repo or p["number"] in seen:
-                    continue
-                if p.get("state") == "closed" and now.timestamp() - _ts(p.get("closed_at") or "") > RECENT:
-                    continue
-                seen.add(p["number"])
-                m = branch.match(ref)
-                prs.append({"repo": repo, "bot": owner, "issue": int(m.group(2)) if m else 0, "pr": int(p["number"]),
-                            "title": str(p.get("title") or ""), "sha": str(head.get("sha") or ""),
-                            "state": ("merged" if p.get("merged_at") else "closed") if p.get("state") == "closed"
-                            else ("pr_draft" if p.get("draft") else "pr_open"),
-                            "auto_merge": bool(p.get("auto_merge")), "updated_at": str(p.get("updated_at") or "")})
-    for pr in prs:
-        if pr["state"] in ("pr_open", "pr_draft") and pr["sha"]:
-            body = ask(pr["repo"], f"/repos/{pr['repo']}/commits/{pr['sha']}/check-runs?per_page=100")
-            pr["checks"], pr["checks_line"] = _checks(body.get("check_runs") or [])
-        else:
-            pr["checks"], pr["checks_line"] = "", ""
-
-    items = []
-    for repo in (repos["app"], repos["ops"]):     # skymp has issues turned off
-        for label, bot in labels.items():
-            path = f"/repos/{repo}/issues?state=open&labels={urllib.parse.quote(label)}&per_page=100"
-            for i in ask(repo, path):
-                if "pull_request" in i:
-                    continue
-                items.append({"repo": repo, "number": int(i["number"]), "title": str(i.get("title") or ""), "bot": bot,
-                              "stage": "claimed", "pr": 0, "pr_repo": "", "pr_title": "", "checks": "",
-                              "checks_line": "", "auto_merge": False, "updated_at": str(i.get("updated_at") or "")})
-
-    # A Bot's PR belongs to the issue its branch names, when that Bot has it
-    # claimed: in the PR's own repo first, else Thornswood's (a skymp branch
-    # names a Thornswood issue). The open PR wins over a finished one.
-    used = set()
-    for item in items:
-        mine = [p for p in prs if p["bot"] == item["bot"] and p["issue"] == item["number"]
-                and (p["repo"] == item["repo"] or (p["repo"] == repos["fork"] and item["repo"] == repos["app"]))]
-        if not mine:
-            continue
-        p = min(mine, key=lambda p: (STAGE_RANK[p["state"]], -_ts(p["updated_at"])))
-        used.update((q["repo"], q["pr"]) for q in mine)
-        item.update(stage=p["state"], pr=p["pr"], pr_repo=p["repo"], pr_title=p["title"], checks=p["checks"],
-                    checks_line=p["checks_line"], auto_merge=p["auto_merge"],
-                    updated_at=max(item["updated_at"], p["updated_at"], key=_ts))
-    for p in prs:
-        if (p["repo"], p["pr"]) in used:
-            continue
-        where = repos["app"] if p["repo"] == repos["fork"] else p["repo"]
-        items.append({"repo": where, "number": p["issue"], "title": p["title"], "bot": p["bot"], "stage": p["state"],
-                      "pr": p["pr"], "pr_repo": p["repo"], "pr_title": p["title"], "checks": p["checks"],
-                      "checks_line": p["checks_line"], "auto_merge": p["auto_merge"], "updated_at": p["updated_at"]})
-    rank = {b: n for n, b in enumerate(bots)}
-    items.sort(key=lambda i: (rank.get(i["bot"], len(bots)), STAGE_RANK[i["stage"]], -_ts(i["updated_at"])))
-    return items[:MAX_ITEMS]
-
-
-def broker_reader(socket_path: str):
-    """`ask(repo, path)` through tw-git's read op. Imported here: the wire needs
-    POSIX peer credentials, and the rest of this file runs anywhere."""
-    from thornswood_brokers import wire
-
-    def ask(repo: str, path: str):
-        return wire.call(socket_path, "read", {"bot": READ_AS, "repo": repo, "path": path}, timeout=30)["body"]
-    return ask
-
-
-class GitHubUnread(Exception):
-    """The Bots' work could not be read whole from GitHub; nothing is sent."""
-
-
-def work_with_github(kanban_db: Path, git_socket: str, now: datetime, ask=None, policy=None) -> dict:
-    """The Board's snapshot: Hermes's Kanban tasks (none while the Bots keep no
-    Kanban) and the Bots' work on GitHub."""
-    body = work_snapshot(kanban_db, now)
-    try:
-        if policy is None:
-            from thornswood_guard.policy import Policy
-            policy = Policy.load()
-        body["items"] = github_work(policy, ask or broker_reader(git_socket), now)
-    except Exception as exc:  # a refusal, the broker away, or an answer not shaped as expected
-        raise GitHubUnread(f"{type(exc).__name__}: {str(exc)[:200]}") from exc
-    return body
 
 
 def room_snapshot(state_db: Path, room_id: str, now: datetime, limit: int = 200) -> dict:
@@ -343,9 +170,6 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--hermes-home", default=str(home / ".hermes"))
     ap.add_argument("--tokens", default=str(home / ".config" / "thornswood"))
     ap.add_argument("--core", default=CORE)
-    ap.add_argument("--git-socket", default=GIT_SOCKET, help="tw-git's socket, for the Board's GitHub reads")
-    ap.add_argument("--github", choices=("due", "always"), default="due",
-                    help="read GitHub for the Board only when due (once in each 5 minutes), or on this run")
     args = ap.parse_args(argv)
     hh, tokens = Path(args.hermes_home), Path(args.tokens)
     now = datetime.now(timezone.utc)
@@ -354,20 +178,11 @@ def main(argv: list[str]) -> int:
     bots = contracts.load()["profiles"]["ids"]
     feeds = [("room", lambda: rooms_snapshot(hh / "shared-state.db", args.room, now)),
              ("bots", lambda: bots_snapshot(hh, bots, now))]
-    if args.github == "always" or (args.github == "due" and github_due(now)):
-        feeds.insert(0, ("work", lambda: work_with_github(hh / "kanban.db", args.git_socket, now)))
-    else:
-        # The last Board snapshot stands, with its own "as of", until the next read.
-        print("SKIP work: GitHub is read once in each 5 minutes")
     for name, make in feeds:
         try:
             body = make()
         except (sqlite3.Error, OSError) as exc:
             print(f"FAIL {name}: could not read Hermes's store ({type(exc).__name__})")
-            bad += 1
-            continue
-        except GitHubUnread as exc:
-            print(f"FAIL {name}: could not read the Bots' work on GitHub ({exc}); the last Board stands")
             bad += 1
             continue
         status = send(args.core, name, read_token(tokens / f"feed-{name}.token"), body)

@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tickets (
   id TEXT PRIMARY KEY, bot TEXT NOT NULL, kind TEXT NOT NULL, risk TEXT NOT NULL,
   task TEXT NOT NULL, source TEXT NOT NULL, state TEXT NOT NULL,
-  created_at TEXT NOT NULL, admitted_at TEXT, seen_at TEXT, finished_at TEXT, reason TEXT);
+  created_at TEXT NOT NULL, admitted_at TEXT, seen_at TEXT, finished_at TEXT, reason TEXT,
+  sweep INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS tickets_state ON tickets(state, created_at);
 CREATE TABLE IF NOT EXISTS task_risk (task TEXT PRIMARY KEY, risk TEXT NOT NULL, set_by TEXT NOT NULL, set_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS operations (
@@ -94,6 +95,7 @@ class PolicyService:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.lock = threading.RLock()
         weakref.finalize(self, self.db.close)
         self._recover()
@@ -113,6 +115,13 @@ class PolicyService:
     def _audit(self, caller: str, op: str, detail: dict) -> None:
         self.db.execute("INSERT INTO audit(at, caller, op, detail) VALUES(?,?,?,?)",
                         (iso(self.clock()), caller, op, json.dumps(detail, sort_keys=True)))
+
+    def _migrate(self) -> None:
+        """Columns added after a store was made. tickets.sweep (2 Nov): whether
+        the ticket is one of the router's whole sweeps."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(tickets)")}
+        if "sweep" not in cols:
+            self.db.execute("ALTER TABLE tickets ADD COLUMN sweep INTEGER NOT NULL DEFAULT 0")
 
     def _recover(self) -> None:
         """At start: a write that was in flight when the service stopped has an
@@ -165,6 +174,30 @@ class PolicyService:
         if kind not in ("turn", "sandbox"):
             raise Refused(f"{kind} is not a kind of work the queue admits")
         ticket = args.get("ticket")
+        sweep = bool(args.get("sweep"))
+        if sweep and not self.policy.is_router(bot):
+            raise Refused(f"only the router sweeps; {bot} asked for a sweep ticket")
+        with self.lock:
+            if ticket:
+                self._turn_away_waiting_sweep(bot, ticket)
+            return self._admit(caller, bot, kind, ticket, sweep, args)
+
+    def _turn_away_waiting_sweep(self, bot: str, ticket: str) -> None:
+        """A sweep's ticket that waited while another sweep got in is done, and
+        refused: it holds no place in the line, and its wake is owed."""
+        running = ""
+        with self._tx():
+            self._expire_silent()
+            row = self.db.execute("SELECT state, sweep FROM tickets WHERE id=? AND bot=?", (ticket, bot)).fetchone()
+            if row and row[0] == "waiting" and row[1]:
+                running = self._sweep_running(bot)
+                if running:
+                    self.db.execute("UPDATE tickets SET state='done', finished_at=?, reason=? WHERE id=?",
+                                    (iso(self.clock()), running, ticket))
+        if running:
+            raise Refused(running)
+
+    def _admit(self, caller: str, bot: str, kind: str, ticket, sweep: bool, args: dict) -> dict:
         with self._tx():
             self._expire_silent()
             if ticket:
@@ -183,6 +216,9 @@ class PolicyService:
                 task = str(args.get("task") or "")
                 if not task:
                     raise Refused("a ticket names the task it is for")
+                running = self._sweep_running(bot) if sweep else ""
+                if running:
+                    raise Refused(running)
                 full = self._queue_full()
                 if full:
                     raise Refused(full)
@@ -190,8 +226,9 @@ class PolicyService:
                 risk = risk_row[0] if risk_row else "high"
                 ticket = uuid.uuid4().hex
                 created = iso(self.clock())
-                self.db.execute("INSERT INTO tickets(id, bot, kind, risk, task, source, state, created_at) VALUES(?,?,?,?,?,?, 'waiting', ?)",
-                                (ticket, bot, kind, risk, task, str(args.get("source") or "chat"), created))
+                self.db.execute("INSERT INTO tickets(id, bot, kind, risk, task, source, state, created_at, sweep) "
+                                "VALUES(?,?,?,?,?,?, 'waiting', ?, ?)",
+                                (ticket, bot, kind, risk, task, str(args.get("source") or "chat"), created, int(sweep)))
             reason = self._why_not_now(kind, ticket)
             if reason:
                 self.db.execute("UPDATE tickets SET reason=? WHERE id=?", (reason, ticket))
@@ -200,6 +237,18 @@ class PolicyService:
             self.db.execute("UPDATE tickets SET state='admitted', admitted_at=?, seen_at=?, reason=NULL WHERE id=?", (t, t, ticket))
             self._audit(caller, "admit", {"ticket": ticket, "bot": bot, "kind": kind})
             return {"ticket": ticket, "state": "admitted", "reason": ""}
+
+    def _sweep_running(self, bot: str) -> str:
+        """Why the router's sweep may not start now, or "" when it may. One
+        sweep at a time (2 Nov): two webhook turns of Bramble's started at 3:57:55
+        and 3:58:00 PM, each did the whole sweep over the same state, and both
+        revised #5458's card, so it went to revision 3 in three minutes and any
+        answer Patrick gave to the revision on his screen was stale. A wake that
+        comes while a sweep runs is owed instead: the running sweep may have read
+        the state before that wake's event, so the next sweep runs after it ends."""
+        row = self.db.execute("SELECT admitted_at FROM tickets WHERE bot=? AND kind='turn' AND sweep=1 "
+                              "AND state='admitted' ORDER BY admitted_at LIMIT 1", (bot,)).fetchone()
+        return f"another sweep of {bot}'s is running (admitted {row[0]}); one sweep runs at a time" if row else ""
 
     def _queue_full(self) -> str:
         """Why the queue takes no new ticket now, or "" when it would."""
@@ -312,16 +361,26 @@ class PolicyService:
             row = self.db.execute("SELECT since, last_at, refused, reason FROM owed_wakes WHERE bot=?", (bot,)).fetchone()
             if row is None:
                 return {"owed": False, "due": False}
-            why_not = self._queue_full() or self._why_not_now("turn", None)
+            why_not = self._sweep_running(bot) or self._queue_full() or self._why_not_now("turn", None)
         return {"owed": True, "due": not why_not, "why_not": why_not, "since": row[0], "last_at": row[1],
                 "refused": row[2], "reason": row[3]}
 
     def wake_paid(self, caller: str, args: dict) -> dict:
+        """A sweep that ran to its end pays what was owed when it started. A
+        wake owed after that (one turned away because this sweep was running)
+        stays owed: the sweep may have read the state before its event."""
         bot = self._router(args)
         with self._tx():
-            row = self.db.execute("SELECT since, refused FROM owed_wakes WHERE bot=?", (bot,)).fetchone()
+            row = self.db.execute("SELECT since, refused, last_at FROM owed_wakes WHERE bot=?", (bot,)).fetchone()
             if row is None:
                 return {"paid": False}
+            started = None
+            if args.get("ticket"):
+                t = self.db.execute("SELECT admitted_at FROM tickets WHERE id=? AND bot=?",
+                                    (args["ticket"], bot)).fetchone()
+                started = t[0] if t else None
+            if started and parse(row[2]) > parse(started):
+                return {"paid": False, "owed_since_it_started": row[2]}
             self.db.execute("DELETE FROM owed_wakes WHERE bot=?", (bot,))
             self._audit(caller, "wake_paid", {"bot": bot, "since": row[0], "refused": row[1]})
         return {"paid": True, "since": row[0], "refused": row[1]}

@@ -320,6 +320,35 @@ class OwedSweeps(unittest.TestCase):
         g.after_turn(session_id="c")
         self.assertEqual(self.owed(f)["refused"], 2)
 
+    def test_a_wake_during_a_sweep_is_owed_and_runs_after_it(self):
+        """2 Nov, 3:57:55 and 3:58:00 PM: two of Bramble's webhook turns ran the
+        whole sweep at once, and both revised #5458's card."""
+        import copy
+        from thornswood_guard.owed_wake import PROMPT
+        from test_policy_service import Clock
+        f = Fleet()
+        data = copy.deepcopy(f.policy.policy.data)
+        data["admission"]["stage"] = "after"
+        clock = Clock()
+        f.policy = policy_service(data=data, clock=clock)
+        g = gate(f, "bramble")
+        self.assertIsNone(g.before_llm(session_id="w1", platform="webhook"))
+        clock.advance(seconds=5)
+        out = g.before_llm(session_id="w2", platform="webhook")
+        self.assertIn("one sweep runs at a time", out["context"])
+        self.assertIn("is owed", out["context"])
+        self.assertIn("Refused by the Thornswood queue", g.before_tool("tw_decide", session_id="w2"))
+        self.assertIsNone(g.before_tool("tw_decide", session_id="w1"))
+        g.after_turn(session_id="w2")
+        self.assertFalse(self.owed(f)["due"], "not while the first sweep runs")
+        clock.advance(seconds=60)
+        g.after_turn(session_id="w1")
+        owed = self.owed(f)
+        self.assertTrue(owed["due"], "the first sweep may have read the state before the second wake")
+        self.assertIsNone(g.before_llm(session_id="cron_o_1", platform="cron", user_message=PROMPT))
+        g.after_turn(session_id="cron_o_1")
+        self.assertFalse(self.owed(f)["owed"])
+
     def test_only_brambles_wakes_are_owed(self):
         f = Fleet()
         self.full(f)

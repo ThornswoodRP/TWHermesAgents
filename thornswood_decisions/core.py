@@ -175,9 +175,18 @@ class DecisionCore:
             if row["revision"] != expected_revision:
                 raise CoreError(409, "stale_revision", f"the card is at revision {row['revision']}",
                                 revision=row["revision"])
+            # Nothing changed is not a new revision: a new one makes the answer
+            # Patrick may be giving to this one stale, for nothing.
+            sha = sha256_hex(body)
+            shown = [tuple(o) for o in db.execute(
+                "SELECT key, label, consequence FROM decision_options WHERE decision_id = ? AND revision = ? "
+                "ORDER BY position", (decision_id, row["revision"])).fetchall()]
+            if (row["title"], row["artifact_sha256"], row["recommendation"], row["scope_of_yes"], shown) == (
+                    title, sha, recommendation, scope_of_yes,
+                    [(o["key"], o["label"], o["consequence"]) for o in options]):
+                return self._card(db, row) | {"unchanged": True}
             rev = row["revision"] + 1
             art_rev = row["artifact_revision"] + 1
-            sha = sha256_hex(body)
             now = self.s.now()
             db.execute("INSERT INTO artifact_revisions(artifact_id, revision, sha256, media_type, body, created_by, "
                        "created_at) VALUES(?,?,?,?,?,?,?)",
@@ -306,26 +315,28 @@ class DecisionCore:
         self._may_read(p, row)
         return self._card(self.s.db, row)
 
+    def asked_by(self, p: Principal, bot: str) -> list[dict]:
+        """The cards waiting on Patrick that this Bot asked, oldest first: shown in its Bot Chat, where
+        his message can answer one (chat.py Chat.send)."""
+        if p.kind != "patrick":
+            raise CoreError(403, "not_patrick", "only Patrick reads the cards in a Bot Chat")
+        rows = self.s.db.execute("SELECT d.* FROM decisions d JOIN principals b ON b.id = d.requested_by "
+                                 "WHERE d.workspace_id = ? AND d.status = 'pending' AND b.bot = ? AND d.expires_at > ? "
+                                 "ORDER BY d.created_at", (p.workspace_id, bot, self.s.now())).fetchall()
+        return [self._card(self.s.db, r) for r in rows]
+
+    def asker(self, workspace_id: str, decision_id: str) -> str | None:
+        """The Bot that asked a card, or None."""
+        r = self.s.db.execute("SELECT b.bot FROM decisions d JOIN principals b ON b.id = d.requested_by "
+                              "WHERE d.id = ? AND d.workspace_id = ?", (decision_id, workspace_id)).fetchone()
+        return r["bot"] if r else None
+
     def needs_you(self, p: Principal) -> list[dict]:
         if p.kind not in ("patrick", "bramble"):
             raise CoreError(403, "not_patrick", "only Patrick and Bramble read the Needs you list")
         rows = self.s.db.execute("SELECT * FROM decisions WHERE workspace_id = ? AND status = 'pending' "
                                  "ORDER BY created_at", (p.workspace_id,)).fetchall()
         return [self._card(self.s.db, r) for r in rows]
-
-    def answered(self, p: Principal, *, hours: int = 24, limit: int = 10) -> list[dict]:
-        """The cards Patrick answered in the last day, newest first: the app's "Answered" list under Decisions."""
-        if p.kind not in ("patrick", "bramble"):
-            raise CoreError(403, "not_patrick", "only Patrick and Bramble read the answered list")
-        since = iso(self.s.clock() - timedelta(hours=hours))
-        rows = self.s.db.execute(
-            "SELECT d.id, d.title, d.risk, r.option_key, r.answered_at, o.label FROM decisions d "
-            "JOIN responses r ON r.decision_id = d.id "
-            "LEFT JOIN decision_options o ON o.decision_id = d.id AND o.revision = r.revision AND o.key = r.option_key "
-            "WHERE d.workspace_id = ? AND d.status = 'resolved' AND r.answered_at >= ? "
-            "ORDER BY r.answered_at DESC, r.rowid DESC LIMIT ?", (p.workspace_id, since, limit)).fetchall()
-        return [{"id": r["id"], "title": r["title"], "risk": r["risk"], "answered_at": r["answered_at"],
-                 "option": r["label"] or r["option_key"]} for r in rows]
 
     def artifact(self, p: Principal, decision_id: str, revision: int | None = None) -> dict:
         row = self._row(self.s.db, decision_id, p.workspace_id)
@@ -433,4 +444,17 @@ class DecisionCore:
             "superseded_by": row["superseded_by"], "task": row["task"],
             "options": [dict(o) for o in opts], "links": [dict(x) for x in links],
             "receipt": self._receipt_for(db, row["id"]),
+            # When the card's alert went to the push service (Patrick, 2 Nov: a card reached his
+            # phone minutes after it was stored), so the card itself says where the time went.
+            "alert": self._alert_of(db, row["id"]),
         }
+
+    @staticmethod
+    def _alert_of(db, decision_id: str) -> dict | None:
+        r = db.execute("SELECT created_at, updated_at, status, attention_revision FROM push_outbox WHERE decision_id = ? "
+                       "ORDER BY attention_revision DESC LIMIT 1", (decision_id,)).fetchone()
+        if not r:
+            return None
+        # Which alert this is: a revised card gets a new one, and the phone keeps when each reached it by this.
+        return {"queued_at": r["created_at"], "status": r["status"], "attention_revision": r["attention_revision"],
+                "sent_at": r["updated_at"] if r["status"] == "sent" else None}

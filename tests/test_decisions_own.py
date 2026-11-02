@@ -20,7 +20,9 @@ import sqlite3
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
+import weakref
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -542,8 +544,27 @@ READY = textwrap.dedent("""\
 
 
 class FakeCore:
+    """The core as an own-Hermes connector reaches it. The connector delivers each message on a thread of its
+    own while its main loop goes on posting, and the real core gives every request thread its own store
+    connection (api.py); so does this, since one SQLite connection shared by two threads mixes their
+    transactions ("cannot start a transaction within a transaction")."""
+
     def __init__(self, own: OwnChat, ws: str, gw: str, token: str):
-        self.own, self.ws, self.gw, self.token = own, ws, gw, token
+        self._own, self.ws, self.gw, self.token = own, ws, gw, token
+        self._local = threading.local()
+        self._opened: list[Store] = []
+        weakref.finalize(self, lambda opened: [s.close() for s in opened], self._opened)
+
+    @property
+    def own(self) -> OwnChat:
+        if threading.current_thread() is threading.main_thread():
+            return self._own
+        o = getattr(self._local, "own", None)
+        if o is None:
+            s = Store(self._own.s.path, clock=self._own.s.clock)
+            self._opened.append(s)
+            o = self._local.own = OwnChat(s)
+        return o
 
     def post(self, op, body):
         if isinstance(body, bytes):
@@ -1001,7 +1022,28 @@ class OneInstall(unittest.TestCase):
         self.assertIn("PASS the VM made the connector's token", r.stdout, r.stderr)
         token = home / ".config" / "Thornswood" / "own-one.token"
         self.assertEqual(token.read_text(encoding="ascii"), "tok_" + "x" * 43)
-        self.assertTrue((home / ".local" / "share" / "Thornswood" / "own-connector" / "own_connector.py").exists())
+        self.assertTrue((home / ".local" / "share" / "Thornswood-Hermes" / "own-connector" / "own_connector.py").exists())
+        self.assertFalse((home / ".local" / "share" / "Thornswood").exists(), "nothing goes in the launcher's folder")
+
+    def test_refuses_a_folder_inside_a_velopack_install(self):
+        """Velopack's Setup.exe deletes its whole folder on a reinstall; on 2 Nov the launcher's took the connector
+        with it, and One's connector stopped at 2:58 PM with nothing left to start."""
+        import subprocess
+        env, home = self.fresh_home()
+        root = self.t / "SomeApp"
+        (root / "current").mkdir(parents=True)
+        (root / "Update.exe").write_bytes(b"")
+        for folder, inside in ((root / "own-connector", root), (home / ".local" / "share" / "Thornswood" / "own-connector",
+                                                                home / ".local" / "share" / "Thornswood")):
+            with self.subTest(folder=str(folder)):
+                r = subprocess.run(["pwsh", "-NoProfile", "-File", str(self.clone / "scripts/one/Install-OwnConnector.ps1"),
+                                    "-Core", "https://hermes.tail0000.ts.net/api/v1", "-Hermes", str(self.hermes),
+                                    "-HermesPython", sys.executable, "-Folder", str(folder), "-NoTask"],
+                                   capture_output=True, text=True, env=env, timeout=120)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn(f"FAIL {folder} is inside {inside}, a Velopack install", r.stdout)
+                self.assertFalse(folder.exists())
+                self.assertFalse(self.calls.exists(), "refused before any token is made")
 
     def test_never_replaces_a_task_it_does_not_own(self):
         from helpers import REPO

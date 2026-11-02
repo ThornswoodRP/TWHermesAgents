@@ -21,6 +21,11 @@ Every few seconds it:
        a new chat:      hermes chat -Q --format stream-json --query-file <file> --yolo --source cli --in <home>
        an existing one: hermes chat -Q --format stream-json --query-file <file> --resume <session id>
 
+   through room_send.py, which runs that same `hermes chat` in Hermes's own
+   runtime and hands a message to a chat whose turn is already running the way
+   Desktop's box does, by the chat's busy-input setting (steer, interrupt or
+   queue; Patrick's answer A on q-one-busy-chat, 2 Nov; contracts.json "busy");
+
    A new chat is made with `--yolo`, Patrick's "full power behind the passkey"
    (the core takes a message only from a passkey sign-in of the last 30
    minutes), and listed like any chat he starts (`--source cli`); Hermes names
@@ -46,6 +51,7 @@ copies nothing. It logs no message text, no chat title and no token.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -64,6 +70,7 @@ from pathlib import Path
 LOCAL_CORE = "http://127.0.0.1:9135/api/v1"
 GATEWAYS = {"me": "my-hermes", "one": "One's Hermes"}
 POLL_SECONDS = 5
+TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 FEED_SECONDS = 20
 READY_SECONDS = 60       # how often a running gateway is checked again
 NOT_READY_SECONDS = 15   # and one that was not running
@@ -235,18 +242,75 @@ def _iso(epoch) -> str:
 
 
 def _text(content) -> str:
-    """A message's content as plain text: a string, or the text parts of a list of parts."""
+    """A message's content as plain text: a string, or the text parts of a list of parts, with a skill's
+    loaded instructions shown as Patrick typed them (as_typed)."""
     if isinstance(content, str):
         try:
             parts = json.loads(content) if content.startswith("[") else None
         except json.JSONDecodeError:
             parts = None
         if not isinstance(parts, list):
-            return content
+            return as_typed(content)
         content = parts
     if isinstance(content, list):
-        return "\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+        return as_typed("\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"))
     return ""
+
+
+# A /skill message, as Hermes keeps it, opens with the skill's whole text ahead of what Patrick typed. Hermes
+# shows it as typed in its own titles, previews and transcripts (agent/skill_commands.py
+# describe_skill_invocation with separator " ", at the pinned commit); untitled,
+# the phone named a chat by the raw text instead (Patrick's screenshot, 2 Nov 3:13 PM: "[IMPORTANT: The user
+# has invoked the ..."). The markers are Hermes's own, byte for byte (skill_commands.py:49-81 and :336-338);
+# test_decisions_lines.py SkillMessages holds the answers Hermes's own describer gave on the same messages.
+_SKILL_PREFIX = "[IMPORTANT: The user has invoked the "
+_SKILL_NAME = re.compile(re.escape(_SKILL_PREFIX) + r'"([^"]*)"')
+_SKILL_MARKER = "The full skill content is loaded below.]"
+_SKILL_INSTRUCTION = "The user has provided the following instruction alongside the skill invocation: "
+_SKILL_RUNTIME_NOTE = "\n\n[Runtime note:"
+_BUNDLE_MARKER = " skill bundle,"
+_BUNDLE_INSTRUCTION = "\nUser instruction: "
+_BUNDLE_FIRST_BLOCK = "\n\n[Loaded as part of the "
+_AUTO_PREFIX = '[IMPORTANT: The "'
+_AUTO_DIR_NOTE_END = "then run them with the terminal tool using the absolute path."
+_AUTO_TRAILING = (("[Skill config (", "\n]"), ("[Skill setup note: ", "]\n\n"),
+                  ("[This skill has supporting files", "/scripts/foo.js`)."))
+_EXCERPT_JOINT = "\x1e"
+
+
+def _cut_after(text: str, marker: str, stop: str, find) -> str | None:
+    at = find(marker)
+    return (text[at + len(marker):].split(stop, 1)[0].strip() or None) if at >= 0 else None
+
+
+def as_typed(text: str) -> str:
+    """A /skill message as Patrick typed it ("/work fix the title"), or the text unchanged."""
+    if text.startswith(_AUTO_PREFIX):
+        name = (re.match(re.escape(_AUTO_PREFIX) + r'([^"]*)"', text) or [None, ""])[1]
+        end = text.rfind(_AUTO_DIR_NOTE_END)
+        if end == -1:
+            return f"/{name}" if name else text
+        tail = text[end + len(_AUTO_DIR_NOTE_END):].lstrip()
+        while stop := next((e for b, e in _AUTO_TRAILING if tail.startswith(b)), None):
+            cut = tail.find(stop)
+            tail = tail[cut + len(stop):].lstrip() if cut >= 0 else ""
+        return " ".join(tail.split()) or (f"/{name}" if name else text)
+    if not text.startswith(_SKILL_PREFIX):
+        return text
+    m = _SKILL_NAME.match(text)
+    name = (m.group(1) if m else "").strip()
+    label = name if name.startswith("/") else f"/{name}"
+    if _BUNDLE_MARKER in text:
+        said = _cut_after(text, _BUNDLE_INSTRUCTION, _BUNDLE_FIRST_BLOCK, text.find)
+    elif _SKILL_MARKER in text:
+        said = _cut_after(text, _SKILL_INSTRUCTION, _SKILL_RUNTIME_NOTE, text.rfind)
+    else:
+        said = None
+    if said:
+        said = " ".join(said.split(_EXCERPT_JOINT)[0].split())
+    if said:
+        return f"{label} {said}" if name else said
+    return label if name else text
 
 
 # What Patrick wrote, apart from what Hermes attached to it: Hermes keeps an @file: reference where it was
@@ -403,6 +467,56 @@ def chat_exists(state_db: Path, session_id: str) -> bool:
         con.close()
 
 
+def _fork_child(row) -> bool:
+    """Hermes's _is_explicit_fork_child_row with include_reset (hermes_state_messages.py:1878): a branch,
+    delegate, tool or reset child of its parent is a conversation of its own."""
+    if row["source"] == "tool":
+        return True
+    try:
+        cfg = json.loads(row["model_config"]) if isinstance(row["model_config"], str) else row["model_config"]
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    markers = (cfg.get("_branched_from"), cfg.get("_delegate_from"), cfg.get("_reset_from"))
+    parent = row["parent_session_id"]
+    return parent in markers if parent else any(m is not None for m in markers)
+
+
+def turn_held(state_db: Path, session_id: str, since: float) -> bool:
+    """Whether another Hermes process holds this chat's turn, taken before `since` (when this connector's
+    own turn started), so the turn waits for it. Hermes runs one turn at a time in a conversation: a new
+    one waits for the turn lease (agent/turn_facade_lease.py:297, up to 30 minutes), keyed by the chat's
+    first compression ancestor (hermes_state_compression.py:683, mirrored here) in session_turn_leases.
+    Read only; any error is "not known to wait", never a guess."""
+    try:
+        con = _ro(state_db)
+    except (sqlite3.Error, OSError):
+        return False
+    try:
+        def row(sid):
+            return con.execute("SELECT id, parent_session_id, source, model_config, end_reason FROM sessions "
+                               "WHERE id = ?", (sid,)).fetchone()
+        current, seen = row(session_id), {session_id}
+        while current:
+            parent_id = current["parent_session_id"]
+            if not parent_id or parent_id in seen or _fork_child(current):
+                break
+            parent = row(parent_id)
+            if not parent or parent["end_reason"] != "compression":
+                break
+            seen.add(parent_id)
+            current = parent
+        key = current["id"] if current else session_id
+        held = con.execute("SELECT acquired_at, expires_at FROM session_turn_leases WHERE conversation_id = ?",
+                           (key,)).fetchone()
+        return bool(held) and held["acquired_at"] < since and held["expires_at"] > time.time()
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+
+
 def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, archived: bool = False) -> dict:
     """Chats Hermes's own pickers list, newest first, older than `before`, with `q` in the title; with
     `archived`, the ones Hermes hides instead (to bring one back)."""
@@ -505,9 +619,57 @@ def fitted(state_db: Path, wanted: list[str], now: datetime) -> bytes:
 
 # ── running a turn ────────────────────────────────────────────────────────
 
+# How room_send.py's turn says Hermes took a message, and the live line's state for it.
+ADMISSIONS = {"started": "thinking", "queued": "queued", "steered": "steered", "redirected": "redirected"}
+
+
+def follow_turn(stream, seen: dict, tell) -> None:
+    """Hermes's stream-json events of one turn, read as they come (hermes_cli/stream_json.py). The start and
+    the end are kept in `seen` without their text (the session id and the exit code are all that is read
+    from them), and `tell(state, tool)` hears each change of what the turn is doing, once: "thinking" (the
+    start, and after each tool's result), "writing" (the reply's text), or "tool" with the tool's name
+    when it is a plain name (else None). Never the words, a tool's input or its output. The Bots'
+    connector reads its Bot Chat turns with this too (connector.py).
+
+    room_send.py's turn adds one line saying how Hermes took the message ({"type": "admission"}): "queued" (behind
+    the turn already running, in Hermes's own queue), "steered" or "redirected" (into the running turn), or
+    "started" (also said when a queued one leaves the queue to run). From then on `seen["admitted"]` is true:
+    Hermes has the message; `seen["taken"]` keeps a steer or redirect for the rest of the turn."""
+    now = None
+    for line in stream:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("type")
+        seen["events"] = seen.get("events", 0) + 1
+        if kind in ("system", "result"):
+            ev.pop("text", None)
+            seen[kind] = ev
+        state = {"system": ("thinking", None), "tool_result": ("thinking", None),
+                 "text": ("writing", None)}.get(kind)
+        if kind == "admission" and ev.get("status") in ADMISSIONS:
+            seen["admitted"] = True
+            if ev["status"] in ("steered", "redirected"):
+                seen["taken"] = ev["status"]
+            state = (ADMISSIONS[ev["status"]], None)
+        if kind == "tool_use":
+            name = ev.get("name")
+            state = ("tool", name if isinstance(name, str) and TOOL_NAME.match(name) else None)
+        if state and state != now:
+            now = state
+            tell(*state)
+
+
 class Hermes:
-    def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str):
+    def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str,
+                 state_db: Path | None = None, turn_cmd: list[str] | None = None):
         self.cmd, self.ready_cmd, self.home_dir, self.name = list(hermes_cmd), list(ready_cmd), home_dir, name
+        # room_send.py in Hermes's runtime (helper_command), which takes `hermes chat`'s own arguments.
+        self.turn_cmd = list(turn_cmd) if turn_cmd else list(hermes_cmd)
+        self.state_db = state_db  # Hermes's own state.db, read only, to see a turn wait for the chat's turn
 
     def ready(self) -> tuple[str, str]:
         """(state, why): is this Hermes's gateway running? Asked without starting one.
@@ -570,8 +732,10 @@ class Hermes:
         reason = got.get("reason") if isinstance(got, dict) else None
         return "failed", str(reason or "not done")[:200]
 
-    def turn(self, session_id: str | None, text: str) -> tuple[str, str, str, str | None]:
-        """(outcome, ref, reason, session id) for one message."""
+    def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None) -> tuple[str, str, str, str | None]:
+        """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
+        `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
+        tool by its name."""
         if session_id is not None and not SESSION_ID.match(session_id):
             return "failed", "", "that is not a chat id Hermes gives", None
         with tempfile.TemporaryDirectory(prefix="tw-own-") as folder:
@@ -581,25 +745,38 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.cmd, "chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
+            argv = [*self.turn_cmd, "chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
+            if image is not None:
+                argv += ["--image", str(image)]
             if session_id:
                 argv += ["--resume", session_id]
             else:
                 argv += ["--yolo", "--source", "cli", "--in", str(self.home_dir)]
-            return self._run(argv, session_id)
+            return self._run(argv, session_id, doing)
 
-    def _run(self, argv: list[str], session_id: str | None) -> tuple[str, str, str, str | None]:
+    def _run(self, argv: list[str], session_id: str | None, doing=None) -> tuple[str, str, str, str | None]:
         seen: dict = {}
+        tell = doing or (lambda state, tool, admitted=False, taken=None: None)
+        began = time.time()
+        moved = threading.Event()  # the turn said more than its start: it has the chat's turn
+
+        def heard(state, tool):
+            if seen.get("events", 0) > 1:
+                moved.set()
+            tell(state, tool, bool(seen.get("admitted")), seen.get("taken"))
 
         def read(stream):
-            for line in stream:
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(ev, dict) and ev.get("type") in ("system", "result"):
-                    seen[ev["type"]] = ev  # only the session id and the end are kept, never the text
-                    seen[ev["type"]].pop("text", None)
+            follow_turn(stream, seen, heard)
+
+        def held():
+            # While the turn has said nothing past its start, it may be waiting for the chat's turn lease,
+            # held by another Hermes process running a turn in the same chat: then it is in a queue too.
+            waiting = False
+            while not moved.wait(2) and proc.poll() is None:
+                now = turn_held(self.state_db, session_id, began)
+                if now != waiting and not moved.is_set():
+                    waiting = now
+                    tell("queued" if now else "thinking", None, bool(seen.get("admitted")), seen.get("taken"))
 
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **quiet(),
@@ -609,6 +786,8 @@ class Hermes:
             return "failed", "", "could not start the hermes command", None
         reader = threading.Thread(target=read, args=(proc.stdout,), daemon=True)
         reader.start()
+        if session_id and self.state_db is not None:
+            threading.Thread(target=held, daemon=True).start()
         try:
             code = proc.wait(timeout=TURN_SECONDS)
         except subprocess.TimeoutExpired:
@@ -792,6 +971,55 @@ class Core:
         except (urllib.error.URLError, OSError, ValueError):
             return 0, {}
 
+    def fetch(self, op: str, body: dict) -> tuple[int, bytes]:
+        """An answer that is bytes (a file Patrick attached), not JSON."""
+        req = urllib.request.Request(f"{self.base}/own/{self.gateway}/{op}", data=json.dumps(body).encode("utf-8"),
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "Authorization": f"Bearer {self.token}"})
+        try:
+            with self.opener.open(req, timeout=120) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            return exc.code, b""
+        except (urllib.error.URLError, OSError, ValueError):
+            return 0, b""
+
+
+# Files and photos Patrick attached on the phone go where Hermes Desktop puts what is dropped or pasted into
+# its box: images in Hermes's own images folder, every other file in its attachments folder (the staging
+# folders Hermes's file and vision tools are given, tools/credential_files.py _CACHE_DIRS), each message's
+# in a folder of its own. The first photo goes to Hermes as the turn's image (`--image`), and each other file
+# as an @file: reference in the message, as Desktop attaches a file.
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
+REF_NEEDS_QUOTES = re.compile(r"""[\s()\[\]{}<>"'`]""")
+MESSAGE_ID = re.compile(r"^own_[A-Za-z0-9_-]{4,64}$")
+BAD_NAME = re.compile(r'[\\/\x00-\x1f\x7f<>:"|?*]')
+
+
+def file_ref(path: Path) -> str:
+    """A path as Hermes reads an @file: reference back whole (agent/context_references.py quote_value)."""
+    value = str(path)
+    return "@file:" + (f'"{value}"' if REF_NEEDS_QUOTES.search(value) else value)
+
+
+def save_attachment(root: Path, message_id: str, f: dict, body: bytes) -> Path:
+    """Writes one attached file under root/<images or attachments>/phone/<message id>/<its name>, readable
+    by this user only. The name is the core's (own.file_name): one part, no path, nothing Windows refuses."""
+    kind = "images" if f.get("mime") in IMAGE_TYPES else "attachments"
+    name = str(f.get("name") or "")
+    if not MESSAGE_ID.match(message_id) or not name or name in (".", "..") or BAD_NAME.search(name):
+        raise ValueError("an attachment's name or message is not one the core gives")
+    folder = root / kind / "phone" / message_id
+    folder.mkdir(parents=True, exist_ok=True)
+    if not WINDOWS:
+        os.chmod(folder, 0o700)
+    path = folder / name
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(body)
+    return path
+
 
 class OwnConnector:
     def __init__(self, core: Core, hermes: Hermes, state_db: Path, say=say, clock=time.monotonic,
@@ -803,6 +1031,7 @@ class OwnConnector:
         self.leaving: str | None = None     # the release this copy was replaced with: finish, then stop
         self.unsaid: list[dict] = []
         self.running: list[threading.Thread] = []
+        self.doing: dict[str, dict] = {}    # message id -> what its turn is doing now (state, tool)
         self.wanted: list[str] = []
         self._lock = threading.Lock()
         self._ready = ("check_failed", "not checked yet")
@@ -860,17 +1089,59 @@ class OwnConnector:
                 self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": "that chat is gone"})
                 self.feed_now = True
             return
+        def doing(state, tool, admitted=False, taken=None):
+            # `admitted`: Hermes has the message (room_send.py's turn said how it took it). The core hands this
+            # connector the chat's next message only once each before it is in Hermes, so they keep order.
+            # `taken`: steered or redirected into the turn already running, kept while that turn goes on.
+            with self._lock:
+                self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool, "admitted": admitted,
+                                          **({"taken": taken} if taken else {})}
+        text, image = item["text"], None
+        files = item.get("attachments") or []
+        if files:
+            try:
+                paths = self._files(item["id"], files)
+            except ValueError as exc:
+                # Nothing was handed to Hermes, so the message did not go: Patrick sees why and can send again.
+                with self._lock:
+                    self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": str(exc)[:200]})
+                    self.feed_now = True
+                return
+            image = next((pth for f, pth in paths if f.get("mime") in IMAGE_TYPES), None)
+            refs = [file_ref(pth) for _, pth in paths if pth != image]
+            text = "\n\n".join(x for x in (text, " ".join(refs)) if x) or f"[Patrick attached {image.name}]"
         try:
-            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), item["text"])
+            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image)
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
                                          item.get("session_id"))
+        finally:
+            with self._lock:
+                self.doing.pop(item["id"], None)
         r = {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
         if not item.get("session_id") and sid:
             r["session_id"] = sid
         with self._lock:
             self.unsaid.append(r)
             self.feed_now = True
+
+    def _files(self, message_id: str, files: list) -> list[tuple[dict, Path]]:
+        """Each attached file, fetched from the core, checked against its size and SHA-256, and saved."""
+        root = self.state_db.parent
+        out = []
+        for f in files[:10]:
+            if not isinstance(f, dict) or not isinstance(f.get("id"), str):
+                raise ValueError("an attachment the core named is not well formed")
+            status, body = self.core.fetch("attachment", {"id": f["id"]})
+            if status != 200:
+                raise ValueError(f"could not fetch {f.get('name')} from the core (it answered {status or 'nothing'})")
+            if len(body) != f.get("size") or hashlib.sha256(body).hexdigest() != f.get("sha256"):
+                raise ValueError(f"{f.get('name')} came from the core changed or cut short")
+            try:
+                out.append((f, save_attachment(root, message_id, f, body)))
+            except OSError as exc:
+                raise ValueError(f"could not save {f.get('name')} into Hermes's folder ({type(exc).__name__})") from None
+        return out
 
     def react(self, wanted: list) -> int:
         """The reactions the core handed over, each set in Hermes one after another (each is one quick
@@ -950,9 +1221,11 @@ class OwnConnector:
         of how many at once, since when the oldest runs, its commit, and an update it is on or could not do."""
         now = self.clock()
         started = [getattr(t, "started_at", now) for t in self.running]
+        with self._lock:
+            turns = list(self.doing.values())[:PARALLEL]
         return {"commit": self.commit, "busy": len(self.running), "parallel": PARALLEL,
                 "busy_for": int(now - min(started)) if started else 0,
-                "updating": self.leaving, "update_why": self.update_why}
+                "updating": self.leaving, "update_why": self.update_why, "turns": turns}
 
     def _update(self, release) -> None:
         if (self.updater is None or self.leaving or not isinstance(release, str) or not RELEASE.match(release)
@@ -1044,8 +1317,9 @@ def main(argv: list[str]) -> int:
     else:
         token = Path.home() / ".config" / "thornswood" / f"own-{args.gateway}.token"
     home = Path(args.hermes_home) if args.hermes_home else hermes_home()
-    hermes = Hermes([args.hermes], helper_command(args.hermes, python=args.hermes_python, root=args.hermes_root), Path.home(),
-                    GATEWAYS[args.gateway])
+    ready = helper_command(args.hermes, python=args.hermes_python, root=args.hermes_root)
+    hermes = Hermes([args.hermes], ready, Path.home(),
+                    GATEWAYS[args.gateway], state_db=home / "state.db", turn_cmd=ready)
     here = Path(__file__).resolve().parent
     updater = Updater(Path(args.clone), args.git, here) if args.clone else None
     conn = OwnConnector(Core(args.core, args.gateway, read_token(token)), hermes, home / "state.db",

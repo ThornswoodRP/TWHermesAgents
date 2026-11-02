@@ -3,7 +3,8 @@
     python tests/decisions_phone_server.py <port>
 
 It prints one JSON line (a phone pairing code and three card ids, the second
-high risk, the third left for the alert checks) and serves until killed. Test data only: no real workspace, no Bot,
+high risk, the third left for the alert checks, and the voice check's fake
+microphone file and words) and serves until killed. Test data only: no real workspace, no Bot,
 no deploy; nothing takes the chat messages it queues, and the push worker's
 keys are throwaway ones said straight to the core, with no worker and no push
 service. One's own-Hermes connector is stood in for by one call to the core
@@ -13,6 +14,7 @@ messages sent to it.
 """
 import json
 import sys
+import tempfile
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent)); sys.path.insert(0, str(HERE))
@@ -30,12 +32,23 @@ for bot in ("bramble", "rift", "sprocket", "echo", "magpie", "wisp"):
 card = w.card(title="Turn on the nightly backup check?")
 high = w.card(title="Delete the old test branches?", risk="high", source_key="high-1")
 third = w.card(title="Move the backup to Sunday?", source_key="third-1")
+# A card Rift asked, which waits in Rift's Bot Chat and is answered there by a message.
+w.core.assign_task(w.bramble, "load-order", "rift")
+w.card(by=w.rift, task="load-order", title="Rebuild the load order now?", source_key="rift-1")
 f = Feeds(w.store)
 tw = f.new_token(w.ws, "work", by="t"); tr = f.new_token(w.ws, "room", by="t"); tb = f.new_token(w.ws, "bots", by="t")
 f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}]}]})
-f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [{"id": "t1", "title": "Fix the <b>launcher</b> log", "assignee": "sprocket", "status": "running"}],
-                         "items": [{"repo": "ThornswoodRP/Thornswood", "number": 5033, "title": "The site hub says <i>which</i> page is open", "bot": "echo", "stage": "pr_open", "pr": 5367, "pr_repo": "ThornswoodRP/Thornswood", "pr_title": "The hub marks its open tab", "checks": "failing", "checks_line": "18 of 20 passed, 2 failed", "auto_merge": True, "updated_at": "2026-11-01T17:30:00+00:00"},
-                                   {"repo": "ThornswoodRP/Thornswood", "number": 5191, "title": "Generated content tables are built from their sources", "bot": "magpie", "stage": "claimed", "updated_at": "2026-11-01T17:00:00+00:00"}]})
+# The live Board: Rift running a command in a session with a title, Echo thinking with none, and Sprocket's
+# two turns at once. When the test makes the file BOARD_NEXT, Rift's command has ended and it is thinking.
+BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:00"},
+         {"bot": "rift", "title": "Rebuild the <b>load order</b>", "state": "tool", "tool": "terminal",
+          "since": "2026-11-01T17:40:00+00:00"},
+         {"bot": "sprocket", "title": "Installer log", "state": "tool", "tool": "read_file",
+          "since": "2026-11-01T17:50:00+00:00"},
+         {"bot": "sprocket", "title": "Launcher news", "state": "tool", "tool": "browser_navigate",
+          "since": "2026-11-01T17:55:00+00:00"}]
+f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "doing": BOARD})
+BOARD_NEXT = Path(tempfile.mkdtemp()) / "board-next"
 # A Bot's message in Markdown, longer than a list line: the Rooms list shows its plain words, cut at a word.
 ROOM_MD = ("@bramble it'll show up on #5367, and it'll run, not skip.\n- **Why it isn't there yet:** "
            "`Launcher builds` has `needs: pick` and [the guide](https://example.invalid/g) says so.\n\n## Next\n1. merge it")
@@ -71,7 +84,9 @@ CHATS = [
     {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"},
     # A chat Hermes has not titled, named by its first message; its newest row a long paste from Hermes Desktop.
     {"id": "s_paste", "title": "", "first": "Here is the plan", "last_at": "2026-10-29T12:00:00+00:00",
-     "preview": PASTE_MSG[:200]}]
+     "preview": PASTE_MSG[:200]},
+    # A chat whose newest message is being answered right now (the live line under it).
+    {"id": "s_work", "title": "Check the build", "last_at": "2026-10-28T12:00:00+00:00", "preview": "earlier"}]
 HIDDEN = []
 OPEN = [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
                                       {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]
@@ -109,6 +124,22 @@ con.execute("INSERT INTO sessions VALUES('s_md', 'cli', 'Markdown check', ?, ?, 
             (epoch("2026-10-31T11:00:00+00:00"), epoch("2026-10-31T12:00:00+00:00")))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_md', 'assistant', ?, ?)",
             (MD, epoch("2026-10-31T12:00:00+00:00")))
+# Links of each kind, a mention and a phone number (Patrick, 2 Nov 3:18 PM and 3:21 PM); and a chat Hermes has
+# not titled that began with a /skill, kept with the skill's whole text ahead of what he typed.
+LINKS = ("Ask @Rift. The [plan thread](https://claude.ai/code/project/chan_1?thread=cmsg_9), "
+         "https://claude.ai/artifact/AbC123, https://github.com/ThornswoodRP/Thornswood-Hermes/pull/96, "
+         "www.example.com and call 720-555-0199.")
+con.execute("INSERT INTO sessions VALUES('s_links', 'cli', 'Links check', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-31T10:00:00+00:00"), epoch("2026-10-31T10:30:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_links', 'assistant', ?, ?)",
+            (LINKS, epoch("2026-10-31T10:30:00+00:00")))
+SKILL = ('[IMPORTANT: The user has invoked the "thornswood-operator-cards" skill, indicating they want you to '
+         'follow its instructions. The full skill content is loaded below.]\n\n# Operator cards\nLong rules.\n\n'
+         'The user has provided the following instruction alongside the skill invocation: run card 2')
+con.execute("INSERT INTO sessions VALUES('s_skill', 'cli', NULL, ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-31T09:00:00+00:00"), epoch("2026-10-31T09:05:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_skill', 'user', ?, ?)",
+            (SKILL, epoch("2026-10-31T09:00:00+00:00")))
 for i in range(120):
     con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_long', ?, ?, ?)",
                 ("user" if i % 2 == 0 else "assistant", f"message {i}", epoch("2026-11-01T10:00:00+00:00") + i))
@@ -124,8 +155,25 @@ con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('
             (PASTE_MSG, epoch("2026-10-29T11:59:00+00:00")))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_paste', 'assistant', ?, ?)",
             (f"Run this:\n\n```\n{PASTE_CMD}\n```", epoch("2026-10-29T12:00:00+00:00")))
+con.execute("INSERT INTO sessions VALUES('s_work', 'cli', 'Check the build', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-28T11:00:00+00:00"), epoch("2026-10-28T12:00:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_work', 'assistant', 'earlier', ?)",
+            (epoch("2026-10-28T12:00:00+00:00"),))
 con.commit()
+# The two new chats are listed as One's connector lists them, by its own row maker, so the /skill chat's
+# name is what own_connector makes of the skill's text, not a name written here.
+con.row_factory = sqlite3.Row
+for sid in ("s_links", "s_skill"):
+    CHATS.append(own_connector._row(con, con.execute(
+        "SELECT id, title, coalesce(last_activity_at, started_at) AS last_at FROM sessions WHERE id = ?", (sid,)).fetchone()))
 con.close()
+one_feed()
+# His message in s_work, taken by the stand-in connector, whose turn is running a command; each claim the loop
+# below makes says so, as One's connector does while a turn runs (own_connector.OwnConnector.busy).
+from test_decisions_own import passkey
+WORK = own.send(passkey(w), "one", "s_work", None, "is the build green?", "own-key-work")["message_id"]
+own.claim(w.ws, "one", to, 1, True)
+TURNS = {"turns": [{"id": WORK, "state": "tool", "tool": "terminal"}]}
 def set_reaction(r, db=None, sid=None):
     """Patrick's reaction, as Hermes sets it: one per person on the row (the helper's own path is in
     test_decisions_reactions.py)."""
@@ -194,7 +242,7 @@ def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
         try:
-            got = o.claim(w.ws, "one", to, 0, True)
+            got = o.claim(w.ws, "one", to, 0, True, "", None, None, TURNS)
             for r in got.get("sessions", []):
                 one_session(o, r)
             one_replies(o)
@@ -237,6 +285,9 @@ con.execute("INSERT INTO hosted_room_events VALUES('54b3ad46-3419-4adb-b60d-c79c
 con.commit()
 con.close()
 tc = f.new_token(w.ws, "connector", by="t")
+# The Bots' connector's report of each Bot's gateway (room_send.py op states): Bramble running, Rift not,
+# Sprocket starting; the other three left out, so they are not known.
+Chat(w.store).live(w.ws, tc, {"states": {"bramble": "ready", "rift": "absent", "sprocket": "starting"}})
 class Direct:
     def __init__(self):
         self.chat = Chat(Store(w.path, clock=w.clock))
@@ -247,6 +298,13 @@ class Direct:
             return 200, self.chat.page_post(w.ws, tc, json.loads(json.dumps(body)))
         except CoreError as exc:
             return exc.status, {"error": exc.reason}
+# His message to Wisp, taken by the Bots' connector, whose turn is writing its reply: leased as the claim
+# leases it (connector_effects stays off here), and each round below says what the turn is doing, as the
+# connector does while a Bot Chat turn runs (connector.Connector.say_doing).
+from datetime import timedelta
+WISP = Chat(w.store).send(w.patrick(), "wisp", "how is the gamemode build?", "key-wisp-0001")["message_id"]
+w.store.db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                   ((w.clock() + timedelta(days=1)).isoformat(), WISP))
 def bots_pages():
     from thornswood_decisions.reactions import Reactions
     conn = Connector(Direct(), None, say=lambda _: None, hermes_home=bhome)
@@ -261,10 +319,68 @@ def bots_pages():
             chat.reacted(w.ws, tc, {"bot": r["chat"], "message_id": r["message_id"], "version": r["version"],
                                     "outcome": out})
         conn.pages()
+        chat.doing(w.ws, tc, {"turns": [{"id": WISP, "state": "writing"}]})
         time.sleep(0.3)
 threading.Thread(target=bots_pages, daemon=True).start()
+def board_feed():
+    # What live_reader.py does on the VM: the Board sent again when it changes.
+    while not BOARD_NEXT.exists():
+        time.sleep(0.2)
+    nxt = [dict(d, state="thinking", tool="") if d["bot"] == "rift" else d for d in BOARD]
+    Feeds(Store(w.path, clock=w.clock)).put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:05+00:00",
+                                                              "doing": nxt})
+threading.Thread(target=board_feed, daemon=True).start()
+# Voice: the browser's fake microphone plays VOICE_WAV (a second of silence, a second of a voice-like hum,
+# three of silence, over and over), and the voice worker's Whisper is a stand-in that writes every recording
+# down as VOICE_WORDS. When Bramble's Bot Chat gets those words, or the words after "Hey Hermes", Bramble
+# answers in its state.db, for voice chat to read aloud.
+import math, struct, wave
+from thornswood_decisions.voice_worker import Worker
+VOICE_WORDS = "Hey Hermes, what is on the board?"
+VOICE_REPLY = "Two Bots are working on the board."
+vdir = Path(tempfile.mkdtemp())
+VOICE_WAV = vdir / "speech.wav"
+with wave.open(str(VOICE_WAV), "wb") as wav:
+    wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+    frames = []
+    for i in range(16000 * 5):
+        t = i / 16000
+        if 1 <= t < 2:
+            env = 0.5 * (1 - math.cos(2 * math.pi * 4 * (t - 1)))
+            v = env * 0.3 * sum(math.sin(2 * math.pi * 150 * k * t) / k for k in range(1, 9))
+        else:
+            v = 0.0
+        frames.append(struct.pack("<h", int(max(-1, min(1, v)) * 32767)))
+    wav.writeframes(b"".join(frames))
+voice_worker = Worker(lambda path: {"success": True, "transcript": VOICE_WORDS}, scratch=vdir / "scratch",
+                      whisper=lambda: "faster-whisper")
+threading.Thread(target=voice_worker.serve, args=(str(vdir / "voice.sock"),), daemon=True).start()
+def bramble_answers():
+    # As the Bots' connector does it: the message taken, its turn run (Bramble's answer in its state.db),
+    # and the result told to the core, which reads the Bot Chat's newest page again for it.
+    store = Store(w.path, clock=w.clock)
+    while True:
+        heard = store.db.execute("SELECT id FROM chat_messages WHERE target = 'bramble' AND text IN (?, ?) "
+                                 "AND status = 'queued'", (VOICE_WORDS, "what is on the board?")).fetchone()
+        if heard:
+            with store.tx() as db:
+                db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                           ((w.clock() + timedelta(minutes=5)).isoformat(), heard["id"]))
+            time.sleep(1)
+            c = sqlite3.connect(bhome / "profiles" / "bramble" / "state.db")
+            c.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'assistant', ?, ?)",
+                      (VOICE_REPLY, time.time()))
+            c.commit()
+            c.close()
+            Chat(store).result(w.ws, tc, heard["id"], "confirmed")
+            return
+        time.sleep(0.2)
+threading.Thread(target=bramble_answers, daemon=True).start()
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
+api.voice_socket = str(vdir / "voice.sock")
 srv = make_server(api, "127.0.0.1", port)
-print(json.dumps({"code": code, "card": card["id"], "high": high["id"], "third": third["id"]}), flush=True)
+print(json.dumps({"code": code, "card": card["id"], "high": high["id"], "third": third["id"],
+                  "board_next": str(BOARD_NEXT), "voice_wav": str(VOICE_WAV), "voice_words": VOICE_WORDS,
+                  "voice_reply": VOICE_REPLY}), flush=True)
 srv.serve_forever()

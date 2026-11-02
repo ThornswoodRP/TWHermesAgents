@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import subprocess
 import tempfile
 import urllib.parse
@@ -44,6 +45,7 @@ class FakeGitHub:
         self.repo_labels: dict[tuple[str, str], dict] = {}   # (repo, lower-case name) -> label
         self.calls: list[tuple[str, str, dict | None]] = []
         self.tokens: list[dict] = []
+        self.token_permissions: dict[str, dict] = {}   # token -> the permissions it was minted with
         self.lose_answer: set[str] = set()   # "METHOD path" whose answer is lost after the write
         self.refuse: dict[str, tuple[int, str]] = {}
         self.merge_queues: set[tuple[str, str]] = set()   # (repo, branch) with a merge queue
@@ -123,13 +125,34 @@ class FakeGitHub:
         if path.startswith("/app/installations/"):
             assert headers["Authorization"].startswith("Bearer ")
             self.tokens.append({"installation": path.split("/")[3], **body})
+            self.token_permissions[f"tok-{len(self.tokens)}"] = dict(body.get("permissions") or {})
             return Response(201, {"token": f"tok-{len(self.tokens)}", "expires_at": "x"}, {})
         assert headers["Authorization"].startswith("token tok-"), headers
+        refused = self._pr_write_refused(method, path, headers["Authorization"][len("token "):])
+        if refused:
+            return refused
         resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
         if key in self.lose_answer:
             self.lose_answer.discard(key)
             raise Lost(f"connection reset after {key}")
         return resp
+
+    def _pr_write_refused(self, method: str, path: str, token: str) -> Response | None:
+        """GitHub's rule for a label or a comment on a pull request through the
+        issues API: the token needs pull_requests write, and issues write alone
+        is answered 403 (measured with Actions tokens on Thornswood-Ops #220,
+        2 Nov 2026: issues write labelled an issue, 200, and was refused on a
+        pull request, 403, for a label and a comment alike; pull_requests write
+        labelled the pull request, 200)."""
+        m = re.match(r"^/repos/([^/]+/[^/]+)/issues/(\d+)/(labels|comments)(/|$)", path)
+        if method not in ("POST", "DELETE", "PUT") or not m:
+            return None
+        issue = self.issues.get((m.group(1), int(m.group(2))))
+        if not issue or not issue.get("pull_request"):
+            return None
+        if self.token_permissions.get(token, {}).get("pull_requests") != "write":
+            return Response(403, {"message": "Resource not accessible by integration"}, {})
+        return None
 
     def _graphql(self, body) -> Response:
         """The GraphQL shapes tw-git sends: the queue state, the enqueue and auto-merge."""

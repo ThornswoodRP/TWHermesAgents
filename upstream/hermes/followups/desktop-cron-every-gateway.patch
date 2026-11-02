@@ -1,0 +1,331 @@
+From 3ff3b39275835817dea09b25043f7f275b1a8db2 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:50:47 +0000
+Subject: [PATCH] refactor(desktop): main.ts stops growing; the cron union's
+ request handling lives in cron-job-union.ts
+
+main.ts is over the 2000-line target and may only shrink. The all-gateways
+job list's request handling (front answer, pooled sources beside the
+connection, the front's install_id, the merge) moves into cron-job-union.ts
+as answerWithEveryGatewaysCronJobs, with tests, and main.ts only wires it.
+To offset the wiring, reusedPrimarySshDescriptor moves unchanged into
+registry-session-sources.ts (main.ts passes it the primary's pending
+descriptor), and the three reads of the pooled sources beside a connection
+share pooledRegistrySourcesBeside. Behaviour is unchanged.
+---
+ apps/desktop/electron/cron-job-union.test.ts  | 62 +++++++++++++-
+ apps/desktop/electron/cron-job-union.ts       | 31 +++++++
+ apps/desktop/electron/main.ts                 | 82 +++++--------------
+ .../electron/registry-session-sources.ts      | 26 ++++++
+ 4 files changed, 138 insertions(+), 63 deletions(-)
+
+diff --git a/apps/desktop/electron/cron-job-union.test.ts b/apps/desktop/electron/cron-job-union.test.ts
+index 5ef7466adf..7035b75e4f 100644
+--- a/apps/desktop/electron/cron-job-union.test.ts
++++ b/apps/desktop/electron/cron-job-union.test.ts
+@@ -9,7 +9,13 @@ import assert from 'node:assert/strict'
+ 
+ import { test } from 'vitest'
+ 
+-import { type CronUnionSource, isAllProfilesCronListRequest, mergeRegistryCronJobs, otherCronSources } from './cron-job-union'
++import {
++  answerWithEveryGatewaysCronJobs,
++  type CronUnionSource,
++  isAllProfilesCronListRequest,
++  mergeRegistryCronJobs,
++  otherCronSources
++} from './cron-job-union'
+ 
+ const source = (connectionId: string, backendId?: string, descriptors = [connectionId]): CronUnionSource => ({
+   backendId,
+@@ -143,3 +149,57 @@ test('each job is listed once per (connection, profile, id); "unknown" ids are n
+     { connection_id: 'bots', id: 'unknown' }
+   ])
+ })
++
++function unionDeps(front: unknown, sources: CronUnionSource[], answers: Record<string, unknown>) {
++  const reads = { pooled: 0, primary: 0 }
++  const { calls, getJson } = jsonFrom(answers)
++
++  const deps = {
++    front: async () => front,
++    registryConnectionId: (request: any) => request?.connectionId,
++    pooledSources: async () => {
++      reads.pooled += 1
++
++      return sources
++    },
++    primaryBackendId: async () => {
++      reads.primary += 1
++
++      return 'one'
++    },
++    getJson
++  }
++
++  return { calls, deps, reads }
++}
++
++test('any other request gets the front answer and reads no other gateway', async () => {
++  const { calls, deps, reads } = unionDeps({ ok: true }, [source('bots', 'vm')], {})
++
++  assert.deepEqual(await answerWithEveryGatewaysCronJobs({ method: 'GET', path: '/api/cron/jobs/x' }, deps), { ok: true })
++  assert.deepEqual(reads, { pooled: 0, primary: 0 })
++  assert.equal(calls.length, 0)
++})
++
++test("the unpinned front skips the gateway that is the primary's own backend", async () => {
++  const { deps, reads } = unionDeps([{ id: 'mine' }], [source('local', 'one'), source('bots', 'vm')], {
++    bots: [{ id: 'review', profile: 'bramble' }],
++    local: [{ id: 'mine' }]
++  })
++
++  const merged = await answerWithEveryGatewaysCronJobs({ path: '/api/cron/jobs?profile=all' }, deps)
++
++  assert.deepEqual(merged, [{ id: 'mine' }, { connection_id: 'bots', id: 'review', profile: 'bramble' }])
++  assert.deepEqual(reads, { pooled: 1, primary: 1 })
++})
++
++test("a pinned front is matched by its own source's install_id", async () => {
++  const { deps, reads } = unionDeps([{ id: 'review', profile: 'bramble' }], [source('bots', 'vm'), source('same', 'vm')], {
++    same: [{ id: 'review', profile: 'bramble' }]
++  })
++
++  const merged = await answerWithEveryGatewaysCronJobs({ connectionId: 'bots', path: '/api/cron/jobs' }, deps)
++
++  assert.deepEqual(merged, [{ id: 'review', profile: 'bramble' }])
++  assert.equal(reads.primary, 0)
++})
+diff --git a/apps/desktop/electron/cron-job-union.ts b/apps/desktop/electron/cron-job-union.ts
+index 5e2fc76fd2..1cc4869117 100644
+--- a/apps/desktop/electron/cron-job-union.ts
++++ b/apps/desktop/electron/cron-job-union.ts
+@@ -167,3 +167,34 @@ export async function mergeRegistryCronJobs(
+ 
+   return merged
+ }
++
++export interface CronUnionDeps {
++  /** The connection in front's own answer to the request. */
++  front: (request: any) => Promise<unknown>
++  registryConnectionId: (request: any) => null | string | undefined
++  /** The pooled registry gateways read beside that connection; never dials. */
++  pooledSources: (registryConnectionId: null | string | undefined) => Promise<CronUnionSource[]>
++  /** The unpinned primary's install_id, when known. */
++  primaryBackendId: () => Promise<null | string | undefined>
++  getJson: GetJson
++}
++
++/** Answer a Hermes API request as the front connection does; the all-profiles
++ *  job list also gets every connected gateway's jobs, each tagged with its
++ *  connection. */
++export async function answerWithEveryGatewaysCronJobs(request: any, deps: CronUnionDeps): Promise<unknown> {
++  const own = await deps.front(request)
++
++  if (!isAllProfilesCronListRequest(request?.method, request?.path)) {
++    return own
++  }
++
++  const connectionId = deps.registryConnectionId(request) || null
++  const sources = await deps.pooledSources(connectionId)
++
++  const backendId = connectionId
++    ? sources.find(source => source.connectionId === connectionId)?.backendId
++    : await deps.primaryBackendId()
++
++  return mergeRegistryCronJobs(own, sources, deps.getJson, { backendId, connectionId })
++}
+diff --git a/apps/desktop/electron/main.ts b/apps/desktop/electron/main.ts
+index 3a309e19f5..30d9c8428d 100644
+--- a/apps/desktop/electron/main.ts
++++ b/apps/desktop/electron/main.ts
+@@ -194,7 +194,6 @@ import {
+   reconcileAppliedGlobalConnection,
+   reconcileRegistryDrift,
+   registryDialConnectionId,
+-  registrySourceOwnsPrimaryBackend,
+   rememberSshEnumeration,
+   removeConnection,
+   type ResolvedConnectionDescriptor,
+@@ -215,7 +214,7 @@ import type { RegistryConnection } from './connection-registry'
+ import type { RosterProfileMetadata } from './connection-registry'
+ import { liveWindowState, overlayWindowState } from './connection-window-state'
+ import { describeCrashReason, installCrashForensics } from './crash-forensics'
+-import { isAllProfilesCronListRequest, mergeRegistryCronJobs } from './cron-job-union'
++import { answerWithEveryGatewaysCronJobs } from './cron-job-union'
+ import { adoptServedDashboardToken } from './dashboard-token'
+ import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
+ import { registerDeepLinkProtocol as registerDeepLinkProtocolWith } from './deep-link-protocol'
+@@ -513,7 +512,7 @@ import {
+   probeCachedConnectionInstallId,
+   rememberConnectionInstallId
+ } from './registry-backend-identity'
+-import { collectRegistrySessionSources } from './registry-session-sources'
++import { collectRegistrySessionSources, reusedPrimarySshDescriptor } from './registry-session-sources'
+ import { releaseHolderRetry } from './release-holder-consent'
+ import * as remoteLifecycle from './remote-lifecycle'
+ import {
+@@ -15635,9 +15634,7 @@ async function interceptSessionRequestForRemote(request, registryConnectionId =
+   if (method === 'GET' && pathname === '/api/profiles/sessions') {
+     const remoteProfiles = configuredRemoteProfileNames()
+ 
+-    const registrySources = await pooledRegistrySessionSources(
+-      shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
+-    )
++    const registrySources = await pooledRegistrySourcesBeside(registryConnectionId)
+ 
+     if (remoteProfiles.length === 0 && registrySources.length === 0) {
+       return undefined // no remote profiles and no connected registry gateways → local fast path
+@@ -15671,9 +15668,7 @@ async function interceptSessionRequestForRemote(request, registryConnectionId =
+   if (method === 'GET' && pathname === '/api/profiles/sessions/sidebar') {
+     const remoteProfiles = configuredRemoteProfileNames()
+ 
+-    const registrySources = await pooledRegistrySessionSources(
+-      shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
+-    )
++    const registrySources = await pooledRegistrySourcesBeside(registryConnectionId)
+ 
+     if (remoteProfiles.length === 0 && registrySources.length === 0) {
+       return undefined // local fast path → batched endpoint's single DB open
+@@ -15915,6 +15910,11 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles, registry
+   return composeUnifiedSessionResponse(base, merged, offset, limit, total, profileTotals, remoteErrors, { archivedOnly })
+ }
+ 
++// The pooled gateways an all-gateway list reads beside `registryConnectionId`.
++function pooledRegistrySourcesBeside(registryConnectionId) {
++  return pooledRegistrySessionSources(shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive()))
++}
++
+ // Every CONNECTED registry gateway as a session source (see the module); never dials.
+ async function pooledRegistrySessionSources(includeLocal = false): Promise<RegistrySessionSource[]> {
+   const registry = readDesktopConnectionsRegistry()
+@@ -15924,7 +15924,8 @@ async function pooledRegistrySessionSources(includeLocal = false): Promise<Regis
+       connections: registry.connections,
+       pool: backendPool.entries(),
+       scopePrefix: backendScopePrefix,
+-      reusedPrimary: connectionId => reusedPrimarySshDescriptor(registry, connectionId),
++      reusedPrimary: connectionId =>
++        reusedPrimarySshDescriptor(registry, connectionId, connectionId === registry.primary ? backendConnectionState.getPromise() : null),
+       installId: (connectionId, descriptor) => boundedInstallId(probeConnectionInstallId(connectionId, descriptor)),
+       sharedProfiles: sharedSshProfiles
+     },
+@@ -15932,31 +15933,6 @@ async function pooledRegistrySessionSources(includeLocal = false): Promise<Regis
+   )
+ }
+ 
+-// The running primary descriptor when it IS this registry SSH connection: its
+-// registry routes reuse it rather than pooling a backend. Never starts one.
+-async function reusedPrimarySshDescriptor(registry, connectionId: string) {
+-  const pending = connectionId === registry.primary ? backendConnectionState.getPromise() : null
+-
+-  if (!pending) {
+-    return null
+-  }
+-
+-  try {
+-    const descriptor = await Promise.race([
+-      pending,
+-      new Promise((_, reject) => setTimeout(() => reject(new Error('pending')), 2_000))
+-    ])
+-
+-    return descriptor?.mode === 'remote' &&
+-      descriptor.remoteKind === 'ssh' &&
+-      registrySourceOwnsPrimaryBackend(registry, connectionId, descriptor)
+-      ? descriptor
+-      : null
+-  } catch {
+-    return null
+-  }
+-}
+-
+ // RT-42: install_id of the backend the primary session aggregate reads (see the module).
+ const primaryBackendInstallId = createPrimaryInstallIdResolver({
+   resolve: () => ensureBackend(null, { passive: true }),
+@@ -16018,34 +15994,16 @@ async function teardownConnectionScopedProfileBackend(connectionId, profile) {
+   ])
+ }
+ 
+-// The Scheduled jobs list across every connected gateway: the front
+-// connection's own answer, then each other CONNECTED registry gateway's jobs,
+-// each tagged with the connection that serves it so its per-job calls route
+-// there (cron-job-union.ts). Before this the list asked only the connection in
+-// front, so a Bot's jobs on an SSH host never showed while you read a chat on
+-// another connection. Same never-dial sources as the unified Sessions list.
++// The front connection's answer; the all-profiles job list also gets every
++// connected gateway's jobs (cron-job-union.ts).
+ async function handleHermesApiRequest(request) {
+-  if (!isAllProfilesCronListRequest(request?.method, request?.path)) {
+-    return handleFrontHermesApiRequest(request)
+-  }
+-
+-  const own = await handleFrontHermesApiRequest(request)
+-  const registryConnectionId = apiRequestRegistryConnectionId(request)
+-
+-  const sources = await pooledRegistrySessionSources(
+-    shouldIncludeLocalRegistrySessionSource(registryConnectionId, !globalRemoteActive())
+-  )
+-
+-  const frontBackendId = registryConnectionId
+-    ? sources.find(source => source.connectionId === registryConnectionId)?.backendId
+-    : await primaryBackendInstallId()
+-
+-  return mergeRegistryCronJobs(
+-    own,
+-    sources,
+-    (descriptor, path) => getJsonForBackend(descriptor, path, { timeoutMs: 10_000 }),
+-    { backendId: frontBackendId, connectionId: registryConnectionId || null }
+-  )
++  return answerWithEveryGatewaysCronJobs(request, {
++    front: handleFrontHermesApiRequest,
++    registryConnectionId: apiRequestRegistryConnectionId,
++    pooledSources: pooledRegistrySourcesBeside,
++    primaryBackendId: primaryBackendInstallId,
++    getJson: (descriptor, path) => getJsonForBackend(descriptor, path, { timeoutMs: 10_000 })
++  })
+ }
+ 
+ async function handleFrontHermesApiRequest(request) {
+diff --git a/apps/desktop/electron/registry-session-sources.ts b/apps/desktop/electron/registry-session-sources.ts
+index a9289df8f6..6521993c26 100644
+--- a/apps/desktop/electron/registry-session-sources.ts
++++ b/apps/desktop/electron/registry-session-sources.ts
+@@ -17,6 +17,7 @@
+  * in so forced-local backends remain visible when the legacy primary is remote.
+  */
+ 
++import { registrySourceOwnsPrimaryBackend } from './connection-registry'
+ import type { RegistrySessionSource } from './profile-session-routing'
+ 
+ type SessionBackend = RegistrySessionSource['backends'][number]
+@@ -83,3 +84,28 @@ export async function collectRegistrySessionSources(
+ 
+   return sources
+ }
++
++/** The running primary descriptor when it IS this registry SSH connection: its
++ *  registry routes reuse it rather than pooling a backend. Never starts one.
++ *  `pending` is the primary's descriptor promise when `connectionId` is the
++ *  registry primary, else null. Moved here from main.ts (code-health size ratchet). */
++export async function reusedPrimarySshDescriptor(registry, connectionId: string, pending: null | Promise<any>) {
++  if (!pending) {
++    return null
++  }
++
++  try {
++    const descriptor = await Promise.race([
++      pending,
++      new Promise((_, reject) => setTimeout(() => reject(new Error('pending')), 2_000))
++    ])
++
++    return descriptor?.mode === 'remote' &&
++      descriptor.remoteKind === 'ssh' &&
++      registrySourceOwnsPrimaryBackend(registry, connectionId, descriptor)
++      ? descriptor
++      : null
++  } catch {
++    return null
++  }
++}
+-- 
+2.43.0
+

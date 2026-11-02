@@ -1,0 +1,20 @@
+#!/usr/bin/python3 -I
+# Dictation for the phone app: starts voice_worker.py inside Hermes's own runtime
+# (its real Python, with Hermes's source on the path), the way the connector starts
+# its helper, so the words come from Hermes's own local Whisper. Standard library
+# only here; this file only finds Hermes's runtime and hands over to it.
+import argparse
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_decisions.own_connector import helper_command  # noqa: E402
+
+ap = argparse.ArgumentParser(prog="tw-decide-voice")
+ap.add_argument("--hermes", required=True, help="the hermes command")
+ap.add_argument("--socket", default="/run/tw/decide-voice/voice.sock")
+ap.add_argument("--allow-user", default="tw-decide")
+a = ap.parse_args()
+worker = Path("/opt/thornswood-hermes/current/thornswood_decisions/voice_worker.py")
+cmd = helper_command(a.hermes, worker)
+os.execv(cmd[0], [*cmd, "--socket", a.socket, "--allow-user", a.allow_user])

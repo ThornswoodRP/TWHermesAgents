@@ -500,6 +500,30 @@ class PullRequestsAndIssues(unittest.TestCase):
         with self.assertRaises(Refused):
             w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 3151, "body": "Mine now."})
 
+    def test_a_comment_on_a_pull_request_is_sent_with_pull_requests_write(self):
+        # GitHub answers 403 to a comment on a pull request from a token with
+        # issues write alone (Thornswood-Ops #220, 2 Nov 2026); the stand-in
+        # does the same, so this fails with the issues-only token.
+        w = World()
+        w.green_pr(repo=APP)
+        out = w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "body": "Pushed the fix."})
+        self.assertTrue(out["done"], out)
+        self.assertEqual(w.fake.tokens[-1]["permissions"], {"pull_requests": "write", "metadata": "read"})
+
+    def test_a_label_on_a_pull_request_is_sent_with_pull_requests_write(self):
+        w = World()
+        w.green_pr(repo=APP)
+        out = w.git.label("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 42,
+                                     "label": "claimed: Sprocket", "action": "add"})
+        self.assertTrue(out["done"], out)
+        self.assertEqual(w.fake.tokens[-1]["permissions"], {"pull_requests": "write", "metadata": "read"})
+
+    def test_a_comment_on_an_issue_keeps_issues_write(self):
+        w = World()
+        w.fake.add_issue(APP, 3150, labels=["claimed: Sprocket"])
+        w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 3150, "body": "Fixed."})
+        self.assertEqual(w.fake.tokens[-1]["permissions"], {"issues": "write", "metadata": "read"})
+
     def test_hands_off_issues_get_no_comment(self):
         w = World()
         w.fake.add_issue(APP, 3152, author="WiccanDjinn", assignees=["WiccanDjinn"], labels=["claimed: Sprocket"])
@@ -644,7 +668,7 @@ class Runs(unittest.TestCase):
         # Thornswood found no such workflow.
         w = World()
         self.lists(w)
-        out = w.git.start_run("hermes", {"bot": "bramble", "task": "logs", "workflow": "box-run.yml", "ref": "main",
+        out = w.git.start_run("hermes", {"bot": "bramble", "task": "logs", "workflow": "box-run.yml",
                                          "inputs": {"line": "Get-Logs -Dev -Lines 2000"}})
         self.assertTrue(out["done"], out)
         self.assertEqual(out["commit"], w.fake.ref(APP, "main"))
@@ -654,11 +678,29 @@ class Runs(unittest.TestCase):
         self.assertEqual(w.fake.writes("POST", f"/repos/{APP}/actions"), [], "nothing was dispatched to Thornswood")
         self.assertEqual(len(w.fake.writes("POST", f"/repos/{OPS}/actions/workflows/box-run.yml/dispatches")), 1)
 
+    def test_a_run_started_with_only_what_the_tool_takes_starts_on_main(self):
+        # The cause of every run being refused on 2 Nov ("runs start on main
+        # only, not "): the broker read a ref the tw_git tool has no field
+        # for, so a Bot could never send one. A call is only what the
+        # schema lets a Bot send, and the run starts on main.
+        from thornswood_guard.brokers import TW_GIT_SCHEMA
+        allowed = set(TW_GIT_SCHEMA["parameters"]["properties"])
+        self.assertNotIn("ref", allowed)
+        args = {"op": "start_run", "bot": "bramble", "task": "5334", "workflow": "box-run.yml",
+                "inputs": {"line": "Get-Logs -Dev -Lines 2000"}}
+        self.assertLessEqual(set(args) - {"bot"}, allowed)
+        w = World()
+        self.lists(w)
+        out = w.git.start_run("hermes", {k: v for k, v in args.items() if k != "op"})
+        self.assertTrue(out["done"], out)
+        sent = w.fake.writes("POST", f"/repos/{OPS}/actions/workflows/box-run.yml/dispatches")
+        self.assertEqual([x[2]["ref"] for x in sent], ["main"])
+
     def test_box_run_still_refuses_a_line_outside_thornswoods_verbs(self):
         w = World()
         self.lists(w)
         with self.assertRaises(Refused) as e:
-            w.git.start_run("hermes", {"bot": "bramble", "task": "t", "workflow": "box-run.yml", "ref": "main",
+            w.git.start_run("hermes", {"bot": "bramble", "task": "t", "workflow": "box-run.yml",
                                        "inputs": {"line": "Set-Anything -Now"}})
         self.assertIn("gate would refuse", str(e.exception))
         self.assertEqual(w.fake.runs, [])
@@ -667,7 +709,7 @@ class Runs(unittest.TestCase):
         w = World()
         self.lists(w)
         main = w.fake.ref(APP, "main")
-        out = w.git.start_run("hermes", {"bot": "bramble", "task": "tag", "workflow": "release-tag.yml", "ref": "main",
+        out = w.git.start_run("hermes", {"bot": "bramble", "task": "tag", "workflow": "release-tag.yml",
                                          "inputs": {"tag": "v1.2.3", "commit": main}})
         self.assertTrue(out["done"], out)
         self.assertNotIn("repo", out)
@@ -714,7 +756,7 @@ class OneExecutor(unittest.TestCase):
             "label": {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "label": "claimed: Sprocket"},
             "claim_labels": {"bot": "bramble", "repo": APP, "task": "t"},
             "merge": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "sha": sha},
-            "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml", "ref": "main",
+            "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml",
                           "commit": main, "inputs": {}},
         }
         self.assertEqual(sorted(asks), sorted(GitService.WRITES))

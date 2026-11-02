@@ -1,13 +1,16 @@
 """The phone's Board, Rooms and Bot Chat views: read-only snapshots the Bots' Hermes sends in.
 
-The work feed carries Hermes's Kanban tasks and, since the Bots keep their work
-on GitHub, `items`: each issue a Bot has claimed and each pull request from a
-Bot's branch, with its stage and checks. Hermes keeps the Kanban and the rooms; the core keeps no copy of either beyond
-the latest snapshot of each, shown with the time it was read ("as of"). The
+The work feed is the live Board (Patrick, 2 Nov: "only what each is currently
+doing"): `doing`, one row for each turn a Bot is running now, with the Bot, the
+session's title, thinking or the tool it runs, and since when. A Bot with no
+turn running has no row, and nothing that ended is kept. It comes from
+`live_reader.py` every 2 seconds while it changes. Hermes keeps the rooms; the
+core keeps no copy of any feed beyond its latest snapshot. The
 room feed carries every bound room at once, `{source_time, rooms: [{room_id,
 events}]}`; the first shape, one room as `{source_time, room_id, events}`, is
-still taken and kept as a list of one. The snapshot comes from `feed_reader.py`, which runs as the Bots'
-`hermes` user with a feed token. That token can do one thing: replace one
+still taken and kept as a list of one. The room and Bot Chat snapshots come from `feed_reader.py`, which runs as
+the Bots' `hermes` user with a feed token, and the work feed from
+`live_reader.py`, the same way. That token can do one thing: replace one
 snapshot. It cannot read a card, answer, or reach anything else, and what it
 sends is shown as text, never as markup. Because any Bot could read that token,
 these views are what the Bots' Hermes reports, not authority: a decision is
@@ -31,22 +34,17 @@ from .store import CoreError, Store, canonical, parse, sha256_hex
 NAMES = ("work", "room", "bots")
 TOKENS = NAMES + ("connector", "push", "own-me", "own-one")
 MAX_FEED_BYTES = 512 * 1024
-MAX_TASKS = 500
 MAX_EVENTS = 200
 MAX_ROOMS = 8
 MAX_BOT_MESSAGES = 40
-TASK_FIELDS = {"id": 64, "title": 200, "assignee": 64, "status": 32, "updated_at": 40}
 EVENT_FIELDS = {"event_id": 128, "kind": 32, "actor": 80, "text": 2000, "at": 40}
 BOT_MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
 ROLES = ("user", "assistant")
-# The Bots' work on GitHub (feed_reader.github_work): one item per claimed issue
-# or Bot pull request. The repo is kept only as owner/name, so the app's links
-# can only ever go to github.com.
-MAX_ITEMS = 200
-ITEM_FIELDS = {"title": 200, "bot": 64, "pr_title": 200, "checks_line": 80, "updated_at": 40}
-STAGES = ("claimed", "pr_open", "pr_draft", "merged", "closed")
-CHECKS = ("", "none", "running", "passed", "failing")
-REPO = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
+# The live Board (live_reader.py): one row for each turn running now.
+MAX_DOING = 60
+DOING_FIELDS = {"bot": 64, "title": 200, "since": 40, "platform": 32}
+LIVE_FOR = 90
+TOOL = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 
 def _text(value, limit: int) -> str:
@@ -70,16 +68,18 @@ def clean(name: str, body: dict) -> dict:
         raise CoreError(400, "bad_feed", "a feed is a JSON object")
     out = {"source_time": _time(body.get("source_time"))}
     if name == "work":
-        tasks = body.get("tasks")
-        if not isinstance(tasks, list) or len(tasks) > MAX_TASKS:
-            raise CoreError(400, "bad_feed", f"tasks is a list of at most {MAX_TASKS}")
-        out["tasks"] = [{k: _text(t.get(k) if isinstance(t, dict) else None, n) for k, n in TASK_FIELDS.items()}
-                        for t in tasks]
-        for t, raw in zip(out["tasks"], tasks):
-            p = raw.get("priority") if isinstance(raw, dict) else None
-            t["priority"] = p if isinstance(p, int) and not isinstance(p, bool) and -1000 <= p <= 1000 else 0
-        if "items" in body:
-            out["items"] = _items(body.get("items"))
+        doing = body.get("doing")
+        if not isinstance(doing, list) or len(doing) > MAX_DOING:
+            raise CoreError(400, "bad_feed", f"doing is a list of at most {MAX_DOING}")
+        out["doing"] = []
+        for d in doing:
+            if not isinstance(d, dict):
+                raise CoreError(400, "bad_feed", "each row of the Board is an object")
+            row = {k: _text(d.get(k), n) for k, n in DOING_FIELDS.items()}
+            tool = d.get("tool")
+            row["tool"] = tool if isinstance(tool, str) and TOOL.fullmatch(tool) else ""
+            row["state"] = "tool" if row["tool"] and d.get("state") == "tool" else "thinking"
+            out["doing"].append(row)
     elif name == "bots":
         bots = body.get("bots")
         if not isinstance(bots, list) or len(bots) > 16:
@@ -108,32 +108,6 @@ def clean(name: str, body: dict) -> dict:
         if len(set(ids)) != len(ids):
             raise CoreError(400, "bad_feed", "the feed names a room twice")
     return out
-
-
-def _number(value) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10 ** 9 else 0
-
-
-def _repo(value) -> str:
-    return value if isinstance(value, str) and REPO.fullmatch(value) and ".." not in value else ""
-
-
-def _items(items) -> list[dict]:
-    if not isinstance(items, list) or len(items) > MAX_ITEMS:
-        raise CoreError(400, "bad_feed", f"items is a list of at most {MAX_ITEMS}")
-    kept = []
-    for i in items:
-        if not isinstance(i, dict):
-            raise CoreError(400, "bad_feed", "each work item is an object")
-        row = {k: _text(i.get(k), n) for k, n in ITEM_FIELDS.items()}
-        row.update(repo=_repo(i.get("repo")), number=_number(i.get("number")), pr=_number(i.get("pr")),
-                   pr_repo=_repo(i.get("pr_repo")), auto_merge=i.get("auto_merge") is True,
-                   stage=i.get("stage") if i.get("stage") in STAGES else "claimed",
-                   checks=i.get("checks") if i.get("checks") in CHECKS else "")
-        if not row["repo"]:
-            raise CoreError(400, "bad_feed", "each work item names its repo as owner/name")
-        kept.append(row)
-    return kept
 
 
 def _room(r) -> dict:
@@ -189,11 +163,12 @@ class Feeds:
                                       (workspace_id,)).fetchall()
             if not {r["room_id"] for r in snap["rooms"]} <= {r[0] for r in bound}:
                 raise CoreError(409, "not_the_room", "the feed names a room this workspace is not bound to")
-        if name == "bots":
+        if name in ("bots", "work"):
             bound = {r[0] for r in self.s.db.execute("SELECT bot FROM bot_bindings WHERE workspace_id = ?",
                                                      (workspace_id,)).fetchall()}
-            names = [b["bot"] for b in snap["bots"]]
-            if len(set(names)) != len(names) or not set(names) <= bound:
+            names = [b["bot"] for b in snap["bots" if name == "bots" else "doing"]]
+            # A Bot has one Bot Chat, and may run several turns at once.
+            if (name == "bots" and len(set(names)) != len(names)) or not set(names) <= bound:
                 raise CoreError(409, "not_the_bots", "the feed names a Bot this workspace does not have, or one twice")
         text = canonical(snap)
         digest = sha256_hex(text)
@@ -216,4 +191,10 @@ class Feeds:
         if not row:
             return {"as_of": None, "received_at": None, name: None}
         body = json.loads(row["body"])
-        return {"as_of": row["source_time"], "received_at": row["received_at"], name: body}
+        out = {"as_of": row["source_time"], "received_at": row["received_at"], name: body}
+        if name == "work":
+            # The live Board is true only while its reader is sending: it sends at least once in each 30
+            # seconds, so a snapshot older than LIVE_FOR is not shown as what the Bots are doing now.
+            age = (parse(self.s.now()) - parse(row["received_at"])).total_seconds()
+            out["live"] = age <= LIVE_FOR
+        return out

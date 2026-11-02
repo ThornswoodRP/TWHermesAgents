@@ -67,6 +67,27 @@ class Replies(unittest.TestCase):
         for m in self.own.view(self.w.patrick(), "one", SID)["mine"]:
             self.assertEqual(pointer.sub("", m["text"]), "Yes, do that first.")
 
+    def test_a_quote_never_asks_hermes_for_a_file(self):
+        # Patrick's Hermes on One, 2 Nov: a quote that held a paste's reference attached the paste a second
+        # time, and one cut inside a reference asked for a file named 'AppData/Local/hermes/..."]'.
+        import re
+        # agent/context_references.py REFERENCE_PATTERN and _PLUGIN_REFERENCE_PATTERN at the pinned commit.
+        value = r"""(?:`[^`\n]+`|"[^"\n]+"|'[^'\n]+')"""
+        hermes = [re.compile(rf"(?<![\w/])@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>{value}(?::\d+(?:-\d+)?)?|\S+))"),
+                  re.compile(rf"(?<![\w/])@(?P<kind>[a-zA-Z][a-zA-Z0-9_-]*):(?P<value>{value}(?::\d+(?:-\d+)?)?|\S+)")]
+        quote = ("Look at @file:AppData/Local/hermes/composer-pastes/pasted_content_2026-11-02_18-42-16-109_2255e5.txt "
+                 "and @file:\"C:/a b/notes.md\", @folder:src/, @url:https://example.invalid/x, @git:3, @diff, "
+                 "@staged and @thing:x; mail a@b.example, ask @bramble.\n\n--- Attached Context ---\n\n"
+                 "📄 @file:AppData/Local/hermes/composer-pastes/pasted_content_x.txt (40 tokens)\nthe paste")
+        self.send(quote=quote, by="patrick")
+        (item,) = self.own.claim(self.w.ws, "one", self.g.tok["one"], 3, True)["items"]
+        for pattern in hermes:
+            self.assertIsNone(pattern.search(item["text"]), item["text"])
+        self.assertEqual(item["text"], '[Replying to: "Look at [pasted text] and [file: notes.md], [folder: src], '
+                         'https://example.invalid/x, [git: 3], @\u2060diff, @\u2060staged and [thing: x]; mail a@b.example, '
+                         'ask @bramble."]\n\nYes, do that first.')
+        self.refused("bad_quote", quote="--- Attached Context ---\n\n📄 @file:x.txt (1 tokens)\nx", key="reply-ctx")
+
     def test_a_plain_message_carries_no_link(self):
         self.own.send(passkey(self.w), "one", SID, None, "hello", "plain-key-0001")
         (m,) = self.own.view(self.w.patrick(), "one", SID)["mine"]

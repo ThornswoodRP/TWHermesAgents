@@ -115,7 +115,13 @@ to work the queue.
      people would notice the fix;
    - a note that cannot run keeps the reason written into it.
 5. Work the items on `ops/bramble-list.md` the same way, and take each one
-   off the list in the same Ops pull request once it is done.
+   off the list in the same Ops pull request once it is done. Done means
+   what it asks for is true on GitHub, whoever did it: a merge whose pull
+   request is already merged, a run whose result is already on its issue.
+   Check every item against GitHub each time you read the list, and take
+   the done ones off with the rest, so the list holds only what is left
+   (2 Nov 2026: Ops merges others had landed stayed on it for a day,
+   because only Bramble's own runs counted as done).
 
 ## Every time
 
