@@ -12,6 +12,20 @@ deploy/install.sh runs, as root:
               wake.secret_file, through the App's own key. The secret goes
               from root's file to GitHub and nowhere else: it is never
               printed, logged or copied by hand.
+  hook        whether the App's webhook is on at all. GitHub's API can
+              change an App's webhook but not turn one on: with Active off
+              on the App's settings page there is no webhook, and every
+              call to it answers 404, as #65's install found on 2 Nov
+              when it asked before Patrick's step. Exit 3 is that state, so
+              the install skips the wake and says the step; any other
+              answer is a fault and stops it.
+  allowed <status.json>
+              checks `tailscale status --json` before anything asks for
+              Funnel: this machine must hold the tailnet's funnel and https
+              node attributes. Without them `tailscale funnel` does not
+              refuse, it prints a link for an admin and waits for the
+              approval for as long as it takes, which held the #65 install
+              on 2 Nov; so the install asks only once both are there.
   funnel <status.json>
               checks `tailscale funnel status --json`: the wake path, and
               only it, is public on wake.funnel_port, and no other port is
@@ -66,6 +80,24 @@ def _app_call(policy: Policy, method: str, path: str, body=None, *, transport=ur
     return transport(method, f"{API}{path}", headers, data)
 
 
+HOOK_OFF = 3
+
+
+def hook_off(policy: Policy, *, transport=urllib_transport, signer=None, now=None) -> list[str]:
+    """Empty when the App has a webhook to set; the step that is missing
+    when GitHub says it has none (404). Any other answer raises."""
+    r = _app_call(policy, "GET", "/app/hook/config", transport=transport, signer=signer, now=now)
+    if r.status == 200:
+        return []
+    if r.status == 404:
+        app = policy.data["wake"]["app"]
+        return [f"{app}'s App has no webhook: on its settings page tick Webhook Active, give it the URL "
+                f"https://<this VM's tailnet name>:{policy.data['wake']['funnel_port']}{wake_path(policy)}, "
+                f"tick {' and '.join(EVENTS)} under Subscribe to events, and save; leave the secret empty, "
+                "this install sets it"]
+    raise GitHubError(r.status, _message(r.body))
+
+
 def set_hook(policy: Policy, url: str, *, transport=urllib_transport, signer=None, now=None) -> list[str]:
     """Point the App's webhook at url with the secret; the lines to print."""
     w = policy.data["wake"]
@@ -84,6 +116,24 @@ def set_hook(policy: Policy, url: str, *, transport=urllib_transport, signer=Non
         raise GitHubError(r.status, f"the App's webhook reads back as url {got.get('url')!r}, "
                                     f"content type {got.get('content_type')!r}, insecure_ssl {got.get('insecure_ssl')!r}")
     return [f"PASS {w['app']}'s App sends its webhook to {url} as JSON over checked TLS, signed with the secret in {w['secret_file']}"]
+
+
+# The node attributes `tailscale funnel` needs (tailcfg.NodeAttrFunnel and
+# tailcfg.CapabilityHTTPS), and what each one is on the tailnet's side.
+FUNNEL_ATTRS = {
+    "funnel": "the tailnet policy gives this machine no funnel node attribute "
+              "(Access controls, nodeAttrs: target this machine's tag, attr funnel)",
+    "https": "the tailnet has HTTPS certificates off (DNS page, HTTPS Certificates: Enable)",
+}
+
+
+def check_allowed(status: dict) -> list[str]:
+    """Problems with `tailscale status --json`'s Self for Funnel; empty when
+    this machine holds every node attribute Funnel needs. Reads CapMap, and
+    the older Capabilities list where a client still reports that."""
+    me = status.get("Self") or {}
+    held = set((me.get("CapMap") or {}).keys()) | set(me.get("Capabilities") or [])
+    return [why for attr, why in FUNNEL_ATTRS.items() if attr not in held]
 
 
 def check_funnel(policy: Policy, status: dict) -> list[str]:
@@ -131,6 +181,20 @@ def main(argv: list[str]) -> int:
     try:
         if argv[:1] == ["set"] and len(argv) == 2:
             lines = set_hook(policy, argv[1])
+        elif argv == ["hook"]:
+            problems = hook_off(policy)
+            for p in problems:
+                print(f"NOT YET: {p}")
+            if problems:
+                return HOOK_OFF
+            lines = ["PASS the App's webhook is on"]
+        elif argv[:1] == ["allowed"] and len(argv) == 2:
+            problems = check_allowed(json.loads(Path(argv[1]).read_text(encoding="utf-8") or "{}"))
+            for p in problems:
+                print(f"NOT YET: {p}")
+            if problems:
+                return 1
+            lines = ["PASS this machine holds the funnel and https node attributes"]
         elif argv[:1] == ["funnel"] and len(argv) == 2:
             problems = check_funnel(policy, json.loads(Path(argv[1]).read_text(encoding="utf-8") or "{}"))
             for p in problems:
@@ -141,7 +205,7 @@ def main(argv: list[str]) -> int:
         elif argv == ["check"]:
             lines = check_deliveries(policy)
         else:
-            print("usage: app_hook set <url> | funnel <status.json> | check")
+            print("usage: app_hook set <url> | hook | allowed <status.json> | funnel <status.json> | check")
             return 2
     except (GitHubError, ValueError, OSError) as e:
         print(f"STOP: {e}")

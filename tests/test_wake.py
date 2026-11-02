@@ -172,6 +172,18 @@ class TheAppHook(unittest.TestCase):
         with self.assertRaises(GitHubError):
             app_hook.set_hook(self.p, URL, transport=FakeGitHub(status=403), signer=signer)
 
+    def test_an_app_with_no_webhook_names_the_step(self):
+        off = app_hook.hook_off(self.p, transport=lambda m, u, h, d: Response(404, {"message": "Not Found"}, {}),
+                                signer=signer)
+        self.assertEqual(len(off), 1)
+        self.assertIn("tick Webhook Active", off[0])
+        self.assertIn("/p/bramble/webhooks/github-checks", off[0])
+        self.assertIn("check_suite and pull_request", off[0])
+        self.assertEqual(app_hook.hook_off(self.p, transport=FakeGitHub(readback={"url": URL}), signer=signer), [])
+        with self.assertRaises(GitHubError):
+            app_hook.hook_off(self.p, transport=lambda m, u, h, d: Response(401, {"message": "Bad credentials"}, {}),
+                              signer=signer)
+
     def test_the_secret_file_must_hold_one_line(self):
         for text in ("", "WEBHOOK_SECRET=short\n", f"WEBHOOK_SECRET={SECRET}\nOTHER=1\n", f"export WEBHOOK_SECRET={SECRET}\n"):
             self.secret_file.write_text(text, encoding="utf-8")
@@ -264,7 +276,7 @@ class TheInstall(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("must hold one WEBHOOK_SECRET=<64 hex characters> line", r.stdout)
 
-    def _funnel(self, refuse: bool, status: dict):
+    def _funnel(self, refuse: bool, status: dict, caps=("funnel", "https"), hang: bool = False, hook_rc: int = 0):
         d = Path(tempfile.mkdtemp())
         (d / "bin").mkdir()
         (d / "status.json").write_text(json.dumps(status))
@@ -275,18 +287,22 @@ if [[ "$1 $2" == "funnel status" ]]; then
   if [[ -f {d}/on ]]; then cat {d}/status.json; else echo '{{}}'; fi; exit 0
 fi
 if [[ "$1" == funnel ]]; then
-  {"echo 'Funnel not available; \"funnel\" node attribute not set.'; exit 1" if refuse else f"touch {d}/on; exit 0"}
+  {"exec sleep 600" if hang else "echo 'Funnel not available; \"funnel\" node attribute not set.'; exit 1" if refuse else f"touch {d}/on; exit 0"}
 fi
-if [[ "$1" == status ]]; then echo '{{"Self": {{"DNSName": "{HOST}."}}}}'; exit 0; fi
+if [[ "$1" == status ]]; then echo '{json.dumps({"Self": {"DNSName": HOST + ".", "CapMap": {c: None for c in caps}}})}'; exit 0; fi
 exit 3
 """)
         (d / "bin" / "tailscale").chmod(0o755)
         block = _block("# 8b. Bramble's wake", "# 9. The gateway, when asked.")
         real_hook = block[block.index("hook_py() {"):block.index("\n", block.index("hook_py() {"))]
         stub = ('hook_py() { echo "hook_py $1 ${2:-}" >> ' + str(log) + '\n'
-                '  if [[ $1 == funnel ]]; then ' + real_hook.replace("hook_py() {", "(").rstrip("}").rstrip() + ' ); fi; }')
+                f'  if [[ $1 == hook ]]; then echo "NOT YET: the App has no webhook"; return {hook_rc}; fi\n'
+                '  if [[ $1 == funnel || $1 == allowed ]]; then ' + real_hook.replace("hook_py() {", "(").rstrip("}").rstrip() + ' ); fi; }')
         script = ('pol() { python3 -I -c \'import json,sys; d=json.load(open(sys.argv[1])); v=d\nfor k in sys.argv[2].split("."): v=v[k]\nprint(v)\' '
                   f'{REPO}/thornswood_guard/policy.json "$1"; }}\n' + block.replace(real_hook, stub))
+        if hang:
+            (d / "bin" / "timeout").write_text("#!/bin/bash\nshift; exec /usr/bin/timeout 2 \"$@\"\n")
+            (d / "bin" / "timeout").chmod(0o755)
         r = self._run(script, env={"PATH": f"{d / 'bin'}:{os.environ['PATH']}"})
         return r, (log.read_text() if log.exists() else "")
 
@@ -297,6 +313,62 @@ exit 3
         self.assertIn("SKIP Bramble's wake: Tailscale refused Funnel on port 8443, so nothing was made public", r.stdout)
         self.assertIn('"funnel" node attribute not set', r.stdout)
         self.assertNotIn("hook_py set", log)
+
+    @POSIX_BASH
+    def test_with_the_apps_webhook_off_nothing_is_asked_for_and_the_install_goes_on(self):
+        # 2 Nov, #65's install: setting the webhook before Patrick turned it
+        # on answered 404 and stopped the whole install.
+        r, log = self._funnel(refuse=False, status=funnel_status(), hook_rc=3)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SKIP Bramble's wake: the App's webhook is off, so Funnel was not asked for", r.stdout)
+        self.assertIn("NOT YET: the App has no webhook", r.stdout)
+        self.assertNotIn("tailscale funnel", log)
+        self.assertNotIn("hook_py set", log)
+
+    @POSIX_BASH
+    def test_a_webhook_that_cannot_be_read_stops(self):
+        r, log = self._funnel(refuse=False, status=funnel_status(), hook_rc=1)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("STOP: the App's webhook could not be read", r.stdout)
+        self.assertNotIn("tailscale funnel", log)
+
+    @POSIX_BASH
+    def test_without_the_funnel_attribute_funnel_is_never_asked_for(self):
+        # 2 Nov, #65's install: `tailscale funnel` waited for an admin's
+        # approval for as long as it took instead of refusing.
+        r, log = self._funnel(refuse=False, status=funnel_status(), caps=("https",))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SKIP Bramble's wake: Funnel was not asked for", r.stdout)
+        self.assertIn("NOT YET: the tailnet policy gives this machine no funnel node attribute", r.stdout)
+        self.assertNotIn("tailscale funnel --bg", log)
+        self.assertNotIn("hook_py set", log)
+
+    @POSIX_BASH
+    def test_without_https_certificates_funnel_is_never_asked_for(self):
+        r, log = self._funnel(refuse=False, status=funnel_status(), caps=("funnel",))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("NOT YET: the tailnet has HTTPS certificates off", r.stdout)
+        self.assertNotIn("tailscale funnel --bg", log)
+
+    @POSIX_BASH
+    def test_a_funnel_that_never_answers_ends_and_the_install_goes_on(self):
+        r, log = self._funnel(refuse=False, status=funnel_status(), hang=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SKIP Bramble's wake: tailscale funnel gave no answer in 60 s and was ended", r.stdout)
+        self.assertNotIn("hook_py set", log)
+
+    def test_the_funnel_attributes_are_read_from_capmap_or_capabilities(self):
+        self.assertEqual(app_hook.check_allowed({"Self": {"CapMap": {"funnel": None, "https": None}}}), [])
+        self.assertEqual(app_hook.check_allowed({"Self": {"Capabilities": ["https", "funnel"]}}), [])
+        self.assertEqual(len(app_hook.check_allowed({})), 2)
+
+    def test_funnel_is_asked_for_only_after_the_attributes_and_bounded(self):
+        block = _block("# 8b. Bramble's wake", "# 9. The gateway, when asked.")
+        ask = block.index("tailscale funnel --bg")
+        self.assertLess(block.index("funnel_allowed)"), ask)
+        line = block[block.rindex("\n", 0, ask):block.index("\n", ask)]
+        self.assertIn("timeout 60 tailscale funnel --bg", line)
+        self.assertIn("</dev/null", line)
 
     @POSIX_BASH
     def test_funnel_on_points_the_app_at_this_vms_path(self):

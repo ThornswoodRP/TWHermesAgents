@@ -367,9 +367,11 @@ ok "units in place and started"
 
 # 8b. Bramble's wake: Tailscale Funnel publishes the one webhook path, and
 # only it, on wake.funnel_port, to the gateway's loopback receiver; then the
-# App's webhook is pointed there with the secret from 3b. Funnel needs the
-# tailnet's policy to allow it for this machine, which is Patrick's; until
-# then this step says so and changes nothing.
+# App's webhook is pointed there with the secret from 3b. Two things come
+# first and are Patrick's: the App's webhook turned on (Active, the URL and
+# the events, on its settings page) and the tailnet's funnel and https node
+# attributes for this machine. Until both are there this step says which is
+# missing, changes nothing and waits on nothing, and the install goes on.
 hook_py() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from thornswood_brokers.app_hook import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"; }
 wake_path="/p/$(pol wake.app)/webhooks/$(pol wake.route)"
 wake_target="http://127.0.0.1:$(pol wake.port)$wake_path"
@@ -382,17 +384,53 @@ funnel_ok() {
   rm -f "$f"
   return $rc
 }
-if ! command -v tailscale >/dev/null; then
+# Without the node attributes, `tailscale funnel` does not refuse: it prints
+# an approval link and waits for an admin for as long as it takes, which held
+# the #65 install on 2 Nov. So it is asked only once this machine holds them,
+# with nothing on stdin and a bound, and the rest of the install goes on.
+funnel_allowed() {
+  local f rc
+  f="$(mktemp)"
+  tailscale status --json > "$f" 2>/dev/null || echo '{}' > "$f"
+  hook_py allowed "$f"; rc=$?
+  rm -f "$f"
+  return $rc
+}
+# The App's webhook is turned on by hand (GitHub's API cannot), so it is
+# asked first: until it is on, nothing is made public and nothing is set.
+hook_rc=0
+hook_out="$(hook_py hook)" || hook_rc=$?
+if [[ $hook_rc -eq 3 ]]; then
+  echo "SKIP Bramble's wake: the App's webhook is off, so Funnel was not asked for and nothing was set:"
+  printf '  %s\n' "$hook_out"
+  echo "  That is Patrick's step on the App's settings page; then run this again."
+  wake_skipped=1
+elif [[ $hook_rc -ne 0 ]]; then
+  stop "the App's webhook could not be read: $hook_out"
+elif ! command -v tailscale >/dev/null; then
   echo "SKIP Bramble's wake: tailscale is not installed on the VM."
+  wake_skipped=1
 elif ! funnel_ok >/dev/null; then
-  if ! funnel_out="$(tailscale funnel --bg --https="$wake_port" --set-path="$wake_path" "$wake_target" 2>&1)"; then
-    echo "SKIP Bramble's wake: Tailscale refused Funnel on port $wake_port, so nothing was made public. It said:"
-    printf '  %s\n' "$funnel_out"
-    echo "  The tailnet policy must give this machine the funnel attribute (Patrick's step); then run this again."
+  if ! allowed_out="$(funnel_allowed)"; then
+    echo "SKIP Bramble's wake: Funnel was not asked for, so nothing was made public and nothing waits:"
+    printf '  %s\n' "$allowed_out"
+    echo "  Those are the tailnet's settings (Patrick's step); then run this again."
     wake_skipped=1
+  else
+    funnel_rc=0
+    funnel_out="$(timeout 60 tailscale funnel --bg --https="$wake_port" --set-path="$wake_path" "$wake_target" </dev/null 2>&1)" || funnel_rc=$?
+    if [[ $funnel_rc -eq 124 ]]; then
+      echo "SKIP Bramble's wake: tailscale funnel gave no answer in 60 s and was ended. It said:"
+    elif [[ $funnel_rc -ne 0 ]]; then
+      echo "SKIP Bramble's wake: Tailscale refused Funnel on port $wake_port, so nothing was made public. It said:"
+    fi
+    if [[ $funnel_rc -ne 0 ]]; then
+      printf '  %s\n' "$funnel_out"
+      wake_skipped=1
+    fi
   fi
 fi
-if command -v tailscale >/dev/null && [[ -z "${wake_skipped:-}" ]]; then
+if [[ -z "${wake_skipped:-}" ]]; then
   funnel_ok || stop "Funnel is not as the wake needs it (above); tailscale funnel status shows what is public."
   dns="$(tailscale status --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
   hook_py set "https://$dns:$wake_port$wake_path" || stop "the App's webhook was not set; Funnel stays on, and the gateway refuses every event without the signature."
