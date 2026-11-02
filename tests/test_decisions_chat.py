@@ -112,7 +112,10 @@ class ChatSend(unittest.TestCase):
 class ConnectorSide(unittest.TestCase):
     def at_schema(self, n):
         """The store as an older release left it at schema n: the stored version, and no column a later
-        migration adds (13: own_messages.reply_to), so this release's migrations run on it as they would."""
+        migration adds (13: own_messages.reply_to; 14: own_attachments), so this release's migrations run on
+        it as they would."""
+        if n < 14:
+            self.w.store.db.execute("DROP TABLE own_attachments")
         if n < 13:
             self.w.store.db.execute("ALTER TABLE own_messages DROP COLUMN reply_to")
         self.w.store.db.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(n),))

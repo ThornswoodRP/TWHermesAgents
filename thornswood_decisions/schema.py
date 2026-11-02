@@ -664,6 +664,55 @@ CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway,
     """
 ALTER TABLE own_messages ADD COLUMN reply_to INTEGER;
 """,
+    # 14: files and photos Patrick attaches to a message to his own Hermes (Pixel check, 2 Nov: "no way to
+    # add files or photos ... add a + button like Claude and Hermes have"). Each is uploaded on its own,
+    # goes with one message when that is sent (message_id), is fetched by that gateway's connector while
+    # the message is leased, and its bytes are dropped once the message has a result: the file then lives
+    # in that Hermes's own attachments or images folder. A message may now be files alone, with no words
+    # (the text check goes from 1 to 0 characters at least); the core still refuses one with neither.
+    """
+CREATE TABLE own_messages_14 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT CHECK (session_id IS NULL OR length(session_id) BETWEEN 1 AND 128),
+  made_session_id TEXT CHECK (made_session_id IS NULL OR length(made_session_id) BETWEEN 1 AND 128),
+  text TEXT NOT NULL CHECK (length(text) <= 8000),
+  send_key TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'sent', 'uncertain', 'cancelled', 'dead', 'quarantined')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT,
+  reply_to INTEGER,
+  CHECK (made_session_id IS NULL OR session_id IS NULL)
+);
+INSERT INTO own_messages_14 SELECT id, workspace_id, gateway, session_id, made_session_id, text, send_key, principal_id,
+  device_id, status, attempts, lease_until, created_at, updated_at, reason, reply_to FROM own_messages;
+DROP TABLE own_messages;
+ALTER TABLE own_messages_14 RENAME TO own_messages;
+CREATE INDEX own_messages_by_gateway ON own_messages(workspace_id, gateway, status, created_at);
+
+CREATE TABLE own_attachments (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  message_id TEXT REFERENCES own_messages(id),
+  name TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL CHECK (size > 0),
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  body BLOB,
+  created_at TEXT NOT NULL,
+  fetched_at TEXT
+);
+CREATE INDEX own_attachments_by_message ON own_attachments(message_id);
+CREATE INDEX own_attachments_by_owner ON own_attachments(workspace_id, principal_id, message_id, created_at);
+""",
 ]
 
 
@@ -769,5 +818,37 @@ ALTER TABLE flags_9 RENAME TO flags;
     13: ([("SELECT count(*) FROM own_messages WHERE reply_to IS NOT NULL",
            "messages to his own Hermes that answer one message, with the link back to it")], """
 ALTER TABLE own_messages DROP COLUMN reply_to;
+""", ""),
+    # A file still on its way to a Hermes would be lost; one already there lives in that Hermes's folder.
+    # A message of files alone has no words, which the older release cannot hold.
+    14: ([("SELECT count(*) FROM own_attachments WHERE body IS NOT NULL",
+           "files and photos on their way to his own Hermes"),
+          ("SELECT count(*) FROM own_messages WHERE text = ''",
+           "messages to his own Hermes that are files alone, with no words")], """
+DROP TABLE own_attachments;
+-- reply_to sits on reason's line, as ALTER TABLE ADD COLUMN left it in schema 13.
+CREATE TABLE own_messages_13 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT CHECK (session_id IS NULL OR length(session_id) BETWEEN 1 AND 128),
+  made_session_id TEXT CHECK (made_session_id IS NULL OR length(made_session_id) BETWEEN 1 AND 128),
+  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 8000),
+  send_key TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'sent', 'uncertain', 'cancelled', 'dead', 'quarantined')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT, reply_to INTEGER,
+  CHECK (made_session_id IS NULL OR session_id IS NULL)
+);
+INSERT INTO own_messages_13 SELECT id, workspace_id, gateway, session_id, made_session_id, text, send_key, principal_id,
+  device_id, status, attempts, lease_until, created_at, updated_at, reason, reply_to FROM own_messages;
+DROP TABLE own_messages;
+ALTER TABLE own_messages_13 RENAME TO own_messages;
+CREATE INDEX own_messages_by_gateway ON own_messages(workspace_id, gateway, status, created_at);
 """, ""),
 }

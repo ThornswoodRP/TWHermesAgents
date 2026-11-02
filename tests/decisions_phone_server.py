@@ -71,7 +71,9 @@ CHATS = [
     {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"},
     # A chat Hermes has not titled, named by its first message; its newest row a long paste from Hermes Desktop.
     {"id": "s_paste", "title": "", "first": "Here is the plan", "last_at": "2026-10-29T12:00:00+00:00",
-     "preview": PASTE_MSG[:200]}]
+     "preview": PASTE_MSG[:200]},
+    # A chat whose newest message is being answered right now (the live line under it).
+    {"id": "s_work", "title": "Check the build", "last_at": "2026-10-28T12:00:00+00:00", "preview": "earlier"}]
 HIDDEN = []
 OPEN = [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
                                       {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]
@@ -124,8 +126,18 @@ con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('
             (PASTE_MSG, epoch("2026-10-29T11:59:00+00:00")))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_paste', 'assistant', ?, ?)",
             (f"Run this:\n\n```\n{PASTE_CMD}\n```", epoch("2026-10-29T12:00:00+00:00")))
+con.execute("INSERT INTO sessions VALUES('s_work', 'cli', 'Check the build', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-28T11:00:00+00:00"), epoch("2026-10-28T12:00:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_work', 'assistant', 'earlier', ?)",
+            (epoch("2026-10-28T12:00:00+00:00"),))
 con.commit()
 con.close()
+# His message in s_work, taken by the stand-in connector, whose turn is running a command; each claim the loop
+# below makes says so, as One's connector does while a turn runs (own_connector.OwnConnector.busy).
+from test_decisions_own import passkey
+WORK = own.send(passkey(w), "one", "s_work", None, "is the build green?", "own-key-work")["message_id"]
+own.claim(w.ws, "one", to, 1, True)
+TURNS = {"turns": [{"id": WORK, "state": "tool", "tool": "terminal"}]}
 def set_reaction(r, db=None, sid=None):
     """Patrick's reaction, as Hermes sets it: one per person on the row (the helper's own path is in
     test_decisions_reactions.py)."""
@@ -194,7 +206,7 @@ def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
         try:
-            got = o.claim(w.ws, "one", to, 0, True)
+            got = o.claim(w.ws, "one", to, 0, True, "", None, None, TURNS)
             for r in got.get("sessions", []):
                 one_session(o, r)
             one_replies(o)
@@ -237,6 +249,9 @@ con.execute("INSERT INTO hosted_room_events VALUES('54b3ad46-3419-4adb-b60d-c79c
 con.commit()
 con.close()
 tc = f.new_token(w.ws, "connector", by="t")
+# The Bots' connector's report of each Bot's gateway (room_send.py op states): Bramble running, Rift not,
+# Sprocket starting; the other three left out, so they are not known.
+Chat(w.store).live(w.ws, tc, {"states": {"bramble": "ready", "rift": "absent", "sprocket": "starting"}})
 class Direct:
     def __init__(self):
         self.chat = Chat(Store(w.path, clock=w.clock))
@@ -247,6 +262,13 @@ class Direct:
             return 200, self.chat.page_post(w.ws, tc, json.loads(json.dumps(body)))
         except CoreError as exc:
             return exc.status, {"error": exc.reason}
+# His message to Wisp, taken by the Bots' connector, whose turn is writing its reply: leased as the claim
+# leases it (connector_effects stays off here), and each round below says what the turn is doing, as the
+# connector does while a Bot Chat turn runs (connector.Connector.say_doing).
+from datetime import timedelta
+WISP = Chat(w.store).send(w.patrick(), "wisp", "how is the gamemode build?", "key-wisp-0001")["message_id"]
+w.store.db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                   ((w.clock() + timedelta(days=1)).isoformat(), WISP))
 def bots_pages():
     from thornswood_decisions.reactions import Reactions
     conn = Connector(Direct(), None, say=lambda _: None, hermes_home=bhome)
@@ -261,6 +283,7 @@ def bots_pages():
             chat.reacted(w.ws, tc, {"bot": r["chat"], "message_id": r["message_id"], "version": r["version"],
                                     "outcome": out})
         conn.pages()
+        chat.doing(w.ws, tc, {"turns": [{"id": WISP, "state": "writing"}]})
         time.sleep(0.3)
 threading.Thread(target=bots_pages, daemon=True).start()
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]

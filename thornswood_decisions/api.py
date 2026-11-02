@@ -34,7 +34,7 @@ from .auth import Principal
 from .chat import Chat
 from .core import DecisionCore
 from .feeds import MAX_FEED_BYTES, Feeds
-from .own import OwnChat
+from .own import MAX_ATTACHMENT, OwnChat
 from .passkey import Passkeys
 from .push import Push
 from .store import CoreError, Store, now_utc
@@ -71,7 +71,15 @@ SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
             ("GET", "own"), ("POST", "own")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done")
+OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment")
+# A file or photo for a message to his own Hermes comes as its own bytes, not JSON (own.py attach).
+ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/own/[a-z]+/attach$")
+
+
+class Raw:
+    """Bytes to answer with as they are (a file for an own-Hermes connector), never as JSON."""
+    def __init__(self, body: bytes):
+        self.body = body
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -148,10 +156,17 @@ class Api:
                 raise CoreError(404, "no_route", "no such route")
             route = parts[2:]
             query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            data = self._json(body) if method == "POST" else {}
+            if method == "POST" and ATTACH_PATH.match(url.path):
+                data = {"_raw": body, "_type": headers.get("content-type", "")}
+            else:
+                data = self._json(body) if method == "POST" else {}
             status, out = self._route(method, route, query, headers, data, extra)
         except CoreError as exc:
             return _refusal(exc.status, exc.reason, str(exc), exc.detail)
+        if isinstance(out, Raw):
+            # Always a download's type: a file never runs or renders as anything on this origin.
+            return status, {**SECURITY_HEADERS, **extra, "Content-Type": "application/octet-stream",
+                            "Content-Disposition": "attachment"}, out.body
         return status, {**SECURITY_HEADERS, **extra}, json.dumps(out).encode("utf-8")
 
     def _static(self, method: str, rest: str) -> tuple[int, dict, bytes]:
@@ -209,13 +224,15 @@ class Api:
                 return 200, own.reacted(self.ws, route[1], token, data)
             if route[2] == "session_done":
                 return 200, own.session_done(self.ws, route[1], token, data)
+            if route[2] == "attachment":
+                return 200, Raw(own.attachment(self.ws, route[1], token, data.get("id"))[1])
             if route[2] == "claim":
                 # Tailscale Serve sets X-Forwarded-For to the tailnet address the connector posts from
                 # (and replaces any it was sent); the core reads the tailnet's view of that machine.
                 return 200, own.claim(self.ws, route[1], token, data.get("limit", 3), data.get("ready", False),
                                       str(data.get("why", "")), data.get("state"), headers.get("x-forwarded-for"),
                                       {k: data.get(k) for k in ("commit", "busy", "parallel", "busy_for", "updating",
-                                                                "update_why")})
+                                                                "update_why", "turns")})
             return 200, own.result(self.ws, route[1], token, str(data.get("id", "")), str(data.get("outcome", "")),
                                    str(data.get("ref", "")), str(data.get("reason", "")), data.get("session_id"))
         if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector", "push-worker"):
@@ -237,12 +254,16 @@ class Api:
                 raise CoreError(404, "no_route", "no such route")
             if route[1] == "pages":
                 return 200, Chat(core.s).page_requests(self.ws, token)
+            if route[1] == "live":
+                return 200, Chat(core.s).live(self.ws, token, data)
             if route[1] == "page":
                 return 200, Chat(core.s).page_post(self.ws, token, data)
             if route[1] == "claim":
                 return 200, Chat(core.s).claim(self.ws, token, data.get("limit", 7))
             if route[1] == "reacted":
                 return 200, Chat(core.s).reacted(self.ws, token, data)
+            if route[1] == "doing":
+                return 200, Chat(core.s).doing(self.ws, token, data)
             if route[1] == "result":
                 return 200, Chat(core.s).result(self.ws, token, str(data.get("id", "")), str(data.get("outcome", "")),
                                                 str(data.get("ref", "")), str(data.get("reason", "")))
@@ -278,7 +299,7 @@ class Api:
             return 200, {"kind": p.kind, "device_id": p.device_id, "device_kind": p.device_kind,
                          "fresh": p.fresh, "workspace": self.workspace}
         if method == "GET" and route == ["cards"]:
-            return 200, {"cards": core.needs_you(p), "answered": core.answered(p), "seq": self._seq(core)}
+            return 200, {"cards": core.needs_you(p), "seq": self._seq(core)}
         if method == "GET" and len(route) == 2 and route[0] == "cards":
             return 200, core.get_card(p, route[1])
         if method == "GET" and len(route) == 3 and route[0] == "cards" and route[2] == "artifact":
@@ -339,7 +360,12 @@ class Api:
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
             return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
                                              data.get("text"), data.get("idempotency_key"),
-                                             data.get("reply_to"), data.get("quote"), data.get("quote_by"))
+                                             data.get("reply_to"), data.get("quote"), data.get("quote_by"),
+                                             data.get("attachments"))
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "attach":
+            return 200, OwnChat(core.s).attach(p, route[1], query.get("name"), data.get("_type"), data.get("_raw"))
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "unattach":
+            return 200, OwnChat(core.s).unattach(p, route[1], data.get("id"))
         if method == "POST" and route == ["csrf"]:
             if "cookie" not in headers:
                 raise CoreError(400, "not_the_app", "only the app's cookie session asks for a new CSRF token")
@@ -413,6 +439,8 @@ class Api:
 
 
 def body_limit(path: str) -> int:
+    if ATTACH_PATH.match(path):
+        return MAX_ATTACHMENT
     feed = (path.startswith(PREFIX + "/feeds/") or path == PREFIX + "/connector/page"
             or (path.startswith(PREFIX + "/own/") and path.endswith(("/feed", "/page"))))
     return MAX_FEED_BYTES if feed else MAX_REQUEST_BYTES

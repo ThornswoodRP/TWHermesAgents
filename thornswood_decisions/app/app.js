@@ -49,9 +49,18 @@ function el(tag, attrs, ...children) {
 }
 
 function show(...nodes) {
-  const view = document.getElementById('view')
-  view.replaceChildren(...nodes.flat(Infinity).filter(Boolean))
-  if (pageTop) { pageTop = false; scrollTo({ top: 0 }) }
+  showIn('view', nodes)
+}
+
+// The desktop's panes (the chat list on the left, Decisions on the right) are
+// drawn by the same views as the phone's screens, each into its own pane. Only
+// the middle one moves the page; a pane keeps its own place in its list.
+function showIn(into, nodes) {
+  const pane = document.getElementById(into)
+  const keep = into === 'view' ? null : pane.scrollTop
+  pane.replaceChildren(...[nodes].flat(Infinity).filter(Boolean))
+  if (keep !== null) pane.scrollTop = keep
+  else if (pageTop) { pageTop = false; scrollTo({ top: 0 }) }
 }
 
 function when(iso) {
@@ -81,7 +90,9 @@ function avatar(id, label) {
 const ICON = {
   back: 'M15 18l-6-6 6-6', send: 'M4 12l16-8-6 16-3-7z', x: 'M6 6l12 12M18 6L6 18', plus: 'M12 5v14M5 12h14',
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
-  more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6'
+  more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6',
+  panel: 'M3 4h18v16H3zM9 4v16', file: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6',
+  image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', dec: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9'
 }
 function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg'
@@ -97,19 +108,19 @@ function icon(name, size = 20) {
 // A screen's bar: back (when there is somewhere to go back to), the agent's
 // avatar, the title (a heading on a list screen) and a line under it, and
 // whatever goes on the right.
-function screenBar({ back, backLabel, agent, label, title, heading, under, right }) {
+function screenBar({ back, backLabel, agent, label, title, heading, under, right, live }) {
   return el('div', { class: 'bar' },
     back ? el('button', { class: 'ib', type: 'button', 'aria-label': backLabel, onclick: back }, icon('back')) : null,
-    agent !== undefined ? avatar(agent, label || title) : null,
+    agent !== undefined ? (live ? liveAvatar(agent, label || title, live) : avatar(agent, label || title)) : null,
     el('div', { class: 't' }, el(heading ? 'h2' : 'strong', {}, title), under ? el('span', {}, under) : null),
     right || null)
 }
 
 // A row of a list: avatar, title with its tags, the lines under it, and what
 // goes on the right (a state or a time).
-function listRow(attrs, { agent, label, title, tags, lines, right }) {
+function listRow(attrs, { agent, label, title, tags, lines, right, live }) {
   return el('button', { type: 'button', ...attrs, class: 'row' + (attrs.class ? ' ' + attrs.class : '') },
-    agent !== undefined ? avatar(agent, label || title) : null,
+    agent !== undefined ? (live ? liveAvatar(agent, label || title, live) : avatar(agent, label || title)) : null,
     el('div', { class: 't' }, el('strong', {}, title), tags || null, lines || null),
     right ? el('div', { class: 'w' }, right) : null)
 }
@@ -446,15 +457,15 @@ async function signInView(note) {
 // ── the views ─────────────────────────────────────────────────────────────
 
 function setTab(name) {
-  for (const a of document.querySelectorAll('#tabs a')) {
+  for (const a of document.querySelectorAll('#tabs a[data-tab]')) {
     if (a.dataset.tab === name) a.setAttribute('aria-current', 'page')
     else a.removeAttribute('aria-current')
   }
 }
 
-function refused(r) {
+function refused(r, into = 'view') {
   if (r.status === 401) { csrf = null; signInView(said(r.body)); return true }
-  if (r.status !== 200) { show(el('p', { class: 'warn' }, said(r.body))); return true }
+  if (r.status !== 200) { showIn(into, el('p', { class: 'warn' }, said(r.body))); return true }
   return false
 }
 
@@ -485,30 +496,29 @@ async function fingerprintOffer() {
   return part
 }
 
-async function decisionsView() {
-  setTab('decisions')
+async function decisionsView(into = 'view') {
+  const main = into === 'view'
+  if (main) setTab('decisions')
   const r = await call('GET', '/cards')
-  if (refused(r)) return
+  if (refused(r, into)) return
   seq = r.body.seq
   badge(r.body.cards.length)
   // Every alert of a card that no longer needs Patrick goes off the phone.
   toWorker({ pending: r.body.cards.map(c => c.id) })
-  const note = flash
-  flash = ''
-  const answered = r.body.answered || []
-  show(
-    screenBar({ title: 'Decisions', heading: true }),
+  const note = main ? flash : ''
+  if (main) flash = ''
+  showIn(into, [
+    screenBar({ title: 'Decisions', heading: true,
+      right: main ? null : el('button', { class: 'ib', type: 'button', 'aria-label': 'Hide Decisions', title: 'Hide Decisions',
+        onclick: () => fold('side') }, icon('x', 18)) }),
     note ? el('p', { class: 'receipt', role: 'status' }, note) : null,
-    await fingerprintOffer(),
+    main ? await fingerprintOffer() : null,
     r.body.cards.length
       ? [el('h2', { class: 'section' }, `Waiting on you (${r.body.cards.length})`),
         r.body.cards.map(c => listRow({ onclick: () => go('/m/decisions/' + c.id) }, {
-          title: c.title, tags: c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
+          title: inlineMd(c.title, true), tags: c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
           lines: el('span', { class: 'quiet' }, `${c.kind}, answer by ${when(c.expires_at)}`) }))]
-      : el('p', { class: 'quiet' }, 'Nothing needs you right now.'),
-    answered.length ? el('h2', { class: 'section' }, 'Answered') : null,
-    answered.map(c => listRow({ class: 'done', onclick: () => go('/m/decisions/' + c.id) }, {
-      title: c.title, lines: el('span', { class: 'quiet' }, `You chose ${c.option}, ${when(c.answered_at)}`) })))
+      : el('p', { class: 'quiet' }, 'Nothing needs you right now.')])
 }
 
 async function cardView(id, note) {
@@ -522,13 +532,13 @@ async function cardView(id, note) {
   const status = el('p', { class: 'warn', role: 'status' }, note || '')
   const pending = c.status === 'pending'
   const parts = [
-    el('h2', {}, c.title),
-    el('p', { class: 'quiet' }, `${c.kind}, revision ${c.revision}, ${c.status}${c.risk === 'high' ? ', high risk' : ''}`),
-    a.status === 200 ? el('pre', { class: 'artifact' }, a.body.body) : el('p', { class: 'warn' }, said(a.body)),
-    el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
+    el('h2', {}, inlineMd(c.title)),
+    c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
+    a.status === 200 ? el('div', { class: 'artifact' }, markdown(a.body.body)) : el('p', { class: 'warn' }, said(a.body)),
+    el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
     c.options.map(o => el('div', { class: 'option' },
-      el('strong', {}, o.label), o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
-      el('div', { class: 'quiet' }, o.consequence),
+      el('strong', {}, inlineMd(o.label)), o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
+      el('div', { class: 'quiet' }, inlineMd(o.consequence)),
       pending ? el('button', { class: o.key === c.recommendation ? 'primary' : 'secondary', type: 'button',
         'data-option': o.key, onclick: () => choose(c, o, status) }, 'Choose: ' + o.label) : null))
   ]
@@ -558,9 +568,9 @@ async function choose(c, o, status) {
   show(el('div', { class: 'card' },
     el('h2', {}, 'Check this answer'),
     el('p', {}, `"${c.title}" is high risk. You are choosing:`),
-    el('p', {}, el('strong', {}, o.label)),
-    el('p', { class: 'quiet' }, o.consequence),
-    el('p', {}, el('strong', {}, 'What yes covers: '), c.scope_of_yes),
+    el('p', {}, el('strong', {}, inlineMd(o.label))),
+    el('p', { class: 'quiet' }, inlineMd(o.consequence)),
+    el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
     el('p', { class: 'quiet' }, `Your ${signInWord()} answers it. Cancel the prompt to change your mind.`),
     button, note,
     el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
@@ -604,11 +614,11 @@ async function answer(c, o, status) {
   return cardView(c.id, said(r.body))
 }
 
-// An answered card leaves Decisions at once: its alert closes, and the list
-// says what was chosen and keeps the card under Answered for a day.
+// An answered card leaves Decisions at once and for good (Patrick, 2 Nov: "I only want things waiting for
+// me there"): its alert closes, and one line says what was chosen. The tab lists only cards waiting on him.
 function answered(c, o) {
   toWorker({ close: c.id })
-  flash = `Answered "${c.title}": ${o.label}. It is under Answered below.`
+  flash = `Answered "${c.title}": ${o.label}.`
   history.replaceState(null, '', '/m/decisions')
   return route()
 }
@@ -674,8 +684,7 @@ async function boardView() {
   const r = await call('GET', '/work')
   if (refused(r)) return
   const work = r.body.work
-  const bar = screenBar({ title: 'Board', heading: true,
-    under: work ? `The Bots' work on GitHub, as of ${when(r.body.as_of)}` : undefined })
+  const bar = screenBar({ title: 'Board', heading: true })
   if (!work) return show(bar, el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
   const items = work.items
   const tasks = work.tasks || []
@@ -690,12 +699,11 @@ async function boardView() {
           el('div', { class: 't' }, el('strong', {}, NAMES[b] || b),
             el('span', { class: 'quiet' }, botCount(open, mine.length - open)))),
         mine.map(workRow)]
-    }) : el('p', { class: 'quiet' }, "The Bots' work on GitHub shows here after the feed's next read, once in each 5 minutes."),
+    }) : el('p', { class: 'quiet' }, 'Nothing yet.'),
     tasks.length ? [el('h2', { class: 'section' }, "Hermes's Kanban"),
       el('table', {},
         el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
-        tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))] : null,
-    el('p', { class: 'quiet foot' }, 'Read only. Claims are the "claimed: <Bot>" labels; pull requests are the ones from each Bot\'s own branch.'))
+        tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))] : null)
 }
 
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
@@ -751,29 +759,58 @@ function gatewayLine(g) {
   return el('span', { class: g.state === 'ready' ? 'rec' : 'rec off' }, stateWords(g)[0])
 }
 
-async function botsView() {
-  setTab('bots')
+// Online and offline, from what is really running (Patrick, 2 Nov: "the design had green and red circles
+// to indicate bots online or offline"). Green: its gateway is running. Red: it is not (or One's machine is
+// off). Amber: on its way up or down, or not heard from, so nobody is told it is up or down when that is
+// not known. A Bot's word is Hermes's own state of its gateway, read by the Bots' connector every half
+// minute; Hermes and One have theirs from their own connectors (stateWords).
+const BOT_STATE = {
+  ready: ['on', 'On'], draining: ['wait', 'Restarting'], starting: ['wait', 'Starting'],
+  absent: ['off', 'Offline'], incompatible: ['off', 'Wrong version'], inaccessible: ['off', 'Cannot be reached'],
+  conflict: ['off', 'Two gateways'], check_failed: ['wait', 'Check failed'], not_heard: ['wait', 'Not heard from']
+}
+const GATEWAY_DOT = { ready: 'on', machine_off: 'off', gateway_down: 'off', connector_stopped: 'off', missing: 'off',
+  turned_off: 'off' }
+function botLive(live) {
+  const [cls, words] = BOT_STATE[(live && live.state) || 'not_heard'] || BOT_STATE.not_heard
+  return { cls, words }
+}
+function gatewayLive(g) {
+  return { cls: GATEWAY_DOT[g.state] || 'wait', words: stateWords(g)[0] }
+}
+function dot(live) {
+  return el('span', { class: 'dot ' + live.cls, role: 'img', 'aria-label': live.words, title: live.words })
+}
+// An avatar with its dot on its corner.
+function liveAvatar(id, label, live) {
+  return el('div', { class: 'avwrap' }, avatar(id, label), live ? dot(live) : null)
+}
+function liveLine(live) {
+  return el('span', { class: 'rec live ' + live.cls }, live.words)
+}
+
+async function botsView(into = 'view') {
+  if (into === 'view') setTab('bots')
   const [r, own] = await Promise.all([call('GET', '/chat'), call('GET', '/own')])
-  if (refused(r)) return
+  if (refused(r, into)) return
   const rank = b => (ORDER.indexOf(b.bot) + 1) || ORDER.length + 1
   const bots = r.body.bots.slice().sort((a, b) => rank(a) - rank(b))
   // Hermes, then One, then the six Bots (Patrick's mock-up answer, 1 Nov).
   const gateways = own.status === 200 ? ['me', 'one'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
-  show(
+  showIn(into, [
     screenBar({ title: 'Thornswood Bots', heading: true }),
     gateways.map(g => listRow({ 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) }, {
-      agent: g.gateway, title: GATEWAY[g.gateway],
+      agent: g.gateway, title: GATEWAY[g.gateway], live: gatewayLive(g),
       lines: [el('span', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
-        el('span', { class: 'quiet' }, g.last ? `${chatName(g.last)}: ${preview(g.last.preview, 100)}`
-          : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.'))],
+        g.last ? snippet(g.last.preview, 2, el('b', { class: 'sender' }, chatName(g.last) + ': '))
+          : el('span', { class: 'quiet' }, g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')],
       right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })),
     own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
     bots.map(b => listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
-      agent: b.bot, title: NAMES[b.bot] || b.bot,
+      agent: b.bot, title: NAMES[b.bot] || b.bot, live: botLive(b.live),
       lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
-        el('span', { class: 'quiet' }, b.last ? preview(b.last.text) : 'No messages yet.')],
-      right: b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null })),
-    el('p', { class: 'quiet foot' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
+        b.last ? snippet(b.last.text) : el('span', { class: 'quiet' }, 'No messages yet.')],
+      right: [liveLine(botLive(b.live)), b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null] }))])
 }
 
 // Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
@@ -857,24 +894,40 @@ const INLINE = new RegExp([
   '(?<!\\w)__(?=\\S)([^\\n]+?)(?<=\\S)__(?!\\w)',                 // 6 bold
   '~~(?=\\S)([^\\n]+?)(?<=\\S)~~',                                // 7 struck
   '(?<![\\w*])\\*(?=[^\\s*])([^*\\n]+?)(?<=\\S)\\*(?![\\w*])',    // 8 italic
-  '(?<!\\w)_(?=[^\\s_])([^_\\n]+?)(?<=\\S)_(?!\\w)'               // 9 italic, never inside a_name
+  '(?<!\\w)_(?=[^\\s_])([^_\\n]+?)(?<=\\S)_(?!\\w)',              // 9 italic, never inside a_name
+  '(?<![\\w/])(@(?:file|folder|url|image|tool|terminal|git):(?:"[^"\\n]+"|\'[^\'\\n]+\'|`[^`\\n]+`|\\S+))', // 10 a reference
+  '(?<![\\w@/])@([A-Za-z][\\w-]{0,30})(?![\\w:@-])'               // 11 a mention
 ].join('|'), 'g')
+
+// Who a mention names, as the app names them, with their colour (app.css .a-<id>).
+const MENTIONED = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp',
+  hermes: 'Hermes', one: 'One', patrick: 'Patrick' }
 
 function link(text, href) {
   return el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, text)
 }
 
-function inlineMd(text) {
+// still: a link is drawn as one but is not one, for words inside something tapped as a whole (a list's row).
+function inlineMd(text, still = false) {
   const out = []
   let last = 0
+  text = String(text ?? '')
+  const to = (words, href) => still ? el('span', { class: 'lnk' }, words) : link(words, href)
   for (const m of text.matchAll(INLINE)) {
     if (m.index > last) out.push(text.slice(last, m.index))
     if (m[1] !== undefined) out.push(el('code', {}, m[1]))
-    else if (m[2] !== undefined) out.push(link(m[2], m[3]))
-    else if (m[4] !== undefined) out.push(link(m[4], m[4]))
-    else if (m[5] !== undefined || m[6] !== undefined) out.push(el('strong', {}, inlineMd(m[5] ?? m[6])))
-    else if (m[7] !== undefined) out.push(el('s', {}, inlineMd(m[7])))
-    else out.push(el('em', {}, inlineMd(m[8] ?? m[9])))
+    else if (m[2] !== undefined) out.push(to(m[2], m[3]))
+    else if (m[4] !== undefined) out.push(to(m[4], m[4]))
+    else if (m[5] !== undefined || m[6] !== undefined) out.push(el('strong', {}, inlineMd(m[5] ?? m[6], still)))
+    else if (m[7] !== undefined) out.push(el('s', {}, inlineMd(m[7], still)))
+    else if (m[8] !== undefined || m[9] !== undefined) out.push(el('em', {}, inlineMd(m[8] ?? m[9], still)))
+    // A file or other reference is its name, as plain text: it never opens, loads or attaches anything.
+    else if (m[10] !== undefined) out.push(el('span', { class: 'ref' }, refLabel(m[10])))
+    else {
+      const who = MENTIONED[m[11].toLowerCase()]
+      const id = who && (AGENT_BY_NAME[who] || (who === 'Patrick' ? 'patrick' : null))
+      out.push(el('span', { class: 'mention' + (id ? ' a-' + id : '') }, '@' + (who || m[11])))
+    }
     last = m.index + m[0].length
   }
   if (last < text.length) out.push(text.slice(last))
@@ -1102,6 +1155,38 @@ function preview(text, n = 120) {
   return clip(line, n)
 }
 
+// A message in a short space: a list's line, a reply's quote. It is drawn the way the message is (bold,
+// italic, code, links, mentions, a file as its name), and only its blocks are laid out as one run: a heading,
+// a list's bullet, a quote's mark, a code fence and a table's rule go, a table's cells are joined with " · ".
+// It is cut by lines, at a whole word, with "…" (app.css .snip), never in the middle of a mark. Patrick,
+// 2 Nov: the plain words were better than the raw text, "but I want the proper formatting", everywhere.
+function flatMd(text) {
+  return String(text || '').replace(/\r\n?/g, '\n')
+    .replace(/^[ \t]*(```|~~~).*$/gm, '')
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/gm, '')
+    .replace(/^[ \t]{0,3}([-*_][ \t]*){3,}$/gm, '')
+    .replace(/^[ \t]{0,3}(#{1,6}[ \t]+|>[ \t]?)/gm, '')
+    .replace(/^[ \t]*[-*+][ \t]+(\[[ xX]\][ \t]+)?/gm, '')
+    .replace(/^[ \t]*\|[ \t]*|[ \t]*\|[ \t]*$/gm, '')
+    .replace(/[ \t]*\|[ \t]*/g, ' · ')
+    .replace(/\s+/g, ' ').trim()
+}
+
+function snippet(text, lines = 2, sender) {
+  const a = authored(text)
+  const words = flatMd(a.words)
+  // The words, else what was attached (a line the core cut can end inside the attached text).
+  return el('span', { class: 'snip l' + lines },
+    sender || null,
+    words ? inlineMd(words, true) : a.files.map(f => el('span', { class: 'ref' }, f.label)))
+}
+
+// Who said a list's last line, the way a group chat shows it: the name, in its colour, then the words.
+function sender(who) {
+  const name = NAMES[who] || who
+  return el('b', { class: 'sender a-' + (AGENT_BY_NAME[name] || 'room') }, name + ': ')
+}
+
 function fileChips(files) {
   return files.map(f => {
     const what = f.tokens ? `${f.label} · ${f.tokens.toLocaleString()} tokens` : f.label
@@ -1151,7 +1236,8 @@ function bubbles(items) {
     const bub = el('div', { class: 'bub' },
       ptr ? el('div', { class: 'quote' },
         el('div', { class: 'qwho' }, ptr[1] ? 'Replying to ' + (m.agent || m.who || 'Hermes') : 'Replying to your message'),
-        el('div', { class: 'qtext' }, ptr[2])) : null,
+        el('div', { class: 'qtext' }, snippet(ptr[2], 3))) : null,
+      (m.sent || []).map(f => el('div', { class: 'att' }, el('span', {}, `${f.name} · ${sizeWords(f.size)}`))),
       own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
     if (ptr && m.replyTo) replyLink(bub, m.replyTo)
     if (m.mid !== undefined && m.mid !== null && !m.status) {
@@ -1159,7 +1245,8 @@ function bubbles(items) {
       bub.tabIndex = 0
       bub.title = 'Tap for reactions and copy'
       bub.addEventListener('click', e => {
-        if (e.target.closest('a, button') || String(getSelection())) return
+        // Opening a pasted file's chip opens the chip, not the actions too.
+        if (e.target.closest('a, button, summary') || String(getSelection())) return
         messageSheet(m)
       })
       bub.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === bub) messageSheet(m) })
@@ -1215,10 +1302,16 @@ function replyLink(bub, mid) {
 
 // The words a reply quotes: the whole message, as Hermes quotes it (a preview would lose the rest of a
 // list or code), without the pointer it opened with, cut at the core's 2000 characters.
+// A message that is only a paste quotes the paste's words. A file is never quoted as its reference (the
+// core makes any that is left plain words too, own.py inert): on 2 Nov a quote that held the paste's
+// reference made Hermes attach the paste again, and one cut inside a reference asked for a file that does
+// not exist. A long quote is cut at a whole word.
 function quoteOf(text) {
   const t = String(text || '')
-  const body = t.replace(POINTER, '').trim() || t.trim()
-  return body.length <= 2000 ? body : body.slice(0, 1997) + '...'
+  const a = authored(t.replace(POINTER, ''))
+  const body = a.words || a.files.map(f => f.body).filter(Boolean).join('\n\n').trim() ||
+    a.files.map(f => '[' + f.label + ']').join(' ')
+  return clip(body, 1999)
 }
 
 // The reactions the phone offers; the core takes only these (own.py REACTIONS).
@@ -1267,8 +1360,8 @@ function messageSheet(m) {
 
 // The bar on top of a chat: back, then the chat's name and where it lives.
 // More, when given, opens the chat's own actions.
-function chatBar(back, backLabel, title, under, agent, label, more) {
-  const bar = screenBar({ back, backLabel, agent, label, title, under,
+function chatBar(back, backLabel, title, under, agent, label, more, live) {
+  const bar = screenBar({ back, backLabel, agent, label, title, under, live,
     right: more ? el('button', { class: 'ib', type: 'button', 'aria-label': 'Chat actions', onclick: more }, icon('more')) : null })
   bar.classList.add('chatbar')
   return bar
@@ -1277,13 +1370,14 @@ function chatBar(back, backLabel, title, under, agent, label, more) {
 // The box at the foot of a chat. It grows with what is typed, up to six
 // lines, and keeps its draft (and the draft's idempotency key) while the
 // chat redraws. Enter is a new line; the button sends.
-function chatComposer(key, label, buttonLabel, send, status, gw) {
+function chatComposer(key, label, buttonLabel, send, status, gw, attach) {
   const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
+  if (!draft.files) draft.files = []
   // A reply being written shows the words it quotes, which open the message as sent.
   const replying = draft.reply ? el('div', { class: 'replying' },
     el('div', { class: 'rq' },
       el('strong', {}, 'Replying to ' + draft.reply.who),
-      el('div', { class: 'qtext' }, draft.reply.quote)),
+      el('div', { class: 'qtext' }, snippet(draft.reply.quote, 3))),
     el('button', { class: 'back', type: 'button', 'aria-label': 'Cancel the reply', onclick: () => {
       draft.reply = null
       draft.key = newKey()
@@ -1299,10 +1393,12 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
   requestAnimationFrame(fit)
   const button = el('button', { class: 'send', type: 'button', 'aria-label': buttonLabel, onclick: async () => {
     const text = box.value.trim()
-    if (!text) { status.textContent = 'Type a message first.'; return }
+    const ready = draft.files.filter(f => f.id)
+    if (draft.files.some(f => f.state === 'up')) { status.textContent = 'Wait for the files to finish uploading.'; return }
+    if (!text && !ready.length) { status.textContent = 'Type a message first.'; return }
     status.textContent = 'Sending...'
     button.disabled = true
-    const s = await send(text, draft.key, draft.reply)
+    const s = await send(text, draft.key, draft.reply, ready.map(f => f.id))
     button.disabled = false
     if (s.status === 200) { drafts[key] = null; chatPlace.toEnd = true; return route() }
     if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
@@ -1311,7 +1407,99 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
       ? 'Could not reach the core. Sending again sends the same message, never a second one.'
       : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
   } }, icon('send'))
-  return [replying, el('div', { class: 'composer' }, box, button)]
+  const plus = attach ? el('button', { class: 'plus', type: 'button', 'aria-label': 'Add photos or files',
+    onclick: () => attachSheet(attach, draft, status) }, icon('plus')) : null
+  return [replying, attach ? attachStrip(attach, draft, status) : null,
+    el('div', { class: 'composer', 'data-reply': draft.reply ? String(draft.reply.mid) : '',
+      'data-files': draft.files.map(f => f.local + ':' + f.state).join(' ') }, plus, box, button)]
+}
+
+// Photos and files on a message to his own Hermes (Patrick, 2 Nov: "no way to add files or photos or
+// anything add a + button like Claude and Hermes have"). The + offers the camera, his photos and his
+// files; each is uploaded to the core as soon as it is picked, shows above the box while it goes, and
+// can be taken off before sending. The message names them, and his Hermes gets them in its own folders
+// (own_connector.py save_attachment): the first photo as the turn's image, every other file as an
+// @file: reference, as Hermes Desktop attaches them. Up to 10 a message, 20 MB each.
+const ATTACH_MAX = 20 * 1024 * 1024
+let localFile = 0
+
+function attachSheet(gw, draft, status) {
+  closeSheet()
+  const pick = (accept, capture) => {
+    closeSheet()
+    const input = el('input', { type: 'file', multiple: capture ? null : true, accept: accept || null,
+      capture: capture || null, hidden: true })
+    input.addEventListener('change', () => {
+      for (const file of [...input.files]) addFile(gw, draft, file, status)
+      input.remove()
+      route()
+    })
+    document.body.append(input)
+    input.click()
+  }
+  const back = el('div', { class: 'sheet-back' },
+    el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Add photos or files' },
+      el('button', { class: 'secondary pick-file', type: 'button', onclick: () => pick('image/*', 'environment') },
+        icon('camera'), 'Take a photo'),
+      el('button', { class: 'secondary pick-file', type: 'button', onclick: () => pick('image/*') }, icon('image'), 'Photos'),
+      el('button', { class: 'secondary pick-file', type: 'button', onclick: () => pick() }, icon('file'), 'Files'),
+      el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close')))
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  back.querySelector('button').focus()
+}
+
+async function addFile(gw, draft, file, status) {
+  if (draft.files.length >= 10) { status.textContent = 'A message takes up to 10 files.'; return }
+  const f = { local: ++localFile, name: file.name || 'photo.jpg', mime: file.type || '', size: file.size, state: 'up' }
+  draft.files.push(f)
+  draft.key = newKey()
+  if (file.size > ATTACH_MAX) {
+    Object.assign(f, { state: 'bad', why: 'over 20 MB' })
+    return
+  }
+  const headers = { 'Content-Type': file.type || 'application/octet-stream' }
+  if (csrf) headers['X-CSRF-Token'] = csrf
+  let r
+  try {
+    const resp = await fetch(`${API}/own/${gw}/attach?name=${encodeURIComponent(f.name)}`,
+      { method: 'POST', headers, credentials: 'same-origin', cache: 'no-store', body: file })
+    let out = {}
+    try { out = await resp.json() } catch (e) { out = {} }
+    r = { status: resp.status, body: out }
+  } catch (e) {
+    r = { status: 0, body: { error: 'offline' } }
+  }
+  if (!draft.files.includes(f)) {
+    // Taken off while it went up: take it off the core too.
+    if (r.status === 200) call('POST', `/own/${gw}/unattach`, { id: r.body.id })
+    return
+  }
+  if (r.status === 200) Object.assign(f, { state: 'ok', id: r.body.id, name: r.body.name, mime: r.body.mime })
+  else Object.assign(f, { state: 'bad', why: r.status === 0 ? 'could not reach the core' : said(r.body) })
+  draft.key = newKey()
+  route()
+}
+
+function sizeWords(n) {
+  return n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'
+}
+
+function attachStrip(gw, draft, status) {
+  if (!draft.files.length) return null
+  return el('div', { class: 'files', role: 'list', 'aria-label': 'Files on this message' }, draft.files.map(f =>
+    el('div', { class: 'file ' + f.state, role: 'listitem' },
+      icon(/^image\//.test(f.mime) ? 'image' : 'file', 18),
+      el('span', { class: 'fname' }, f.name),
+      el('span', { class: 'fstate' }, f.state === 'up' ? 'Uploading...' : f.state === 'bad' ? 'Not added: ' + f.why
+        : sizeWords(f.size)),
+      el('button', { class: 'ib', type: 'button', 'aria-label': 'Take off ' + f.name, onclick: () => {
+        draft.files = draft.files.filter(x => x !== f)
+        draft.key = newKey()
+        if (f.id) call('POST', `/own/${gw}/unattach`, { id: f.id })
+        route()
+      } }, icon('x', 16)))))
 }
 
 // Where a chat is scrolled. Opening a chat, or sending, goes to the newest
@@ -1366,7 +1554,23 @@ function showChat(key, top, list, dock, items) {
   const keep = chatPlace.keep
   const jump = el('button', { class: 'jump', type: 'button', onclick: toNewest })
   jump.hidden = true
-  show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), el('div', { class: 'dock' }, jump, dock)))
+  const fresh = el('div', { class: 'dock' }, jump, dock)
+  // While the box has the focus, the messages above it are drawn again and the box stays as it is, so
+  // the keyboard stays up and a word being typed is not lost. Patrick, 2 Nov: a message showed "Waiting
+  // to send" long after it had gone, because a chat was not read again while its box had the focus,
+  // and putting the keyboard away leaves the focus in the box.
+  const old = document.querySelector('#view > .chat')
+  const box = document.activeElement
+  const oldDock = old && chatPlace.key === key && box && box.matches('.dock .composer textarea') && old.contains(box)
+    ? box.closest('.dock') : null
+  const newBox = fresh.querySelector('.composer textarea')
+  const same = k => fresh.querySelector('.composer').dataset[k] === box.closest('.composer').dataset[k]
+  if (oldDock && newBox && newBox.value === box.value && same('reply') && same('files')) {
+    for (const n of [...old.childNodes]) if (n !== oldDock) n.remove()
+    oldDock.before(...[top].flat(Infinity).filter(Boolean), el('div', { class: 'msgs' }, list))
+  } else {
+    show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), fresh))
+  }
   chatPlace.key = key
   chatPlace.toEnd = false
   chatPlace.keep = null
@@ -1447,30 +1651,29 @@ function chatRow(gw, c, ops) {
   const o = ops ? lastOp(ops, c.id) : null
   return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
     title: chatName(c), tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
-    lines: [el('span', { class: 'quiet' }, preview(c.preview)), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
+    lines: [snippet(c.preview), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
     right: at(c.last_at) || when(c.last_at) })
 }
 
-async function gatewayView(gw) {
-  setTab('bots')
-  const seqNow = ++viewSeq
+async function gatewayView(gw, into = 'view') {
+  // In the desktop's chat list it goes with the chat beside it, so it takes that view's number, not a new one.
+  if (into === 'view') setTab('bots')
+  const seqNow = into === 'view' ? ++viewSeq : viewSeq
   const r = await call('GET', '/own/' + gw)
-  if (refused(r)) return
+  if (refused(r, into)) return
   const v = r.body
   const name = GATEWAY[gw]
   const pick = pickers[gw] || (pickers[gw] = { q: '', results: null, more: false, extra: [] })
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
-    screenBar({ back: () => go('/m/bots'), backLabel: 'All Thornswood Bots', agent: gw, title: name, heading: true,
-      under: GATEWAY_WHAT[gw], right: gatewayLine(v) }),
-    el('p', { class: 'quiet' }, `Your chats, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`),
+    screenBar({ back: into === 'view' ? () => go('/m/bots') : null, backLabel: 'All Thornswood Bots', agent: gw, title: name, heading: true,
+      right: gatewayLine(v), live: gatewayLive(v) }),
     offLine(v)
   ]
   if (v.can_send && v.online) {
     parts.push(signInPart(v, status))
     if (v.sign_in_until) {
-      parts.push(el('p', { class: 'quiet' }, 'New chat is the only way a new conversation starts. It has full power on every turn, and Hermes names it.'),
-        composer('new:' + gw, 'Start a new chat',
+      parts.push(composer('new:' + gw, 'Start a new chat',
           (text, key) => call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key }), status, gw), status)
     }
   } else if (!v.can_send) {
@@ -1519,7 +1722,7 @@ async function gatewayView(gw) {
     hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(shown[shown.length - 1].last_at) }, 'Older chats') : null,
     note,
     el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats'))
-  if (seqNow === viewSeq) show(parts)
+  if (seqNow === viewSeq) showIn(into, parts)
 }
 
 // What Hermes holds of one of his own chats: notes to show above it, its
@@ -1564,9 +1767,59 @@ function historyPart(gw, sid, t, name, feed) {
 }
 
 // What Patrick sent from the phone, until the chat itself shows it.
+// The live line under a message being answered (Patrick, 2 Nov: "no typing or thinking indicators and no
+// like what they are currently doing"; "Those would be the same lines"). It says what the turn is doing now,
+// from Hermes's own stream as One's connector passed it on seconds ago: thinking, writing, or a tool by its
+// name. Never the words of the reply or what a tool was given.
+const TOOL_WORDS = {
+  terminal: 'Running a command', process_manage: 'Running a command', read_terminal: 'Reading a command\'s output',
+  close_terminal: 'Closing a command', execute_code: 'Running code', read_file: 'Reading a file',
+  write_file: 'Writing a file', patch: 'Editing a file', search_files: 'Searching files',
+  web_search: 'Searching the web', x_search: 'Searching X', web_extract: 'Reading a web page',
+  delegate_task: 'Handing work to a subagent', memory: 'Updating its memory', todo_list: 'Updating its to-do list',
+  skill_view: 'Reading a skill', skills_list: 'Looking through its skills', skill_manage: 'Updating a skill',
+  session_search: 'Searching past chats', clarify: 'Asking you something', cronjob_manage: 'Setting up a scheduled job',
+  vision_analyze: 'Looking at an image', image_generate: 'Making an image', video_analyze: 'Watching a video',
+  video_generate: 'Making a video', text_to_speech: 'Making audio', computer_use: 'Using the computer',
+  react_to_message: 'Reacting to a message'
+}
+function doingWords(doing) {
+  if (!doing) return 'Starting'
+  if (doing.state === 'thinking') return 'Thinking'
+  if (doing.state === 'writing') return 'Writing'
+  const tool = doing.tool || ''
+  return TOOL_WORDS[tool] || (tool.startsWith('browser') ? 'Using the browser' : tool ? `Using ${tool}` : 'Using a tool')
+}
+// The other side's typing bubble: three moving dots and what it is doing.
+function workingItem(name, agent, doing) {
+  return el('div', { class: 'msg theirs working', role: 'status', 'aria-live': 'polite' },
+    el('div', { class: 'who a-' + agent }, name),
+    el('div', { class: 'bub typing' }, el('span', { class: 'dots', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')),
+      el('span', { class: 'doing' }, doingWords(doing))))
+}
+// While a turn runs in the open chat, its line follows every two seconds, reading only this chat's state;
+// when the turn ends the chat is drawn again with the reply. One watch at a time, ended by any new page.
+let turnWatch = null
+function watchTurn(path, seqNow, turnId, name) {
+  clearTimeout(turnWatch)
+  turnWatch = setTimeout(async () => {
+    if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
+    const r = await call('GET', path)
+    if (seqNow !== viewSeq || r.status !== 200) return
+    const m = r.body.mine.find(x => x.id === turnId)
+    if (!m || m.status !== 'leased') {
+      const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+      if (!typing) return route()
+    }
+    const line = document.querySelector('#view .msg.working .doing')
+    if (line && m) line.textContent = doingWords(m.doing)
+    watchTurn(path, seqNow, turnId, name)
+  }, 2000)
+}
+
 function pendingItems(mine, readAt) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
-    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to,
+    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files,
       note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
         + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
       warn: m.status === 'dead' || m.status === 'uncertain' }))
@@ -1650,8 +1903,8 @@ async function ownChatView(gw, sid) {
     const manage = v.can_manage && v.online && !h.gone && !t.error && !ended && !(o && inFlight(o)) && !v.chat.bot_chat
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
-        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`, gw, name,
-        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null),
+        undefined, gw, name,
+        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null, gatewayLive(v)),
       ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
       ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
         el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats')) : null,
@@ -1665,15 +1918,22 @@ async function ownChatView(gw, sid) {
     } else if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
         dock.push(signInPart(v, status), chatComposer(draftKey, 'Message to ' + name, 'Send to ' + name,
-          (text, k, reply) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
-            ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}) }), status, gw), status)
+          (text, k, reply, files) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
+            ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}),
+            ...(files.length ? { attachments: files } : {}) }), status, gw, gw), status)
       } else {
         dock.push(signInPart(v, status), status)
       }
     } else if (!v.can_send) {
       dock.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
     }
-    if (seqNow === viewSeq) showChat('own:' + key, top, bubbles(items), dock, items)
+    // His message being answered now: the other side's live line under it, kept current while it runs.
+    const turn = v.mine.find(m => m.status === 'leased')
+    const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing)] : bubbles(items)
+    if (seqNow === viewSeq) {
+      showChat('own:' + key, top, list, dock, items)
+      if (turn) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, turn.id, name)
+    }
   }
   render()
   const p = await ownPage(`/own/${gw}/chats/${encodeURIComponent(sid)}/messages`)
@@ -1823,8 +2083,7 @@ async function hiddenView(gw) {
   const name = GATEWAY[gw]
   const note = el('p', { class: 'warn', role: 'status' })
   const head = [
-    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', `${name}, ${GATEWAY_WHAT[gw]}`, gw, name),
-    el('p', { class: 'quiet' }, `The chats you hid on ${name}, with every message kept. Bring back puts one in the chat list again.`),
+    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', undefined, gw, name),
     offLine(v)
   ]
   show(head, el('p', { class: 'quiet' }, `Asking ${name}...`))
@@ -1847,7 +2106,7 @@ async function hiddenView(gw) {
       return el('div', { class: 'row', 'data-chat': c.id },
         el('div', { class: 't' },
           el('strong', {}, chatName(c)),
-          el('span', { class: 'quiet' }, preview(c.preview)),
+          snippet(c.preview),
           opLine(o, name),
           line),
         el('div', { class: 'w' },
@@ -1867,18 +2126,18 @@ async function hiddenView(gw) {
   await page(null)
 }
 
-async function roomsView() {
-  setTab('rooms')
+async function roomsView(into = 'view') {
+  if (into === 'view') setTab('rooms')
   const r = await call('GET', '/chat')
-  if (refused(r)) return
+  if (refused(r, into)) return
   const rooms = r.body.rooms || []
-  show(
-    screenBar({ title: 'Rooms', heading: true, under: `Each group chat, as of ${when(r.body.rooms_as_of) || 'nothing yet'}` }),
-    rooms.length ? rooms.map(m => listRow({ onclick: () => go('/m/rooms/' + m.room_id) }, {
+  showIn(into, [
+    screenBar({ title: 'Rooms', heading: true }),
+    rooms.length ? rooms.map(m => listRow({ 'data-room': m.room_id, onclick: () => go('/m/rooms/' + m.room_id) }, {
       agent: null, label: m.name, title: m.name,
       tags: m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
-      lines: el('span', { class: 'quiet' }, m.last ? `${m.last.who}: ${preview(m.last.text)}` : 'No messages yet.') }))
-      : el('p', { class: 'quiet' }, 'No rooms yet.'))
+      lines: m.last ? snippet(m.last.text, 2, sender(m.last.who)) : el('span', { class: 'quiet' }, 'No messages yet.') }))
+      : el('p', { class: 'quiet' }, 'No rooms yet.')])
 }
 
 // A Bot's Bot Chat or a room: what the feed last sent shows at once, then the
@@ -1937,9 +2196,8 @@ async function chatView(target, tab) {
     const h = history()
     const items = h.items.concat(pendingItems(v.mine, readAt))
     const top = [
-      chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, room
-        ? `A room, as of ${when(v.as_of) || 'nothing yet'}. What is said here is never an answer to a card.`
-        : `Your Bot Chat, as of ${when(v.as_of) || 'nothing yet'}. A chat is never an answer to a card.`, room ? null : v.target, name),
+      chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, undefined,
+        room ? null : v.target, name, null, room ? null : botLive(v.live)),
       h.notes
     ]
     if (!items.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
@@ -1947,16 +2205,23 @@ async function chatView(target, tab) {
       ? [chatComposer(target, 'Message to ' + name, 'Send to ' + name,
           (text, k) => call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: k }), status), status]
       : [el('p', { class: 'quiet' }, said({ error: 'chat_write_off' }))]
-    if (seqNow === viewSeq) showChat(key, top, bubbles(items), dock, items)
+    // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs.
+    const turn = room ? null : v.mine.find(m => m.status === 'leased')
+    const list = turn ? [bubbles(items), workingItem(name, v.target, turn.doing)] : bubbles(items)
+    if (seqNow === viewSeq) {
+      showChat(key, top, list, dock, items)
+      if (turn) watchTurn('/chat/' + encodeURIComponent(v.target), seqNow, turn.id, name)
+    }
   }
   render()
   const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages`)
   if (seqNow !== viewSeq || p.status !== 200 || p.body.pending) return
   t.newest = p.body
   keepThread(key, t)
-  // Never redrawn under someone typing; the next read shows it.
-  const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-  if (!typing) render()
+  // Drawn again under a box being typed in, which stays as it is (showChat).
+  const other = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) &&
+    !document.activeElement.matches('.dock .composer textarea')
+  if (!other) render()
 }
 
 // ── alerts (step 5) ───────────────────────────────────────────────────────
@@ -2239,6 +2504,108 @@ async function route() {
   // The tabs' first names, from an old alert or home screen link.
   const FIRST = { 'needs-you': 'decisions', work: 'board' }
   if (FIRST[path]) { path = FIRST[path]; history.replaceState(null, '', '/m/' + path) }
+  // On a wide screen the list beside a chat and Decisions on the right are drawn with it.
+  const d = desk(path)
+  const drawn = [d.pick ? pickView(path) : mainView(path)]
+  if (d.list) drawn.push(d.list('list').then(() => markCurrent(path)))
+  if (d.side) drawn.push(decisionsView('side'))
+  await Promise.all(drawn)
+}
+
+// The desktop (Patrick's approved mock-up, its Desktop board): a rail of
+// Hermes, One, the six Bots and the tabs on the left; the chat list; the
+// conversation; and Decisions on the right. A phone gets none of it: the same
+// screens, one at a time, with the tabs at the foot. Which one is decided by
+// the window's width alone, in a browser or installed, and redrawn when it
+// changes.
+const WIDE = matchMedia('(min-width: 1000px)')
+const WIDEST = matchMedia('(min-width: 1360px)')
+const folded = { list: false, side: false }   // the panes Patrick folded away, for this visit
+const LIST_ONLY = /^(bots|rooms|hermes\/(me|one))$/
+
+function listFor(path) {
+  const own = path.match(/^(?:hermes|hidden)\/(me|one)(?:\/|$)/)
+  if (own) return into => gatewayView(own[1], into)
+  if (/^(bots|bramble)(\/|$)/.test(path)) return into => botsView(into)
+  if (/^(rooms|room)(\/|$)/.test(path)) return into => roomsView(into)
+  return null
+}
+
+function desk(path) {
+  const wide = WIDE.matches
+  const list = wide ? listFor(path) : null
+  const side = wide && WIDEST.matches && path !== '' && !/^decisions(\/|$)/.test(path)
+  const out = { list: list && !folded.list ? list : null, side: side && !folded.side,
+    pick: !!(list && !folded.list && LIST_ONLY.test(path)) }
+  document.body.classList.toggle('wide', wide)
+  document.body.classList.toggle('with-list', !!out.list)
+  document.body.classList.toggle('with-side', out.side)
+  for (const id of ['list', 'side']) {
+    const on = id === 'list' ? !!out.list : out.side
+    document.getElementById(id).hidden = !on
+    if (!on) document.getElementById(id).replaceChildren()
+  }
+  rail(path, { list: !!list, side })
+  return out
+}
+
+// The middle of the desktop when the list on its left is the page: what to pick there.
+function pickView(path) {
+  setTab(path.startsWith('rooms') ? 'rooms' : 'bots')
+  const own = path.match(/^hermes\/(me|one)$/)
+  show(el('div', { class: 'pick' }, own
+    ? [avatar(own[1]), el('p', {}, `Pick one of ${GATEWAY[own[1]]}'s chats on the left, or start a new one there.`)]
+    : el('p', {}, path === 'rooms' ? 'Pick a room on the left.' : 'Pick Hermes, One or a Bot on the left.')))
+}
+
+// The row of what is open in the middle, marked in the list beside it.
+function markCurrent(path) {
+  const m = path.match(/^hermes\/(?:me|one)\/(.+)$/) || []
+  const bot = path.match(/^bots\/(.+)$/) || (path === 'bramble' ? [0, 'bramble'] : [])
+  const room = path.match(/^rooms\/(.+)$/) || []
+  for (const row of document.querySelectorAll('#list .row')) {
+    const on = (m[1] && row.dataset.chat === m[1]) || (bot[1] && row.dataset.bot === bot[1]) ||
+      (room[1] && row.dataset.room === room[1])
+    if (on) row.setAttribute('aria-current', 'true')
+    else row.removeAttribute('aria-current')
+  }
+}
+
+const RAIL = [['me', '/m/hermes/me', 'Hermes'], ['one', '/m/hermes/one', 'One'],
+  ...['bramble', 'rift', 'sprocket', 'echo', 'magpie', 'wisp'].map(b => [b, '/m/bots/' + b, NAMES[b]])]
+
+// The rail's people and its fold buttons. The tabs below the people are the phone's own.
+function rail(path, can) {
+  const people = document.getElementById('agents')
+  const tools = document.getElementById('folds')
+  // A phone's tab bar has the four tabs only.
+  if (!WIDE.matches) { people.replaceChildren(); tools.replaceChildren(); return }
+  if (!people.childElementCount) {
+    people.append(...RAIL.map(([id, href, name]) => el('a', { href, class: 'agent', 'data-go': '', 'data-agent': id,
+      'aria-label': name, title: name }, avatar(id, name))))
+  }
+  const open = (path.match(/^(?:hermes|hidden)\/(me|one)/) || path.match(/^bots\/([a-z0-9_-]+)/) || [])[1] ||
+    (path === 'bramble' ? 'bramble' : null)
+  for (const a of people.children) {
+    if (a.dataset.agent === open) a.setAttribute('aria-current', 'page')
+    else a.removeAttribute('aria-current')
+  }
+  tools.replaceChildren(...[
+    can.list ? el('button', { class: 'ib', type: 'button', 'aria-pressed': String(!folded.list),
+      'aria-label': folded.list ? 'Show the chat list' : 'Hide the chat list', title: 'Chat list',
+      onclick: () => fold('list') }, icon('panel')) : null,
+    can.side ? el('button', { class: 'ib', type: 'button', 'aria-pressed': String(!folded.side),
+      'aria-label': folded.side ? 'Show Decisions' : 'Hide Decisions', title: 'Decisions',
+      onclick: () => fold('side') }, icon('dec')) : null].filter(Boolean))
+}
+
+function fold(pane) {
+  folded[pane] = !folded[pane]
+  route()
+}
+
+// What the middle shows: on a phone, the whole screen.
+function mainView(path) {
   const card = path.match(/^decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card) return cardView(card[1])
   if (path === 'board') return boardView()
@@ -2261,11 +2628,15 @@ async function route() {
 async function poll() {
   if (!csrf || document.visibilityState !== 'visible' || answering || document.querySelector('.sheet-back')) return
   const path = location.pathname
-  // A chat view reads itself again, unless something is being typed.
-  const box = document.querySelector('textarea')
+  // A chat view reads itself again. Its messages are drawn again under the box Patrick is typing in, and
+  // the box stays as it is (showChat). Any other box with focus or words in it (on the desktop, the chat
+  // list's New chat box is on the page too) holds the redraw.
+  const chatBox = '#view .dock .composer textarea'
+  const writing = [...document.querySelectorAll('textarea')].some(t => t.value && !t.matches(chatBox))
   if (/^\/m\/(bramble$|room$|rooms\/|bots\/|hermes\/)/.test(path)) {
-    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-    if ((!box || !box.value) && !typing) route()
+    const other = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) &&
+      !document.activeElement.matches(chatBox)
+    if (!writing && !other) route()
     return
   }
   const r = await call('GET', '/changes?since=' + seq)
@@ -2273,16 +2644,19 @@ async function poll() {
   seq = r.body.seq
   const card = path.match(/^\/m\/decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card && r.body.changed.includes(card[1]) && !document.querySelector('[data-confirm]')) return route()
-  if (/^\/m\/(decisions)?$/.test(path)) return route()
+  // Decisions on the desktop's right follow the list too, whatever is in the middle.
+  if (/^\/m\/(decisions)?$/.test(path) || !document.getElementById('side').hidden) return route()
   // Elsewhere, the badge still follows the list.
   const list = await call('GET', '/cards')
   if (list.status === 200) badge(list.body.cards.length)
 }
 
 document.addEventListener('click', event => {
-  const a = event.target.closest('a[data-tab]')
+  const a = event.target.closest('a[data-tab], a[data-go]')
   if (a) { event.preventDefault(); go(a.getAttribute('href')) }
 })
+// Turning a phone, or widening a window on One, redraws the page in the layout that fits it.
+for (const q of [WIDE, WIDEST]) q.addEventListener('change', () => { if (csrf) route() })
 document.getElementById('settings').addEventListener('click', () => go('/m/settings'))
 window.addEventListener('popstate', () => { newPage = true; route() })
 // The app keeps its own place on every page, so the browser does not put back an old one.
