@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Three causes found on 1 Nov 2026 are in Hermes, not in this repository, so
+Four causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM runs.
@@ -10,8 +10,8 @@ Hermes release.
 Apply them in order on a checkout of that commit:
 
 ```
-git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch
-scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py
+git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch
+scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py
 ```
 
 ## 0001: the "too large" note names a path the Bot can read
@@ -58,11 +58,29 @@ v0.22.5 with and without 0001 and 0002, and only there.
 The fix makes it `/tmp/hermes-results`, the same default as
 `BaseEnvironment.get_temp_dir()`, with a test that holds it.
 
+## 0004: an auxiliary Codex call picks the pool entry for its own model
+
+Cause: the auxiliary Codex resolver knows the model it will call but asked
+the pool for an entry without naming one. An unscoped pick honours every
+model cooldown on an entry, and a Codex entitlement bench lasts a year. Seen
+2 Nov on the VM: the one Codex entry (c76109) is healthy (token good to 9
+Nov, not dead, not exhausted, no refresh due) but carries benches until 30
+Oct 2027 for anthropic/claude-opus-4.6, gpt-5.4 and gpt-5.5, set on 30 Oct
+when the account was refused those slugs. The Bots' Codex model is
+gpt-6.1-sol, which was never refused, yet every auxiliary pick came back
+empty and auxiliary_client found no token.
+
+The fix passes the model to the pick in both Codex callers. The year-long
+bench on a slug the account really cannot use is upstream's design (#71970)
+and stays; it now benches only that slug.
+
 ## Test results so far
 
 - Windows (One, Python 3.14, 1 Nov), 0001 and 0002: test_tool_result_storage
   58 passed and 1 failed (the 0003 cause, also failing without the patches),
   test_ratelimit_headers_logged 3 passed, test_retry_delay_parsers_shared 9
   passed.
-- Linux: not run yet. The upstream pull requests wait on a Linux run of all
-  three.
+- Linux (the VM, python:3.14 container, 2 Nov), 0001 to 0003: 72 passed,
+  0 failed.
+- 0004: not run yet. The upstream pull requests wait on a Linux run of all
+  four.
