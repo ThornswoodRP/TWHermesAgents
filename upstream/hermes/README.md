@@ -325,6 +325,14 @@ python -m pm.build_env --source . --out /venv --group dev --group test --extra m
 HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/tui_gateway/test_display_watch.py tests/tui_gateway/test_display_methods.py -q -rfE
 ```
 
+Run on upstream main `013bde47` (Linux, python:3.14, 2 Nov), with the patch
+at sha256 `2b1a46f2da7a66e2f9c13ee6c70d96e86ad1991da58761dd0ccb77f5f91f03f5`:
+the two new tests alone fail (16 passed, 2 failed); the whole patch on the
+two files passes 18 of 18; the whole `tests/tui_gateway` folder passes 2,969
+with 1 skipped without the patch and 2,971 with 1 skipped with it. The first
+version of this patch failed the three tests for a screen starting or
+stopping; this one does not.
+
 ## On upstream main
 
 The pull requests go to upstream main, not to v0.22.5. On 2 Nov, main was
@@ -410,3 +418,7 @@ the five merges or closes. 0007 and 0010 wait behind it the same way.
   patch on 4d26e0cc (Linux, Node 26, 2 Nov): the same suites, 62 files, 478
   passed, 0 failed; both tsc runs clean. Rebased on f0d94882 (2 Nov, 11 AM):
   67 files, 492 passed, 0 failed; both tsc runs and eslint clean.
+- 0010 (Linux, python:3.14, 2 Nov, on upstream main 013bde47): the new
+  tests fail without the fix (2 failed); with it, 18 of 18 on the two
+  files, and `tests/tui_gateway` 2,971 passed, 0 failed, 1 skipped (2,969
+  and the same skip without the patch).
