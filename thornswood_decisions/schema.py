@@ -14,7 +14,9 @@ from __future__ import annotations
 FLAGS_1 = ("decision_write", "mobile_read", "mobile_chat_write", "push_send", "connector_effects")
 # own_chat_write (migration 7): Patrick's chat with his own Hermes, my-hermes on
 # the VM and his Hermes on One, from the phone.
-FLAGS = FLAGS_1 + ("own_chat_write",)
+FLAGS_7 = FLAGS_1 + ("own_chat_write",)
+# session_manage_write (migration 10): rename, hide and delete Patrick's own chats from the phone.
+FLAGS = FLAGS_7 + ("session_manage_write",)
 # Patrick's own Hermes: the gateways the phone reaches beside the Bots' own.
 OWN_GATEWAYS = ("me", "one")
 
@@ -586,6 +588,44 @@ CREATE TABLE chat_reactions (
 );
 CREATE INDEX chat_reactions_by_status ON chat_reactions(workspace_id, gateway, status, updated_at);
 """,
+    # 10: renaming, hiding (archive), bringing back and deleting one of Patrick's own chats on Hermes or
+    # One (redesign step 3, plan Part 11). A flag of its own, off in every workspace until Patrick turns
+    # it on. Each request is one row, done by that gateway's own connector with Hermes's own calls, one
+    # at a time in each chat. Each ends in the same state however often it runs (that title, hidden or
+    # not, gone), so a lease that ran out is handed out again. The new title is kept here because the
+    # connector needs it; it is never in the event chain.
+    f"""
+CREATE TABLE flags_10 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN {_in(FLAGS_7 + ("session_manage_write",))}),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  changed_at TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO flags_10 SELECT workspace_id, name, enabled, changed_at, changed_by FROM flags;
+DROP TABLE flags;
+ALTER TABLE flags_10 RENAME TO flags;
+INSERT INTO flags(workspace_id, name, enabled, changed_at, changed_by)
+  SELECT id, 'session_manage_write', 0, created_at, 'migration 10' FROM workspaces;
+
+CREATE TABLE own_session_ops (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT NOT NULL CHECK (length(session_id) BETWEEN 1 AND 128),
+  op TEXT NOT NULL CHECK (op IN ('rename', 'archive', 'unarchive', 'delete')),
+  title TEXT CHECK ((op = 'rename') = (title IS NOT NULL) AND (title IS NULL OR length(title) BETWEEN 1 AND 100)),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
+""",
 ]
 
 
@@ -660,5 +700,26 @@ ALTER TABLE own_gateways DROP COLUMN state;
     9: ([("SELECT count(*) FROM chat_reactions WHERE status IN ('queued', 'leased')",
           "reactions on their way to Hermes")], """
 DROP TABLE chat_reactions;
+""", ""),
+    # A request already done lives in Hermes itself; only one still on its way would be lost.
+    10: ([("SELECT count(*) FROM own_session_ops WHERE status IN ('queued', 'leased')",
+           "chat renames, hides and deletes on their way to Hermes"),
+          ("SELECT count(*) FROM flags WHERE name = 'session_manage_write' AND enabled = 1",
+           "workspaces with session_manage_write on")], f"""
+DROP TABLE own_session_ops;
+
+CREATE TABLE flags_9 (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL CHECK (name IN ('decision_write', 'mobile_read', 'mobile_chat_write', 'push_send',
+                                     'connector_effects', 'own_chat_write')),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  changed_at TEXT NOT NULL,
+  changed_by TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, name)
+);
+INSERT INTO flags_9 SELECT workspace_id, name, enabled, changed_at, changed_by FROM flags
+  WHERE name <> 'session_manage_write';
+DROP TABLE flags;
+ALTER TABLE flags_9 RENAME TO flags;
 """, ""),
 }

@@ -220,3 +220,13 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
   font-size: 21px; padding: 0; }
 .sheet .emoji-row button[aria-pressed="true"] { border-color: var(--accent); background: var(--mine); }
 .sheet p { margin: 6px 0; }
+
+/* Chat actions (redesign step 3): the chat bar's More, and a delete that says
+   what it removes before it runs. */
+.chatbar .more { flex-basis: 40px; }
+.danger { background: var(--warn); color: var(--accent-fg); border: 0; border-radius: 8px; padding: 12px 16px;
+  width: 100%; margin: 8px 0; font-weight: 600; }
+.danger-quiet { background: transparent; color: var(--warn); border: 1px solid var(--warn); border-radius: 8px;
+  padding: 10px 14px; width: 100%; margin: 6px 0; }
+.sheet .search input { min-width: 0; }
+.row p.receipt, .row p.warn { margin: 6px 0 0; }

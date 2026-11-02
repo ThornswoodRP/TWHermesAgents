@@ -372,7 +372,7 @@ class Migration7(unittest.TestCase):
         self.assertEqual(migrate(con), len(MIGRATIONS))
         flags = dict(con.execute("SELECT name, enabled FROM flags WHERE workspace_id = 'ws_1'").fetchall())
         self.assertEqual(flags, {"decision_write": 0, "mobile_read": 1, "mobile_chat_write": 0, "push_send": 0,
-                                 "connector_effects": 0, "own_chat_write": 0})
+                                 "connector_effects": 0, "own_chat_write": 0, "session_manage_write": 0})
         self.assertEqual(con.execute("SELECT name FROM feed_sources").fetchall()[0][0], "push")
         self.assertEqual(con.execute("SELECT name FROM feed_snapshots").fetchall()[0][0], "work")
         con.execute("INSERT INTO feed_sources VALUES('ws_1', 'own-one', ?, 't')", ("c" * 64,))

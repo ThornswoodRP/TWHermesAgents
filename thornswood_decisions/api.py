@@ -60,7 +60,7 @@ APP_FILES = {
 # so an old alert or home screen link still opens.
 APP_VIEWS = re.compile(r"^(|decisions|board|rooms|bots|bramble|settings|needs-you|work|room|"
                        r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64}|"
-                       r"hermes/(?:me|one)|hermes/(?:me|one)/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$")
+                       r"hermes/(?:me|one)|hermes/(?:me|one)/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}|hidden/(?:me|one))$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
            "font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 # The service worker's own policy: it fetches only this origin, to keep the shell,
@@ -71,7 +71,7 @@ SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
             ("GET", "own"), ("POST", "own")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted")
+OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done")
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -207,6 +207,8 @@ class Api:
                 return 200, own.page_post(self.ws, route[1], token, data)
             if route[2] == "reacted":
                 return 200, own.reacted(self.ws, route[1], token, data)
+            if route[2] == "session_done":
+                return 200, own.session_done(self.ws, route[1], token, data)
             if route[2] == "claim":
                 # Tailscale Serve sets X-Forwarded-For to the tailnet address the connector posts from
                 # (and replaces any it was sent); the core reads the tailnet's view of that machine.
@@ -317,6 +319,12 @@ class Api:
         if method == "GET" and len(route) == 3 and route[0] == "own" and route[2] == "chats":
             return 200, OwnChat(core.s).page(p, route[1], "chats", before=query.get("before"), q=query.get("q"),
                                              wait=query.get("wait"))
+        if method == "GET" and len(route) == 4 and route[0] == "own" and route[2] == "chats" and route[3] == "archived":
+            return 200, OwnChat(core.s).page(p, route[1], "archived", before=query.get("before"),
+                                             wait=query.get("wait"))
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "session":
+            return 200, OwnChat(core.s).session(p, route[1], data.get("session_id"), data.get("op"),
+                                                data.get("title"), data.get("idempotency_key"))
         if method == "GET" and len(route) == 5 and route[0] == "own" and route[2] == "chats" and route[4] == "messages":
             return 200, OwnChat(core.s).page(p, route[1], "messages", chat=route[3], before=query.get("before"),
                                              wait=query.get("wait"))

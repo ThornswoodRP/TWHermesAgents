@@ -120,6 +120,8 @@ const SAID = {
   decision_write_off: 'Answering is off for now. The report page is still where you answer.',
   chat_write_off: 'Chat from the phone is off for now.',
   own_chat_off: 'Chat with your own Hermes from the phone is off for now.',
+  session_manage_off: 'Renaming, hiding and deleting chats from the phone is off for now.',
+  bot_chat_kept: 'Your Bot Chat is kept as it is: Bot Mode and every Bot\'s message to you find it by its name, so it is not renamed, hidden or deleted.',
   passkey_needed: 'A message to your own Hermes runs with full power, so it needs a passkey sign-in from the last 30 minutes.',
   one_off: 'One is off',
   no_gateway: 'There is no such gateway.',
@@ -934,8 +936,10 @@ function messageSheet(m) {
 }
 
 // The bar on top of a chat: back, then the chat's name and where it lives.
-function chatBar(back, backLabel, title, under, agent, label) {
-  const bar = screenBar({ back, backLabel, agent, label, title, under })
+// More, when given, opens the chat's own actions.
+function chatBar(back, backLabel, title, under, agent, label, more) {
+  const bar = screenBar({ back, backLabel, agent, label, title, under,
+    right: more ? el('button', { class: 'ib', type: 'button', 'aria-label': 'Chat actions', onclick: more }, icon('more')) : null })
   bar.classList.add('chatbar')
   return bar
 }
@@ -1028,10 +1032,12 @@ async function ownPage(path) {
   return r
 }
 
-function chatRow(gw, c) {
+function chatRow(gw, c, ops) {
+  const o = ops ? lastOp(ops, c.id) : null
   return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
     title: c.title || 'Untitled chat', tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
-    lines: el('span', { class: 'quiet' }, c.preview.slice(0, 120)), right: at(c.last_at) || when(c.last_at) })
+    lines: [el('span', { class: 'quiet' }, c.preview.slice(0, 120)), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
+    right: at(c.last_at) || when(c.last_at) })
 }
 
 async function gatewayView(gw) {
@@ -1098,9 +1104,10 @@ async function gatewayView(gw) {
     searching ? el('button', { class: 'secondary', type: 'button', onclick: () => {
       pick.q = ''; pick.results = null; pick.extra = []; route()
     } }, 'Show every chat') : null,
-    shown.length ? shown.map(c => chatRow(gw, c)) : el('p', { class: 'quiet' }, searching ? 'No chat has that in its title.' : 'No chats yet.'),
+    shown.length ? shown.map(c => chatRow(gw, c, v.ops)) : el('p', { class: 'quiet' }, searching ? 'No chat has that in its title.' : 'No chats yet.'),
     hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(shown[shown.length - 1].last_at) }, 'Older chats') : null,
-    note)
+    note,
+    el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats'))
   if (seqNow === viewSeq) show(parts)
 }
 
@@ -1201,14 +1208,26 @@ async function ownChatView(gw, sid) {
     withReactions(h.items, v.reactions, pageAt, canReact ? (mid, emoji) => reactTo(`/own/${gw}/react`, { session_id: sid }, mid, emoji, status) : null,
       `${name} is not answering, so a reaction cannot be set now.`)
     const items = h.items.concat(pendingItems(v.mine, readAt))
+    // A rename, hide or delete asked for here: how it stands, and once a hide or a delete is done, so it says.
+    const o = lastOp(v.ops, sid)
+    const ended = o && o.status === 'done' && (o.op === 'delete' || o.op === 'archive') ? o.op : null
+    // His Bot Chat is kept as it is, so it offers no Rename, Hide or Delete (the core refuses them too).
+    const manage = v.can_manage && v.online && !h.gone && !t.error && !ended && !(o && inFlight(o)) && !v.chat.bot_chat
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, v.chat.title || 'Untitled chat',
-        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`, gw),
+        `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`, gw, name,
+        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null),
+      ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
+      ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
+        el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats')) : null,
+      opLine(o, name),
       h.notes,
       offLine(v)
     ]
     const dock = []
-    if (v.can_send && v.online && !h.gone && !t.error) {
+    if (ended) {
+      // Nothing sent here would reach a chat that is gone or hidden.
+    } else if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
         dock.push(signInPart(v, status, true), chatComposer(`own:${gw}:${sid}`, 'Message to ' + name, 'Send to ' + name,
           (text, k) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k }), status, gw), status)
@@ -1239,6 +1258,176 @@ async function ownChatView(gw, sid) {
   t.newest = p.body
   t.error = null
   render()
+}
+
+// ── renaming, hiding and deleting his own chats (redesign step 3) ─────────
+//
+// Each is a request the core keeps and that gateway's own connector does with
+// Hermes's own calls: a rename as `hermes sessions rename` does it, hiding and
+// bringing back as Hermes's archive (the whole chat, every message kept), and a
+// delete as `hermes sessions delete`, which Hermes refuses while a turn runs.
+// Only Hermes and One have them, never a Bot Chat or a room.
+
+const OP_WORDS = {
+  rename: ['Renaming', 'Not renamed'],
+  archive: ['Hiding this chat', 'Not hidden'],
+  unarchive: ['Bringing it back', 'Not brought back'],
+  delete: ['Deleting this chat', 'Not deleted']
+}
+
+function inFlight(o) { return o.status === 'queued' || o.status === 'leased' }
+
+// The newest request of one chat, from the core's rows (oldest first).
+function lastOp(ops, sid) {
+  for (let i = ops.length - 1; i >= 0; i--) if (ops[i].session_id === sid) return ops[i]
+  return null
+}
+
+// How the newest request of a chat stands, while it is waiting or after it failed.
+function opLine(o, name) {
+  if (!o) return null
+  const [doing, failed] = OP_WORDS[o.op]
+  if (inFlight(o)) {
+    return el('p', { class: 'receipt', role: 'status', 'data-op': o.op },
+      `${doing}${o.op === 'rename' ? ` to "${o.title}"` : ''}. ${name} does it the next time it checks in.`)
+  }
+  if (o.status === 'failed') return el('p', { class: 'warn', role: 'status', 'data-op': o.op }, `${failed}: ${o.reason || 'no reason given'}`)
+  return null
+}
+
+// One request to the core. The same request again (after no answer) carries the
+// same key, so it is one request, never a second.
+async function askSession(gw, sid, op, title, keys, note) {
+  const k = op + '\n' + (title || '')
+  keys[k] = keys[k] || newKey()
+  note.textContent = 'Asking...'
+  const r = await call('POST', `/own/${gw}/session`, { session_id: sid, op, title: op === 'rename' ? title : null,
+    idempotency_key: keys[k] })
+  if (r.status === 200) { closeSheet(); return r }
+  if (r.status === 401) { csrf = null; closeSheet(); signInView(said(r.body)); return r }
+  const d = r.body.detail || {}
+  note.textContent = r.status === 0
+    ? 'Could not reach the core. Asking again sends the same request, never a second one.'
+    : (d.state ? stateWords({ gateway: gw, ...d })[1] : (r.body.message || said(r.body)))
+  return r
+}
+
+// What deleting removes, in Hermes's own terms (contracts.json "sessions").
+function deleteWords(title, name) {
+  return [
+    el('p', {}, el('strong', {}, `Delete "${title || 'Untitled chat'}" for good?`)),
+    el('p', {}, `This deletes the chat from ${name} for good: all its messages, the earlier parts Hermes ` +
+      'compressed it from, and the side tasks Hermes ran for it. It cannot be undone.'),
+    el('p', { class: 'quiet' }, 'Nothing else changes: no other chat, no Bot and no room. A chat branched off ' +
+      'this one is kept. What you sent from the phone stays in the core\'s record. If a turn is still running ' +
+      `in it, ${name} refuses and nothing is deleted.`)
+  ]
+}
+
+// The chat's actions: Rename, Hide and Delete for good, in a sheet like a message's.
+function chatSheet(gw, sid, title, v) {
+  closeSheet()
+  const name = GATEWAY[gw]
+  const keys = {}
+  const note = el('p', { class: 'warn', role: 'status' })
+  const sheet = el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Chat actions' })
+  const back = el('div', { class: 'sheet-back' }, sheet)
+  const fill = (...nodes) => { sheet.replaceChildren(...nodes.flat().filter(n => n)); const f = sheet.querySelector('input, button'); if (f) f.focus() }
+  const done = () => route()
+  const box = el('input', { type: 'text', maxlength: '100', autocomplete: 'off', 'aria-label': 'New title' })
+  box.value = title || ''
+  // A delete needs a passkey sign-in from the last 30 minutes: without one, its prompt opens by itself.
+  let signed = !!v.sign_in_until
+  async function remove() {
+    if (!signed) {
+      const s = await passkeySignIn()
+      if (s.status !== 200) { note.textContent = said(s.body); return }
+      signed = true
+    }
+    const r = await askSession(gw, sid, 'delete', null, keys, note)
+    if (r.status === 200) return done()
+    if (r.status === 403 && r.body.error === 'passkey_needed') signed = false
+  }
+  function confirmDelete() {
+    fill(deleteWords(title, name),
+      signed ? null : el('p', { class: 'quiet' }, 'Deleting needs your passkey. Its prompt opens when you press Delete for good.'),
+      el('button', { class: 'danger', type: 'button', 'data-confirm': 'delete', onclick: remove }, 'Delete for good'),
+      el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Keep it'),
+      note)
+  }
+  fill(el('p', {}, el('strong', {}, 'This chat on ' + name)),
+    el('div', { class: 'search' }, box, el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      if (!box.value.trim()) { note.textContent = 'Type a title first.'; return }
+      if (box.value.trim() === (title || '')) { note.textContent = 'That is its title already.'; return }
+      const r = await askSession(gw, sid, 'rename', box.value.trim(), keys, note)
+      if (r.status === 200) done()
+    } }, 'Rename')),
+    el('button', { class: 'secondary', type: 'button', onclick: async () => {
+      const r = await askSession(gw, sid, 'archive', null, keys, note)
+      if (r.status === 200) done()
+    } }, 'Hide this chat'),
+    el('p', { class: 'quiet' }, `Hiding takes it off ${name}'s chat list and keeps every message. Hidden chats, on ${name}'s page, brings it back.`),
+    el('button', { class: 'danger-quiet', type: 'button', onclick: confirmDelete }, 'Delete for good...'),
+    el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'),
+    note)
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  box.focus()
+}
+
+// The chats Hermes hides (archived), newest first, each with Bring back. Never in the chat list.
+async function hiddenView(gw) {
+  setTab('bots')
+  const seqNow = ++viewSeq
+  const r = await call('GET', '/own/' + gw)
+  if (refused(r)) return
+  const v = r.body
+  const name = GATEWAY[gw]
+  const note = el('p', { class: 'warn', role: 'status' })
+  const head = [
+    chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, 'Hidden chats', `${name}, ${GATEWAY_WHAT[gw]}`, gw, name),
+    el('p', { class: 'quiet' }, `The chats you hid on ${name}, with every message kept. Bring back puts one in the chat list again.`),
+    offLine(v)
+  ]
+  show(head, el('p', { class: 'quiet' }, `Asking ${name}...`))
+  const all = []
+  async function page(before) {
+    const p = await ownPage(`/own/${gw}/chats/archived` + (before ? '?' + new URLSearchParams({ before }) : ''))
+    if (seqNow !== viewSeq) return
+    if (p.status === 401) { csrf = null; return signInView(said(p.body)) }
+    if (p.status !== 200) { note.textContent = said(p.body); return draw(false) }
+    if (p.body.pending) { note.textContent = `${name} has not answered yet. Try again in a moment.`; return draw(false) }
+    all.push(...p.body.chats)
+    draw(p.body.more)
+  }
+  function draw(more) {
+    if (seqNow !== viewSeq) return
+    const keys = {}
+    const rows = all.map(c => {
+      const o = lastOp(v.ops, c.id)
+      const line = el('p', { class: 'warn', role: 'status' })
+      return el('div', { class: 'row', 'data-chat': c.id },
+        el('div', { class: 't' },
+          el('strong', {}, c.title || 'Untitled chat'),
+          el('span', { class: 'quiet' }, (c.preview || '').slice(0, 120)),
+          opLine(o, name),
+          line),
+        el('div', { class: 'w' },
+          el('span', {}, when(c.last_at)),
+          v.can_manage && v.online && !(o && inFlight(o))
+            ? el('button', { class: 'secondary', type: 'button', onclick: async () => {
+                const a = await askSession(gw, c.id, 'unarchive', null, keys, line)
+                if (a.status === 200) { v.ops.push(a.body); draw(more) }
+              } }, 'Bring back')
+            : null))
+    })
+    show(head, all.length ? rows : el('p', { class: 'quiet' }, 'No hidden chats.'),
+      more ? el('button', { class: 'secondary', type: 'button', onclick: () => page(all[all.length - 1].last_at) }, 'Older hidden chats') : null,
+      v.can_manage ? null : el('p', { class: 'quiet' }, said({ error: 'session_manage_off' })),
+      note)
+  }
+  await page(null)
 }
 
 async function roomsView() {
@@ -1597,6 +1786,8 @@ async function route() {
   if (path === 'bots') return botsView()
   const own = path.match(/^hermes\/(me|one)(?:\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127}))?$/)
   if (own) return own[2] ? ownChatView(own[1], own[2]) : gatewayView(own[1])
+  const hidden = path.match(/^hidden\/(me|one)$/)
+  if (hidden) return hiddenView(hidden[1])
   if (path === 'settings') return settingsView()
   return decisionsView()
 }

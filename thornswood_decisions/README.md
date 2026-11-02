@@ -237,6 +237,30 @@ Checked here: `tests/test_decisions_reactions.py`:
 
 The browser check: Hermes's and Bramble's reactions show with their names, a tap opens the actions, a reaction shows at once and asks for exactly that message and emoji, it stops being dashed once set (in One's chat and in Bramble's Bot Chat), and it comes off. Not checked here: a real Hermes on One or the VM, and Desktop showing a reaction set from the phone.
 
+## Renaming, hiding and deleting his own chats (redesign step 3)
+
+Plan Part 11, build step 3, for his own Hermes and One only: never a Bots' Bot Chat, his own Bot Chat or a room. Each is done with Hermes's own call, as Hermes's own commands do it (`contracts.json` `sessions`), and all of it is off until Patrick turns on `session_manage_write` (`tw-decide flag`), on top of `own_chat_write`.
+
+- **On the phone.** A chat of his own has Chat actions (the dots in its bar) while that gateway answers: Rename, Hide this chat, and Delete for good. A request shows at once ("Renaming to ..."), and a failure says Hermes's reason. A hidden or deleted chat says so and offers no send. Hidden chats, under the chat list, lists the chats Hermes hides, from Hermes itself, each with Bring back.
+- **Rename** is `hermes sessions rename`: Hermes's own `set_session_title`, which refuses a title another chat holds or one over 100 characters. The core takes one line of text and closes up its spaces.
+- **Hide and Bring back** are Hermes's archive: `set_session_archived` on the whole chat (every compressed part of it), with every message kept. Hiding is never deleting.
+- **Delete for good** is `hermes sessions delete`. Hermes refuses it while a turn runs or one is unfinished in the chat or a side task of it, and says why. It deletes that chat with all its messages, the earlier parts Hermes compressed it from and the side tasks (delegate chats) Hermes ran for it; a chat branched off it is kept, and nothing else changes. Before anything is asked, the phone says exactly that, and Keep it changes nothing. A delete needs a passkey sign-in from the last 30 minutes: when there is none, the prompt opens by itself on Delete for good. What Patrick sent from the phone stays in the core's record.
+- **In the core.** `POST /own/<me or one>/session` with `{session_id, op, title, idempotency_key}` (op `rename`, `archive`, `unarchive` or `delete`). It needs a chat that gateway listed (for Bring back, one a page of its hidden chats listed) and that gateway answering. `own_session_ops` (migration 10) keeps each request with its command record, so the same key again gets the same receipt. No title goes into the event chain. `GET /own/<gateway>/chats/archived` asks for a page of the hidden chats, like the chat list's own pages.
+- **The connector.** That gateway's claim hands its connector one request at a time in each chat, up to 5, even while every turn slot is busy, and it answers on `POST /own/<gateway>/session_done`, then feeds the chat list at once. Each request ends the same however often it runs, so a lease that ran out after 2 minutes goes out again, and a delete of a chat already gone is done. `room_send.py` op `session` does it in Hermes's own Python through Hermes's own `SessionDB`.
+- **His own Bot Chat is kept as it is.** Bot Mode and every Bot's message to him find it by its exact title while it is hidden (`contracts.json` `sessions` `bot_chat`), so a new title, a hide or a delete would cut him off from it, and Hermes's own apps never offer these for it. On the phone it has no Chat actions. The core refuses a request for a chat the connector listed as his Bot Chat (`bot_chat_kept`), and `room_send.py` refuses it again by Hermes's own record, for the canonical row and every part Hermes compressed it into. Nothing is written.
+- **The way back.** `tw-decide downgrade --to 9` refuses while a request is queued or leased or `session_manage_write` is on, then drops `own_session_ops` and the flag.
+
+Checked here: `tests/test_decisions_sessions.py`:
+
+- the requests: the flag, the title rules, the idempotency key, a chat that gateway never listed, the passkey for a delete only, and the gateway answering;
+- one at a time in each chat, a lapsed lease handed out again, a failure with Hermes's reason, a late answer;
+- the routes, and that a browser can never answer for a connector;
+- the connector and the helper against a stand-in for Hermes's own calls, including a delete Hermes refuses while a turn runs and a delete of a chat already gone;
+- his Bot Chat refused by the core as listed (in the chat list or a page of it) and by the helper for each part of it, with nothing written, and the Bots list naming the chat last written in rather than the Bot Chat listed first;
+- migration 10 and its way back.
+
+The browser check: a chat's actions, a rename that shows at once and then from One, hiding (off the list, no send), Hidden chats from One with Bring back, the delete's words before anything goes, Keep it, a delete that goes through, no chat actions on a Bot Chat, and his own Bot Chat first on One's list, marked Bot Mode, opening with its messages and no chat actions. Not checked here: a real Hermes on One or the VM.
+
 ## The pinned contract (step 0)
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:

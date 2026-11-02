@@ -340,6 +340,93 @@ const base = `http://localhost:${port}`
     if (m.dock > m.tabs + 0.5) throw new Error(`the box ends at ${m.dock}, under the tabs at ${m.tabs}`)
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-markdown.png' })
+  // Renaming, hiding, bringing back and deleting one of his own chats (redesign step 3). The scratch
+  // connector does each on its state.db and feeds the chat list again; the app reads it on its next draw.
+  const again = async (path, test) => {
+    for (let i = 0; i < 20; i++) {
+      await page.goto(base + path)
+      await page.locator('#view').filter({ hasNotText: 'Loading...' }).waitFor({ timeout: 5000 })
+      await page.waitForTimeout(250)
+      if (await test()) return
+    }
+    throw new Error('never came to pass on ' + path)
+  }
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await step('a chat of his own has its actions: Rename, Hide and Delete for good, and no reactions', async () => {
+    const sheet = page.getByRole('dialog', { name: 'Chat actions' })
+    for (const name of ['Rename', 'Hide this chat', 'Delete for good...']) await sheet.getByRole('button', { name }).waitFor({ timeout: 3000 })
+    if ((await page.getByLabel('New title').inputValue()) !== 'Markdown check') throw new Error('the title box does not hold its title')
+  })
+  await page.getByLabel('New title').fill('  Markdown   look ')
+  await page.getByRole('button', { name: 'Rename', exact: true }).click()
+  await step('a rename shows at once as asked, then the chat has its new name from One', async () => {
+    // The scratch connector checks in every 0.3 s, so the rename may be done before the chat redraws:
+    // then the chat shows the new name at once instead of the line saying it is on its way.
+    await page.waitForFunction(() => document.body.innerText.includes('Renaming to "Markdown look".') ||
+      document.querySelector('.chatbar .t strong')?.textContent === 'Markdown look', null, { timeout: 5000 })
+    await again('/m/hermes/one/s_md', async () => (await page.locator('.chatbar .t strong').textContent()) === 'Markdown look')
+  })
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await page.getByRole('button', { name: 'Hide this chat' }).click()
+  await step('a hidden chat says so, offers no send, and is off the chat list', async () => {
+    await again('/m/hermes/one/s_md', () => page.getByText(/^Hidden from One's chat list/).count())
+    if (await page.getByLabel('Message to One').count()) throw new Error('a composer on a hidden chat')
+    await page.goto(base + '/m/hermes/one')
+    await page.getByRole('button', { name: /^Plan the week/ }).waitFor({ timeout: 5000 })
+    if (await page.locator('#view .row[data-chat="s_md"]').count()) throw new Error('the hidden chat is still listed')
+  })
+  await page.getByRole('button', { name: 'Hidden chats' }).click()
+  await step('Hidden chats lists it from One itself, with Bring back', () =>
+    page.locator('#view .row[data-chat="s_md"]').getByRole('button', { name: 'Bring back' }).waitFor({ timeout: 8000 }))
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-hidden.png' })
+  await page.locator('#view .row[data-chat="s_md"]').getByRole('button', { name: 'Bring back' }).click()
+  await step('Bring back shows as asked, then the chat is on the list again', async () => {
+    await page.getByText(/^Bringing it back\./).waitFor({ timeout: 5000 })
+    await again('/m/hermes/one', () => page.locator('#view .row[data-chat="s_md"]').count())
+  })
+  await page.goto(base + '/m/hermes/one/s_md')
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await page.getByRole('button', { name: 'Delete for good...' }).click()
+  await step('Delete for good says exactly what goes before anything is deleted', async () => {
+    await page.getByText('Delete "Markdown look" for good?').waitFor({ timeout: 3000 })
+    await page.getByText(/all its messages, the earlier parts Hermes compressed it from, and the side tasks Hermes ran for it/).waitFor({ timeout: 3000 })
+    await page.getByText(/no other chat, no Bot and no room/).waitFor({ timeout: 3000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-delete.png' })
+  await page.getByRole('button', { name: 'Keep it' }).click()
+  await step('Keep it deletes nothing', async () => {
+    await page.waitForTimeout(800)
+    await page.goto(base + '/m/hermes/one')
+    await page.locator('#view .row[data-chat="s_md"]').waitFor({ timeout: 5000 })
+  })
+  await page.goto(base + '/m/hermes/one/s_md')
+  await page.getByRole('button', { name: 'Chat actions' }).click()
+  await page.getByRole('button', { name: 'Delete for good...' }).click()
+  await page.getByRole('button', { name: 'Delete for good', exact: true }).click()
+  await step('a delete goes through, the chat says it is gone and offers no send, and it is off the list', async () => {
+    await again('/m/hermes/one/s_md', () => page.getByText('Deleted from One for good.').count())
+    if (await page.getByLabel('Message to One').count()) throw new Error('a composer on a deleted chat')
+    if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('actions on a deleted chat')
+    await page.goto(base + '/m/hermes/one')
+    await page.getByRole('button', { name: /^Plan the week/ }).waitFor({ timeout: 5000 })
+    if (await page.locator('#view .row[data-chat="s_md"]').count()) throw new Error('the deleted chat is still listed')
+  })
+  await page.goto(base + '/m/hermes/one')
+  await step("his own Bot Chat heads One's chats, marked Bot Mode", async () => {
+    const first = page.locator('#view .row[data-chat]').first()
+    if ((await first.getAttribute('data-chat')) !== 's_obc') throw new Error('the Bot Chat is not first')
+    await first.getByText('Bot Mode').waitFor({ timeout: 3000 })
+  })
+  await page.goto(base + '/m/hermes/one/s_obc')
+  await step('his own Bot Chat opens with its messages and offers no Rename, Hide or Delete', async () => {
+    await page.getByText('Rift: load order is clean').first().waitFor({ timeout: 8000 })
+    if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('chat actions on his Bot Chat')
+  })
+  await page.goto(base + '/m/bots/bramble')
+  await step('a Bot Chat has no chat actions', async () => {
+    await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
+    if (await page.getByRole('button', { name: 'Chat actions' }).count()) throw new Error('chat actions on a Bot Chat')
+  })
   await page.goto(base + '/m/hermes/me/s_plan')
   await step("One's chat id does not open on Hermes", () =>
     page.getByText('Hermes has not listed this chat, so it does not open here.').waitFor({ timeout: 5000 }))
@@ -472,7 +559,7 @@ const base = `http://localhost:${port}`
   for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3]]) {
     await page.setViewportSize({ width, height: 860 })
     for (const view of ['/m/bots', '/m/rooms', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',
-      '/m/hermes/one', '/m/hermes/one/s_plan', '/m/bots/bramble', '/m/room']) {
+      '/m/hermes/one', '/m/hermes/one/s_plan', '/m/hidden/one', '/m/bots/bramble', '/m/room']) {
       await page.goto(base + view)
       await page.locator('#view').filter({ hasNotText: 'Loading...' }).waitFor({ timeout: 5000 })
       await page.waitForTimeout(300)

@@ -281,7 +281,8 @@ class AppFiles(unittest.TestCase):
     def test_the_shell_and_its_deep_links(self):
         # Decisions, Board and Rooms, and the tabs' first names, which old links still use.
         for path in ("/m/", "/m/decisions", "/m/board", "/m/rooms", "/m/rooms/00000000-0000-4000-8000-000000000001",
-                     "/m/needs-you", "/m/work", "/m/room", "/m/decisions/dec_abc-123"):
+                     "/m/needs-you", "/m/work", "/m/room", "/m/decisions/dec_abc-123", "/m/hermes/one",
+                     "/m/hermes/me/s_plan", "/m/hidden/one", "/m/hidden/me"):
             status, headers, body = self.raw("GET", path)
             self.assertEqual(status, 200, path)
             self.assertIn(b'<script src="/m/app.js" defer>', body)
@@ -289,7 +290,8 @@ class AppFiles(unittest.TestCase):
             self.assertNotIn("unsafe-inline", headers["Content-Security-Policy"])
 
     def test_only_the_app_files(self):
-        for path in ("/m/../thornswood_decisions/store.py", "/m/app.py", "/m/decisions/a/b", "/m/%2e%2e/x"):
+        for path in ("/m/../thornswood_decisions/store.py", "/m/app.py", "/m/decisions/a/b", "/m/%2e%2e/x",
+                     "/m/hidden/bots", "/m/hidden/one/s_plan"):
             self.assertEqual(self.raw("GET", path)[0], 404, path)
         self.assertEqual(self.raw("POST", "/m/")[0], 405)
 

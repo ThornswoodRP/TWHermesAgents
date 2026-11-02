@@ -77,7 +77,7 @@ FEED_BYTES = 480 * 1024  # under the core's 512 KB
 PAGE_CHATS = 50
 PAGE_MESSAGES = 50
 PAGE_TEXT = 8000
-PAGE_KINDS = ("chats", "messages")
+PAGE_KINDS = ("chats", "archived", "messages")
 # Sessions Hermes's own pickers leave out (hermes_state_sessions.py INTERNAL_LISTING_SOURCES), and sub-agent runs.
 NOT_LISTED = ("kanban", "tool", "oneshot", "subagent")
 WINDOWS = os.name == "nt"
@@ -279,9 +279,12 @@ def chat_exists(state_db: Path, session_id: str) -> bool:
         con.close()
 
 
-def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS) -> dict:
-    """Chats Hermes's own pickers list, newest first, older than `before`, with `q` in the title."""
+def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, archived: bool = False) -> dict:
+    """Chats Hermes's own pickers list, newest first, older than `before`, with `q` in the title; with
+    `archived`, the ones Hermes hides instead (to bring one back)."""
     sql = LIST_SQL.replace("ORDER BY last_at DESC LIMIT ?", "")
+    if archived:
+        sql = sql.replace("WHERE s.archived = 0", "WHERE s.archived = 1")
     where, args = [], [*NOT_LISTED]
     if before:
         where.append("coalesce(s.last_activity_at, s.started_at) < ?")
@@ -292,9 +295,10 @@ def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS) 
     sql = sql.rstrip() + "".join(f"\n  AND {w}" for w in where) + "\nORDER BY last_at DESC, s.id LIMIT ?"
     con = _ro(state_db)
     try:
-        bot = bot_chat(con)
+        # It heads the first page of the chat list, and a search for its name finds it. It is never
+        # archived (BOT_CHAT_SQL takes only the unarchived one), so a page of hidden chats never lists it.
+        bot = None if archived else bot_chat(con)
         rows = [r for r in con.execute(sql, (*args, n + 1)).fetchall() if not bot or r["id"] != bot["id"]]
-        # It heads the first page, and a search for its name finds it.
         chats = [bot] if bot and not before and q.lower() in BOT_CHAT.lower() else []
         for r in rows[:n - len(chats)]:
             last = con.execute(MESSAGES_SQL, (r["id"], 1)).fetchone()
@@ -356,10 +360,10 @@ def reactions(raw) -> list[dict]:
 def fitted_page(state_db: Path, req: dict) -> bytes:
     """A page as the core takes it: under its size, with fewer rows if need be. The cursor is the oldest row
     sent, so a shorter page leaves no gap."""
-    n = PAGE_CHATS if req["kind"] == "chats" else PAGE_MESSAGES
+    n = PAGE_CHATS if req["kind"] in ("chats", "archived") else PAGE_MESSAGES
     while True:
-        if req["kind"] == "chats":
-            page = chats_page(state_db, req.get("before"), req.get("q") or "", n)
+        if req["kind"] in ("chats", "archived"):
+            page = chats_page(state_db, req.get("before"), req.get("q") or "", n, archived=req["kind"] == "archived")
         else:
             page = messages_page(state_db, req["chat"], req.get("before"), n)
         body = json.dumps({"id": req["id"], "page": page}, ensure_ascii=False).encode("utf-8")
@@ -421,6 +425,24 @@ class Hermes:
             return "set", ""
         reason = got.get("reason") if isinstance(got, dict) else None
         return "failed", str(reason or "not set")[:200]
+
+    def session(self, action: str, session_id: str, title: str | None) -> tuple[str, str]:
+        """(outcome, reason): rename, hide, bring back or delete one chat with Hermes's own store, through
+        the same helper and Python as the readiness check. The title goes on stdin, never a command line."""
+        req = json.dumps({"op": "session", "profile": "", "action": action, "session_id": session_id,
+                          "title": title}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True,
+                                 timeout=60, cwd=str(self.home_dir), check=False)
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            return "failed", "Hermes's store did not answer in a minute"
+        except (OSError, IndexError, json.JSONDecodeError):
+            return "failed", "could not run the helper with Hermes's Python"
+        if isinstance(got, dict) and got.get("done") is True:
+            return "done", ""
+        reason = got.get("reason") if isinstance(got, dict) else None
+        return "failed", str(reason or "not done")[:200]
 
     def turn(self, session_id: str | None, text: str) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message."""
@@ -675,6 +697,15 @@ class OwnConnector:
             pending, self.unsaid = self.unsaid, []
         keep = []
         for r in pending:
+            if "op_id" in r:
+                # A rename, hide or delete: the core changes nothing for one it already has an answer to.
+                status, _ = self.core.post("session_done", {"id": r["op_id"], "outcome": r["outcome"],
+                                                            "reason": r["reason"]})
+                if status in (200, 404):
+                    self.say(f"{'PASS' if r['outcome'] == 'done' else 'NOTE'} chat {r['action']}: {r['outcome']}")
+                else:
+                    keep.append(r)
+                continue
             if "version" in r:
                 # A reaction: the core drops an answer about an older wish by itself.
                 status, _ = self.core.post("reacted", r)
@@ -730,6 +761,27 @@ class OwnConnector:
             with self._lock:
                 self.unsaid.append({"session_id": r["session_id"], "message_id": r["message_id"],
                                     "version": r["version"], "outcome": outcome, "reason": reason})
+        if tried:
+            self._report()
+        return done
+
+    def sessions(self, wanted: list) -> int:
+        """The renames, hides and deletes the core handed over, done one after another, and what came of
+        each told to the core. A delete that cannot be done says Hermes's reason. Returns how many were done."""
+        done = tried = 0
+        for r in wanted[:5]:
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str)
+                    and r.get("op") in ("rename", "archive", "unarchive", "delete")
+                    and isinstance(r.get("session_id"), str) and SESSION_ID.match(r["session_id"])
+                    and (r.get("title") is None or isinstance(r.get("title"), str))):
+                continue
+            outcome, reason = self.hermes.session(r["op"], r["session_id"], r.get("title"))
+            done += outcome == "done"
+            tried += 1
+            if outcome == "done":
+                self.feed_now = True  # the chat list shows the new title, or loses the chat, at once
+            with self._lock:
+                self.unsaid.append({"op_id": r["id"], "action": r["op"], "outcome": outcome, "reason": reason})
         if tried:
             self._report()
         return done
@@ -817,6 +869,9 @@ class OwnConnector:
         reacts = body.get("reactions", [])
         if isinstance(reacts, list):
             self.react(reacts)
+        ops = body.get("sessions", [])
+        if isinstance(ops, list):
+            self.sessions(ops)
         items = body.get("items", [])
         for item in items:
             t = threading.Thread(target=self._deliver, args=(item,), daemon=True)

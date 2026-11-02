@@ -40,6 +40,7 @@ from pathlib import Path
 from .auth import Principal
 from . import reactions
 from .feeds import Feeds
+from .own_sessions import OwnSessions
 from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
 from .schema import OWN_GATEWAYS
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
@@ -120,6 +121,19 @@ def _sid(value) -> str:
         raise CoreError(400, "bad_chat", "a chat's id is 1 to 128 letters, digits and _ . : -, starting with a "
                         "letter or digit")
     return value
+
+
+def _when(c: dict) -> datetime:
+    try:
+        return parse(c.get("last_at") or "")
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _newest(chats: list) -> dict | None:
+    """The chat last written in. Not simply the first: the connector lists his Bot Chat first however
+    long ago it was written in."""
+    return max(chats, key=_when) if chats else None
 
 
 def clean(body) -> dict:
@@ -233,19 +247,28 @@ class _Pages:
             self.cond.notify_all()
             return key
 
-    def listed(self, ws: str, gw: str, sid: str, now: datetime) -> bool:
-        """Whether a chats page this gateway's connector posted names the chat, or a messages page says the
-        chat goes on under it."""
+    def listed(self, ws: str, gw: str, sid: str, now: datetime, kind: str = "chats") -> bool:
+        """Whether a chats page (or with kind "archived", a page of hidden chats) this gateway's connector
+        posted names the chat, or a messages page says the chat goes on under it."""
         with self.cond:
             self._drop_old(now)
             for key, (_, page) in self.held.items():
                 if key[0] != ws or key[1] != gw:
                     continue
-                if key[2] == "chats" and any(c["id"] == sid for c in page["chats"]):
+                if key[2] == kind and any(c["id"] == sid for c in page["chats"]):
                     return True
-                if key[2] == "messages" and page.get("continued_as") == sid:
+                if kind == "chats" and key[2] == "messages" and page.get("continued_as") == sid:
                     return True
             return False
+
+
+    def bot_chat(self, ws: str, gw: str, sid: str, now: datetime) -> bool:
+        """Whether a chats page this gateway's connector posted names the chat as his Bot Chat."""
+        with self.cond:
+            self._drop_old(now)
+            return any(key[0] == ws and key[1] == gw and key[2] == "chats"
+                       and any(c["id"] == sid and c.get("bot_chat") for c in page["chats"])
+                       for key, (_, page) in self.held.items())
 
 
 PAGES = _Pages()
@@ -346,7 +369,7 @@ def clean_page(kind: str, body) -> dict:
     more = body.get("more")
     if not isinstance(more, bool):
         raise CoreError(400, "bad_page", "more is true or false")
-    if kind == "chats":
+    if kind in ("chats", "archived"):
         chats = body.get("chats")
         if not isinstance(chats, list) or len(chats) > PAGE_CHATS:
             raise CoreError(400, "bad_page", f"a page of chats has at most {PAGE_CHATS}")
@@ -435,6 +458,21 @@ class OwnChat:
         """On: its connector was heard from in the last 2 minutes, and said that Hermes's gateway was running."""
         row = self._gw_row(workspace_id, gw)
         return bool(row and row["ready"]) and self.s.clock() - parse(row["last_seen"]) < ONLINE
+
+    def must_be_online(self, workspace_id: str, gw: str) -> None:
+        """Refuses at once, saying why, when that Hermes is not answering."""
+        if self.online(workspace_id, gw):
+            return
+        why = self._off_why(workspace_id, gw)
+        st = self.gateway_state(workspace_id, gw)
+        if st["state"] == "machine_off":
+            raise CoreError(409, "one_off", "One is off", why=why, state=st["state"], since=st["since"])
+        raise CoreError(409, "gateway_off", f"{NAMES[gw]} is not answering: {why}", why=why,
+                        state=st["state"], since=st["since"])
+
+    @staticmethod
+    def name(gw: str) -> str:
+        return NAMES[gw]
 
     def _off_why(self, workspace_id: str, gw: str) -> str | None:
         row = self._gw_row(workspace_id, gw)
@@ -546,7 +584,9 @@ class OwnChat:
                 "as_of": snap["as_of"], "snap": snap[gw]}
 
     def _can(self, p: Principal) -> dict:
-        return {"can_send": self.s.flag(p.workspace_id, "own_chat_write"), "sign_in_until": self.sign_in_until(p)}
+        return {"can_send": self.s.flag(p.workspace_id, "own_chat_write"), "sign_in_until": self.sign_in_until(p),
+                "can_manage": self.s.flag(p.workspace_id, "own_chat_write")
+                and self.s.flag(p.workspace_id, "session_manage_write")}
 
     def summary(self, p: Principal) -> dict:
         self._patrick(p)
@@ -554,7 +594,7 @@ class OwnChat:
         for gw in OWN_GATEWAYS:
             st = self._state(p, gw)
             chats = (st.pop("snap") or {}).get("chats", [])
-            out.append(st | {"chats": len(chats), "last": chats[0] if chats else None,
+            out.append(st | {"chats": len(chats), "last": _newest(chats),
                              "unsettled": self._unsettled(p.workspace_id, gw)})
         return {"gateways": out, **self._can(p)}
 
@@ -569,7 +609,8 @@ class OwnChat:
             "ORDER BY created_at DESC, rowid DESC LIMIT 10", (p.workspace_id, gw)).fetchall()
         listed = {c["id"] for c in snap.get("chats", [])}
         starting = [dict(r) for r in rows if r["made_session_id"] not in listed]
-        return st | {"chats": snap.get("chats", []), "starting": starting, **self._can(p)}
+        return st | {"chats": snap.get("chats", []), "starting": starting,
+                     "ops": OwnSessions(self.s).shown(p.workspace_id, gw), **self._can(p)}
 
     def _connector(self, workspace_id: str, gw: str) -> dict | None:
         """Which copy its connector runs against the core's release, and an update it is on or could not do."""
@@ -626,6 +667,7 @@ class OwnChat:
         self._waits(p.workspace_id, gw, mine)
         return st | {"chat": chat or {"id": sid, "title": ""}, "loaded": opened is not None, "history": history,
                      "mine": mine, "reactions": Reactions(self.s).shown(p.workspace_id, gw, sid),
+                     "ops": OwnSessions(self.s).shown(p.workspace_id, gw, sid),
                      **self._can(p)}
 
     def _unsettled(self, workspace_id: str, gw: str) -> int:
@@ -662,13 +704,7 @@ class OwnChat:
             if self.sign_in_until(p) is None:
                 raise CoreError(403, "passkey_needed", "a message to your own Hermes runs with full power, so it "
                                 "needs a passkey sign-in from the last 30 minutes; sign in with your passkey again")
-            if not self.online(p.workspace_id, gw):
-                why = self._off_why(p.workspace_id, gw)
-                st = self.gateway_state(p.workspace_id, gw)
-                if st["state"] == "machine_off":
-                    raise CoreError(409, "one_off", "One is off", why=why, state=st["state"], since=st["since"])
-                raise CoreError(409, "gateway_off", f"{NAMES[gw]} is not answering: {why}", why=why,
-                                state=st["state"], since=st["since"])
+            self.must_be_online(p.workspace_id, gw)
             now = self.s.now()
             mid = new_id("own")
             db.execute("INSERT INTO own_messages(id, workspace_id, gateway, session_id, text, send_key, "
@@ -701,14 +737,33 @@ class OwnChat:
         message_id, emoji = reactions.message_id(message_id), reactions.emoji(emoji)
         if not self._listed(p.workspace_id, gw, sid):
             raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
-        if not self.online(p.workspace_id, gw):
-            why = self._off_why(p.workspace_id, gw)
-            st = self.gateway_state(p.workspace_id, gw)
-            if st["state"] == "machine_off":
-                raise CoreError(409, "one_off", "One is off", why=why, state=st["state"], since=st["since"])
-            raise CoreError(409, "gateway_off", f"{NAMES[gw]} is not answering: {why}", why=why,
-                            state=st["state"], since=st["since"])
+        self.must_be_online(p.workspace_id, gw)
         return {"session_id": sid} | Reactions(self.s).want(p, gw, sid, message_id, emoji)
+
+    def session(self, p: Principal, gw: str, session_id, op, title=None, idempotency_key=None) -> dict:
+        """Rename, hide (archive), bring back (unarchive) or delete one chat (own_sessions.py)."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        return OwnSessions(self.s).ask(self, p, gw, _sid(session_id), op, title, idempotency_key)
+
+    def listed_or_hidden(self, workspace_id: str, gw: str, sid: str, hidden: bool = False) -> bool:
+        """A chat this gateway listed, or for bringing one back, one a page of its hidden chats listed."""
+        if hidden:
+            return PAGES.listed(workspace_id, gw, sid, self.s.clock(), kind="archived")
+        return self._listed(workspace_id, gw, sid)
+
+    def is_bot_chat(self, workspace_id: str, gw: str, sid: str) -> bool:
+        """Whether this gateway's connector listed the chat as his Bot Chat, in its chat list or a page of it."""
+        snap = Feeds(self.s).get(workspace_id, gw)[gw] or {}
+        if any(c["id"] == sid and c.get("bot_chat") for c in snap.get("chats", [])):
+            return True
+        return PAGES.bot_chat(workspace_id, gw, sid, self.s.clock())
+
+    def session_done(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        self._check_token(workspace_id, gw, token)
+        return OwnSessions(self.s).done(workspace_id, gw, body)
 
     # ── full history: pages ───────────────────────────────────────────────
 
@@ -740,6 +795,9 @@ class OwnChat:
                 chats = snap.get("chats", [])
                 return {"pending": False, "chats": chats, "more": len(chats) >= MAX_CHATS}
             key = (p.workspace_id, gw, "chats", None, before, q)
+        elif kind == "archived":
+            # The chats Hermes hides (archived), to bring one back: never in the chat list.
+            key = (p.workspace_id, gw, "archived", None, _page_time(before), "")
         elif kind == "messages":
             chat = _sid(chat)
             if not self._listed(p.workspace_id, gw, chat):
@@ -757,7 +815,7 @@ class OwnChat:
         if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not PAGE_ID.match(body["id"]):
             raise CoreError(400, "bad_page", "a page names the request it answers")
         key = page_kind(body["id"])
-        if key is None or key[1] != gw or key[2] not in ("chats", "messages"):
+        if key is None or key[1] != gw or key[2] not in ("chats", "archived", "messages"):
             raise CoreError(409, "not_asked", "no page with that id was asked of this gateway")
         PAGES.answer(workspace_id, gw, body["id"], clean_page(key[2], body.get("page")), self.s.clock())
         return {"ok": True}
@@ -820,8 +878,10 @@ class OwnChat:
                 items.append({"id": r["id"], "session_id": r["session_id"], "text": r["text"],
                               "send_key": r["send_key"], "lease_until": until})
             reactions = [{"session_id": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, gw)] if ready else []
+            sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
-                "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "release": RELEASE}
+                "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "sessions": sessions,
+                "release": RELEASE}
 
     def reacted(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
         """What came of setting one reaction. An answer about an older wish than the newest is dropped,

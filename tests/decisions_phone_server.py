@@ -43,16 +43,24 @@ Push(w.store).hello(w.ws, tp, webpush.vapid_public(webpush.new_vapid_key()), pus
 # Patrick's own Hermes: One heard from with its gateway running and two chats; my-hermes never heard from.
 from thornswood_decisions.own import OwnChat
 w.store.set_flag(w.ws, "own_chat_write", True, by="t")
+w.store.set_flag(w.ws, "session_manage_write", True, by="t")
 own = OwnChat(w.store)
 to = f.new_token(w.ws, "own-one", by="t"); f.new_token(w.ws, "own-me", by="t")
 own.claim(w.ws, "one", to, 0, True)
-own.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "chats": [
+# His Bot Chat comes first, as One's connector lists it (own_connector.bot_chat).
+CHATS = [
+    {"id": "s_obc", "title": "Bot Chat", "last_at": "2026-11-01T09:45:00+00:00", "preview": "Rift: load order is clean",
+     "bot_chat": True},
     {"id": "s_plan", "title": "Plan the week", "last_at": "2026-11-01T17:30:00+00:00", "preview": "three things"},
     {"id": "s_long", "title": "A long chat", "last_at": "2026-11-01T16:00:00+00:00", "preview": "message 119"},
     {"id": "s_old", "title": "", "last_at": "2026-10-30T17:30:00+00:00", "preview": "older"},
-    {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"}],
-    "open": [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
-                                           {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]})
+    {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"}]
+HIDDEN = []
+OPEN = [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
+                                      {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]
+def one_feed(o=own):
+    o.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "chats": CHATS, "open": OPEN})
+one_feed()
 # The pages: s_plan and s_long are in the scratch state.db, s_old is not (gone from Hermes).
 import sqlite3, tempfile, threading, time
 from datetime import datetime
@@ -87,6 +95,11 @@ con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('
 for i in range(120):
     con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_long', ?, ?, ?)",
                 ("user" if i % 2 == 0 else "assistant", f"message {i}", epoch("2026-11-01T10:00:00+00:00") + i))
+# His Bot Chat: hidden, as Hermes keeps it, and written in before the others, though it is listed first.
+con.execute("INSERT INTO sessions VALUES('s_obc', 'cli', 'Bot Chat', ?, ?, NULL, NULL, NULL, 0, 1)",
+            (epoch("2026-11-01T08:00:00+00:00"), epoch("2026-11-01T09:45:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_obc', 'assistant', "
+            "'Rift: load order is clean', ?)", (epoch("2026-11-01T09:45:00+00:00"),))
 con.commit()
 con.close()
 def set_reaction(r, db=None, sid=None):
@@ -107,11 +120,39 @@ def set_reaction(r, db=None, sid=None):
     c.commit()
     c.close()
     return "set"
+def one_session(o, r):
+    """A rename, hide, bring back or delete, done on the scratch state.db as Hermes's own calls do it (the
+    helper's own path is in test_decisions_sessions.py), then the chat list fed again, as the connector does."""
+    c = sqlite3.connect(sdb)
+    sid, op = r["session_id"], r["op"]
+    if op == "rename":
+        c.execute("UPDATE sessions SET title = ? WHERE id = ?", (r["title"], sid))
+        for row in CHATS:
+            if row["id"] == sid:
+                row["title"] = r["title"]
+    elif op == "archive":
+        c.execute("UPDATE sessions SET archived = 1 WHERE id = ?", (sid,))
+        HIDDEN.extend(row for row in CHATS if row["id"] == sid)
+        CHATS[:] = [row for row in CHATS if row["id"] != sid]
+    elif op == "unarchive":
+        c.execute("UPDATE sessions SET archived = 0 WHERE id = ?", (sid,))
+        CHATS.extend(row for row in HIDDEN if row["id"] == sid)
+        HIDDEN[:] = [row for row in HIDDEN if row["id"] != sid]
+    elif op == "delete":
+        c.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+        c.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+        CHATS[:] = [row for row in CHATS if row["id"] != sid]
+    c.commit()
+    c.close()
+    one_feed(o)
+    o.session_done(w.ws, "one", to, {"id": r["id"], "outcome": "done"})
 def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
         try:
             got = o.claim(w.ws, "one", to, 0, True)
+            for r in got.get("sessions", []):
+                one_session(o, r)
             for r in got.get("reactions", []):
                 o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],
                                             "version": r["version"], "outcome": set_reaction(r)})
