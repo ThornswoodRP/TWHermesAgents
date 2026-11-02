@@ -13,14 +13,16 @@ everything first and writes nothing if any check fails. With --check it only
 reports.
 
 For each Bot it:
-  1. checks the profile, its SOUL.md and its two Thornswood skills exist;
+  1. checks the profile and its SOUL.md exist;
   2. builds the Bot's config from the policy and merges it into config.yaml;
   3. checks the merged config can reach no route the Bot may not use;
   4. checks every .env by name against what may sit on the Oracle box;
   5. installs the guard plugin into plugins/thornswood_guard;
   6. makes the Bot's working folder, and installs the skills this repository
      owns for it (OWN_SKILLS: Bramble's bramble-duties);
-  7. loads the installed plugin and checks it refuses what it must.
+  7. installs the two Thornswood skills from skills/thornswood/ (until 1 Nov
+     they lived only in each profile, so a stale line could be fixed by no PR);
+  8. loads the installed plugin and checks it refuses what it must.
 
 The gateway's own profile (the hermes user's default profile, which
 tw-hermes-gateway runs as) is not a Bot, but it holds the Discord connection
@@ -55,6 +57,7 @@ from thornswood_guard.routes import check_config, check_gateway_config, proxy_re
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
 SKILLS = ("thornswood-ops", "thornswood-guide")
+SKILLS_DIR = REPO / "skills" / "thornswood"
 # Skills this repository owns and installs, by Bot, from skills/<name>/SKILL.md
 # into the profile's skills/thornswood/<name>/. 2 Nov: Bramble had merge
 # authority but nothing told it to merge, hand back a dropped pull request, or
@@ -193,6 +196,42 @@ def install_guard(pdir: Path) -> None:
         shutil.rmtree(old)
 
 
+def check_skills() -> list[str]:
+    """Each skill in this commit is a SKILL.md whose front matter Hermes can read
+    and names the skill its folder does."""
+    problems = []
+    for skill in SKILLS:
+        path = SKILLS_DIR / skill / "SKILL.md"
+        if not path.is_file():
+            problems.append(f"the {skill} skill is not in this commit at {path.relative_to(REPO)}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        parts = text.split("---\n", 2) if text.startswith("---\n") else []
+        meta = yaml.safe_load(parts[1]) if len(parts) == 3 else None
+        if not isinstance(meta, dict) or meta.get("name") != skill or not meta.get("description"):
+            problems.append(f"the {skill} skill's front matter does not name it or describe it")
+    return problems
+
+
+def install_skills(pdir: Path) -> list[str]:
+    """Write each skill over the profile's copy, one file at a time, never half a file."""
+    changed = []
+    for skill in SKILLS:
+        src = (SKILLS_DIR / skill / "SKILL.md").read_bytes()
+        dest_dir = pdir / "skills" / "thornswood" / skill
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "SKILL.md"
+        if dest.is_file() and dest.read_bytes() == src:
+            continue
+        fd, tmp = tempfile.mkstemp(dir=dest_dir, prefix=".SKILL-")
+        with os.fdopen(fd, "wb") as f:
+            f.write(src)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dest)
+        changed.append(skill)
+    return changed
+
+
 def install_skill(pdir: Path, name: str) -> None:
     """The repository's skills/<name>/SKILL.md into the profile, whole, in one rename."""
     target = pdir / "skills" / "thornswood" / name
@@ -254,9 +293,6 @@ def main() -> int:
             continue
         if not (pdir / "SOUL.md").is_file():
             problems.append(f"{bot}: no SOUL.md")
-        for skill in SKILLS:
-            if not (pdir / "skills" / "thornswood" / skill / "SKILL.md").is_file():
-                problems.append(f"{bot}: the {skill} skill is missing")
         for skill in OWN_SKILLS.get(bot, ()):
             if not (REPO / "skills" / skill / "SKILL.md").is_file():
                 problems.append(f"{bot}: this commit has no skills/{skill}/SKILL.md to install")
@@ -278,6 +314,7 @@ def main() -> int:
     if not wake_secret.exists():
         problems.append(f"{wake_secret} is not there; deploy/install.sh makes it, so run the install for this commit first")
     problems += scan_files(policy, home)
+    problems += check_skills()
 
     # Every Bot's terminal runs in Hermes's sandbox image under rootless podman.
     present, why = image_present(podman)
@@ -317,6 +354,8 @@ def main() -> int:
         for skill in OWN_SKILLS.get(bot, ()):
             install_skill(pdir, skill)
         write_config(pdir, cfg_path, merged, a.expect, stamp)
+        skills = install_skills(pdir)
+        print(f"{bot}: skills written: {', '.join(skills) or 'none, already current'}")
     install_guard(home)
     write_config(home, gw_path, gw_merged, a.expect, stamp)
 

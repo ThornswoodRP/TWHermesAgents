@@ -274,18 +274,24 @@ class PluginPackage(unittest.TestCase):
         self.assertEqual(manifest["name"], "thornswood-decisions")
         self.assertEqual(yaml_name, "thornswood-decisions")
 
-    def test_the_agent_half_registers_nothing(self):
+    def test_the_agent_half_registers_only_rule_zero(self):
+        # It gives Patrick's Hermes no tools, hooks or commands: only the rule
+        # zero prompt section (tests/test_rule_zero.py checks the text).
         import importlib.util
         spec = importlib.util.spec_from_file_location("tw_decisions_agent_half", PLUGIN / "__init__.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        called = []
 
         class Ctx:
+            def register_system_prompt_section(self, sid, text, **kw):
+                called.append(sid)
+
             def __getattr__(self, name):
                 raise AssertionError(f"the agent half called ctx.{name}")
 
         self.assertIsNone(mod.register(Ctx()))
-
+        self.assertEqual(called, ["thornswood.rule-zero"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -241,10 +241,39 @@ class Apply(unittest.TestCase):
         self.assertFalse((home / "profiles" / "wisp").exists())
         self.assertFalse((home / "profiles" / "rift" / "plugins").exists())
 
-    def test_a_missing_skill_stops_everything(self):
-        r = self.run_apply(self.home(skip_skill="thornswood-guide"))
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("thornswood-guide skill is missing", r.stdout)
+    def test_the_skills_are_installed_from_the_commit(self):
+        # 1 Nov: the two skills lived only in each profile, so their stale
+        # lines (the old owner's repo names, "private now, going public")
+        # could be fixed by no PR. apply.py now writes the commit's copy.
+        home = self.home(skip_skill="thornswood-guide")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for bot in policy().bots:
+            for skill in ("thornswood-ops", "thornswood-guide"):
+                got = (home / "profiles" / bot / "skills" / "thornswood" / skill / "SKILL.md").read_bytes()
+                self.assertEqual(got, (REPO / "skills" / "thornswood" / skill / "SKILL.md").read_bytes(), (bot, skill))
+        again = self.run_apply(home)
+        self.assertIn("skills written: none, already current", again.stdout)
+
+    def test_check_writes_no_skill(self):
+        home = self.home(skip_skill="thornswood-guide")
+        r = self.run_apply(home, "--check")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertFalse((home / "profiles" / "rift" / "skills" / "thornswood" / "thornswood-guide" / "SKILL.md").exists())
+
+    def test_the_skills_name_themselves_and_name_no_old_home(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("apply_mod", REPO / "scripts" / "apply.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.check_skills(), [])
+        for skill in ("thornswood-ops", "thornswood-guide"):
+            raw = (REPO / "skills" / "thornswood" / skill / "SKILL.md").read_bytes()
+            self.assertNotIn(b"\r", raw, f"{skill}: LF line endings, as .gitattributes keeps them")
+            text = raw.decode("utf-8")
+            self.assertNotIn("EvilPatrick06/", text, skill)
+            self.assertNotIn("going public", text, skill)
+            self.assertNotIn("Desk to merge", text, skill)
 
     def test_a_forbidden_key_stops_everything(self):
         home = self.home(env_root="NEXUS_API_KEY=canary\n")
