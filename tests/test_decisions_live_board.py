@@ -100,7 +100,8 @@ class TheHooks(unittest.TestCase):
         live.on_turn_start(session_id="s2")
         self.assertEqual([t["session_id"] for t in self.h.written("rift")["turns"]], ["s1"])
         self.assertEqual([t["session_id"] for t in self.h.written("echo")["turns"]], ["s2"])
-        self.assertEqual(oct(self.h.file("echo").stat().st_mode & 0o777), "0o600")
+        if os.name != "nt":  # the Bots run on the VM; Windows has no such mode bits to check
+            self.assertEqual(oct(self.h.file("echo").stat().st_mode & 0o777), "0o600")
 
     def test_a_hook_never_breaks_a_turn(self):
         self.h.current = self.h.root / "not-a-folder-file"
@@ -170,6 +171,7 @@ class TheReader(unittest.TestCase):
         rows = live_reader.snapshot(self.h.hh, BOTS, NOW, alive=lambda *_: True)["doing"]
         self.assertEqual([(r["session_id"], r["state"], r["tool"]) for r in rows], [("s2", "thinking", None)])
 
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "the reader runs on the VM, whose /proc says when a process started")
     def test_the_real_process_check(self):
         start = live.process_start()
         self.assertTrue(live_reader._alive(os.getpid(), start))

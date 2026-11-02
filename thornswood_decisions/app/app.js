@@ -540,7 +540,6 @@ async function cardView(id, note) {
     c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
     a.status === 200 ? el('div', { class: 'artifact' }, markdown(a.body.body)) : el('p', { class: 'warn' }, said(a.body)),
     el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
-    boxLine(c),
     c.options.map(o => el('div', { class: 'option' },
       el('strong', {}, inlineMd(o.label)), o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
       el('div', { class: 'quiet' }, inlineMd(o.consequence)),
@@ -584,15 +583,6 @@ function alertTimes(c) {
   return line
 }
 
-// A box card (a pull request that changes what runs on the live box): the
-// line the core builds from the card's own binding, the pull request and its
-// exact head, so what a yes lets Bramble merge never rests on a Bot's words.
-function boxLine(c) {
-  if (!c.box) return null
-  return el('p', { class: 'warn', 'data-box': c.box.repo + '#' + c.box.pr },
-    el('strong', {}, 'Box change: '), c.box.says)
-}
-
 // One option chosen: a high-risk card shows what is being approved on its own
 // screen, and the passkey prompt opens over it by itself (Patrick, 1 Nov). The
 // passkey is the yes: it signs in afresh, then the answer goes. If the prompt is
@@ -608,7 +598,6 @@ async function choose(c, o, status) {
     el('p', {}, el('strong', {}, inlineMd(o.label))),
     el('p', { class: 'quiet' }, inlineMd(o.consequence)),
     el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
-    boxLine(c),
     el('p', { class: 'quiet' }, `Your ${signInWord()} answers it. Cancel the prompt to change your mind.`),
     button, note,
     el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))

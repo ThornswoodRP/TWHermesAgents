@@ -534,7 +534,7 @@ class Worker(unittest.TestCase):
         self.assertEqual(msg["path"], "/m/decisions/" + card["id"])
         self.assertEqual(headers["Content-Encoding"], "aes128gcm")
         self.assertEqual(headers["TTL"], "86400")
-        self.assertEqual(headers["Urgency"], "normal")
+        self.assertEqual(headers["Urgency"], "high", "a card is a time-sensitive alert, delivered at once in Doze")
         self.assertRegex(headers["Topic"], r"^[A-Za-z0-9_-]{1,32}$")
         self.assertEqual(verify_vapid(headers["Authorization"], FCM)["sub"], ORIGIN)
         self.assertEqual(self.w.store.db.execute("SELECT status FROM push_outbox").fetchone()["status"], "sent")

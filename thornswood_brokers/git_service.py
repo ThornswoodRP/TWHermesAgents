@@ -48,11 +48,19 @@ CHECKS_APP = "github-actions"
 QUEUE_STATE = """query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
   repository(owner: $owner, name: $name) {
     mergeQueue(branch: $branch) { id }
-    pullRequest(number: $number) { id headRefOid isInMergeQueue merged }
+    pullRequest(number: $number) { id headRefOid isInMergeQueue merged autoMergeRequest { enabledAt } }
   }
 }"""
 ENQUEUE = """mutation($pr: ID!, $head: GitObjectID!) {
   enqueuePullRequest(input: {pullRequestId: $pr, expectedHeadOid: $head}) { mergeQueueEntry { id position } }
+}"""
+# GitHub's auto-merge at one exact head (policy merge.auto_merge): GitHub
+# merges once the checks the base branch's rules require pass, through the
+# merge queue where the branch has one, whose own method then applies.
+AUTO_MERGE = """mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $pr, expectedHeadOid: $head, mergeMethod: $method}) {
+    pullRequest { autoMergeRequest { enabledAt } }
+  }
 }"""
 WORKFLOW_DIR = ".github/workflows/"
 
@@ -212,11 +220,19 @@ class GitService:
         r = data.get("repository") or {}
         p = r.get("pullRequest") or {}
         return {"queue": (r.get("mergeQueue") or {}).get("id"), "id": p.get("id"), "head": p.get("headRefOid"),
-                "queued": bool(p.get("isInMergeQueue")), "merged": bool(p.get("merged"))}
+                "queued": bool(p.get("isInMergeQueue")), "merged": bool(p.get("merged")),
+                "auto": bool(p.get("autoMergeRequest"))}
+
+    def _branch_checks(self, repo: str, branch: str) -> set[str]:
+        """The status checks GitHub's rules require on this branch, read from
+        GitHub itself, so auto-merge waits for what the policy names."""
+        rules = self.gh.get_all("bramble", repo, f"/repos/{repo}/rules/branches/{quote(branch)}")
+        return {c.get("context") for r in rules if r.get("type") == "required_status_checks"
+                for c in ((r.get("parameters") or {}).get("required_status_checks") or []) if c.get("context")}
 
     def _verb_lists(self, repo: str, ref: str) -> dict[str, dict]:
         out = {}
-        for path in self.policy.data["merge"]["verb_lists"]:
+        for path in self.policy.data["runs"]["verb_lists"]:
             try:
                 raw = self.gh.get("bramble", repo, f"/repos/{repo}/contents/{path}?ref={quote(ref)}")
             except GitHubError as e:
@@ -490,15 +506,18 @@ class GitService:
         method = str(args.get("method") or self.policy.data["merge"]["method"][repo])
         pr = self._pr(repo, number)
         queue = None  # the base branch's merge queue, read once the merge is allowed
+        auto = self.policy.auto_merge(repo)
 
         def read_back():
             raw = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{number}")
             if raw.get("merged") and raw.get("head", {}).get("sha") == sha:
                 return {"merged": True, "merge_commit_sha": raw.get("merge_commit_sha")}
-            if queue is not None:
+            if auto or queue is not None:
                 now = self._queue_state(repo, number, pr.base_ref)
                 if now["head"] == sha and now["queued"]:
                     return {"queued": True}
+                if now["head"] == sha and now["auto"]:
+                    return {"auto_merge": True}
             return None
 
         if pr.merged:
@@ -512,20 +531,24 @@ class GitService:
                 self._finish(op["key"], "failed", reason="already merged when read")
             raise Refused(f"PR {number} is already merged")
         checks = self._checks(repo, pr.head_sha)
-        main_lists = list(self._verb_lists(repo, self.policy.data["merge"]["base"][repo]).values()) if repo == self.policy.data["repos"]["app"] else []
-        decision_id, revision = args.get("decision_id"), args.get("card_revision")
-        self._check(self.rules.merge(bot, pr, sha, method, checks, base_verb_lists=main_lists,
-                                     decision_id=decision_id, card_revision=revision))
+        branch_checks = self._branch_checks(repo, pr.base_ref) if auto else None
+        self._check(self.rules.merge(bot, pr, sha, method, checks, branch_checks=branch_checks))
 
-        # With a merge queue on the base branch (the redesign's part 5), GitHub
-        # refuses a direct merge: the PR joins the queue at this exact head,
-        # and the queue merges it once its own checks pass (method is the
-        # queue's). Read each time, so the rule can come and go in either
-        # order with this code.
+        # Where GitHub's auto-merge merges (policy merge.auto_merge), this turns
+        # it on at this exact head, and GitHub merges once the checks the
+        # branch's rules require pass. With a merge queue on the base branch
+        # (the redesign's part 5) GitHub refuses a direct merge, so a merge
+        # that is not auto-merge joins the queue at this exact head. Read each
+        # time, so the queue can come and go in either order with this code.
         state = self._queue_state(repo, number, pr.base_ref)
         queue = state["queue"]
 
         def write():
+            if auto:
+                variables = {"pr": state["id"], "head": sha, "method": None if queue else method.upper()}
+                data = self.gh.graphql("bramble", repo, WRITE["merge"], AUTO_MERGE, variables)
+                pr_now = ((data.get("enablePullRequestAutoMerge") or {}).get("pullRequest") or {})
+                return {"auto_merge": bool(pr_now.get("autoMergeRequest"))}
             if queue is not None:
                 data = self.gh.graphql("bramble", repo, WRITE["merge"], ENQUEUE,
                                        {"pr": state["id"], "head": sha})
@@ -537,10 +560,11 @@ class GitService:
             return {"merged": True}
 
         out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back)
-        if (out.get("receipt") or {}).get("queued"):
+        receipt = out.get("receipt") or {}
+        if receipt.get("queued"):
             out["queued"] = True
-        if decision_id and not out.get("reconciled"):
-            self.ask("decision_use", {"id": decision_id})
+        if receipt.get("auto_merge"):
+            out["auto_merge"] = True
         return out
 
     def start_run(self, caller: str, args: dict) -> dict:

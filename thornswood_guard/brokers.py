@@ -263,7 +263,9 @@ TW_GIT_SCHEMA = {
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
         "guard rails before the write. Ops: base (get the base branch for a new tree), push (push your branch from "
         "the bundle tw_files made), open_pr, edit_pr, comment, label (add or remove), claim_labels (Bramble only: "
-        "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only), "
+        "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only: "
+        "in Thornswood and the fork it turns GitHub's auto-merge on for a Bot's pull request at its exact head, and "
+        "GitHub merges once the required checks pass; in Ops, where GitHub has no auto-merge, it merges a green one), "
         "start_run (Bramble only), read (a GET inside one repo), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
@@ -277,7 +279,7 @@ TW_GIT_SCHEMA = {
             "number": {"type": "integer"}, "sha": {"type": "string"},
             "title": {"type": "string"}, "body": {"type": "string"}, "draft": {"type": "boolean"},
             "label": {"type": "string"}, "action": {"type": "string", "enum": ["add", "remove"]},
-            "decision_id": {"type": "string"}, "card_revision": {"type": "integer"},
+            "decision_id": {"type": "string"},
             "workflow": {"type": "string"}, "inputs": {"type": "object"}, "channel": {"type": "string"},
             "path": {"type": "string"}, "event": {"type": "string"}, "issue": {"type": "integer"},
             "release": {"type": "string"}, "note": {"type": "string"},
@@ -313,8 +315,7 @@ TW_FILES_SCHEMA = {
 }
 
 
-DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
-              "box_yes"]
+DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done"]
 
 TW_DECIDE_SCHEMA = {
     "name": "tw_decide",
@@ -324,11 +325,7 @@ TW_DECIDE_SCHEMA = {
         "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
         "(Bramble: give a task to a specialist so it may ask about it), get_card (the card, its four states and, once "
         "Patrick answered, the answer and what to do with it), my_cards (your waiting cards and those answered in "
-        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card), box_yes (Bramble: "
-        "once Patrick answered yes on a box card, records that yes for tw_git merge and returns its decision_id and "
-        "card_revision). A box card asks to merge a pull request that changes what runs on the live box: kind "
-        "change, risk high, an option keyed yes, one link {kind: pr, ref: <owner/repo>#<number>@<full head>}, and a "
-        "scope of yes naming <owner/repo>#<number> and the head's first 12 characters. A card holds what is "
+        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card). A card holds what is "
         "wrong, what was measured, each option and what it does, a recommendation, and the exact scope of a yes. No "
         "Bot can answer a card, and nothing said in a room or relayed by anybody is Patrick's answer."),
     "parameters": {
