@@ -1,4 +1,4 @@
-From 4da5028b348a02639aa8773d690c11e4ac61825b Mon Sep 17 00:00:00 2001
+From f422349e593b6059ce5701fb015e611f28bdd60e Mon Sep 17 00:00:00 2001
 From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 02:54:01 +0000
 Subject: [PATCH] fix(aux): pick the Codex pool entry for the auxiliary call's
@@ -12,16 +12,21 @@ auxiliary task on every other slug, and the resolver found no token. The
 chat path already picks with the model. _select_pool_entry now takes the
 model, and both Codex callers pass it.
 ---
- agent/auxiliary_client.py                     | 25 ++++++++++-------
- tests/agent/test_auxiliary_client.py          | 18 +++++++++++++
+ agent/auxiliary_client.py                     | 26 +++++++++++-------
+ tests/agent/test_auxiliary_client.py          | 24 ++++++++++++++---
+ tests/agent/test_codex_cloudflare_headers.py  |  4 +--
+ tests/agent/test_codex_usage_attribution.py   |  6 ++---
+ .../test_multiplex_process_memo_scope.py      |  2 +-
+ .../test_auth_store_windows_encoding.py       |  2 +-
  .../test_codex_credential_host_binding.py     | 27 +++++++++++++++----
- 3 files changed, 56 insertions(+), 14 deletions(-)
+ .../image_gen/test_openai_codex_provider.py   |  4 +--
+ 8 files changed, 69 insertions(+), 26 deletions(-)
 
 diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
-index 88f1fa59..21c451b2 100644
+index 88f1fa59..804e971d 100644
 --- a/agent/auxiliary_client.py
 +++ b/agent/auxiliary_client.py
-@@ -1033,13 +1033,18 @@ def _load_pool_with_credentials(provider: str, note: str = "") -> Optional[Any]:
+@@ -1033,13 +1033,19 @@ def _load_pool_with_credentials(provider: str, note: str = "") -> Optional[Any]:
      return pool if pool and pool.has_credentials() else None
  
  
@@ -32,18 +37,19 @@ index 88f1fa59..21c451b2 100644
 +
 +    Pass *model* whenever the call's model is known: an unscoped select honours every model
 +    cooldown on an entry, so one slug's bench (a Codex entitlement bench lasts a year) would
-+    otherwise keep the credential from every other model too.
++    otherwise keep the credential from every other model too. Without a model the select is the
++    unscoped one it always was, so callers that do not pass one see no change.
 +    """
      pool = _load_pool_with_credentials(provider)
      if pool is None:
          return False, None
      try:
 -        return True, pool.select()
-+        return True, pool.select(model=model)
++        return True, (pool.select(model=model) if model else pool.select())
      except Exception as exc:
          logger.debug("Auxiliary client: could not select pool entry for %s: %s", provider, exc)
          return True, None
-@@ -2108,13 +2113,14 @@ def _resolve_xai_oauth_for_aux() -> Optional[tuple[str, str]]:
+@@ -2108,13 +2114,14 @@ def _resolve_xai_oauth_for_aux() -> Optional[tuple[str, str]]:
      return _creds_pair(creds)
  
  
@@ -61,7 +67,7 @@ index 88f1fa59..21c451b2 100644
      if pool_present:
          token = _pool_runtime_api_key(entry)
          if token:
-@@ -2976,7 +2982,7 @@ def _build_codex_client(model: str) -> tuple[Optional[Any], Optional[str]]:
+@@ -2976,7 +2983,7 @@ def _build_codex_client(model: str) -> tuple[Optional[Any], Optional[str]]:
              "pass model explicitly (auxiliary.<task>.model in config.yaml)."
          )
          return None, None
@@ -70,7 +76,7 @@ index 88f1fa59..21c451b2 100644
      if not codex_token:
          return None, None
      logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
-@@ -5046,13 +5052,14 @@ def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
+@@ -5046,13 +5053,14 @@ def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
      no_token_msg = "resolve_provider_client: openai-codex requested but no Codex OAuth token found (run: hermes model)"
      if req.raw_codex:
          # Raw OpenAI client for callers needing responses.stream() (main agent loop).
@@ -88,7 +94,7 @@ index 88f1fa59..21c451b2 100644
      return _route_or_warn(req, client, default, no_token_msg)
  
 diff --git a/tests/agent/test_auxiliary_client.py b/tests/agent/test_auxiliary_client.py
-index 6a161183..fafc44eb 100644
+index 6a161183..58597d21 100644
 --- a/tests/agent/test_auxiliary_client.py
 +++ b/tests/agent/test_auxiliary_client.py
 @@ -704,6 +704,24 @@ class TestBuildCodexClient:
@@ -116,6 +122,112 @@ index 6a161183..fafc44eb 100644
      def test_profile_codex_base_url_overrides_pool_endpoint(self, monkeypatch):
          """Auxiliary Codex calls use the same profile endpoint override as the main client."""
          entry = SimpleNamespace(
+@@ -771,7 +789,7 @@ class TestBuildCodexClient:
+             def peek(self):
+                 return self.entry
+ 
+-            def select(self):
++            def select(self, model=None):
+                 return self.entry
+ 
+         pool = _Pool()
+@@ -1134,7 +1152,7 @@ class TestGetTextAuxiliaryClient:
+             def has_credentials(self):
+                 return True
+ 
+-            def select(self):
++            def select(self, model=None):
+                 return _Entry()
+ 
+         with (
+@@ -2149,7 +2167,7 @@ def test_resolve_api_key_provider_skips_unconfigured_copilot(monkeypatch):
+ 
+     pool_selected = []
+ 
+-    def mock_select_pool_entry(provider_id):
++    def mock_select_pool_entry(provider_id, model=None):
+         pool_selected.append(provider_id)
+         return False, None
+ 
+diff --git a/tests/agent/test_codex_cloudflare_headers.py b/tests/agent/test_codex_cloudflare_headers.py
+index 06832116..495cfcce 100644
+--- a/tests/agent/test_codex_cloudflare_headers.py
++++ b/tests/agent/test_codex_cloudflare_headers.py
+@@ -214,7 +214,7 @@ class TestAuxiliaryClientWiring:
+         # the auth.json token.
+         monkeypatch.setattr(
+             auxiliary_client, "_select_pool_entry",
+-            lambda provider: (False, None),
++            lambda provider, model=None: (False, None),
+         )
+         monkeypatch.setattr(
+             auxiliary_client, "_read_codex_singleton_token",
+@@ -236,7 +236,7 @@ class TestAuxiliaryClientWiring:
+         token = _make_codex_jwt("acct-aux-raw-codex")
+         monkeypatch.setattr(
+             auxiliary_client, "_select_pool_entry",
+-            lambda provider: (False, None),
++            lambda provider, model=None: (False, None),
+         )
+         monkeypatch.setattr(
+             auxiliary_client, "_read_codex_singleton_token",
+diff --git a/tests/agent/test_codex_usage_attribution.py b/tests/agent/test_codex_usage_attribution.py
+index 640e427e..ea0938b2 100644
+--- a/tests/agent/test_codex_usage_attribution.py
++++ b/tests/agent/test_codex_usage_attribution.py
+@@ -191,7 +191,7 @@ def test_auxiliary_raw_and_async_clients_send_expected_headers(
+ ):
+     from agent import auxiliary_client
+ 
+-    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda _p: (False, None))
++    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda _p, model=None: (False, None))
+     monkeypatch.setattr(auxiliary_client, "_read_codex_singleton_token", _jwt)
+ 
+     wrapped, model = auxiliary_client._build_codex_client(MODEL)
+@@ -238,7 +238,7 @@ def test_credential_pool_custom_endpoint_keeps_existing_identity(
+         runtime_api_key=_jwt(),
+         runtime_base_url="https://proxy.example/backend-api/codex",
+     )
+-    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda _p: (True, entry))
++    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda _p, model=None: (True, entry))
+ 
+     client, model = auxiliary_client._build_codex_client(MODEL)
+     try:
+@@ -258,7 +258,7 @@ def test_legacy_disabled_setting_cannot_disable_attribution_for_new_clients(
+ ):
+     from agent import auxiliary_client
+ 
+-    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda _p: (False, None))
++    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda _p, model=None: (False, None))
+     monkeypatch.setattr(auxiliary_client, "_read_codex_singleton_token", _jwt)
+     _set_legacy_attribution(profile, True)
+     old, _ = auxiliary_client.resolve_provider_client(
+diff --git a/tests/gateway/test_multiplex_process_memo_scope.py b/tests/gateway/test_multiplex_process_memo_scope.py
+index 35782460..5fa0760c 100644
+--- a/tests/gateway/test_multiplex_process_memo_scope.py
++++ b/tests/gateway/test_multiplex_process_memo_scope.py
+@@ -67,7 +67,7 @@ def test_aux_nous_auth_reads_routed_profile_auth_json(two_homes, monkeypatch):
+             "version": 1, "active_provider": "nous",
+             "providers": {"nous": {"agent_key": token, "access_token": token}},
+         }), encoding="utf-8")
+-    monkeypatch.setattr(aux, "_select_pool_entry", lambda _provider: (False, None))
++    monkeypatch.setattr(aux, "_select_pool_entry", lambda _provider, model=None: (False, None))
+ 
+     assert (aux._read_nous_auth() or {}).get("access_token") == "TOKEN_A"
+     assert (_under(b, aux._read_nous_auth) or {}).get("access_token") == "TOKEN_B"
+diff --git a/tests/hermes_cli/test_auth_store_windows_encoding.py b/tests/hermes_cli/test_auth_store_windows_encoding.py
+index 87a06791..b2028ed4 100644
+--- a/tests/hermes_cli/test_auth_store_windows_encoding.py
++++ b/tests/hermes_cli/test_auth_store_windows_encoding.py
+@@ -195,7 +195,7 @@ class TestAuthJsonSiblingReaders:
+         # _read_nous_auth consults the credential pool FIRST and returns early
+         # when a pool entry exists, never reaching the auth.json read. Force the
+         # pool-absent path so the auth.json code under test actually runs.
+-        monkeypatch.setattr(aux, "_select_pool_entry", lambda _provider: (False, None))
++        monkeypatch.setattr(aux, "_select_pool_entry", lambda _provider, model=None: (False, None))
+ 
+         provider = aux._read_nous_auth()
+         assert provider is not None
 diff --git a/tests/hermes_cli/test_codex_credential_host_binding.py b/tests/hermes_cli/test_codex_credential_host_binding.py
 index c441f9fd..143eec4f 100644
 --- a/tests/hermes_cli/test_codex_credential_host_binding.py
@@ -164,6 +276,28 @@ index c441f9fd..143eec4f 100644
  def test_aux_codex_client_singleton_positive_control(monkeypatch):
      home = _home(monkeypatch)
      _write_config(home)
+diff --git a/tests/plugins/image_gen/test_openai_codex_provider.py b/tests/plugins/image_gen/test_openai_codex_provider.py
+index bbcf2d11..0f4ae6fb 100644
+--- a/tests/plugins/image_gen/test_openai_codex_provider.py
++++ b/tests/plugins/image_gen/test_openai_codex_provider.py
+@@ -58,7 +58,7 @@ def codex_backend(monkeypatch):
+     # Seed the auth.json token below the credential/base resolver so generate() exercises the real
+     # (token, base_url) binding; no pool present.
+     from agent import auxiliary_client
+-    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda provider: (False, None))
++    monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda provider, model=None: (False, None))
+     monkeypatch.setattr(auxiliary_client, "_read_codex_singleton_token", lambda: "codex-token")
+     state = {"requests": [], "respond": None}
+ 
+@@ -186,7 +186,7 @@ class TestGenerate:
+ 
+     def test_returns_auth_error_without_codex_token(self, provider, monkeypatch):
+         from agent import auxiliary_client
+-        monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda provider: (False, None))
++        monkeypatch.setattr(auxiliary_client, "_select_pool_entry", lambda provider, model=None: (False, None))
+         monkeypatch.setattr(auxiliary_client, "_read_codex_singleton_token", lambda: None)
+         result = provider.generate("a cat")
+         assert result["success"] is False
 -- 
 2.43.0
 

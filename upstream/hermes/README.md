@@ -11,7 +11,7 @@ Apply them in order on a checkout of that commit:
 
 ```
 git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch 0004-aux-codex-pick-by-model.patch
-scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py
+scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py tests/agent/test_auxiliary_client.py tests/hermes_cli/test_codex_credential_host_binding.py tests/agent/test_codex_usage_attribution.py tests/agent/test_codex_cloudflare_headers.py tests/plugins/image_gen/test_openai_codex_provider.py tests/hermes_cli/test_auth_store_windows_encoding.py tests/gateway/test_multiplex_process_memo_scope.py
 ```
 
 ## 0001: the "too large" note names a path the Bot can read
@@ -72,7 +72,14 @@ empty and auxiliary_client found no token.
 
 The fix passes the model to the pick in both Codex callers. The year-long
 bench on a slug the account really cannot use is upstream's design (#71970)
-and stays; it now benches only that slug.
+and stays; it now benches only that slug. A pick with no model is the
+unscoped `select()` it always was, so no other provider's path changes. The
+test stand-ins on the Codex paths take the model, as the real pool does.
+
+The first Linux run of all four (2 Nov) failed 3 tests in
+test_auxiliary_client.py: the first version passed `model=None` to every
+pick, and stand-in pools written as `select(self)` refused it. Unscoped picks
+are back to `select()`, and the Codex stand-ins take `model`.
 
 ## Test results so far
 
@@ -82,5 +89,11 @@ and stays; it now benches only that slug.
   passed.
 - Linux (the VM, python:3.14 container, 2 Nov), 0001 to 0003: 72 passed,
   0 failed.
-- 0004: not run yet. The upstream pull requests wait on a Linux run of all
-  four.
+- Linux (cloud, Python 3.14.6, uv.lock's dev group, 2 Nov), 0001 to 0004:
+  the five files above plus the Nous, xAI and Anthropic pool tests, 369
+  passed and 1 failed. The failing test,
+  test_anthropic_messages_profile_resolves_to_messages_adapter, fails the
+  same way on v0.22.5 with no patches: the anthropic extra is not installed
+  there.
+- 0004 on the VM: waits on the Linux run card. The upstream pull requests
+  wait on it.
