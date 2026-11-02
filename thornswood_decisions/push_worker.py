@@ -37,6 +37,7 @@ from . import webpush
 CORE = "http://127.0.0.1:9135/api/v1"
 POLL_SECONDS = 5
 SEND_TIMEOUT = 15
+URGENCY = "high"
 
 
 def _private_file(path: Path) -> bytes:
@@ -155,8 +156,11 @@ class Worker:
             except Exception:  # a subscription this worker cannot open is useless: retire it
                 results.append({"subscription_id": sub["id"], "status": 410})
                 continue
+            # Urgency high: a card waiting on Patrick is a time-sensitive alert (RFC 8030 section 5.3).
+            # With "normal", Chrome on Android asks FCM for normal priority, which an idle phone in Doze
+            # holds until its next maintenance window, so a card reached his phone minutes late (2 Nov).
             headers = {"TTL": str(int(item.get("ttl", 86400))), "Content-Encoding": "aes128gcm",
-                       "Content-Type": "application/octet-stream", "Urgency": "normal", "Topic": item["topic"],
+                       "Content-Type": "application/octet-stream", "Urgency": URGENCY, "Topic": item["topic"],
                        "Authorization": webpush.vapid_header(endpoint, self.vapid, self.subject)}
             code, retry_after = self.send(endpoint, body, headers)
             r = {"subscription_id": sub["id"], "status": code}

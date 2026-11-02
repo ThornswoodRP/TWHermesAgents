@@ -100,23 +100,27 @@
       "ThornswoodRP/Thornswood-Ops": "main",
       "ThornswoodRP/skymp": "thornswood/engine-changes"
     },
-    "patrick_path_repos": [
-      "app",
-      "ops"
-    ],
-    "patrick_paths": [
-      ".github/workflows/**",
-      "scripts/vps/gate/**",
-      "scripts/release/nexus-verbs.json"
-    ],
-    "verb_lists": [
-      "scripts/vps/gate/verbs.json",
-      "scripts/release/nexus-verbs.json"
+    "auto_merge": {
+      "ThornswoodRP/Thornswood": [
+        "Build check result"
+      ],
+      "ThornswoodRP/Thornswood-Ops": [],
+      "ThornswoodRP/skymp": [
+        "build-pr"
+      ]
+    },
+    "robot_authors": [
+      "dependabot[bot]",
+      "thornswood-pin-robot[bot]"
     ]
   },
   "runs": {
     "main_without_patrick": true,
     "ref": "main",
+    "verb_lists": [
+      "scripts/vps/gate/verbs.json",
+      "scripts/release/nexus-verbs.json"
+    ],
     "repo": "ThornswoodRP/Thornswood",
     "workflows": {
       "box-run.yml": {
@@ -365,8 +369,7 @@
   "notifications": {
     "push_kinds": [
       "decision",
-      "main-approval",
-      "box-change"
+      "main-approval"
     ],
     "lock_screen_text": "Thornswood needs you",
     "link": "/cards/{card_id}?rev={revision}"
@@ -418,8 +421,7 @@
       "files": "tw-files",
       "git": "tw-git",
       "proxy": "tw-proxy",
-      "backup": "tw-backup",
-      "decide": "tw-decide"
+      "backup": "tw-backup"
     },
     "exec_users": {
       "rift": "tw-rift",
@@ -437,7 +439,6 @@
           "tw-git",
           "tw-files",
           "tw-proxy",
-          "tw-decide",
           "root"
         ]
       },

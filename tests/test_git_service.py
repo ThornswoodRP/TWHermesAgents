@@ -31,7 +31,11 @@ from thornswood_brokers.github_api import GitHub
 from thornswood_brokers.wire import Refused
 
 APP = "ThornswoodRP/Thornswood"
+OPS = "ThornswoodRP/Thornswood-Ops"
 FORK = "ThornswoodRP/skymp"
+# main's ruleset on Thornswood (read 2 Nov 2026) and the fork branch's.
+APP_RULES = ["Build check result", "Test tasks in the pull request", "Release note"]
+FORK_RULES = ["build-pr", "save-directory-linux"]
 HERMES = "ThornswoodRP/Thornswood-Hermes"
 
 
@@ -43,7 +47,10 @@ class World:
         self.fake = fake or FakeGitHub(self.root / "gh")
         if fake is None:
             self.fake.make_repo(APP)
+            self.fake.make_repo(OPS)
             self.fake.make_repo(FORK, base="thornswood/engine-changes")
+            self.fake.branch_rules[(APP, "main")] = list(APP_RULES)
+            self.fake.branch_rules[(FORK, "thornswood/engine-changes")] = list(FORK_RULES)
         self.db = db or self.root / "policy.db"
         self.policy = policy_service(db=self.db)
         self.spool = self.root / "spool"
@@ -84,16 +91,20 @@ class World:
         return self.git.push("hermes", {"bot": bot, "repo": kw.get("repo", APP), "task": kw.get("task", "t-1"),
                                         "branch": branch, "bundle": name})
 
+    CHECKS = {APP: ("Launcher builds", "Build check result"), OPS: ("check",), FORK: ("build-pr",)}
+
     def green_pr(self, number: int = 42, branch: str = "sprocket/3561-path-fence",
-                 files: list[str] | None = None) -> str:
-        sha = self.push("sprocket", branch, {"launcher/PathFence.cs": "fence\n"})["sha"]
-        self.fake.add_pr(APP, number, head_ref=branch, head_sha=sha, files=files or ["launcher/PathFence.cs"])
-        for name in ("Launcher builds", "Build check result"):
-            self.fake.add_check(APP, sha, name)
+                 files: list[str] | None = None, repo: str = OPS, checks: bool = True) -> str:
+        base = "thornswood/engine-changes" if repo == FORK else "main"
+        sha = self.push(branch.split("/")[0], branch, {"launcher/PathFence.cs": "fence\n"}, repo=repo, base=base)["sha"]
+        self.fake.add_pr(repo, number, head_ref=branch, head_sha=sha, base=base,
+                         files=files or ["launcher/PathFence.cs"])
+        for name in self.CHECKS[repo] if checks else ():
+            self.fake.add_check(repo, sha, name)
         return sha
 
-    def merge(self, bot: str = "bramble", number: int = 42, sha: str = "", **extra) -> dict:
-        return self.git.merge("hermes", {"bot": bot, "repo": APP, "task": "merge-42", "number": number,
+    def merge(self, bot: str = "bramble", number: int = 42, sha: str = "", repo: str = OPS, **extra) -> dict:
+        return self.git.merge("hermes", {"bot": bot, "repo": repo, "task": "merge-42", "number": number,
                                          "sha": sha, **extra})
 
 
@@ -197,7 +208,10 @@ class Push(unittest.TestCase):
 
 
 class Merge(unittest.TestCase):
-    def test_bramble_merges_on_both_checks_at_the_exact_head(self):
+    """Ops is private on GitHub Free, with no auto-merge: Bramble merges a
+    green pull request itself, at its exact head."""
+
+    def test_bramble_merges_on_its_check_at_the_exact_head(self):
         w = World()
         sha = w.green_pr()
         out = w.merge(sha=sha)
@@ -218,18 +232,17 @@ class Merge(unittest.TestCase):
     def test_attack_10_a_check_posted_by_another_app_does_not_count(self):
         w = World()
         sha = w.push("sprocket", "sprocket/3561-path-fence", {"a": "a\n"})["sha"]
-        w.fake.add_pr(APP, 42, head_ref="sprocket/3561-path-fence", head_sha=sha, files=["a"])
-        w.fake.add_check(APP, sha, "Launcher builds")
-        w.fake.add_check(APP, sha, "Build check result", app="thornswood-workers")
+        w.fake.add_pr(OPS, 42, head_ref="sprocket/3561-path-fence", head_sha=sha, files=["a"])
+        w.fake.add_check(OPS, sha, "check", app="thornswood-workers")
         with self.assertRaises(Refused) as e:
             w.merge(sha=sha)
-        self.assertIn("Build check result", str(e.exception))
+        self.assertIn("'check'", str(e.exception))
         self.assertEqual(w.fake.writes("PUT"), [])
 
     def test_the_latest_run_decides(self):
         w = World()
         sha = w.green_pr()
-        w.fake.add_check(APP, sha, "Launcher builds", conclusion="failure")
+        w.fake.add_check(OPS, sha, "check", conclusion="failure")
         with self.assertRaises(Refused) as e:
             w.merge(sha=sha)
         self.assertIn("failure", str(e.exception))
@@ -246,24 +259,23 @@ class Merge(unittest.TestCase):
     def test_a_pr_that_hides_files_is_not_merged(self):
         w = World()
         sha = w.green_pr()
-        w.fake.prs[(APP, 42)]["changed_files"] = 4000
+        w.fake.prs[(OPS, 42)]["changed_files"] = 4000
         with self.assertRaises(Refused) as e:
             w.merge(sha=sha)
         self.assertIn("nothing merges unseen", str(e.exception))
 
-    def test_a_box_path_needs_patricks_decision(self):
+    def test_a_workflow_or_gate_change_merges_with_no_yes(self):
+        # Patrick, 2 Nov 2026: "I shouldn't need to approve".
         w = World()
-        sha = w.green_pr(files=["scripts/vps/gate/Run-Verb.ps1"])
-        w.fake.contents[(APP, "main", "scripts/vps/gate/verbs.json")] = (FIXTURES / "verbs.json").read_bytes()
-        with self.assertRaises(Refused) as e:
-            w.merge(sha=sha)
-        self.assertIn("live box", str(e.exception))
-        self.assertEqual(w.fake.writes("PUT"), [])
+        sha = w.green_pr(files=[".github/workflows/box-run.yml", "scripts/vps/gate/Run-Verb.ps1"])
+        out = w.merge(sha=sha)
+        self.assertTrue(out["done"])
+        self.assertEqual(w.fake.writes("PUT", "/merge")[0][2], {"sha": sha, "merge_method": "squash"})
 
     def test_attack_20_a_lost_merge_answer_is_read_back_not_merged_again(self):
         w = World()
         sha = w.green_pr()
-        w.fake.lose_answer.add(f"PUT /repos/{APP}/pulls/42/merge")
+        w.fake.lose_answer.add(f"PUT /repos/{OPS}/pulls/42/merge")
         with self.assertRaises(Refused) as e:
             w.merge(sha=sha)
         self.assertIn("read back", str(e.exception))
@@ -281,11 +293,11 @@ class Merge(unittest.TestCase):
         w = World()
         sha = w.green_pr()
         # tw-git dies after op_begin and after GitHub merged, before op_finish.
-        op = w.ask("op_begin", {"bot": "bramble", "task": "merge-42", "action": "merge", "repo": APP,
+        op = w.ask("op_begin", {"bot": "bramble", "task": "merge-42", "action": "merge", "repo": OPS,
                                 "target": "pr/42", "commit": sha})
         self.assertEqual(op["state"], "go")
-        w.fake.prs[(APP, 42)]["merged"] = True
-        w.fake.prs[(APP, 42)]["merge_commit_sha"] = "e" * 40
+        w.fake.prs[(OPS, 42)]["merged"] = True
+        w.fake.prs[(OPS, 42)]["merge_commit_sha"] = "e" * 40
         w2 = w.restart()
         out = w2.merge(sha=sha)
         self.assertTrue(out["reconciled"])
@@ -294,7 +306,7 @@ class Merge(unittest.TestCase):
     def test_a_lost_answer_for_a_merge_that_did_not_happen_tries_once_more(self):
         w = World()
         sha = w.green_pr()
-        w.ask("op_begin", {"bot": "bramble", "task": "merge-42", "action": "merge", "repo": APP,
+        w.ask("op_begin", {"bot": "bramble", "task": "merge-42", "action": "merge", "repo": OPS,
                            "target": "pr/42", "commit": sha})
         w2 = w.restart()
         out = w2.merge(sha=sha)
@@ -305,7 +317,7 @@ class Merge(unittest.TestCase):
     def test_someone_elses_merge_is_not_claimed(self):
         w = World()
         sha = w.green_pr()
-        w.fake.prs[(APP, 42)]["merged"] = True
+        w.fake.prs[(OPS, 42)]["merged"] = True
         with self.assertRaises(Refused) as e:
             w.merge(sha=sha)
         self.assertIn("already merged", str(e.exception))
@@ -314,13 +326,13 @@ class Merge(unittest.TestCase):
 
 class MergeQueue(unittest.TestCase):
     """The redesign's part 5: with a merge queue on main, GitHub refuses a
-    direct merge, so Bramble's merge puts the PR in the queue at the exact
-    green head, and the queue merges it."""
+    direct merge, so where auto-merge does not merge, Bramble's merge puts the
+    PR in the queue at the exact green head, and the queue merges it."""
 
     def queue(self) -> tuple[World, str]:
         w = World()
         sha = w.green_pr()
-        w.fake.merge_queues.add((APP, "main"))
+        w.fake.merge_queues.add((OPS, "main"))
         return w, sha
 
     def test_with_a_queue_the_green_head_joins_it_and_nothing_merges_directly(self):
@@ -329,20 +341,20 @@ class MergeQueue(unittest.TestCase):
         self.assertTrue(out["done"])
         self.assertTrue(out["queued"])
         self.assertEqual(out["receipt"], {"queued": True})
-        self.assertEqual(w.fake.queued, [(APP, 42, sha)])
+        self.assertEqual(w.fake.queued, [(OPS, 42, sha)])
         self.assertEqual(w.fake.writes("PUT"), [], "no direct merge")
-        self.assertFalse(w.fake.prs[(APP, 42)]["merged"])
+        self.assertFalse(w.fake.prs[(OPS, 42)]["merged"])
         # The enqueue went with Bramble's App and a merge token.
         merge_tokens = [t for t in w.fake.tokens if t["permissions"].get("pull_requests") == "write"]
         self.assertEqual([t["installation"] for t in merge_tokens], ["177392923"])
         # The queue's own checks pass and GitHub merges it; asking again is
         # refused (the same task's op is done), and nothing is queued twice.
-        w.fake.land_queue(APP, 42)
+        w.fake.land_queue(OPS, 42)
         with self.assertRaises(Refused) as e:
             w.merge(sha=sha)
         self.assertIn("already", str(e.exception))
         with self.assertRaises(Refused) as e:
-            w.git.merge("hermes", {"bot": "bramble", "repo": APP, "task": "another-task", "number": 42, "sha": sha})
+            w.git.merge("hermes", {"bot": "bramble", "repo": OPS, "task": "another-task", "number": 42, "sha": sha})
         self.assertIn("already merged", str(e.exception))
         self.assertEqual(len(w.fake.queued), 1)
 
@@ -368,7 +380,7 @@ class MergeQueue(unittest.TestCase):
 
     def test_every_rule_still_comes_first(self):
         w, sha = self.queue()
-        w.fake.add_check(APP, sha, "Launcher builds", conclusion="failure")
+        w.fake.add_check(OPS, sha, "check", conclusion="failure")
         with self.assertRaises(Refused):
             w.merge(sha=sha)
         with self.assertRaises(Refused):
@@ -377,11 +389,89 @@ class MergeQueue(unittest.TestCase):
 
     def test_github_saying_no_to_the_enqueue_is_a_refusal(self):
         w, sha = self.queue()
-        w.fake.prs[(APP, 42)]["in_queue"] = True   # someone else queued it
+        w.fake.prs[(OPS, 42)]["in_queue"] = True   # someone else queued it
         with self.assertRaises(Refused) as e:
             w.merge(sha=sha)
         self.assertIn("already queued", str(e.exception))
         self.assertEqual(w.fake.queued, [])
+
+
+class AutoMerge(unittest.TestCase):
+    """Patrick, 2 Nov 2026: "He shouldn't have to be merging to begin with".
+    In Thornswood and the fork tw-git turns GitHub's auto-merge on for a Bot's
+    pull request at its exact head, and GitHub merges once the checks the
+    branch's rules require pass. Nothing waits for a yes from Patrick."""
+
+    def test_a_bots_pr_goes_on_auto_merge_and_nothing_merges_directly(self):
+        w = World()
+        w.fake.merge_queues.add((APP, "main"))
+        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        out = w.merge(sha=sha, repo=APP)
+        self.assertTrue(out["done"])
+        self.assertTrue(out["auto_merge"])
+        # The queue's own method applies, so none is sent.
+        self.assertEqual(w.fake.auto_merged, [(APP, 42, sha, None)])
+        self.assertEqual(w.fake.writes("PUT"), [], "no direct merge")
+        self.assertEqual(w.fake.queued, [], "GitHub queues it once the checks pass, not tw-git")
+        merge_tokens = [t for t in w.fake.tokens if t["permissions"].get("pull_requests") == "write"]
+        self.assertEqual([t["installation"] for t in merge_tokens], ["177392923"])
+
+    def test_the_fork_goes_on_auto_merge_with_a_merge_commit(self):
+        w = World()
+        sha = w.green_pr(repo=FORK, branch="wisp/77-equip-drop", checks=False)
+        out = w.merge(sha=sha, repo=FORK)
+        self.assertTrue(out["auto_merge"])
+        self.assertEqual(w.fake.auto_merged, [(FORK, 42, sha, "MERGE")])
+
+    def test_a_threads_pr_is_its_owners_to_put_on_auto_merge(self):
+        w = World()
+        sha = w.push("sprocket", "sprocket/3561-path-fence", {"a": "a\n"}, repo=APP)["sha"]
+        w.fake.add_pr(APP, 42, head_ref="claude/5381-avalonia", head_sha=sha, files=["a"], author="EvilPatrick06")
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("owner puts it on auto-merge", str(e.exception))
+        self.assertEqual(w.fake.auto_merged, [])
+
+    def test_rules_that_do_not_require_the_check_refuse(self):
+        for rules in ([], ["Release note"]):
+            w = World()
+            w.fake.branch_rules[(APP, "main")] = rules
+            sha = w.green_pr(repo=APP, checks=False)
+            with self.assertRaises(Refused) as e:
+                w.merge(sha=sha, repo=APP)
+            self.assertIn("Build check result", str(e.exception))
+            self.assertEqual(w.fake.auto_merged, [])
+
+    def test_a_red_check_is_never_put_on_auto_merge(self):
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.fake.add_check(APP, sha, "Launcher builds", conclusion="failure")
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("failure", str(e.exception))
+        self.assertEqual(w.fake.auto_merged, [])
+
+    def test_a_moved_head_and_a_worker_are_refused(self):
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        with self.assertRaises(Refused):
+            w.merge(sha="d" * 40, repo=APP)
+        with self.assertRaises(Refused):
+            w.merge(bot="sprocket", sha=sha, repo=APP)
+        self.assertEqual(w.fake.auto_merged, [])
+
+    def test_a_lost_answer_is_read_back_not_sent_twice(self):
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.fake.lose_answer.add("auto_merge")
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("read back", str(e.exception))
+        w2 = w.restart()
+        out = w2.merge(sha=sha, repo=APP)
+        self.assertTrue(out["reconciled"])
+        self.assertEqual(out["receipt"], {"auto_merge": True})
+        self.assertEqual(len(w2.fake.auto_merged), 1)
 
 
 class PullRequestsAndIssues(unittest.TestCase):
@@ -553,7 +643,6 @@ class Runs(unittest.TestCase):
         # box-run.yml lives in Ops since Thornswood #4013; a dispatch to
         # Thornswood found no such workflow.
         w = World()
-        w.fake.make_repo(OPS)
         self.lists(w)
         out = w.git.start_run("hermes", {"bot": "bramble", "task": "logs", "workflow": "box-run.yml", "ref": "main",
                                          "inputs": {"line": "Get-Logs -Dev -Lines 2000"}})
@@ -567,7 +656,6 @@ class Runs(unittest.TestCase):
 
     def test_box_run_still_refuses_a_line_outside_thornswoods_verbs(self):
         w = World()
-        w.fake.make_repo(OPS)
         self.lists(w)
         with self.assertRaises(Refused) as e:
             w.git.start_run("hermes", {"bot": "bramble", "task": "t", "workflow": "box-run.yml", "ref": "main",
@@ -614,7 +702,7 @@ class OneExecutor(unittest.TestCase):
     def test_every_write_is_refused_before_the_cutover(self):
         w = World()
         w.git.policy.data["executor"] = "patrick-hermes"
-        sha = w.green_pr()
+        sha = w.green_pr(repo=APP)
         main = w.fake.ref(APP, "main")
         name, _ = w.bundle("sprocket", "sprocket/3561-other", {"x.txt": "x\n"})
         calls = len(w.fake.calls)
@@ -648,12 +736,12 @@ class OneExecutor(unittest.TestCase):
         w = World()
         sha = w.green_pr()
         w.git.policy.data["executor"] = "bramble"
-        out = self.call(w, "merge", {"bot": "bramble", "repo": APP, "task": "merge-42", "number": 42, "sha": sha})
+        out = self.call(w, "merge", {"bot": "bramble", "repo": OPS, "task": "merge-42", "number": 42, "sha": sha})
         self.assertTrue(out["done"], out)
-        self.assertTrue(w.fake.prs[(APP, 42)]["merged"])
+        self.assertTrue(w.fake.prs[(OPS, 42)]["merged"])
         # A worker still never merges.
         with self.assertRaises(Refused):
-            self.call(w, "merge", {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "sha": sha})
+            self.call(w, "merge", {"bot": "sprocket", "repo": OPS, "task": "t", "number": 42, "sha": sha})
 
     def test_an_unknown_executor_is_a_broken_policy(self):
         from thornswood_guard.policy import Policy, PolicyError
@@ -693,7 +781,7 @@ class CanaryOneExecutor(unittest.TestCase):
         from thornswood_brokers.canary import executor_problem
         w = World()
         w.git.policy.data["executor"] = "patrick-hermes"
-        sha = w.green_pr()
+        sha = w.green_pr(repo=APP)
         sock = self.serve(w)
         # Even a merge that would go through: the head is right and green.
         out = self.ask(sock, sha)
@@ -703,7 +791,7 @@ class CanaryOneExecutor(unittest.TestCase):
     def test_after_the_cutover_the_zero_head_is_refused_and_nothing_merges(self):
         from thornswood_brokers.canary import executor_problem
         w = World()
-        w.green_pr()
+        w.green_pr(repo=APP)
         w.git.policy.data["executor"] = "bramble"
         out = self.ask(self.serve(w), "0" * 40)
         self.assertIsNone(executor_problem("bramble", out), out)

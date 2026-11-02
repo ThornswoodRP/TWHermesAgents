@@ -279,7 +279,6 @@ function CardView({ store }) {
         ? jsx('pre', { className: 'whitespace-pre-wrap break-words text-xs', children: s.artifact.body })
         : text(muted, 'The card\'s text did not load.'),
       text(`text-xs ${muted}`, `What yes covers: ${c.scope_of_yes}`),
-      c.box ? text('text-xs font-semibold', `Box change: ${c.box.says}`) : null,
       ...c.options.map(o =>
         jsxs('div', {
           key: o.key,
@@ -313,7 +312,7 @@ function CardView({ store }) {
           return store.answer(key)
         },
         title: 'Answer a high-risk card',
-        description: `What yes covers: ${c.scope_of_yes}` + (c.box ? ` Box change: ${c.box.says}` : ''),
+        description: `What yes covers: ${c.scope_of_yes}`,
         confirmLabel: 'Send this answer',
         destructive: true
       })

@@ -18,7 +18,7 @@ from .policy import Policy, Verdict
 @dataclass
 class Card:
     id: str
-    kind: str          # decision, main-approval, box-change, report, progress, ...
+    kind: str          # decision, main-approval, report, progress, ...
     revision: int
     title: str
     answered: bool = False

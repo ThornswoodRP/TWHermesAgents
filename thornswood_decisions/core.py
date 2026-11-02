@@ -28,12 +28,6 @@ MAX_BODY_BYTES = 256 * 1024
 MAX_OPTIONS = 6
 LIVE = ("draft", "pending")
 ROOM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# A card that asks Patrick to let one pull request change what runs on the
-# live box names it with one "pr" link: <owner/repo>#<number>@<the full head>.
-# His yes on that card, at that revision, is what tw-policy records as a
-# box-change decision (box_yes); nothing else in the core becomes a record.
-BOX_PR = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,6})@([0-9a-f]{40})$")
-BOX_YES = "yes"
 
 
 def pushes(kind: str, urgent: bool) -> bool:
@@ -124,11 +118,6 @@ class DecisionCore:
         elif p.kind != "bramble":
             raise CoreError(403, "not_a_requester", f"{p.label} does not open cards")
         self._check_card(title, body, options, recommendation, scope_of_yes, risk)
-        links = list(links)
-        if any(lk == "pr" and "@" in ref for lk, ref in links):
-            if p.kind != "bramble":
-                raise CoreError(403, "box_bramble_only", "only Bramble asks for a yes on a box change")
-            self._check_binding(kind, options, scope_of_yes, risk, links)
         with self.s.tx() as db:
             if p.kind == "specialist":
                 a = db.execute("SELECT bot FROM task_assignments WHERE workspace_id = ? AND task = ?",
@@ -186,12 +175,6 @@ class DecisionCore:
             if row["revision"] != expected_revision:
                 raise CoreError(409, "stale_revision", f"the card is at revision {row['revision']}",
                                 revision=row["revision"])
-            bound = [(x["kind"], x["ref"]) for x in db.execute(
-                "SELECT kind, ref FROM task_links WHERE decision_id = ? AND kind = 'pr'", (decision_id,))]
-            if any("@" in ref for _, ref in bound):
-                # A new revision of a box card still asks about the same pull
-                # request at the same head; a moved head is a new card.
-                self._check_binding(row["kind"], options, scope_of_yes, row["risk"], bound)
             rev = row["revision"] + 1
             art_rev = row["artifact_revision"] + 1
             sha = sha256_hex(body)
@@ -316,37 +299,6 @@ class DecisionCore:
             self._fault("before_commit")
         return receipt
 
-    # ── a box change Patrick said yes to ──────────────────────────────────
-
-    def box_yes(self, p: Principal, decision_id: str) -> dict:
-        """What Patrick's answer on a box card lets Bramble do, read from the
-        card's own records: the pull request and exact head its link names,
-        the revision he answered, and when. Only his "yes" counts; any other
-        answer, a card with no binding, or one not answered yet is refused."""
-        if p.kind != "bramble":
-            raise CoreError(403, "not_bramble", "only Bramble asks the core for a box yes")
-        db = self.s.db
-        row = self._row(db, decision_id, p.workspace_id)
-        refs = [r["ref"] for r in db.execute("SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'pr'",
-                                             (decision_id,)) if "@" in r["ref"]]
-        if len(refs) != 1 or not BOX_PR.fullmatch(refs[0]):
-            raise CoreError(409, "not_a_box_card", "this card names no pull request at an exact head")
-        if row["status"] != "resolved":
-            raise CoreError(409, "not_answered", f"the card is {row['status']}; only Patrick's answer counts",
-                            status_now=row["status"])
-        r = db.execute("SELECT * FROM responses WHERE decision_id = ? ORDER BY revision DESC LIMIT 1",
-                       (decision_id,)).fetchone()
-        if r is None or r["revision"] != row["revision"]:
-            raise CoreError(409, "not_answered", "no answer to the card's current revision")
-        who = db.execute("SELECT kind FROM principals WHERE id = ?", (r["principal_id"],)).fetchone()
-        if who is None or who["kind"] != "patrick":
-            raise CoreError(409, "not_patrick", "the answer is not Patrick's")
-        if r["option_key"] != BOX_YES:
-            raise CoreError(409, "not_yes", f"Patrick answered {r['option_key']!r}, not yes")
-        repo, pr, commit = BOX_PR.fullmatch(refs[0]).groups()
-        return {"decision_id": decision_id, "repo": repo, "pr": int(pr), "commit": commit,
-                "revision": r["revision"], "answered_at": r["answered_at"], "response_id": r["id"]}
-
     # ── reading ───────────────────────────────────────────────────────────
 
     def get_card(self, p: Principal, decision_id: str) -> dict:
@@ -421,26 +373,6 @@ class DecisionCore:
             raise CoreError(400, "risk", "risk is normal or high")
 
     @staticmethod
-    def _check_binding(kind, options, scope_of_yes, risk, links) -> None:
-        bound = [ref for lk, ref in links if lk == "pr" and "@" in ref]
-        if len(bound) != 1:
-            raise CoreError(400, "box_binding", "a box card names exactly one pull request at an exact head")
-        m = BOX_PR.fullmatch(bound[0])
-        if not m:
-            raise CoreError(400, "box_binding", "a box card's pull request is <owner/repo>#<number>@<the full "
-                                                "40-character head>")
-        if kind != "change":
-            raise CoreError(400, "box_binding", "a box card is a change card")
-        if risk != "high":
-            raise CoreError(400, "box_binding", "a box card is high risk: his yes changes what runs on the live box")
-        if BOX_YES not in [o.get("key") for o in options]:
-            raise CoreError(400, "box_binding", f"a box card has an option {BOX_YES!r}, the only answer that "
-                                                "lets the merge go")
-        repo, pr, commit = m.groups()
-        if f"{repo}#{pr}" not in scope_of_yes or commit[:12] not in scope_of_yes:
-            raise CoreError(400, "box_binding", f"the scope of a yes names {repo}#{pr} and the head {commit[:12]}")
-
-    @staticmethod
     def _write_options(db, decision_id: str, revision: int, options: list[dict]) -> None:
         for i, o in enumerate(options):
             db.execute("INSERT INTO decision_options(decision_id, revision, key, label, consequence, position) "
@@ -487,18 +419,4 @@ class DecisionCore:
             "superseded_by": row["superseded_by"], "task": row["task"],
             "options": [dict(o) for o in opts], "links": [dict(x) for x in links],
             "receipt": self._receipt_for(db, row["id"]),
-            # What a yes on a box card lets Bramble do, built from the card's
-            # binding, never from a Bot's words: the app shows this line.
-            "box": self._box_of(links),
         }
-
-    @staticmethod
-    def _box_of(links) -> dict | None:
-        refs = [x["ref"] for x in links if x["kind"] == "pr" and "@" in x["ref"]]
-        m = BOX_PR.fullmatch(refs[0]) if len(refs) == 1 else None
-        if not m:
-            return None
-        repo, pr, commit = m.groups()
-        return {"repo": repo, "pr": int(pr), "commit": commit, "yes": BOX_YES,
-                "says": f"Yes lets Bramble merge {repo}#{pr} at {commit[:12]} and nothing else: once, "
-                        "within 72 hours of your answer, and only while that is still the pull request's head."}
