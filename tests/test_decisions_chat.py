@@ -20,11 +20,12 @@ import textwrap
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from decisions_helpers import World
 from test_decisions_api import ORIGIN, Served, answer_body
 
-from thornswood_decisions import backup, connector, feed_reader
+from thornswood_decisions import backup, connector, feed_reader, store as store_mod
 from thornswood_decisions.chat import Chat, room_event_id
 from thornswood_decisions.feeds import Feeds
 from thornswood_decisions.schema import MIGRATIONS
@@ -301,6 +302,50 @@ class ConnectorSide(unittest.TestCase):
             self.assertTrue(self.w.core.states(died[reason][0])["bot_told"])
         self.assertFalse(self.w.core.states(died["could not start the hermes command"][0])["bot_told"])
         self.assertTrue(self.w.store.verify_events()[0])
+
+    def test_migration_12_queues_again_the_answer_an_old_connector_failed_after_migration_11(self):
+        # 1 Nov, 10:53 PM: migration 11 put the answer back, then the release before's connector,
+        # still running, leased it and failed it the old way: dead again, a second failed receipt.
+        flags(self.w, "connector_effects")
+        card = self.answered(key="key-00000110", title="Pick A")
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, cx, "failed", reason="could not check the Bots' gateway")
+        real = self.answered(key="key-00000111", title="Pick B")
+        rx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, rx, "failed", reason="could not start the hermes command")
+        self.w.store.db.execute("UPDATE meta SET value = '10' WHERE key = 'schema_version'")
+        with mock.patch.object(store_mod, "MIGRATIONS", MIGRATIONS[:11]):
+            self.assertEqual(migrate(self.w.store.db), 11)
+        self.assertEqual(self.outbox(cx)["status"], "queued")
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([i["id"] for i in items], [cx])
+        self.chat.result(self.w.ws, self.tok, cx, "failed", reason="could not check the Bots' gateway")
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"]), ("dead", 1))
+        self.assertEqual(self.receipts(cx), ["failed", "failed"])
+        # This release opens the store at schema 11.
+        self.assertEqual(migrate(self.w.store.db), len(MIGRATIONS))
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"], row["lease_until"]), ("queued", 0, None))
+        self.assertEqual(row["reason"], "waiting for the Bots' gateway: could not check the Bots' gateway")
+        self.assertEqual(self.receipts(cx), ["failed", "failed"], "both failed receipts stay as history")
+        self.assertEqual(self.outbox(rx)["status"], "dead", "a real failure stays dead")
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([(i["id"], i["target"]) for i in items], [(cx, "bramble")])
+        self.chat.result(self.w.ws, self.tok, cx, "confirmed", "turn finished")
+        self.assertTrue(self.w.core.states(card["id"])["bot_told"])
+        self.assertFalse(self.w.core.states(real["id"])["bot_told"])
+        self.assertTrue(self.w.store.verify_events()[0])
+
+    def test_migration_12_leaves_a_delivered_answer_alone(self):
+        flags(self.w, "connector_effects")
+        self.answered(key="key-00000112", title="Pick C")
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, cx, "confirmed", "turn finished")
+        before = dict(self.outbox(cx))
+        self.w.store.db.execute("UPDATE meta SET value = '11' WHERE key = 'schema_version'")
+        self.assertEqual(migrate(self.w.store.db), len(MIGRATIONS))
+        self.assertEqual(dict(self.outbox(cx)), before)
 
     def test_a_restore_quarantines_waiting_chat(self):
         self.send("wisp", "hello", "key-00000017")

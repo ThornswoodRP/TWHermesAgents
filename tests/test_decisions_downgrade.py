@@ -103,7 +103,7 @@ class PuttingBack(unittest.TestCase):
         self.addCleanup(older.close)
         self.assertEqual({t: older.db.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in tables}, before)
         self.assertTrue(older.verify_events()[0])
-        # The flags the older schema knows, each as it was (schema 10 adds session_manage_write; 11 adds none).
+        # The flags the older schema knows, each as it was (schema 10 adds session_manage_write; 11 and 12 add none).
         self.assertEqual({r[0] for r in older.db.execute("SELECT name FROM flags")},
                          set(FLAGS if self.newest - 1 >= 10 else FLAGS_7))
 

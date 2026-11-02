@@ -103,7 +103,7 @@ The payload is only `{v, event_id, decision_id, attention_revision, path}`: no q
 | `tw-decide-feed`, `tw-decide-feed.service`, `.timer` | The Work, Room and Bot Chat feeds as `hermes`, once a minute, loopback only |
 | `tw-decide-push`, `tw-decide-push.service` | The push worker as `tw-push`, writing only `/srv/tw/push`, at most 150 MB. Its outbound connections are not limited by address, because the push services' addresses are not fixed; the worker refuses every host but theirs |
 | `tw-decide-connector`, `tw-decide-connector.service` | The connector as `hermes`, loopback only, at most 900 MB. It runs `hermes` and finds the gateway's control socket, so it is not `ProtectSystem=strict`; the install adds `XDG_RUNTIME_DIR` as the gateway's own unit has it |
-| `install.sh <commit> [--room <id>] [--origin <url>]` | Makes the user and `/srv/tw/decide` (0700), builds the venv, runs a whole passkey ceremony under the unit's limits, puts the launchers and units in place, makes the store the first time with every flag off, binds the room, makes the three feed tokens and the connector's token into `hermes`'s `~/.config/thornswood` (0600), finds the `hermes` command as that user's login shell does, starts the core, the feeds and the connector, and checks the core answers on loopback only. Since step 5 it also makes the `tw-push` user and `/srv/tw/push`, puts the push worker's token there, checks one sealed, encrypted and signed push under the unit's limits, and starts the push worker once `--origin` is known. It changes no flag and makes no pairing code |
+| `install.sh <commit> [--room <id>] [--origin <url>]` | Makes the user and `/srv/tw/decide` (0700), builds the venv, runs a whole passkey ceremony under the unit's limits, puts the launchers and units in place, makes the store the first time with every flag off, binds the room, makes the three feed tokens and the connector's token into `hermes`'s `~/.config/thornswood` (0600), finds the `hermes` command as that user's login shell does, stops the core and every worker before the store migrates, starts the core, checks it answers on loopback only and on this release's schema, and only then starts the feeds and the connector. Since step 5 it also makes the `tw-push` user and `/srv/tw/push`, puts the push worker's token there, checks one sealed, encrypted and signed push under the unit's limits, and starts the push worker once `--origin` is known. It changes no flag and makes no pairing code |
 | `install-plugin.sh <commit>` | Links `plugins/thornswood-decisions` in Patrick's own Hermes (`patrick-hermes`) to the root-owned release. It never touches the Bots' Hermes and never edits a Hermes setting; Patrick turns the plugin on with `hermes plugins enable thornswood-decisions` |
 
 The order, after the merge, with the merged commit. Every line but 5 and 7 runs on the VM, by someone with sudo there (Patrick's own Hermes, as it ran #21's install):
@@ -283,6 +283,36 @@ Bramble never got the answer. Now:
   of a readiness check (its reason is one of those checks' and its every
   receipt is that failure), on a card still answered. Its failed receipt stays
   as history. Chat messages are left as they are. Its way back changes nothing.
+
+### The install stops every worker before the store migrates (1 Nov)
+
+At 10:53 PM the install of the fix above ran migration 11, which put Patrick's
+answer A on dec_fWitODbwp3NuQ7dNhxaRTw (#5327, for Bramble) back in the queue.
+The release before's connector was still running: three seconds later it leased
+that answer while the Bots' gateway was reloading and failed it the old way, so
+it was dead again with a second failed receipt, and only then was it restarted
+on the new code. Now:
+
+- `install.sh` step 5b stops the timers (first, so none starts its service
+  again), every worker that leases from the core or opens its store
+  (`tw-decide-bots`, `-connector`, `-push`, `-own`, `-feed`, `-peers`) and the
+  core itself, and checks each really stopped, before its first `tw-decide`
+  command opens the store and migrates it. Each starts again, with
+  `reset-failed` first as before, only after the core answers on loopback and
+  `tw-decide schema` says the store is at the schema this release knows (step
+  8). `tests/test_decisions_install_order.py` pins that order, and finds the
+  workers from the unit files, so a new worker unit must join the stop.
+- the same race hit the feed at 10:57 PM, in the install of #74: the feed
+  timer's run posted the new `work` snapshot, with `items`, at 10:57 PM while
+  the release before's core still served (it restarted 38 seconds later) and
+  dropped `items`, so the Board was empty until the next read. Both timers that
+  post to the core (`tw-decide-feed.timer`, `tw-decide-peers.timer`) are in
+  that stop, before the core restarts, and start again only after the core
+  answers on the new code; the order test pins them too.
+- migration 12 is migration 11's rule once more (the same SQL), for that
+  answer: dead only of a readiness check, every receipt that failure, the card
+  still answered. Against a read-only copy of the VM's store it changes that
+  one row and nothing else. Its way back changes nothing.
 
 The browser check: a chat's actions, a rename that shows at once and then from One, hiding (off the list, no send), Hidden chats from One with Bring back, the delete's words before anything goes, Keep it, a delete that goes through, no chat actions on a Bot Chat, and his own Bot Chat first on One's list, marked Bot Mode, opening with its messages and no chat actions. Not checked here: a real Hermes on One or the VM.
 

@@ -40,6 +40,22 @@ BEGIN SELECT RAISE(ABORT, '{table} rows are history and are never deleted'); END
 """
 
 
+# A "Bot told" message that died only because the Bots' gateway was not ready, back in the queue
+# (migrations 11 and 12).
+_REQUEUE_NOT_READY = """
+UPDATE connector_outbox
+  SET status = 'queued', lease_until = NULL, attempts = max(attempts - 1, 0),
+      reason = 'waiting for the Bots'' gateway: ' || reason,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+  WHERE status = 'dead' AND kind = 'decision.answered'
+    AND (reason IN ('could not check the Bots'' gateway', 'could not start Hermes''s Python')
+         OR reason LIKE 'the Bots'' gateway is %')
+    AND EXISTS (SELECT 1 FROM decisions d WHERE d.id = connector_outbox.decision_id AND d.status = 'resolved')
+    AND NOT EXISTS (SELECT 1 FROM effect_receipts e WHERE e.outbox = 'connector'
+                    AND e.outbox_id = connector_outbox.id AND e.outcome <> 'failed');
+"""
+
+
 MIGRATIONS: list[str] = [
     # 1: the whole first schema
     f"""
@@ -634,18 +650,15 @@ CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway,
     # whose one reason is a readiness check's and whose every receipt is that failure; the failed
     # receipt stays as history. Chat messages are left as they are: Patrick saw those as not sent and
     # may have sent them again himself.
-    """
-UPDATE connector_outbox
-  SET status = 'queued', lease_until = NULL, attempts = max(attempts - 1, 0),
-      reason = 'waiting for the Bots'' gateway: ' || reason,
-      updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-  WHERE status = 'dead' AND kind = 'decision.answered'
-    AND (reason IN ('could not check the Bots'' gateway', 'could not start Hermes''s Python')
-         OR reason LIKE 'the Bots'' gateway is %')
-    AND EXISTS (SELECT 1 FROM decisions d WHERE d.id = connector_outbox.decision_id AND d.status = 'resolved')
-    AND NOT EXISTS (SELECT 1 FROM effect_receipts e WHERE e.outbox = 'connector'
-                    AND e.outbox_id = connector_outbox.id AND e.outcome <> 'failed');
-""",
+    _REQUEUE_NOT_READY,
+    # 12: the same rule once more, for the answer migration 11 put back on 1 Nov at 10:53 PM. The
+    # install then ran this release's migrations while the release before's connector was still
+    # running; three seconds later that old connector leased the message, met the gateway mid-reload
+    # and failed it the old way, so it was dead again with a second failed receipt. Nothing was sent
+    # either time. The install now stops every worker before the store migrates (install.sh step 6),
+    # so this cannot happen again; this puts back what it did. Same rows only: dead of a readiness
+    # check, every receipt that failure, the card still answered.
+    _REQUEUE_NOT_READY,
 ]
 
 
@@ -745,4 +758,6 @@ ALTER TABLE flags_9 RENAME TO flags;
     # A data step: no table changed, and a message it put back in the queue is one the older release
     # sends the same way. Nothing to undo.
     11: ([], "", ""),
+    # The same data step as 11.
+    12: ([], "", ""),
 }

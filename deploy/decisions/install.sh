@@ -12,6 +12,10 @@
 # https://hermes.<tailnet>.ts.net. Both are kept in
 # /etc/thornswood/tw-decide.env (no secrets there) and stay until given again.
 #
+# Before it first opens the store (which migrates it) it stops the core and
+# every worker of the release before, and starts each worker again only once
+# the core answers on this release's schema (step 5b, 1 Nov).
+#
 # Idempotent. It makes the tw-decide user and /srv/tw/decide (0700, tw-decide's
 # only); builds the core's venv from deploy/decisions/requirements.txt (exact
 # hashes, wheels only) and checks a whole passkey ceremony with it under the
@@ -164,6 +168,23 @@ ok "passkey and push self-check: $(tr -d '\n ' <<<"$check")"
 
 run() { runuser -u tw-decide -- "$opt/bin/tw-decide" --db "$db" "$@"; }
 
+# 5b. Nothing of the release before runs while this one opens the store. The
+# first `run` below migrates it, and a worker still on the older code would
+# lease what a migration put back and handle it the old way: on 1 Nov at
+# 10:53 PM the old connector failed again, three seconds after migration 11,
+# the answer that migration had just put back in the queue. So the timers
+# (first, so none starts its service again), every worker that leases from the
+# core or opens its store, and the core itself stop here. Each starts again
+# below, on this release, only once the core answers on the new schema (step 8).
+CORE_WORKERS="tw-decide-bots.service tw-decide-connector.service tw-decide-push.service tw-decide-own.service tw-decide-feed.service tw-decide-peers.service"
+systemctl stop tw-decide-feed.timer tw-decide-peers.timer
+systemctl stop $CORE_WORKERS
+systemctl stop tw-decide.service
+for u in tw-decide-feed.timer tw-decide-peers.timer $CORE_WORKERS tw-decide.service; do
+  if systemctl is-active --quiet "$u"; then stop "$u still runs after systemctl stop: journalctl -u $u -n 20"; fi
+done
+ok "the core and its workers are stopped while the store migrates"
+
 # 6. The store, the first time: the workspace with every flag off, Patrick, the six Bots.
 if [[ ! -e "$db" ]]; then
   run init --workspace thornswood >/dev/null
@@ -225,6 +246,10 @@ except OSError: print("")' 2>/dev/null || true)"
 done
 [[ "$answer" == 401 ]] || stop "the core did not answer on 127.0.0.1:9135: journalctl -u tw-decide -n 50"
 ok "the core answers on 127.0.0.1:9135 (401 to a call with no session, as it should)"
+schema="$(run schema)" || stop "the core's store did not say its schema: $opt/bin/tw-decide --db $db schema"
+python3 -I -c 'import json, sys; d = json.load(sys.stdin); sys.exit(0 if d["store"] == d["code"] else 1)' <<<"$schema" \
+  || stop "the store is not at the schema this release knows, so no worker starts: $(tr -d '\n ' <<<"$schema")"
+ok "the store is at this release's schema: $(tr -d '\n ' <<<"$schema"); the workers start from here"
 if command -v ss >/dev/null; then
   wide="$(ss -Htln 2>/dev/null | awk '{print $4}' | grep ':9135$' | grep -v '^127.0.0.1:9135$' || true)"
   [[ -z "$wide" ]] || stop "something listens on port 9135 beyond loopback: $wide"
