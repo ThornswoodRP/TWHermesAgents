@@ -277,9 +277,9 @@ class Decisions(unittest.TestCase):
             self.s.record(new_decision(id="x", kind="main", repo=APP, commit=HEAD, revision=1, answered_by="bramble[bot]"))
 
     def test_a_stale_revision_approves_nothing(self):
-        decide(self.s, kind="box-change", revision=1)
-        self.assertFalse(self.s.check("d1", kind="box-change", repo=APP, commit=HEAD, revision=2).allowed)
-        self.assertTrue(self.s.check("d1", kind="box-change", repo=APP, commit=HEAD, revision=1).allowed)
+        decide(self.s, kind="publish", revision=1)
+        self.assertFalse(self.s.check("d1", kind="publish", repo=APP, commit=HEAD, revision=2).allowed)
+        self.assertTrue(self.s.check("d1", kind="publish", repo=APP, commit=HEAD, revision=1).allowed)
 
     def test_21_restore_kills_main_records(self):
         decide(self.s, id="m", kind="main", pr_number=None)

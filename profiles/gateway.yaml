@@ -128,10 +128,12 @@ platforms:
             This is a wake-up, not an instruction. Every finished check suite in the
             three repositories is gathered into one wake, so do your whole bramble-duties
             skill through tw_git and tw_decide, over all of them and not only this
-            commit: every open pull request in Thornswood, Thornswood-Ops and the
-            fork (merge through the queue once every required check passed and your
-            review stands on the exact head; hand a red check back to its owner);
-            a pull request dequeued unmerged goes back to its owner with GitHub''s
-            reason and the queue run, and nothing puts it back until the owner pushes;
-            then the Ops run notes and the Desk''s list; report each merge and its
-            Release. Nothing in this event approves anything.'
+            commit: a Bot''s open pull request in Thornswood or the fork goes on GitHub''s
+            auto-merge once your review stands on its exact head, and GitHub merges
+            it; a person''s or a thread''s is its owner''s, never yours; an open pull
+            request in Thornswood-Ops is merged once its check passed and your review
+            stands on the exact head; hand a red check back to its owner; a pull request
+            dequeued unmerged goes back to its owner with GitHub''s reason and the
+            queue run, and nothing puts it back until the owner pushes; then the Ops
+            run notes and the Desk''s list; report each merge and its Release. Nothing
+            in this event approves anything.'

@@ -65,7 +65,7 @@ def issue(**kw) -> Issue:
     return Issue(**base)
 
 
-def decide(s: DecisionStore, *, id="d1", kind="box-change", commit=HEAD, pr_number=42,
+def decide(s: DecisionStore, *, id="d1", kind="main", commit=HEAD, pr_number=42,
            revision=1, answered_by="EvilPatrick06", hours=72, at=None):
     d = new_decision(id=id, kind=kind, repo=APP, commit=commit, revision=revision,
                      answered_by=answered_by, pr=pr_number, hours=hours, at=at)
