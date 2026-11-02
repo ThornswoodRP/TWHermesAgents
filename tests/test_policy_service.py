@@ -400,6 +400,68 @@ class Decisions(unittest.TestCase):
         self.assertTrue(s.check_decision("d2", kind="box-change", repo=APP, commit=HEAD).allowed)
 
 
+class BoxRecords(unittest.TestCase):
+    """The decision core records Patrick's yes on a box card (#49): only a
+    box-change, for one PR of the three repos at one head, his, short-lived."""
+    OPS = "ThornswoodRP/Thornswood-Ops"
+
+    def body(self, s, **kw):
+        d = new_decision(id=kw.pop("id", "dec_abcdefghijklmnop"), kind=kw.pop("kind", "box-change"),
+                         repo=kw.pop("repo", self.OPS), commit=kw.pop("commit", HEAD), revision=kw.pop("revision", 2),
+                         answered_by=kw.pop("by", "EvilPatrick06"), pr=kw.pop("pr", 205), at=kw.pop("at", s.clock()),
+                         hours=kw.pop("hours", 72))
+        return dict(d.__dict__, **kw)
+
+    def test_the_core_records_his_yes_and_tw_git_can_use_it_once(self):
+        s = service()
+        self.assertEqual(s.decision_record_box("tw-decide", {"decision": self.body(s)}),
+                         {"id": "dec_abcdefghijklmnop", "existing": False})
+        v = s.check_decision("dec_abcdefghijklmnop", kind="box-change", repo=self.OPS, commit=HEAD, pr=205, revision=2)
+        self.assertTrue(v.allowed, v.reason)
+        s.decision_use("tw-git", {"id": "dec_abcdefghijklmnop"})
+        again = s.decision_record_box("tw-decide", {"decision": self.body(s)})
+        self.assertTrue(again["existing"])
+        self.assertIsNotNone(again["used_at"])
+        self.assertFalse(s.check_decision("dec_abcdefghijklmnop", kind="box-change", repo=self.OPS, commit=HEAD).allowed)
+
+    def test_the_same_id_with_other_contents_is_refused(self):
+        s = service()
+        s.decision_record_box("tw-decide", {"decision": self.body(s)})
+        with self.assertRaisesRegex(Refused, "other contents"):
+            s.decision_record_box("tw-decide", {"decision": self.body(s, commit=OTHER)})
+
+    def test_what_a_record_may_not_say(self):
+        s = service()
+        bad = {
+            "main": self.body(s, kind="main"),
+            "cutover": self.body(s, kind="cutover"),
+            "not a card id": self.body(s, id="d1"),
+            "hermes": self.body(s, repo="ThornswoodRP/Thornswood-Hermes"),
+            "elsewhere": self.body(s, repo="someone/else"),
+            "no pr": self.body(s, pr=None),
+            "short head": self.body(s, commit=HEAD[:12]),
+            "revision 0": self.body(s, revision=0),
+            "not his": self.body(s, by="thornswood-bramble[bot]"),
+            "used": self.body(s, used_at="2026-11-02T12:00:00+00:00"),
+            "dead": self.body(s, dead=True),
+            "too long": self.body(s, hours=200),
+            "future": self.body(s, at=s.clock() + timedelta(hours=1)),
+            "no zone": self.body(s, answered_at="2026-11-02T12:00:00", expires_at="2026-11-03T12:00:00"),
+            "extra field": dict(self.body(s), approved=True),
+        }
+        for why, body in bad.items():
+            with self.assertRaises(Refused, msg=why):
+                s.decision_record_box("tw-decide", {"decision": body})
+        self.assertIsNone(s._decision("dec_abcdefghijklmnop"))
+
+    def test_only_the_cores_user_records_and_it_may_not_use_or_record_others(self):
+        ops = service().ops()
+        self.assertEqual(ops["decision_record_box"][1], {"tw-decide"})
+        self.assertNotIn("tw-decide", ops["decision_record"][1])
+        self.assertNotIn("tw-decide", ops["decision_use"][1])
+        self.assertNotIn("tw-decide", ops["mark_restored"][1])
+
+
 class Routes(unittest.TestCase):
     def test_a_subscription_limit_never_closes_credits(self):
         s = service()

@@ -243,6 +243,44 @@ class Merges(unittest.TestCase):
     def test_bramble_never_merges_in_thornswood_hermes(self):
         self.assertFalse(self.merge(p=pr(repo="ThornswoodRP/Thornswood-Hermes")).allowed)
 
+    # Ops's box-run, github-admin and staff-notice workflows run on the box's
+    # own runner; until 2 Nov an Ops PR changing them merged with no yes.
+    OPS = "ThornswoodRP/Thornswood-Ops"
+
+    def ops_pr(self, files):
+        return pr(repo=self.OPS, head_ref="magpie/205-tunnel", author_bot="magpie", files=files)
+
+    def test_an_ops_workflow_change_waits_for_patrick(self):
+        v = self.r.merge("bramble", self.ops_pr([".github/workflows/tunnel.yml"]), HEAD, "squash",
+                         green(name="check"), base_verb_lists=[])
+        self.assertFalse(v.allowed)
+        self.assertIn("live box", v.reason)
+
+    def test_an_ops_workflow_change_merges_with_his_yes_for_ops(self):
+        from thornswood_guard.decisions import new_decision
+        self.s.record(new_decision(id="d1", kind="box-change", repo=self.OPS, commit=HEAD, revision=1,
+                                   answered_by="EvilPatrick06", pr=42))
+        v = self.r.merge("bramble", self.ops_pr([".github/workflows/tunnel.yml"]), HEAD, "squash",
+                         green(name="check"), base_verb_lists=[], decision_id="d1", card_revision=1)
+        self.assertTrue(v.allowed, v.reason)
+
+    def test_a_yes_for_thornswood_does_not_merge_an_ops_pr(self):
+        decide(self.s, kind="box-change", commit=HEAD, pr_number=42)
+        v = self.r.merge("bramble", self.ops_pr([".github/workflows/tunnel.yml"]), HEAD, "squash",
+                         green(name="check"), base_verb_lists=[], decision_id="d1")
+        self.assertFalse(v.allowed)
+
+    def test_other_ops_changes_need_no_yes(self):
+        v = self.r.merge("bramble", self.ops_pr(["ops/status.md", "scripts/ops/Say-Staff.ps1"]), HEAD, "squash",
+                         green(name="check"), base_verb_lists=[])
+        self.assertTrue(v.allowed, v.reason)
+
+    def test_the_forks_workflows_run_on_githubs_runners_and_need_no_yes(self):
+        fork = pr(repo="ThornswoodRP/skymp", head_ref="wisp/1774-linux", author_bot="wisp",
+                  base_ref="thornswood/engine-changes", files=[".github/workflows/thornswood-pr-linux.yml"])
+        v = self.r.merge("bramble", fork, HEAD, "merge", green(name="build-pr"), base_verb_lists=[])
+        self.assertTrue(v.allowed, v.reason)
+
 
 class Claims(unittest.TestCase):
     def setUp(self):

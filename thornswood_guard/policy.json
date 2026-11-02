@@ -100,6 +100,10 @@
       "ThornswoodRP/Thornswood-Ops": "main",
       "ThornswoodRP/skymp": "thornswood/engine-changes"
     },
+    "patrick_path_repos": [
+      "app",
+      "ops"
+    ],
     "patrick_paths": [
       ".github/workflows/**",
       "scripts/vps/gate/**",
@@ -414,7 +418,8 @@
       "files": "tw-files",
       "git": "tw-git",
       "proxy": "tw-proxy",
-      "backup": "tw-backup"
+      "backup": "tw-backup",
+      "decide": "tw-decide"
     },
     "exec_users": {
       "rift": "tw-rift",
@@ -432,6 +437,7 @@
           "tw-git",
           "tw-files",
           "tw-proxy",
+          "tw-decide",
           "root"
         ]
       },

@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Merge green pull requests, hand a pull request the merge queue dropped back to its owner, and run the Ops run notes and the Desk's list. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.1.0
+version: 1.2.0
 author: Thornswood-Hermes (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -35,10 +35,30 @@ ThornswoodRP/skymp:
    - every check the policy requires for the repository passed;
    - your review stands;
    - nothing in the guide holds it (a Patrick path needs his yes on a card for
-     that head).
+     that head, step 2a).
 
    In Thornswood the merge puts the pull request in the merge queue. In the
    fork it is a merge commit, and in Ops a squash, as the policy says.
+
+2a. A pull request that changes what runs on the live box needs Patrick's yes
+   first. These are the policy's Patrick paths (`.github/workflows/**`,
+   `scripts/vps/gate/**`, the verb lists and the scripts a verb runs) in
+   Thornswood and in Ops; `tw_git merge` refuses one without his yes and names
+   the files. For each such pull request that is green:
+   1. Look for a card you already opened for it (`tw_decide my_cards`). If one
+      is pending for this head, leave it and go on; he answers in the app.
+   2. If there is none, or its head moved, open one with `tw_decide open_card`:
+      kind `change`, risk `high`, options keyed `yes` and `no`, recommendation
+      your own, one link `{kind: pr, ref: <owner/repo>#<number>@<full head
+      sha>}`, a scope of yes naming `<owner/repo>#<number>` and the head's
+      first 12 characters, and a body that says what the change does on the
+      box, what you reviewed and each option. A card for an older head is
+      closed as superseded by the new one (`tw_decide close_card`).
+   3. Once he answered yes, `tw_decide box_yes` with the card's id. It records
+      his yes and returns `decision_id` and `card_revision`; pass both to
+      `tw_git merge` at that same head. A yes is used once and lasts 72 hours.
+   4. A `no`, or no answer yet, is the end of it for now. Never ask in a room,
+      and never merge it another way.
 3. A red required check goes back to the pull request's owner as a comment
    that names the check and links its run. Do nothing else with it.
 4. Never merge ThornswoodRP/Thornswood-Hermes. Patrick's own Hermes merges it.

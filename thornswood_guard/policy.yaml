@@ -100,6 +100,11 @@ merge:
     ThornswoodRP/skymp: thornswood/engine-changes
   # A PR touching any of these runs on the live box once merged, so Bramble
   # merges it only after Patrick's yes on a card for that PR at its exact head.
+  # In Thornswood and in Ops: Ops's box-run, github-admin and staff-notice
+  # workflows run on the box's own runner, and until 2 Nov an Ops PR changing
+  # them merged with no yes at all. The fork's workflows run on GitHub's
+  # runners only.
+  patrick_path_repos: [app, ops]
   patrick_paths:
     - ".github/workflows/**"
     - "scripts/vps/gate/**"
@@ -421,6 +426,8 @@ brokers:
     git: tw-git
     proxy: tw-proxy
     backup: tw-backup
+    # The decision core's user: it records Patrick's box-change yeses (#49).
+    decide: tw-decide
   # One execution user per worker Bot (Tier B). Bramble has none: it acts
   # only through the brokers.
   exec_users:
@@ -437,7 +444,7 @@ brokers:
     policy:
       path: /run/tw/policy/policy.sock
       group: tw-policy-clients
-      clients: [hermes, tw-git, tw-files, tw-proxy, root]
+      clients: [hermes, tw-git, tw-files, tw-proxy, tw-decide, root]
     git:
       path: /run/tw/git/git.sock
       group: tw-git-clients

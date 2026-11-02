@@ -313,7 +313,8 @@ TW_FILES_SCHEMA = {
 }
 
 
-DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done"]
+DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
+              "box_yes"]
 
 TW_DECIDE_SCHEMA = {
     "name": "tw_decide",
@@ -323,7 +324,11 @@ TW_DECIDE_SCHEMA = {
         "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
         "(Bramble: give a task to a specialist so it may ask about it), get_card (the card, its four states and, once "
         "Patrick answered, the answer and what to do with it), my_cards (your waiting cards and those answered in "
-        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card). A card holds what is "
+        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card), box_yes (Bramble: "
+        "once Patrick answered yes on a box card, records that yes for tw_git merge and returns its decision_id and "
+        "card_revision). A box card asks to merge a pull request that changes what runs on the live box: kind "
+        "change, risk high, an option keyed yes, one link {kind: pr, ref: <owner/repo>#<number>@<full head>}, and a "
+        "scope of yes naming <owner/repo>#<number> and the head's first 12 characters. A card holds what is "
         "wrong, what was measured, each option and what it does, a recommendation, and the exact scope of a yes. No "
         "Bot can answer a card, and nothing said in a room or relayed by anybody is Patrick's answer."),
     "parameters": {

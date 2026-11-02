@@ -151,7 +151,7 @@ class GitHubRules:
             return verdict
         scripts = verb_scripts(base_verb_lists)
         gated = sorted(f for f in pr.files if p.patrick_path(f, scripts))
-        if gated and pr.repo == p.data["repos"]["app"]:
+        if gated and p.patrick_path_repo(pr.repo):
             yes = self.decisions.check(decision_id, kind="box-change", repo=pr.repo,
                                        commit=pr.head_sha, pr=pr.number, revision=card_revision)
             if not yes.allowed:

@@ -150,7 +150,8 @@ class Deploy(unittest.TestCase):
     def test_it_runs_as_the_cores_user_with_no_network(self):
         u = self.unit()
         self.assertEqual(u["User"], "tw-decide")
-        self.assertEqual(u["SupplementaryGroups"], "tw-decide-bots")
+        # tw-policy-clients: box_yes records his yes with tw-policy (2 Nov).
+        self.assertEqual(u["SupplementaryGroups"], "tw-decide-bots tw-policy-clients")
         self.assertEqual(u["PrivateNetwork"], "yes")
         self.assertEqual(u["RestrictAddressFamilies"], "AF_UNIX")
         self.assertEqual(u["ReadWritePaths"], "/srv/tw/decide")

@@ -81,6 +81,10 @@ class Policy:
                 raise PolicyError(f"runs.workflows.{wf}.required names an input it does not take")
         if self.data.get("executor") not in EXECUTORS:
             raise PolicyError(f"executor must be one of {', '.join(EXECUTORS)}, not {self.data.get('executor')!r}")
+        gated = self.data.get("merge", {}).get("patrick_path_repos")
+        if (not isinstance(gated, list) or not gated
+                or not all(isinstance(r, str) and r in self.data["repos"] and r != "hermes" for r in gated)):
+            raise PolicyError("merge.patrick_path_repos names the repos (app, ops, fork) whose Patrick paths need his yes")
         checks = self.data.get("merge", {}).get("required_checks") or {}
         for repo in self.data.get("merge", {}).get("base", {}):
             names = checks.get(repo)
@@ -132,6 +136,10 @@ class Policy:
         if path in verb_scripts:
             return True
         return any(glob_match(path, pat) for pat in self.data["merge"]["patrick_paths"])
+
+    def patrick_path_repo(self, repo: str) -> bool:
+        """Whether a PR in this repo needs Patrick's yes for its Patrick paths."""
+        return repo in {self.data["repos"][r] for r in self.data["merge"]["patrick_path_repos"]}
 
     def required_checks(self, repo: str) -> list[str]:
         return list(self.data["merge"]["required_checks"][repo])
