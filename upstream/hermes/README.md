@@ -232,7 +232,7 @@ adapter answered 401 and nothing was ever coalesced or spooled. The test
 now signs them and checks each answer is `202 coalesced` and the spool holds
 the group before the stop. Upstream without 0007 passed 71 of 71.
 
-## 0008: the Bot Screen watcher reads each home under its own terminal policy
+## 0009: the Bot Screen watcher reads each home under its own terminal policy
 
 Made against upstream main `013bde47` (2 Nov 2026), in `on-main/`. The file
 it changes is the same in v0.22.5, so it applies there too.
@@ -259,7 +259,7 @@ the runtime-file poll and the idle check: each body sees the watched home's
 own `TERMINAL_CWD`, not the launch profile's.
 
 ```
-git am on-main/0008-display-watch-profile-scope.patch
+git am on-main/0009-display-watch-profile-scope.patch
 python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
 HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/tui_gateway/test_display_watch.py tests/tui_gateway/test_display_methods.py -q -rfE
 ```
