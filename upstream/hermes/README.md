@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Eight causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
+Ten causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
@@ -256,6 +256,38 @@ electron/remote-lifecycle.test.ts electron/remote-lifecycle-profile-missing.test
 runs the real remote command through sh against a temp log. The wrapped
 command was also run through bash and dash as the login shell. eslint is
 clean, and upstream's code-health ratchet passes.
+
+## 0009: a source switch resolves the target's address in its dial, not in its commit
+
+Cause, measured on 2 Nov in One's desktop.log: the switch to
+thornswood-bots/bramble moved the active route at 2:19:09.182 PM, published
+no connection, and gave up at 2:19:29.350 PM (exactly 20 s) with "Connection
+"thornswood-bots" did not become active". The ssh tunnel had dropped at
+2:18:50 PM when #94's install restarted Bramble, and the two remote
+dashboards bound at 2:19:35 and 2:19:36 PM. The same switch at 2:31:37 PM
+published in 407 ms. In `selectConnection` (store/connections.ts) the dial
+(phase 1, 135 s budget) found the socket open, then the commit
+(`ensureGatewayAgent`, 20 s budget, after the old bindings are severed)
+looked up the target's descriptor through `getConnectionFor`, which waited
+on main rebuilding that route's backend. The commit lands only once that
+descriptor is published (`targetIsActive`), so it timed out.
+
+Fix: `openGatewayAgent` resolves the descriptor together with the socket,
+on the dial's budget, and returns it; a failed lookup fails the dial before
+anything is touched. `selectConnection` hands it to `ensureGatewayAgent`,
+which publishes it with no lookup of its own. Callers that pass no
+descriptor (the SDK and session doors) look it up as before. No budget
+changed. `0009-desktop-switch-descriptor-in-dial.patch` applies on 0008
+(One's v0.22.5 build). Upstream main rewrote this flow on 1 Nov (13bd44e4a4,
+the commit now has the 135 s budget, so it waits instead of failing, but
+still with the old bindings severed); the upstream copy is made when an
+upstream pull request slot frees.
+
+Tests (Linux, Node 26, 2 Nov): the new
+`src/store/profile-agent-dial-descriptor.test.ts` (5 tests) and one new
+test in `src/store/connections.test.ts` fail without the fix (5 failed) and
+pass with it. The whole Desktop suite, `npx vitest run src`: 1,343 files,
+11,534 tests passed. `tsc -p tsconfig.json --noEmit` and eslint clean.
 
 ## 0010: the Bot Screen watcher reads each home under its own terminal policy
 
