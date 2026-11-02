@@ -18,6 +18,11 @@ came of it:
   11.1, "an unclear effect blocks automatic retry"). A room message is settled
   later from the room itself, because the room's event id comes from the key
   the core gave it; a Bot Chat message stays unclear and the phone says so.
+- not_ready (an outcome, not a state): the gateway was not ready (starting,
+  stopped, reloading, or its check could not run), so nothing was sent. The
+  message goes back to queued as it was, its lease and that attempt undone, and
+  the phone says what it waits for. A gateway that is not ready yet is not a
+  failure of the message, so it is never dead for that.
 
 The same lease carries the connector's other job: telling the Bot that asked a
 card how Patrick answered it (`connector_outbox`, written by the answer's own
@@ -52,7 +57,8 @@ SETTLES = ("question", "change")
 MOUNTAIN = ZoneInfo("America/Denver")  # Patrick's dates, as DECIDED.md writes them
 LEASE = timedelta(minutes=20)
 ROOM = "room"  # the first room bound, by its first name
-OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
+OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain", "not_ready": "queued"}
+WAITS = "waiting for the Bots' gateway: "  # the reason a message put back by not_ready carries
 MINE = 50
 MAX_CLAIM = 7  # the six Bots and the rooms, at most this many at once
 ROOM_PAGE = 50
@@ -207,7 +213,11 @@ class Chat:
                                  f"WHERE workspace_id = ? AND target IN ({','.join('?' * len(targets))}) "
                                  "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                                  (workspace_id, *targets, MINE)).fetchall()
-        return [dict(r) for r in reversed(rows)]
+        mine = [dict(r) for r in reversed(rows)]
+        for m in mine:
+            if m["status"] == "queued" and (m["reason"] or "").startswith(WAITS):
+                m["waits"] = m["reason"]
+        return mine
 
     def _unsettled(self, workspace_id: str, target: str) -> int:
         targets = self._targets(workspace_id, target)
@@ -420,9 +430,11 @@ class Chat:
                reason: str = "") -> dict:
         Feeds(self.s).check_token(workspace_id, "connector", token)
         if outcome not in OUTCOMES:
-            raise CoreError(400, "bad_outcome", "an outcome is confirmed, failed or uncertain")
+            raise CoreError(400, "bad_outcome", "an outcome is confirmed, failed, uncertain or not_ready")
         ref, reason = str(ref)[:128], str(reason)[:200]
         state = OUTCOMES[outcome]
+        if outcome == "not_ready":
+            return self._not_ready(workspace_id, item_id, reason)
         row = self.s.db.execute("SELECT status FROM chat_messages WHERE id = ? AND workspace_id = ?",
                                 (item_id, workspace_id)).fetchone()
         if row:
@@ -449,3 +461,24 @@ class Chat:
             db.execute("UPDATE connector_outbox SET lease_until = NULL, reason = ? WHERE id = ?",
                        (reason or None, item_id))
         return {"id": item_id, "status": state}
+
+    def _not_ready(self, workspace_id: str, item_id: str, reason: str) -> dict:
+        """The gateway was not ready, so nothing was sent: back in the queue as it was, with no effect
+        receipt (there was no effect) and that attempt not counted. It goes once the gateway is ready."""
+        why = (WAITS + (reason or "it is not ready"))[:200]
+        with self.s.tx() as db:
+            for table, kind in (("chat_messages", "chat.not_ready"), ("connector_outbox", "connector.not_ready")):
+                row = db.execute(f"SELECT status FROM {table} WHERE id = ? AND workspace_id = ?",
+                                 (item_id, workspace_id)).fetchone()
+                if not row:
+                    continue
+                if row["status"] == "queued":
+                    return {"id": item_id, "status": "queued", "replayed": True}
+                if row["status"] != "leased":
+                    raise CoreError(409, "not_leased", f"that message is {row['status']}, not leased")
+                db.execute(f"UPDATE {table} SET status = 'queued', lease_until = NULL, reason = ?, "
+                           f"attempts = max(attempts - 1, 0), updated_at = ? WHERE id = ?",
+                           (why, self.s.now(), item_id))
+                self.s.event(db, workspace_id, kind, item_id, "connector", {"reason": why})
+                return {"id": item_id, "status": "queued"}
+        raise CoreError(404, "no_item", "no such message")

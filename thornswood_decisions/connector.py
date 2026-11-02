@@ -30,7 +30,12 @@ what came of it goes to `POST /api/v1/connector/reacted`.
 For each message, it tells the core what came of it (`POST /api/v1/connector/result`):
 confirmed only when Hermes said so, failed only when nothing was sent, and
 uncertain for everything else. An uncertain message is never sent again by
-itself. A result the core did not take is kept and offered again until it
+itself. A gateway that is not ready (it is starting, stopped, being reloaded by
+an install, or its check could not run) is not a failure of the message:
+nothing was sent, so the outcome is not_ready and the core puts the message back
+in the queue as it was. The connector then claims nothing more until that
+gateway's readiness check says ready, once each round, and the message goes
+then. A result the core did not take is kept and offered again until it
 lands; that resends the record, never the message. Nothing here logs message
 text or a token, holds a GitHub credential or listens on any port.
 """
@@ -145,12 +150,22 @@ class Hermes:
         except (IndexError, json.JSONDecodeError):
             return {"bad": out.returncode}
 
+    def ready(self, profile: str) -> tuple[bool, str]:
+        """(ready, why not): whether that profile's gateway is running, found without starting one. A check
+        that could not run or answer says not ready too: either way nothing can be sent to it yet."""
+        got = self._helper({"op": "ready", "profile": profile}, CHECK_SECONDS)
+        if got and got.get("ready") is True:
+            return True, ""
+        return False, str((got or {}).get("reason") or "could not check the Bots' gateway")[:200]
+
     def to_room(self, room_id: str, send_key: str, text: str) -> tuple[str, str, str]:
         got = self._helper({"op": "send", "room_id": room_id, "event_id": send_key, "text": text}, CHECK_SECONDS)
         if got is None:
             return "uncertain", "", "no answer from the room helper in a minute"
         if got.get("sent") is True:
             return "confirmed", f"seq {got.get('seq')}", ""
+        if got.get("sent") is False and got.get("ready") is False:
+            return "not_ready", "", str(got.get("reason") or "the Bots' gateway is not ready")
         if got.get("sent") is False:
             return "failed", "", str(got.get("reason", "not sent"))
         return "uncertain", "", str(got.get("reason") or "the room helper stopped without saying")
@@ -167,9 +182,9 @@ class Hermes:
         return "failed", str(got.get("reason") or "not set")[:200]
 
     def to_bot(self, bot: str, text: str) -> tuple[str, str, str]:
-        ready = self._helper({"op": "ready", "profile": bot}, CHECK_SECONDS)
-        if not ready or ready.get("ready") is not True:
-            return "failed", "", str((ready or {}).get("reason") or "could not check the Bots' gateway")
+        ready, why = self.ready(bot)
+        if not ready:
+            return "not_ready", "", why
         with tempfile.TemporaryDirectory(prefix="tw-chat-") as folder:
             os.chmod(folder, 0o700)
             path = Path(folder) / "message.txt"
@@ -223,6 +238,7 @@ class Connector:
         self.core, self.hermes, self.say = core, hermes, say
         self.hermes_home = hermes_home or Path.home() / ".hermes"
         self.unsaid: list[dict] = []  # results the core has not taken yet
+        self.waiting: dict[str, str] = {}  # gateways (by profile, "" for the room) found not ready: why
         self._lock = threading.Lock()
 
     def deliver(self, item: dict) -> dict:
@@ -273,9 +289,23 @@ class Connector:
                                 "outcome": outcome, "reason": reason})
         return done
 
+    def _still_waiting(self) -> bool:
+        """After a message came back not_ready: check each such gateway once this round. True while any is
+        still not ready, so nothing more is claimed (and leased, and put back) until it is."""
+        for profile in list(self.waiting):
+            ready, why = self.hermes.ready(profile)
+            if ready:
+                del self.waiting[profile]
+                self.say(f"PASS {profile or 'the room'}'s gateway is ready; its messages go now")
+            else:
+                self.waiting[profile] = why
+        return bool(self.waiting)
+
     def once(self) -> int:
         """One round. Returns how many messages went to Hermes, or -1 when the core said to wait."""
         self._report()
+        if self.waiting and self._still_waiting():
+            return 0
         status, body = self.core.post("/connector/claim", {"limit": PARALLEL})
         if status == 423:
             return -1
@@ -301,6 +331,13 @@ class Connector:
             t.start()
         for t in threads:
             t.join()
+        gateway = {i["id"]: "" if i["target"] == "room" else i["target"] for i in items}
+        for r in results:
+            if r["outcome"] == "not_ready" and r["id"] in gateway:
+                if gateway[r["id"]] not in self.waiting:
+                    self.say(f"NOTE {gateway[r['id']] or 'the room'}'s gateway is not ready ({r['reason']}); "
+                             "its messages wait in the queue")
+                self.waiting[gateway[r["id"]]] = r["reason"]
         self.unsaid.extend(results)
         self._report()
         return len(items)

@@ -70,7 +70,7 @@ The phone answers a card with the same command Desktop sends (`POST /cards/<id>/
 | File | What it holds |
 |---|---|
 | `chat.py` | Patrick's chat. A message is written to `chat_messages` with its command record in one commit (same key, same receipt; a changed body with the same key is refused). It needs `mobile_chat_write`, and only Patrick sends. The connector leases one message per Bot or room at a time; a lease that runs out is "uncertain" and never sent again by itself. A room message whose event the room feed shows is settled as sent, because its event id comes from the core's key. The same lease carries the "Bot told" message to the Bot that asked a card, and its confirmed receipt is that state. For a question or change card, that message also gives the Bot the steps for its DECIDED.md line (plan line 39): comment the answer on the card's issue, or file one first, then add one line in DECIDED.md's own format with the card id and Patrick's Mountain date, linking that comment, and run Check-Words and the two docs tests before the pull request. A review or to-do card approves one step and gets no line No message text goes into the event chain or a log |
-| `connector.py` | Runs on the VM as `hermes` (`tw-decide-connector.service`) with its own token, and does nothing while `connector_effects` is off. A Bot Chat message goes through `hermes -p <bot> chat --in ~ -c "Bot Chat" --create-if-missing -Q --query-file <file>`, the way Hermes's own message_agent sends one on its machine, after a check that the Bot's gateway is running. A room message goes through `room_send.py`. Only Hermes saying so is "sent", only nothing sent is "not sent", and everything else is "uncertain". At most three turns at once |
+| `connector.py` | Runs on the VM as `hermes` (`tw-decide-connector.service`) with its own token, and does nothing while `connector_effects` is off. A Bot Chat message goes through `hermes -p <bot> chat --in ~ -c "Bot Chat" --create-if-missing -Q --query-file <file>`, the way Hermes's own message_agent sends one on its machine, after a check that the Bot's gateway is running. A room message goes through `room_send.py`. Only Hermes saying so is "sent", only nothing sent is "not sent", and everything else is "uncertain". A gateway that is not ready (starting, stopped, reloaded by an install, or its check could not run) is `not_ready`: the core puts the message back in the queue as it was, and the connector claims nothing more until that gateway's check says ready, so it goes then. At most three turns at once |
 | `room_send.py` | Run with Hermes's own Python: finds the running gateway without starting one and calls `groups.send` with the core's key as the event id and thread |
 | `feed_reader.py` | Now also sends the "bots" snapshot: each Bot's canonical Bot Chat, its last 40 messages from Patrick and the Bot, read only from `profiles/<id>/state.db`. Room events carry their event id |
 
@@ -258,6 +258,31 @@ Checked here: `tests/test_decisions_sessions.py`:
 - the connector and the helper against a stand-in for Hermes's own calls, including a delete Hermes refuses while a turn runs and a delete of a chat already gone;
 - his Bot Chat refused by the core as listed (in the chat list or a page of it) and by the helper for each part of it, with nothing written, and the Bots list naming the chat last written in rather than the Bot Chat listed first;
 - migration 10 and its way back.
+
+## A gateway that is not ready is not a failed message (1 Nov)
+
+Patrick answered a card at 10:17 PM on 1 Nov while an install was reloading the
+Bots' gateway. The connector's readiness check got no answer, the connector
+called that a failure, and the "Bot told" message was dead after one try, so
+Bramble never got the answer. Now:
+
+- the connector's outcome for a gateway that is not ready is `not_ready`
+  (`connector.py`: the Bot Chat readiness check, or a room send the helper says
+  never reached a ready gateway). Nothing was sent, so `POST /connector/result`
+  puts the message back to `queued` (`chat.py` `_not_ready`): lease cleared,
+  that attempt not counted, no effect receipt, and an event
+  `connector.not_ready` or `chat.not_ready`. The phone shows a chat message
+  waiting with the reason.
+- after a `not_ready`, each round the connector checks that gateway once and
+  claims nothing until it is ready, so nothing is leased and put back over and
+  over. There is no timer: the message goes on the first round the gateway
+  answers ready.
+- a real failure (the `hermes` command cannot start, the gateway refuses a room
+  message, the room's driver is not running) is still `failed` and dead.
+- migration 11 puts back in the queue each "Bot told" message that died only
+  of a readiness check (its reason is one of those checks' and its every
+  receipt is that failure), on a card still answered. Its failed receipt stays
+  as history. Chat messages are left as they are. Its way back changes nothing.
 
 The browser check: a chat's actions, a rename that shows at once and then from One, hiding (off the list, no send), Hidden chats from One with Bring back, the delete's words before anything goes, Keep it, a delete that goes through, no chat actions on a Bot Chat, and his own Bot Chat first on One's list, marked Bot Mode, opening with its messages and no chat actions. Not checked here: a real Hermes on One or the VM.
 

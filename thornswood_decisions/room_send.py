@@ -18,9 +18,13 @@ It reads the request on stdin, so no message is on a command line, and prints
 one JSON line:
 
     {"sent": true, "seq": n}             the room took it;
-    {"sent": false, "reason": "..."}     it was not sent (the gateway was not
-                                         ready, the room's driver was not
-                                         running, or the gateway refused it);
+    {"sent": false, "ready": false, "reason": "..."}
+                                         it was not sent because the gateway
+                                         is not ready (not running, or not
+                                         taking connections yet); the message
+                                         waits for it;
+    {"sent": false, "reason": "..."}     it was not sent (the room's driver was
+                                         not running, or the gateway refused it);
     {"sent": null, "reason": "..."}      it may have been sent.
 
 `groups.send` with the same `event_id` is the same event (hosted_rooms.py:250),
@@ -89,7 +93,7 @@ async def _send(endpoint, req: dict) -> dict:
             return {"sent": True, "seq": int((out.get("event") or {}).get("seq") or 0)}
     except (GatewayClientError, TimeoutError, OSError):
         # The connection failed before groups.send went out.
-        return {"sent": False, "reason": "could not reach the Bots' gateway"}
+        return {"sent": False, "ready": False, "reason": "could not reach the Bots' gateway"}
 
 
 def _react(profile: str, req: dict) -> dict:

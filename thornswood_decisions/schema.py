@@ -626,6 +626,26 @@ CREATE TABLE own_session_ops (
 );
 CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
 """,
+    # 11: a "Bot told" message that died only because the Bots' gateway was not ready goes back in the
+    # queue. Until this release the connector called a gateway that was not ready (starting, stopped,
+    # reloaded by an install, or its check could not run) a failure, so the message was dead after one
+    # try and the Bot that asked was never told Patrick's answer (1 Nov 2026, while an install reloaded
+    # the gateway). Nothing was sent in that case, so sending it now is its first delivery. Only rows
+    # whose one reason is a readiness check's and whose every receipt is that failure; the failed
+    # receipt stays as history. Chat messages are left as they are: Patrick saw those as not sent and
+    # may have sent them again himself.
+    """
+UPDATE connector_outbox
+  SET status = 'queued', lease_until = NULL, attempts = max(attempts - 1, 0),
+      reason = 'waiting for the Bots'' gateway: ' || reason,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+  WHERE status = 'dead' AND kind = 'decision.answered'
+    AND (reason IN ('could not check the Bots'' gateway', 'could not start Hermes''s Python')
+         OR reason LIKE 'the Bots'' gateway is %')
+    AND EXISTS (SELECT 1 FROM decisions d WHERE d.id = connector_outbox.decision_id AND d.status = 'resolved')
+    AND NOT EXISTS (SELECT 1 FROM effect_receipts e WHERE e.outbox = 'connector'
+                    AND e.outbox_id = connector_outbox.id AND e.outcome <> 'failed');
+""",
 ]
 
 
@@ -722,4 +742,7 @@ INSERT INTO flags_9 SELECT workspace_id, name, enabled, changed_at, changed_by F
 DROP TABLE flags;
 ALTER TABLE flags_9 RENAME TO flags;
 """, ""),
+    # A data step: no table changed, and a message it put back in the queue is one the older release
+    # sends the same way. Nothing to undo.
+    11: ([], "", ""),
 }
