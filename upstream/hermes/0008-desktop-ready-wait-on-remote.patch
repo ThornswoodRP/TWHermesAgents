@@ -1,0 +1,192 @@
+From 2c05034d9f44a0a4dc932f3751e7092c5d9b9078 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:44:33 +0000
+Subject: [PATCH] desktop: wait for a remote dashboard's READY line on the
+ remote, not by polling over ssh
+
+A freshly spawned remote dashboard can take 30 to 120 s to print its READY
+line on a busy host, and scrapeReadyPort read the spawn log with a new
+`cat` exec every 750 ms until it did. On Windows, whose OpenSSH has no
+ControlMaster, every exec is its own ssh login, so each cold boot cost about
+one login a second for its whole length (measured: about 40 logins in 40 s
+for two dashboards booting together, the busiest sources in the host's
+journal being sshd, systemd-logind and systemd).
+
+The wait now runs on the remote: one exec waits up to 10 s for the log to
+name a port (grep only gates the wait; READY_RE still decides), then prints
+the log. A boot costs one login per 10 s slice instead of one per poll, and
+a port is still seen within a second of being printed. The last slice is cut
+to the time left, so the ready deadline is unchanged.
+---
+ .../remote-lifecycle-profile-missing.test.ts  |  2 +-
+ apps/desktop/electron/remote-lifecycle.ts     | 23 ++++-
+ .../electron/remote-ready-wait.test.ts        | 94 +++++++++++++++++++
+ 3 files changed, 117 insertions(+), 2 deletions(-)
+ create mode 100644 apps/desktop/electron/remote-ready-wait.test.ts
+
+diff --git a/apps/desktop/electron/remote-lifecycle-profile-missing.test.ts b/apps/desktop/electron/remote-lifecycle-profile-missing.test.ts
+index a7ca937182..d0f386d92a 100644
+--- a/apps/desktop/electron/remote-lifecycle-profile-missing.test.ts
++++ b/apps/desktop/electron/remote-lifecycle-profile-missing.test.ts
+@@ -10,7 +10,7 @@ const SPAWN_NONCE = '0123456789abcdef'
+ function logSsh(log: string) {
+   return {
+     async exec(cmd: string) {
+-      return cmd.startsWith('cat ') ? log : ''
++      return cmd.includes('cat ') ? log : ''
+     }
+   }
+ }
+diff --git a/apps/desktop/electron/remote-lifecycle.ts b/apps/desktop/electron/remote-lifecycle.ts
+index 5ec95d2ad4..ccccb3d98a 100644
+--- a/apps/desktop/electron/remote-lifecycle.ts
++++ b/apps/desktop/electron/remote-lifecycle.ts
+@@ -52,6 +52,13 @@ const DEFAULT_READY_TIMEOUT_MS = 120_000
+ // (the historical default) so a malformed override can't reintroduce the loop.
+ const MIN_READY_TIMEOUT_MS = 45_000
+ const READY_POLL_INTERVAL_MS = 750
++// The READY wait runs on the remote, one ssh exec per slice: it returns as soon
++// as the log names a port, and otherwise after this long. Polling `cat` every
++// READY_POLL_INTERVAL_MS from here cost one ssh login per poll on a no-mux
++// (Windows) connection, about one a second for the whole of a 30-60 s boot.
++const READY_WAIT_SLICE_S = 10
++// The slice runs inside one exec: give it the exec's own connect and run budget on top.
++const READY_WAIT_EXEC_ALLOWANCE_MS = 20_000
+ // macOS sshd starts non-interactive shells with a 256-FD soft limit even when
+ // the hard limit is unlimited. A Desktop backend can legitimately exceed that
+ // while serving several profiles/tools, so raise only the child process limit.
+@@ -1240,6 +1247,17 @@ function remoteProfileMissingError(output) {
+   return err
+ }
+ 
++/** Wait on the remote for up to `sliceS` seconds until the spawn log names its
++ *  port, then print the log (grep only gates the wait; READY_RE still decides). */
++export function remoteReadyWaitCommand(remoteLog: string, sliceS: number): string {
++  const ready = "'(^|[^A-Za-z0-9_])HERMES_(BACKEND|DASHBOARD)_READY port=[0-9]'"
++
++  return (
++    `i=0; while [ "$i" -lt ${sliceS} ] && ! grep -Eq ${ready} ${remoteLog} 2>/dev/null; ` +
++    `do sleep 1; i=$((i + 1)); done; cat ${remoteLog} 2>/dev/null || true`
++  )
++}
++
+ async function scrapeReadyPort(ssh, logPath, { timeoutMs = resolveReadyTimeoutMs(), isAlive, signal }: any = {}) {
+   const deadline = Date.now() + timeoutMs
+   const remoteLog = expandRemotePath(logPath)
+@@ -1248,9 +1266,12 @@ async function scrapeReadyPort(ssh, logPath, { timeoutMs = resolveReadyTimeoutMs
+     assertBootstrapNotSuperseded(signal)
+ 
+     let tail
++    const sliceS = Math.max(1, Math.min(READY_WAIT_SLICE_S, Math.ceil((deadline - Date.now()) / 1000)))
+ 
+     try {
+-      tail = await ssh.exec(`cat ${remoteLog} 2>/dev/null || true`)
++      tail = await ssh.exec(remoteReadyWaitCommand(remoteLog, sliceS), {
++        timeoutMs: sliceS * 1000 + READY_WAIT_EXEC_ALLOWANCE_MS
++      })
+     } catch {
+       tail = ''
+     }
+diff --git a/apps/desktop/electron/remote-ready-wait.test.ts b/apps/desktop/electron/remote-ready-wait.test.ts
+new file mode 100644
+index 0000000000..fca6128060
+--- /dev/null
++++ b/apps/desktop/electron/remote-ready-wait.test.ts
+@@ -0,0 +1,94 @@
++/**
++ * The READY wait for a spawned remote dashboard runs on the remote host, one
++ * ssh exec per slice, instead of one `cat` exec every 750 ms. On a no-mux
++ * (Windows) connection each exec is a fresh ssh login.
++ */
++
++import assert from 'node:assert/strict'
++import { execFileSync } from 'node:child_process'
++import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import { test } from 'vitest'
++
++import { remoteReadyWaitCommand, scrapeReadyPort, spawnLogPath } from './remote-lifecycle'
++
++const OWNERSHIP_ID = '0123456789abcdef0123456789abcdef'
++const SPAWN_NONCE = '0123456789abcdef'
++const posix = process.platform !== 'win32'
++
++test('a slow boot is waited out in one exec per slice, not one per poll', async () => {
++  const calls: Array<{ cmd: string; timeoutMs?: number }> = []
++  let execs = 0
++
++  const ssh = {
++    async exec(cmd: string, opts: { timeoutMs?: number } = {}) {
++      calls.push({ cmd, timeoutMs: opts.timeoutMs })
++      execs += 1
++
++      // The remote side blocks for its slice; the third slice sees the port.
++      return execs < 3 ? 'still starting...' : 'HERMES_DASHBOARD_READY port=40123\n'
++    }
++  }
++
++  const port = await scrapeReadyPort(ssh, spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE), { timeoutMs: 120_000 })
++
++  assert.equal(port, 40123)
++  assert.equal(calls.length, 3)
++
++  for (const call of calls) {
++    assert.match(call.cmd, /while \[ "\$i" -lt 10 \]/)
++    assert.ok((call.timeoutMs ?? 0) >= 10_000 + 20_000)
++  }
++})
++
++test('the last slice never waits past the deadline', async () => {
++  const cmds: string[] = []
++
++  const ssh = {
++    async exec(cmd: string) {
++      cmds.push(cmd)
++
++      return ''
++    }
++  }
++
++  await assert.rejects(
++    () => scrapeReadyPort(ssh, spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE), { timeoutMs: 2_500 }),
++    (err: any) => err.kind === 'ready-timeout'
++  )
++  assert.match(cmds[0], /-lt 3 \]/)
++})
++
++test.runIf(posix)('the remote wait returns as soon as the log names a port', () => {
++  const dir = mkdtempSync(join(tmpdir(), 'ready-wait-'))
++  const log = join(dir, 'spawn.log')
++  writeFileSync(log, 'booting\n')
++  appendFileSync(log, 'xHERMES_DASHBOARD_READY port=1\n') // not a word boundary: keeps waiting
++  appendFileSync(log, 'HERMES_BACKEND_READY port=45678\n')
++
++  const started = Date.now()
++  const out = execFileSync('sh', ['-c', remoteReadyWaitCommand(log, 5)], { encoding: 'utf8' })
++
++  assert.match(out, /HERMES_BACKEND_READY port=45678/)
++  assert.ok(Date.now() - started < 2_000)
++})
++
++test.runIf(posix)('without a READY line the remote wait ends after its slice and prints the log', () => {
++  const dir = mkdtempSync(join(tmpdir(), 'ready-wait-'))
++  const log = join(dir, 'spawn.log')
++  writeFileSync(log, 'xHERMES_DASHBOARD_READY port=1\nstill booting\n')
++
++  const started = Date.now()
++  const out = execFileSync('sh', ['-c', remoteReadyWaitCommand(log, 2)], { encoding: 'utf8' })
++
++  assert.match(out, /still booting/)
++  assert.ok(Date.now() - started >= 1_900)
++})
++
++test.runIf(posix)('a log that does not exist yet prints nothing and fails nothing', () => {
++  const missing = join(mkdtempSync(join(tmpdir(), 'ready-wait-')), 'none.log')
++
++  assert.equal(execFileSync('sh', ['-c', remoteReadyWaitCommand(missing, 1)], { encoding: 'utf8' }), '')
++})
+-- 
+2.43.0
+

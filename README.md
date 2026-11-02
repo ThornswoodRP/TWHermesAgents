@@ -1,6 +1,6 @@
 # Thornswood-Hermes
 
-The guard rails for Thornswood's six Hermes Bots: Bramble, Rift, Sprocket, Echo, Magpie and Wisp. No Bot can write here. Every change is Patrick's: written with Claude Code, reviewed and merged by him.
+The guard rails for Thornswood's six Hermes Bots: Bramble, Rift, Sprocket, Echo, Magpie and Wisp. No Bot can write here. Every change is Patrick's: written with Claude Code, and merged once its guard rail tests pass ("Merge rule here" below).
 
 What each rule is and how it's held (code now, code waiting for its broker, a GitHub setting, or text in the Bots' files) is in [RULES.md](RULES.md).
 
@@ -83,7 +83,7 @@ Every library comes from a hash-pinned wheel (`tests/requirements-ci.txt`, `depl
 
 `scripts/test-at-head.sh` and its **Guard rail tests (One and VM)** status are no longer the merge rule. The script stays for a run by hand from a machine with the VM's ssh key.
 
-**Merge rule here:** Patrick merges a PR only when both **Guard rail tests** checks are a success on the PR's exact head. A new push runs them again. A failure is fixed at its cause, never re-run to get a pass.
+**Merge rule here:** a PR merges once both **Guard rail tests** checks are a success on its exact head, with nobody touching it (Patrick, 2 Nov 2026: "I want automerge on for this shit too"). GitHub's own auto-merge needs a paid plan on a private repository, so `.github/workflows/merge-green.yml` does its job: each time the guard rail tests finish it runs main's `scripts/merge_green.py`, which merges every open PR into `main` that is green at its head and merges cleanly, with a merge commit at that head, and deletes its branch so a PR stacked on it is aimed at `main` and merges next. A new push runs the checks again. A failure is fixed at its cause, never re-run to get a pass.
 
 After a merge, `tw-follow-main` runs the whole suite again on the VM at `main`'s commit, as `tw-ci` with no network, and installs nothing that fails.
 

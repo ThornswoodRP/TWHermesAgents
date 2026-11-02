@@ -1,0 +1,67 @@
+From 08ae2d655a3386c5a4f182ec45922a57298f4528 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:21:01 +0000
+Subject: [PATCH] fix(spill): catch only the terminal-policy refusal when no
+ sandbox is registered
+
+The backend lookup for env=None caught every exception and answered "not host
+side". The only failure it can raise is TerminalPolicyUnavailable (the routed
+profile's terminal policy could not be read), so catch that one, keep the
+fail-closed answer the terminal tool gives under the same scope, and let any
+other error surface. Test: a refusal scope truncates inline and names no host
+path.
+---
+ tests/tools/test_tool_result_storage.py | 16 ++++++++++++++++
+ tools/tool_result_storage.py            |  7 +++++--
+ 2 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/tests/tools/test_tool_result_storage.py b/tests/tools/test_tool_result_storage.py
+index 2e75837d69..2bfe35601a 100644
+--- a/tests/tools/test_tool_result_storage.py
++++ b/tests/tools/test_tool_result_storage.py
+@@ -436,6 +436,22 @@ class TestSpillover:
+         assert str(get_spillover_dir()) not in result
+         assert "Full output could not be saved" in result
+ 
++    def test_env_none_when_the_profile_policy_is_unreadable_never_names_a_host_path(self):
++        """A refusal scope (the profile's terminal policy could not be read) leaves the backend
++        unknown: fail closed to inline truncation, the way the terminal tool refuses there."""
++        from tools.terminal_scope import TerminalPolicyRefusal, reset_terminal_scope, set_terminal_scope
++
++        token = set_terminal_scope(TerminalPolicyRefusal("unreadable config.yaml"))
++        try:
++            result = maybe_persist_tool_result(
++                content="r" * 60_000, tool_name="tw_git", tool_use_id="tc_refused_1", env=None,
++                threshold=30_000,
++            )
++        finally:
++            reset_terminal_scope(token)
++        assert str(get_spillover_dir()) not in result
++        assert "Full output could not be saved" in result
++
+     def test_local_env_persists_to_spillover_not_sandbox(self):
+         """LocalEnvironment routes host-side: no env.execute() shell-out."""
+         from tools.environments.local import LocalEnvironment
+diff --git a/tools/tool_result_storage.py b/tools/tool_result_storage.py
+index 2e5d7852ae..2a60ca4a3b 100644
+--- a/tools/tool_result_storage.py
++++ b/tools/tool_result_storage.py
+@@ -187,10 +187,13 @@ def _is_host_side_env(env) -> bool:
+     dangle there even though no sandbox is registered right now (never started, or reaped after
+     ``TERMINAL_LIFETIME_SECONDS`` idle while the persistent container lives on)."""
+     if env is None:
++        from tools.credential_files import _terminal_backend
++        from tools.terminal_scope import TerminalPolicyUnavailable
+         try:
+-            from tools.credential_files import _terminal_backend
+             return _terminal_backend() == "local"
+-        except Exception:
++        except TerminalPolicyUnavailable:
++            # The profile's terminal policy can't be read, so the backend is unknown: fail closed
++            # (no host path), the way the terminal tool itself refuses under this scope.
+             return False
+     from tools.environments.base import env_uses_host_filesystem
+ 
+-- 
+2.43.0
+
