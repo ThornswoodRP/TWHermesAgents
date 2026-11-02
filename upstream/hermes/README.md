@@ -156,8 +156,11 @@ Upstream main has moved past v0.22.5 here: its 0e0b2328 added Stop for a
 running job and the missed-run policy, which touch the same lines of
 apps/desktop/src/api/cron.ts and the Scheduled jobs page. So the upstream
 pull request uses `0006-desktop-scheduled-jobs-every-gateway-upstream-main.patch`,
-the same change made on upstream main 4d26e0cc (Stop for a running job also
+the same change made on upstream main f0d94882 (Stop for a running job also
 goes to the job's own gateway there). It needs nothing from 0001 to 0005.
+It was first made on 4d26e0cc; upstream then moved `isNotFoundApiError` out
+of electron/main.ts beside the new block, so it was rebased on f0d94882 with
+upstream's side kept.
 
 Check it with the Desktop's own tests:
 
@@ -200,4 +203,5 @@ for it until that is measured.
   without the fix); `tsc -p . --noEmit`, `tsc -p tsconfig.electron.json
   --noEmit` and eslint on the changed files are clean. The upstream-main
   patch on 4d26e0cc (Linux, Node 26, 2 Nov): the same suites, 62 files, 478
-  passed, 0 failed; both tsc runs clean.
+  passed, 0 failed; both tsc runs clean. Rebased on f0d94882 (2 Nov, 11 AM):
+  67 files, 492 passed, 0 failed; both tsc runs and eslint clean.
