@@ -232,12 +232,17 @@ anthropic package isn't installed); session-actions, relay and chat 1,857
 passed; cron union and registry sources 11 passed; `tsc -p
 tsconfig.electron.json --noEmit` and eslint clean.
 
-Why `gh pr create` was refused for 0006 is still unknown. The same sign-in
-reads the repository (pull: true), the fork is linked to NousResearch's
-repository, other outside accounts opened pull requests all afternoon, and
-REST answered `404 Not Found` to the create. Opening it from GitHub's
-compare page in a browser is the measurement that separates the gh sign-in
-from the account.
+Why `gh pr create` was refused for 0006, found 2 Nov: GitHub's compare
+page, opened in the browser, says "You've reached the open pull request
+limit for this repository. Users without write access can have up to 5 pull
+requests open at a time." EvilPatrick06 has five open there (#147814,
+#147815, #147816, #147834, #147835). gh's "does not have the correct
+permissions to execute `CreatePullRequest`" and REST's `404 Not Found` were
+that limit, worded badly. The earlier check that ruled out a five-PR cap was
+wrong: the accounts it counted with more than five open must have write
+access, which it didn't check. The fork branch is ready (the follow-up
+commit included), so 0006 opens with the same title and body once one of
+the five merges or closes. 0007 waits behind it the same way.
 
 ## Test results so far
 
