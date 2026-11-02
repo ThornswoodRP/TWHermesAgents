@@ -41,6 +41,10 @@ WRITE = {
     "pulls": {"pull_requests": "write", "contents": "read", "metadata": "read"},
     "merge": {"contents": "write", "pull_requests": "write", "metadata": "read"},
     "issues": {"issues": "write", "metadata": "read"},
+    # A label or a comment on a pull request goes through the issues API but
+    # GitHub holds it to pull_requests write: issues write alone is a 403
+    # (measured on Thornswood-Ops #220, 2 Nov 2026).
+    "pr_conversation": {"pull_requests": "write", "metadata": "read"},
     "actions": {"actions": "write", "contents": "read", "metadata": "read"},
 }
 READ = {"contents": "read", "pull_requests": "read", "issues": "read", "actions": "read", "checks": "read", "metadata": "read"}
@@ -246,7 +250,8 @@ class GitService:
         raw = self.gh.get("workers", repo, f"/repos/{repo}/issues/{int(number)}")
         return Issue(repo=repo, number=int(number), author_login=raw["user"]["login"],
                      assignees=[a["login"] for a in raw.get("assignees", [])],
-                     labels=[l["name"] for l in raw.get("labels", [])], open=raw.get("state") == "open")
+                     labels=[l["name"] for l in raw.get("labels", [])], open=raw.get("state") == "open",
+                     pull_request=bool(raw.get("pull_request")))
 
     def _ref_sha(self, repo: str, branch: str) -> str | None:
         try:
@@ -400,6 +405,7 @@ class GitService:
             if not (own or self.policy.is_router(bot)):
                 raise Refused(f"{self.policy.bot_name(bot)} comments only on issues it has claimed")
         app = "bramble" if bot == "bramble" else self._app(bot)
+        perms = WRITE["pr_conversation"] if issue_raw.get("pull_request") else WRITE["issues"]
         digest = hashlib.sha256(body.encode()).hexdigest()[:16]
         marker = f"<!-- tw:{digest} -->"
 
@@ -410,7 +416,7 @@ class GitService:
             return None
 
         def write():
-            r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues/{number}/comments", {"body": f"{body}\n\n{marker}"})
+            r = self.gh.call(app, repo, perms, "POST", f"/repos/{repo}/issues/{number}/comments", {"body": f"{body}\n\n{marker}"})
             if r.status != 201:
                 raise GitHubError(r.status, str(r.body))
             return {"comment": r.body["id"]}
@@ -430,12 +436,13 @@ class GitService:
             raise Refused("a label is added or removed")
         self._check(v)
         app = "bramble" if bot == "bramble" else self._app(bot)
+        perms = WRITE["pr_conversation"] if issue.pull_request else WRITE["issues"]
 
         def write():
             if action == "add":
-                r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues/{number}/labels", {"labels": [label]})
+                r = self.gh.call(app, repo, perms, "POST", f"/repos/{repo}/issues/{number}/labels", {"labels": [label]})
             else:
-                r = self.gh.call(app, repo, WRITE["issues"], "DELETE", f"/repos/{repo}/issues/{number}/labels/{quote(label)}")
+                r = self.gh.call(app, repo, perms, "DELETE", f"/repos/{repo}/issues/{number}/labels/{quote(label)}")
             if r.status not in (200, 204):
                 raise GitHubError(r.status, str(r.body))
             return {"status": r.status}

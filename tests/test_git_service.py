@@ -500,6 +500,30 @@ class PullRequestsAndIssues(unittest.TestCase):
         with self.assertRaises(Refused):
             w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 3151, "body": "Mine now."})
 
+    def test_a_comment_on_a_pull_request_is_sent_with_pull_requests_write(self):
+        # GitHub answers 403 to a comment on a pull request from a token with
+        # issues write alone (Thornswood-Ops #220, 2 Nov 2026); the stand-in
+        # does the same, so this fails with the issues-only token.
+        w = World()
+        w.green_pr(repo=APP)
+        out = w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "body": "Pushed the fix."})
+        self.assertTrue(out["done"], out)
+        self.assertEqual(w.fake.tokens[-1]["permissions"], {"pull_requests": "write", "metadata": "read"})
+
+    def test_a_label_on_a_pull_request_is_sent_with_pull_requests_write(self):
+        w = World()
+        w.green_pr(repo=APP)
+        out = w.git.label("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 42,
+                                     "label": "claimed: Sprocket", "action": "add"})
+        self.assertTrue(out["done"], out)
+        self.assertEqual(w.fake.tokens[-1]["permissions"], {"pull_requests": "write", "metadata": "read"})
+
+    def test_a_comment_on_an_issue_keeps_issues_write(self):
+        w = World()
+        w.fake.add_issue(APP, 3150, labels=["claimed: Sprocket"])
+        w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 3150, "body": "Fixed."})
+        self.assertEqual(w.fake.tokens[-1]["permissions"], {"issues": "write", "metadata": "read"})
+
     def test_hands_off_issues_get_no_comment(self):
         w = World()
         w.fake.add_issue(APP, 3152, author="WiccanDjinn", assignees=["WiccanDjinn"], labels=["claimed: Sprocket"])
