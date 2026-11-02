@@ -1,4 +1,4 @@
-From 92ccbbf1ed5fa3c5c1f3102720982a9f5ddfbf27 Mon Sep 17 00:00:00 2001
+From 8d520d2743f20b34daa4fc2932987dcfb247951a Mon Sep 17 00:00:00 2001
 From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 22:16:10 +0000
 Subject: [PATCH] fix(desktop): the screen watcher polls each home under its
@@ -20,12 +20,14 @@ one per serve process watching the home.
 The poll now binds the watched home's full runtime scope (home, secrets,
 terminal), the composition @_profile_scoped binds for a display.* call and
 methods_profiles._hermes_home_scope binds for config reads (#120726). The
-launch home keeps its frozen launch env. No external secret sources are
-hydrated: the bodies read runtime files and status only.
+launch home keeps its frozen launch env, and its HERMES_HOME stays bound
+explicitly: single-profile, the launch scope binds secrets only, and the
+watcher thread's context carries no override of its own. No external secret
+sources are hydrated: the bodies read runtime files and status only.
 ---
  tests/tui_gateway/test_display_watch.py | 64 +++++++++++++++++++++++++
- tui_gateway/methods_display_watch.py    | 25 ++++++----
- 2 files changed, 79 insertions(+), 10 deletions(-)
+ tui_gateway/methods_display_watch.py    | 38 +++++++++++----
+ 2 files changed, 92 insertions(+), 10 deletions(-)
 
 diff --git a/tests/tui_gateway/test_display_watch.py b/tests/tui_gateway/test_display_watch.py
 index fe64364ba8..6e7008cc14 100644
@@ -100,29 +102,49 @@ index fe64364ba8..6e7008cc14 100644
 +    assert (other.resolve(), str(other_work)) in seen, seen
 +    assert all(cwd != str(other_work) for home, cwd in seen if home != other.resolve()), seen
 diff --git a/tui_gateway/methods_display_watch.py b/tui_gateway/methods_display_watch.py
-index 4a17a39d79..4ccd246bb3 100644
+index 4a17a39d79..7325421a6d 100644
 --- a/tui_gateway/methods_display_watch.py
 +++ b/tui_gateway/methods_display_watch.py
-@@ -39,6 +39,18 @@ def _watched_lease_homes() -> list[Path]:
+@@ -11,6 +11,7 @@ the epoch moves. Bodies are rebound onto server.py's globals (method_ctx.bind_mo
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import threading
+ import time
+ from pathlib import Path
+@@ -39,6 +40,30 @@ def _watched_lease_homes() -> list[Path]:
      return [Path(_hermes_home), *_served_profile_homes]
  
  
++@contextlib.contextmanager
 +def _watched_home_scope(home: Path):
 +    """Bind ``home``'s full runtime scope (home + secrets + terminal) for one poll body, the same
 +    composition ``@_profile_scoped`` binds for a ``display.*`` call. HERMES_HOME alone is half-bound:
 +    the status read re-attaches a sandbox-hosted screen (``runtime._owned_sandbox_env``), and under
 +    the LAUNCH profile's terminal policy that re-attach built a new container keyed and mounted as
-+    the watched profile but rooted at the launch profile's ``terminal.cwd``, once in every serve
-+    process watching that home. The launch home maps to None so it keeps its frozen launch env. No
-+    external-source hydration: these bodies read runtime files and status, never call a provider."""
++    a served profile but rooted at the launch profile's ``terminal.cwd``, once in every serve
++    process watching that home. The launch home keeps its frozen launch env (scope None), and its
++    HERMES_HOME is still bound explicitly: single-profile, the launch scope binds secrets only, and
++    this thread's own context carries no override. No external-source hydration: these bodies read
++    runtime files and status, never call a provider."""
++    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 +    launch = Path(home).resolve() == Path(_hermes_home).resolve()
-+    return _session_profile_runtime_scope({"profile_home": None if launch else str(home)}, hydrate_secrets=False)
++    with _session_profile_runtime_scope({"profile_home": None if launch else str(home)}, hydrate_secrets=False):
++        if not launch:
++            yield
++            return
++        token = set_hermes_home_override(home)
++        try:
++            yield
++        finally:
++            reset_hermes_home_override(token)
 +
 +
  def _mtime(path: Path):
      try:
          return path.stat().st_mtime_ns
-@@ -82,13 +94,12 @@ def _poll_runtime_files() -> None:
+@@ -82,13 +107,12 @@ def _poll_runtime_files() -> None:
      """Broadcast ``display.status`` when a home's screen started/stopped outside this process — a
      file move (start/stop by the CLI or gateway) or the launcher dying without touching its files
      (Xvnc crash: env and launcher.pid stay put, only the pid stops being live)."""
@@ -138,7 +160,7 @@ index 4a17a39d79..4ccd246bb3 100644
              mark = (_mtime(sd / "env"), _mtime(sd / "launcher.pid"), _bd_runtime._launcher_pid() is not None)
              first = key not in _runtime_marks
              if _runtime_marks.get(key) == mark:
-@@ -97,8 +108,6 @@ def _poll_runtime_files() -> None:
+@@ -97,8 +121,6 @@ def _poll_runtime_files() -> None:
              if first:  # seeding: display.status carries the current state
                  continue
              payload = _display_snapshot()
@@ -147,7 +169,7 @@ index 4a17a39d79..4ccd246bb3 100644
          _broadcast_global_event("display.status", payload)
          _notify_agents_of_screen_change(key, payload)
  
-@@ -114,14 +123,10 @@ def _poll_idle_screens() -> None:
+@@ -114,14 +136,10 @@ def _poll_idle_screens() -> None:
      if time.monotonic() - _last_idle_check < _IDLE_CHECK_S:
          return
      _last_idle_check = time.monotonic()

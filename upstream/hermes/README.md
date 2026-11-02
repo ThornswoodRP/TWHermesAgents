@@ -281,7 +281,11 @@ call, and what `methods_profiles._hermes_home_scope` already binds for config
 reads (upstream #120726). The re-attach then finds the profile's own
 container. Two new tests in `tests/tui_gateway/test_display_watch.py` cover
 the runtime-file poll and the idle check: each body sees the watched home's
-own `TERMINAL_CWD`, not the launch profile's.
+own `TERMINAL_CWD`, not the launch profile's. The launch home keeps its frozen
+launch environment, and its HERMES_HOME is still bound explicitly: in
+single-profile mode the launch scope binds secrets only, and the watcher
+thread's own context carries no home override, so without it the three
+existing tests for a screen starting or stopping read the process home.
 
 ```
 git am on-main/0010-display-watch-profile-scope.patch
