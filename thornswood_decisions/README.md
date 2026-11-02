@@ -214,6 +214,29 @@ Plan Part 11, build step 1, after Patrick approved the redone mock-up (answer A 
 
 Checked here: `tests/test_decisions_phone_browser.py` draws a Markdown message with a `javascript:` link and raw HTML in it and checks each piece, that only the `https` link is a link, that nothing of the HTML is drawn, that Copy copies or selects, that a chat opens on its newest message, that Older messages keeps the place, and that at 412 pixels wide nothing scrolls sideways and the box ends above the tabs.
 
+## Reactions in Hermes, One and the Bot Chats (redesign step 2)
+
+Plan Part 11, build step 2. A reaction is Hermes's own: Hermes keeps one per person on a message row (`display_metadata`'s `reactions`, author `user` for Patrick and `agent` for Hermes or the Bot), Desktop shows the same ones, and Hermes tells the model about a new one on a later turn only when that Hermes or profile has `display.message_reactions` on (`contracts.json` `reactions`). Nothing here turns that on.
+
+- **On the phone.** Tapping a message (or Enter on it) opens its actions: eight reactions (👍 ❤️ 😂 😮 😢 🙏 ✅ 👀), Take my reaction off when one is on, Copy text and Close. Patrick's reaction shows at once, dashed until the connector says it is set; tapping his chip takes it off. Hermes's or the Bot's own reactions show beside his, with its name. A reaction that could not be set says why under the message. Rooms have no reactions in Hermes, so a room's actions offer Copy only, and so does the feed's last copy of a Bot Chat before Hermes's own page comes.
+- **One table for all three.** `chat_reactions` (migration 9) keeps one row per message: what should be there, with a version. The gateway is `me` or `one` (the chat is a session id) or `bots` (the chat is the Bot's profile id, since each Bot has one Bot Chat), so neither connector is ever handed the other's. A second tap before the first is set replaces it, and the same tap twice is one. A lease that ran out after 2 minutes goes out again, because setting exactly this emoji is the same whether or not the last try got there. An answer about an older version than the newest is dropped. No message text goes into the event chain (`reactions.py`).
+- **His own Hermes.** `POST /own/<me or one>/react` with `{session_id, message_id, emoji}` (or `null` to take it off). It needs `own_chat_write`, a chat that gateway listed and that gateway answering, but no fresh passkey: it runs no turn. That gateway's claim hands its connector up to 10 to set, and it answers on `POST /own/<gateway>/reacted`.
+- **A Bot Chat.** `POST /chat/<bot>/react` with `{message_id, emoji}`. It rides `mobile_chat_write` like a message to that Bot, and a room refuses it. The Bots' connector is handed them with its claim, so only while `connector_effects` is on, finds that Bot's one Bot Chat in its `state.db` read only, and answers on `POST /connector/reacted`.
+- **The helper.** Both connectors set each one through `room_send.py` op `react` in Hermes's own Python and through Hermes's own `SessionDB` (a Bot's through its profile's store), writing only when Patrick's reaction differs from what is asked, so asking twice never takes it off (Hermes's own rule takes the same emoji off). Hermes checks the message is in that chat's lineage. The pages carry each message's reactions.
+- **Which copy shows.** A page now says when the core handed out the ask for it (`handed_at`, the core's clock; `read_at` is the reading machine's). A set reaction shows from the core's row until a page asked for after it was set, so a clock on One that runs ahead never hides it. What Patrick sent from the phone gives way to Hermes's copy by the same time.
+- **The way back.** `tw-decide downgrade --to 8` refuses while a reaction is queued or leased, then drops `chat_reactions`. Reactions already set stay in Hermes.
+
+Checked here: `tests/test_decisions_reactions.py`:
+
+- the rows: one wish per message, set and taken off, a late answer dropped, a lapsed lease handed out again, a failure and a new tap, nothing handed out while Hermes is not ready, the refusals, each token only for its own gateway;
+- a Bot Chat: `mobile_chat_write`, a room refused, set only while `connector_effects` is on, and kept apart from his own chats;
+- the routes for both, and that a browser can never answer for a connector;
+- a page keeping only Hermes's reactions, and `handed_at` on the core's clock;
+- both connectors against a scratch `state.db` (one without the column too), and a Bot with no Bot Chat;
+- the helper against a stand-in for Hermes's store with Hermes's own rule.
+
+The browser check: Hermes's and Bramble's reactions show with their names, a tap opens the actions, a reaction shows at once and asks for exactly that message and emoji, it stops being dashed once set (in One's chat and in Bramble's Bot Chat), and it comes off. Not checked here: a real Hermes on One or the VM, and Desktop showing a reaction set from the phone.
+
 ## The pinned contract (step 0)
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:

@@ -5,7 +5,8 @@ const { chromium } = require('playwright')
 // answering a card (it leaves Decisions for Answered), a high-risk card's own
 // check screen, the four tabs, the Thornswood Bots list (Hermes, One, then the
 // six Bots) and a chat with Patrick's own Hermes on One (as text, a new chat,
-// Hermes on the VM with no connector yet), the Rooms
+// Hermes on the VM with no connector yet, and reactions: Hermes's own, setting
+// one from a message's actions and taking it off), the Rooms
 // list and a room (as text), the Board,
 // the install hint, the service worker, and alerts: a "no" kept, a push shown
 // as the one quiet line with its card's tag (delivered by DevTools, with no
@@ -183,6 +184,12 @@ const base = `http://localhost:${port}`
     const want = [...Array.from({ length: 68 }, (_, i) => `bramble ${i}`), 'How is the nightly?', 'All green <i>tonight</i>.']
     if (JSON.stringify(texts) !== JSON.stringify(want)) throw new Error(texts.length + ' ' + texts.slice(0, 2))
   })
+  await step("in a Bot Chat, the Bot's own reaction shows with its name", () =>
+    page.locator('#view .msg[data-mid="69"] .react[aria-label="Bramble\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
+  await page.locator('#view .msg[data-mid="70"] .bub').click()
+  await page.getByRole('button', { name: 'React \u2764\uFE0F' }).click()
+  await step('a reaction in a Bot Chat is set in that Bot\'s Bot Chat', () =>
+    page.locator('#view .msg[data-mid="70"] .react.me:not(.pending)').waitFor({ timeout: 25000 }))
   await page.goto(base + '/m/bramble')
   await step("Bramble's first path still opens its chat, under Bots", async () => {
     await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
@@ -221,6 +228,39 @@ const base = `http://localhost:${port}`
   await step('a message to One waits for its connector', async () => {
     await page.getByText('Add the backup check.').waitFor({ timeout: 5000 })
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
+  })
+  await step("Hermes's own reaction shows on the message it is on", () =>
+    page.locator('#view .msg[data-mid="1"] .react[aria-label="Hermes\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
+  const reactBody = []
+  page.on('request', q => { if (q.method() === 'POST' && /\/own\/one\/react$/.test(q.url())) reactBody.push(JSON.parse(q.postData())) })
+  await page.locator('#view .msg[data-mid="2"] .bub').click()
+  await step('tapping a message opens its actions: eight reactions, Copy text and Close', async () => {
+    const sheet = page.getByRole('dialog', { name: 'Message actions' })
+    await sheet.waitFor({ timeout: 3000 })
+    if (await sheet.getByRole('button', { name: /^React / }).count() !== 8) throw new Error('not eight reactions')
+    await sheet.getByRole('button', { name: 'Copy text' }).waitFor({ timeout: 1000 })
+    if (await sheet.getByRole('button', { name: 'Take my reaction off' }).count()) throw new Error('take off with no reaction')
+  })
+  await page.getByRole('button', { name: 'React \u{1F44D}' }).click()
+  const mineChip = page.locator('#view .msg[data-mid="2"] .react.me')
+  await step('a reaction shows at once, and asks the core for exactly that message and emoji', async () => {
+    await mineChip.waitFor({ timeout: 5000 })
+    if (await page.getByRole('dialog').count()) throw new Error('the sheet stayed open')
+    if (JSON.stringify(reactBody) !== JSON.stringify([{ session_id: 's_plan', message_id: 2, emoji: '\u{1F44D}' }])) throw new Error(JSON.stringify(reactBody))
+  })
+  await step("once One says it is set, the chip is no longer dashed", async () => {
+    await page.locator('#view .msg[data-mid="2"] .react.me:not(.pending)').waitFor({ timeout: 25000 })
+    if (await mineChip.getAttribute('aria-label') !== 'Your reaction \u{1F44D}, tap to take it off') throw new Error(await mineChip.getAttribute('aria-label'))
+  })
+  await page.locator('#view .msg[data-mid="2"] .bub').click()
+  await step('the actions mark the reaction that is on', async () => {
+    if (await page.getByRole('button', { name: 'React \u{1F44D}' }).getAttribute('aria-pressed') !== 'true') throw new Error('not pressed')
+  })
+  await page.getByRole('button', { name: 'Take my reaction off' }).click()
+  await step('taking it off asks for none, and the chip goes once One has taken it off', async () => {
+    if (JSON.stringify(reactBody[1]) !== JSON.stringify({ session_id: 's_plan', message_id: 2, emoji: null })) throw new Error(JSON.stringify(reactBody))
+    await page.locator('#view .msg[data-mid="2"] .react').waitFor({ state: 'detached', timeout: 25000 })
+    await page.locator('#view .msg[data-mid="1"] .react').waitFor({ timeout: 1000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-own-chat.png', fullPage: true })
   await page.goto(base + '/m/hermes/one')

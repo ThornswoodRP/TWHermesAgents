@@ -24,7 +24,10 @@ Every few seconds, whatever connector_effects says, it also answers the pages of
 full history the phone asked for (`POST /api/v1/connector/pages`, then
 `/connector/page`): a Bot's Bot Chat from that profile's state.db and a room
 from shared-state.db, both read only, 50 messages at a time.
-Then it tells the core what came of it (`POST /api/v1/connector/result`):
+The same claim hands it Patrick's reactions on Bot Chat messages: each is set in
+that Bot's own store with `room_send.py` op `react` (Hermes's SessionDB), and
+what came of it goes to `POST /api/v1/connector/reacted`.
+For each message, it tells the core what came of it (`POST /api/v1/connector/result`):
 confirmed only when Hermes said so, failed only when nothing was sent, and
 uncertain for everything else. An uncertain message is never sent again by
 itself. A result the core did not take is kept and offered again until it
@@ -62,23 +65,31 @@ ROOM_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
-def bot_page(hermes_home: Path, bot: str, before: int | None) -> dict:
-    """One page of a Bot's one canonical Bot Chat, from that profile's state.db, read only."""
-    from .own_connector import _ro, messages_page
+def bot_chat_id(hermes_home: Path, bot: str) -> str | None:
+    """The id of a Bot's one canonical Bot Chat, from that profile's state.db, read only; None when it has none."""
+    from .own_connector import _ro
     db = hermes_home / "profiles" / bot / "state.db"
     if not db.exists():
-        return {"messages": [], "more": False, "gone": True, "continued_as": None}
+        return None
     con = _ro(db)
     try:
         s = con.execute("SELECT id FROM sessions WHERE title = ? AND archived = 0 ORDER BY started_at DESC LIMIT 1",
                         (BOT_CHAT,)).fetchone()
     finally:
         con.close()
-    if not s:
+    return s["id"] if s else None
+
+
+def bot_page(hermes_home: Path, bot: str, before: int | None) -> dict:
+    """One page of a Bot's one canonical Bot Chat, from that profile's state.db, read only."""
+    from .own_connector import messages_page
+    sid = bot_chat_id(hermes_home, bot)
+    if sid is None:
         return {"messages": [], "more": False, "gone": True, "continued_as": None}
+    db = hermes_home / "profiles" / bot / "state.db"
     n = 50
     while True:
-        page = messages_page(db, s["id"], before, n)
+        page = messages_page(db, sid, before, n)
         page["continued_as"] = None  # one Bot Chat per Bot: the phone names it by the Bot, not by its id
         if len(json.dumps(page, ensure_ascii=False).encode("utf-8")) <= PAGE_BYTES or n <= 1:
             return page
@@ -143,6 +154,17 @@ class Hermes:
         if got.get("sent") is False:
             return "failed", "", str(got.get("reason", "not sent"))
         return "uncertain", "", str(got.get("reason") or "the room helper stopped without saying")
+
+    def react(self, bot: str, session_id: str, message_id: int, emoji: str | None) -> tuple[str, str]:
+        """(outcome, reason): set Patrick's reaction on one message of a Bot's Bot Chat to exactly `emoji`
+        (None takes it off), with that profile's own store."""
+        got = self._helper({"op": "react", "profile": bot, "session_id": session_id, "message_id": message_id,
+                            "emoji": emoji}, CHECK_SECONDS)
+        if got is None:
+            return "failed", "Hermes's store did not answer in a minute"
+        if got.get("set") is True:
+            return "set", ""
+        return "failed", str(got.get("reason") or "not set")[:200]
 
     def to_bot(self, bot: str, text: str) -> tuple[str, str, str]:
         ready = self._helper({"op": "ready", "profile": bot}, CHECK_SECONDS)
@@ -213,12 +235,43 @@ class Connector:
     def _report(self) -> None:
         keep = []
         for r in self.unsaid:
+            if "version" in r:
+                # A reaction: the core drops an answer about an older wish by itself.
+                status, _ = self.core.post("/connector/reacted", r)
+                if status in (200, 404):
+                    self.say(f"{'PASS' if r['outcome'] == 'set' else 'NOTE'} reaction for {r['bot']}: {r['outcome']}")
+                else:
+                    keep.append(r)
+                continue
             status, body = self.core.post("/connector/result", r)
             if status == 200 or (status == 409 and body.get("error") == "not_leased"):
                 self.say(f"{'PASS' if r['outcome'] == 'confirmed' else 'NOTE'} {r['id']}: {r['outcome']}")
             else:
                 keep.append(r)
         self.unsaid = keep
+
+    def react(self, wanted: list) -> int:
+        """The reactions the core handed over, each set in that Bot's Bot Chat one after another (each is one
+        quick write). Returns how many were set; what came of each goes to the core with the report."""
+        done = 0
+        for r in wanted[:10]:
+            if not (isinstance(r, dict) and isinstance(r.get("bot"), str) and PROFILE_ID.match(r["bot"])
+                    and type(r.get("message_id")) is int and type(r.get("version")) is int
+                    and (r.get("emoji") is None or isinstance(r.get("emoji"), str))):
+                continue
+            try:
+                sid = bot_chat_id(self.hermes_home, r["bot"])
+            except (sqlite3.Error, OSError) as exc:
+                outcome, reason = "failed", f"could not read the Bot's store ({type(exc).__name__})"
+            else:
+                if sid is None:
+                    outcome, reason = "failed", "that Bot has no Bot Chat"
+                else:
+                    outcome, reason = self.hermes.react(r["bot"], sid, r["message_id"], r.get("emoji"))
+            done += outcome == "set"
+            self.unsaid.append({"bot": r["bot"], "message_id": r["message_id"], "version": r["version"],
+                                "outcome": outcome, "reason": reason})
+        return done
 
     def once(self) -> int:
         """One round. Returns how many messages went to Hermes, or -1 when the core said to wait."""
@@ -231,6 +284,7 @@ class Connector:
         if status != 200:
             return 0
         items = body.get("items", [])
+        self.react(body.get("reactions", []))
         results: list[dict] = []
 
         def run(item):

@@ -67,8 +67,11 @@ con.execute("INSERT INTO sessions VALUES('s_plan', 'cli', 'Plan the week', ?, ?,
             (epoch("2026-11-01T17:00:00+00:00"), epoch("2026-11-01T17:30:00+00:00")))
 con.execute("INSERT INTO sessions VALUES('s_long', 'cli', 'A long chat', ?, ?, NULL, NULL, NULL, 0, 0)",
             (epoch("2026-11-01T10:00:00+00:00"), epoch("2026-11-01T16:00:00+00:00")))
-con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_plan', 'user', 'What is on this week?', ?)",
-            (epoch("2026-11-01T17:29:00+00:00"),))
+# Hermes keeps reactions in display_metadata; Hermes itself put eyes on Patrick's question.
+con.execute("ALTER TABLE messages ADD COLUMN display_metadata TEXT")
+con.execute("INSERT INTO messages(session_id, role, content, timestamp, display_metadata) VALUES('s_plan', 'user', "
+            "'What is on this week?', ?, ?)", (epoch("2026-11-01T17:29:00+00:00"), json.dumps(
+                {"reactions": [{"emoji": "\U0001F440", "author": "agent", "at": 1, "seen": True}]})))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_plan', 'assistant', '<b>three</b> things', ?)",
             (epoch("2026-11-01T17:30:00+00:00"),))
 # Markdown as Hermes writes it, with things that must stay text: a script link and raw HTML.
@@ -86,11 +89,33 @@ for i in range(120):
                 ("user" if i % 2 == 0 else "assistant", f"message {i}", epoch("2026-11-01T10:00:00+00:00") + i))
 con.commit()
 con.close()
+def set_reaction(r, db=None, sid=None):
+    """Patrick's reaction, as Hermes sets it: one per person on the row (the helper's own path is in
+    test_decisions_reactions.py)."""
+    c = sqlite3.connect(db or sdb)
+    row = c.execute("SELECT display_metadata FROM messages WHERE id = ? AND session_id = ?",
+                    (r["message_id"], sid or r["session_id"])).fetchone()
+    if row is None:
+        c.close()
+        return "failed"
+    meta = json.loads(row[0] or "{}")
+    keep = [x for x in meta.get("reactions", []) if x["author"] != "user"]
+    if r["emoji"]:
+        keep.append({"emoji": r["emoji"], "author": "user", "at": time.time(), "seen": False})
+    meta["reactions"] = keep
+    c.execute("UPDATE messages SET display_metadata = ? WHERE id = ?", (json.dumps(meta), r["message_id"]))
+    c.commit()
+    c.close()
+    return "set"
 def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
         try:
-            for req in o.claim(w.ws, "one", to, 0, True)["pages"]:
+            got = o.claim(w.ws, "one", to, 0, True)
+            for r in got.get("reactions", []):
+                o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],
+                                            "version": r["version"], "outcome": set_reaction(r)})
+            for req in got["pages"]:
                 o.page_post(w.ws, "one", to, json.loads(own_connector.fitted_page(sdb, req)))
         except CoreError:
             pass
@@ -108,8 +133,11 @@ con.execute("INSERT INTO sessions VALUES('s_bc', 'cli', 'Bot Chat', 1, 900, NULL
 for i in range(68):
     con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', ?, ?, ?)",
                 ("user" if i % 2 == 0 else "assistant", f"bramble {i}", epoch("2026-11-01T09:00:00+00:00") + i))
-con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'user', 'How is the nightly?', ?)",
-            (epoch("2026-11-01T17:00:00+00:00"),))
+# Bramble put eyes on Patrick's question, in Hermes's own display_metadata.
+con.execute("ALTER TABLE messages ADD COLUMN display_metadata TEXT")
+con.execute("INSERT INTO messages(session_id, role, content, timestamp, display_metadata) VALUES('s_bc', 'user', "
+            "'How is the nightly?', ?, ?)", (epoch("2026-11-01T17:00:00+00:00"), json.dumps(
+                {"reactions": [{"emoji": "\U0001F440", "author": "agent", "at": 1, "seen": True}]})))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'assistant', 'All green <i>tonight</i>.', ?)",
             (epoch("2026-11-01T17:01:00+00:00"),))
 con.commit()
@@ -134,8 +162,18 @@ class Direct:
         except CoreError as exc:
             return exc.status, {"error": exc.reason}
 def bots_pages():
+    from thornswood_decisions.reactions import Reactions
     conn = Connector(Direct(), None, say=lambda _: None, hermes_home=bhome)
+    store = Store(w.path, clock=w.clock)
+    chat = Chat(store)
     while True:
+        # connector_effects stays off here, so the Bots' reactions are handed as its claim would hand them.
+        with store.tx() as db:
+            wanted = Reactions(store).hand(db, w.ws, "bots")
+        for r in wanted:
+            out = set_reaction(r, bhome / "profiles" / r["chat"] / "state.db", "s_bc")
+            chat.reacted(w.ws, tc, {"bot": r["chat"], "message_id": r["message_id"], "version": r["version"],
+                                    "outcome": out})
         conn.pages()
         time.sleep(0.3)
 threading.Thread(target=bots_pages, daemon=True).start()

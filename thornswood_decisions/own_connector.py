@@ -291,19 +291,42 @@ def messages_page(state_db: Path, session_id: str, before: int | None, n: int = 
             return {"messages": [], "more": False, "gone": True, "continued_as": None}
         tip = con.execute(LINEAGE_SQL + "SELECT d.id FROM descendants d JOIN sessions s ON s.id = d.id "
                           "ORDER BY d.depth DESC, s.started_at DESC LIMIT 1", (session_id, session_id)).fetchone()[0]
-        summary = "AND m._compressed_summary = 0 " if "_compressed_summary" in _columns(con, "messages") else ""
+        cols = _columns(con, "messages")
+        summary = "AND m._compressed_summary = 0 " if "_compressed_summary" in cols else ""
+        meta = "m.display_metadata" if "display_metadata" in cols else "NULL"
         rows = con.execute(
-            LINEAGE_SQL + "SELECT m.id, m.role, m.content, m.timestamp FROM messages m "
+            LINEAGE_SQL + f"SELECT m.id, m.role, m.content, m.timestamp, {meta} AS meta FROM messages m "
             "WHERE m.session_id IN (SELECT id FROM ancestors UNION SELECT id FROM descendants) AND m.active = 1 "
             "AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL AND m.content != '' " + summary +
             "AND (? IS NULL OR m.id < ?) ORDER BY m.id DESC LIMIT ?",
             (session_id, session_id, before, before, n + 1)).fetchall()
     finally:
         con.close()
-    msgs = [{"mid": r["id"], "role": r["role"], "text": _text(r["content"])[:PAGE_TEXT], "at": _iso(r["timestamp"])}
-            for r in reversed(rows[:n])]
+    msgs = [{"mid": r["id"], "role": r["role"], "text": _text(r["content"])[:PAGE_TEXT], "at": _iso(r["timestamp"]),
+             "reactions": reactions(r["meta"])} for r in reversed(rows[:n])]
     return {"messages": msgs, "more": len(rows) > n, "gone": False,
             "continued_as": tip if tip != session_id else None, "read_at": datetime.now(timezone.utc).isoformat()}
+
+
+REACTION_BY = {"user": "patrick", "agent": "hermes"}
+
+
+def reactions(raw) -> list[dict]:
+    """The reactions Hermes keeps on a message row, under display_metadata's "reactions": one per
+    person, {emoji, author} with author "user" (Patrick) or "agent" (Hermes). Older rows carry the
+    JSON as a string inside a string (hermes_state_messages.py _decode_display_metadata)."""
+    meta = raw
+    for _ in range(2):
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except json.JSONDecodeError:
+                return []
+    out = []
+    for r in (meta.get("reactions") if isinstance(meta, dict) else None) or []:
+        if isinstance(r, dict) and r.get("author") in REACTION_BY and isinstance(r.get("emoji"), str) and r["emoji"]:
+            out.append({"emoji": r["emoji"][:16], "by": REACTION_BY[r["author"]]})
+    return out[:8]
 
 
 def fitted_page(state_db: Path, req: dict) -> bytes:
@@ -356,6 +379,24 @@ class Hermes:
         if got.get("ready") is True:
             return "ready", ""
         return "gateway_down", str(got.get("reason") or f"{self.name} is not ready")[:200]
+
+    def react(self, session_id: str, message_id: int, emoji: str | None) -> tuple[str, str]:
+        """(outcome, reason): set Patrick's reaction on one message to exactly `emoji` (None takes it off),
+        with Hermes's own store, through the same helper and Python as the readiness check."""
+        req = json.dumps({"op": "react", "profile": "", "session_id": session_id, "message_id": message_id,
+                          "emoji": emoji}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True,
+                                 timeout=60, cwd=str(self.home_dir), check=False)
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            return "failed", "Hermes's store did not answer in a minute"
+        except (OSError, IndexError, json.JSONDecodeError):
+            return "failed", "could not run the helper with Hermes's Python"
+        if isinstance(got, dict) and got.get("set") is True:
+            return "set", ""
+        reason = got.get("reason") if isinstance(got, dict) else None
+        return "failed", str(reason or "not set")[:200]
 
     def turn(self, session_id: str | None, text: str) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message."""
@@ -474,6 +515,14 @@ class OwnConnector:
             pending, self.unsaid = self.unsaid, []
         keep = []
         for r in pending:
+            if "version" in r:
+                # A reaction: the core drops an answer about an older wish by itself.
+                status, _ = self.core.post("reacted", r)
+                if status in (200, 404):
+                    self.say(f"{'PASS' if r['outcome'] == 'set' else 'NOTE'} reaction: {r['outcome']}")
+                else:
+                    keep.append(r)
+                continue
             status, body = self.core.post("result", r)
             if status == 200 or (status == 409 and body.get("error") == "not_leased"):
                 self.say(f"{'PASS' if r['outcome'] == 'confirmed' else 'NOTE'} {r['id']}: {r['outcome']}")
@@ -505,6 +554,25 @@ class OwnConnector:
         with self._lock:
             self.unsaid.append(r)
             self.feed_now = True
+
+    def react(self, wanted: list) -> int:
+        """The reactions the core handed over, each set in Hermes one after another (each is one quick
+        write), and what came of each told to the core with the next round. Returns how many were set."""
+        done = tried = 0
+        for r in wanted[:10]:
+            if not (isinstance(r, dict) and isinstance(r.get("session_id"), str) and SESSION_ID.match(r["session_id"])
+                    and type(r.get("message_id")) is int and type(r.get("version")) is int
+                    and (r.get("emoji") is None or isinstance(r.get("emoji"), str))):
+                continue
+            outcome, reason = self.hermes.react(r["session_id"], r["message_id"], r.get("emoji"))
+            done += outcome == "set"
+            tried += 1
+            with self._lock:
+                self.unsaid.append({"session_id": r["session_id"], "message_id": r["message_id"],
+                                    "version": r["version"], "outcome": outcome, "reason": reason})
+        if tried:
+            self._report()
+        return done
 
     def pages(self, wanted: list) -> int:
         """The pages the core handed over: each read from state.db, read only, and posted. Returns how many."""
@@ -561,6 +629,9 @@ class OwnConnector:
         pages = body.get("pages", [])
         if isinstance(pages, list) and pages:
             self.pages(pages)
+        reacts = body.get("reactions", [])
+        if isinstance(reacts, list):
+            self.react(reacts)
         items = body.get("items", [])
         for item in items:
             t = threading.Thread(target=self._deliver, args=(item,), daemon=True)

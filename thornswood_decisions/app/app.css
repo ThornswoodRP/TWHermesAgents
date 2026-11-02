@@ -150,3 +150,21 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 .composer .send { flex: 0 0 42px; width: 42px; height: 42px; border-radius: 21px; border: 0; background: var(--accent);
   color: var(--accent-fg); display: inline-flex; align-items: center; justify-content: center; }
 .composer .send:disabled { opacity: .6; }
+
+/* Reactions (redesign step 2): one per person under a bubble, and a message's
+   actions in a sheet over the tabs. */
+.chat .bub[tabindex] { cursor: pointer; }
+.chat .reacts { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.chat .react { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 28px;
+  padding: 0 8px; border-radius: 14px; border: 1px solid var(--line2); background: var(--card); font-size: 15px; }
+.chat .react.me { border-color: var(--accent); background: var(--mine); }
+.chat .react.pending { border-style: dashed; opacity: .75; }
+.sheet-back { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, .55); display: flex;
+  align-items: flex-end; justify-content: center; }
+.sheet { width: 100%; max-width: 520px; background: var(--card); border: 1px solid var(--line2); border-bottom: 0;
+  border-radius: 16px 16px 0 0; padding: 14px max(16px, env(safe-area-inset-left)) calc(14px + env(safe-area-inset-bottom)); }
+.sheet .emoji-row { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin-bottom: 6px; }
+.sheet .emoji-row button { height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--raised);
+  font-size: 21px; padding: 0; }
+.sheet .emoji-row button[aria-pressed="true"] { border-color: var(--accent); background: var(--mine); }
+.sheet p { margin: 6px 0; }

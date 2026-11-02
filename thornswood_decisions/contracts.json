@@ -97,5 +97,15 @@
     "approvals_source": "tools/approval_context.py:198 _is_single_query_approval_context, :347 _binary_approval_mode; tools/approval.py:327 _yolo_active",
     "ready": "Whether that Hermes's gateway runs is asked without starting one, as for the Bots (room_send.py op ready, with profile empty).",
     "ready_source": "hermes_cli/gateway_runtime.py:289 discover_gateway_endpoint"
+  },
+  "reactions": {
+    "store": "Hermes keeps reactions on a message row, in messages.display_metadata under \"reactions\": a list of {emoji, author, at, seen?}, author \"user\" or \"agent\". Older rows carry the JSON as a string inside a string.",
+    "store_source": "hermes_state.py:1629 REACTIONS_METADATA_KEY; hermes_state_messages.py:189 _decode_display_metadata, :517 _reaction_list",
+    "rule": "One reaction per author per message (Tapback): set_message_reaction(session_id, row_id, emoji, author) with a different emoji replaces, the same emoji again takes it off, None takes it off, and a row outside the chat's visible lineage returns None.",
+    "rule_source": "hermes_state_messages.py:522 set_message_reaction, :548 get_message_reactions, :555 _reaction_row_query",
+    "write": "In a process of Hermes's own, as Hermes's own user: hermes_state_registry.acquire(db_path or None) for the SessionDB (None is this user's own state.db; a profile's is ~/.hermes/profiles/<id>/state.db), then release_or_close. Hermes's own react_to_message tool does the same; Desktop's message.react calls the same set_message_reaction. room_send.py op react reads the reaction first and writes only when it differs, so asking twice never takes it off.",
+    "write_source": "hermes_state_registry.py:195 acquire, :474 release_or_close; tools/react_to_message_tool.py:15 and :46; gateway/session_reactions.py:28; tui_gateway/methods_session.py:1311 message.react",
+    "the_model": "Hermes tells the model about Patrick's reactions once, on a later turn, as a note, and only when display.message_reactions is on in that Hermes's config.",
+    "the_model_source": "tui_gateway/methods_prompt.py:204 (gated on display.message_reactions), hermes_state_messages.py:563 take_unseen_reactions"
   }
 }

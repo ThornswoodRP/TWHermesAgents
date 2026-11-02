@@ -559,6 +559,33 @@ ALTER TABLE own_gateways ADD COLUMN peer_online INTEGER CHECK (peer_online IS NU
 ALTER TABLE own_gateways ADD COLUMN peer_seen TEXT;
 ALTER TABLE own_gateways ADD COLUMN peer_checked TEXT;
 """,
+    # 9: Patrick's reaction to a message in a chat with his own Hermes or a Bot's Bot Chat (redesign
+    # step 2, plan Part 11). The chat is a session id on `me` and `one`, and the Bot's profile id on
+    # `bots`, where each Bot has one Bot Chat.
+    # One row per message: the reaction he wants there now (emoji NULL takes his off), which the
+    # connector sets in Hermes with Hermes's own store. Hermes keeps one reaction per person per
+    # message, so a row says what should be there, never a change to make: setting it twice is the
+    # same as once, and a lease that ran out is simply handed out again. `version` tells a
+    # connector's late answer from the newest wish.
+    """
+CREATE TABLE chat_reactions (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one', 'bots')),
+  chat TEXT NOT NULL CHECK (length(chat) BETWEEN 1 AND 128),
+  message_id INTEGER NOT NULL CHECK (message_id >= 1),
+  emoji TEXT CHECK (emoji IS NULL OR length(emoji) BETWEEN 1 AND 16),
+  version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'set', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, gateway, chat, message_id)
+);
+CREATE INDEX chat_reactions_by_status ON chat_reactions(workspace_id, gateway, status, updated_at);
+""",
 ]
 
 
@@ -628,5 +655,10 @@ ALTER TABLE own_gateways DROP COLUMN peer_seen;
 ALTER TABLE own_gateways DROP COLUMN peer_online;
 ALTER TABLE own_gateways DROP COLUMN peer_ip;
 ALTER TABLE own_gateways DROP COLUMN state;
+""", ""),
+    # A reaction already set lives in Hermes itself; only one still on its way would be lost.
+    9: ([("SELECT count(*) FROM chat_reactions WHERE status IN ('queued', 'leased')",
+          "reactions on their way to Hermes")], """
+DROP TABLE chat_reactions;
 """, ""),
 }

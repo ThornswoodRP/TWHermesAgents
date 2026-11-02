@@ -37,7 +37,9 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from .auth import Principal
+from . import reactions
 from .feeds import Feeds
+from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
 from .schema import OWN_GATEWAYS
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
@@ -76,6 +78,9 @@ PAGE_TEXT = 8000
 PAGE_QUERY = 80
 MAX_WAIT = 10
 PAGE_ID = re.compile(r"^pg_[A-Za-z0-9_-]{8,40}$")
+# The reactions the phone offers (redesign step 2). Hermes takes any emoji; the core takes these.
+PAGE_REACTIONS = 8                   # reactions kept on one message of a page
+REACTION_BY = {"user": "patrick", "agent": "hermes"}
 # The tailnet's own addresses: an X-Forwarded-For from Tailscale Serve is one of these.
 TAILNET = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 
@@ -217,7 +222,10 @@ class _Pages:
             key = next((k for k, a in self.asked.items() if a["id"] == rid and k[0] == ws and k[1] == gw), None)
             if key is None:
                 raise CoreError(409, "not_asked", "no page with that id was asked of this gateway")
-            del self.asked[key]
+            a = self.asked.pop(key)
+            # When the core handed the ask out, on the core's clock: the connector read the page after
+            # that, so whatever the core heard was done before then is in it. read_at is One's clock.
+            page = {**page, "handed_at": (a["handed"] or a["at"]).isoformat()}
             self.held[key] = (now + (PAGE_FRESH if key[4] is None else PAGE_TTL), page)
             self.cond.notify_all()
             return key
@@ -323,6 +331,12 @@ def clean_page(kind: str, body) -> dict:
                "at": _text(m.get("at"), 40)}
         if row["role"] not in ROLES:
             raise CoreError(400, "bad_page", "a message is from the user or the assistant")
+        reactions = m.get("reactions", [])
+        if not isinstance(reactions, list):
+            raise CoreError(400, "bad_page", "a message's reactions are a list")
+        row["reactions"] = [{"emoji": _text(r.get("emoji"), 16), "by": r.get("by")}
+                            for r in reactions[:PAGE_REACTIONS]
+                            if isinstance(r, dict) and r.get("by") in REACTION_BY.values() and r.get("emoji")]
         out.append(row)
     cont = body.get("continued_as")
     try:
@@ -520,8 +534,11 @@ class OwnChat:
             "SELECT id, text, status, reason, created_at, updated_at FROM own_messages WHERE workspace_id = ? "
             "AND gateway = ? AND (session_id = ? OR made_session_id = ?) ORDER BY created_at DESC, rowid DESC "
             "LIMIT ?", (p.workspace_id, gw, sid, sid, MINE)).fetchall()
+        # His reactions in this chat that the phone has asked for, so it shows each one at once, and
+        # how it went, until the chat's own page shows it.
         return st | {"chat": chat or {"id": sid, "title": ""}, "loaded": opened is not None, "history": history,
-                     "mine": [dict(r) for r in reversed(rows)], **self._can(p)}
+                     "mine": [dict(r) for r in reversed(rows)], "reactions": Reactions(self.s).shown(p.workspace_id, gw, sid),
+                     **self._can(p)}
 
     def _unsettled(self, workspace_id: str, gw: str) -> int:
         return self.s.db.execute("SELECT count(*) FROM own_messages WHERE workspace_id = ? AND gateway = ? "
@@ -578,6 +595,32 @@ class OwnChat:
                        "result_json, created_at) VALUES(?,?,?,?,?,?,?)",
                        (p.workspace_id, p.id, idempotency_key, "own.send", body_sha, canonical(receipt), now))
         return receipt
+
+    def react(self, p: Principal, gw: str, session_id, message_id, emoji) -> dict:
+        """Patrick's reaction on one message of one chat: exactly this emoji, or none (null).
+
+        It rides own_chat_write like a message, and like a message it needs that Hermes to be
+        answering. It runs no turn, so it needs no fresh passkey. Hermes keeps it on the message,
+        where Desktop shows it too, and tells the model about it on a later turn only when that
+        Hermes has display.message_reactions on (contracts.json "reactions"). A row says what
+        should be there, so a second tap before the first is set replaces it, and the same tap
+        twice is one wish."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        sid = _sid(session_id)
+        message_id, emoji = reactions.message_id(message_id), reactions.emoji(emoji)
+        if not self._listed(p.workspace_id, gw, sid):
+            raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
+        if not self.online(p.workspace_id, gw):
+            why = self._off_why(p.workspace_id, gw)
+            st = self.gateway_state(p.workspace_id, gw)
+            if st["state"] == "machine_off":
+                raise CoreError(409, "one_off", "One is off", why=why, state=st["state"], since=st["since"])
+            raise CoreError(409, "gateway_off", f"{NAMES[gw]} is not answering: {why}", why=why,
+                            state=st["state"], since=st["since"])
+        return {"session_id": sid} | Reactions(self.s).want(p, gw, sid, message_id, emoji)
 
     # ── full history: pages ───────────────────────────────────────────────
 
@@ -686,8 +729,17 @@ class OwnChat:
                 self.s.event(db, workspace_id, "own.leased", r["id"], f"own connector ({gw})", {})
                 items.append({"id": r["id"], "session_id": r["session_id"], "text": r["text"],
                               "send_key": r["send_key"], "lease_until": until})
+            reactions = [{"session_id": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, gw)] if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
-                "pages": PAGES.hand(workspace_id, gw, self.s.clock())}
+                "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions}
+
+    def reacted(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """What came of setting one reaction. An answer about an older wish than the newest is dropped,
+        and the newest goes out on the next claim."""
+        self._check_token(workspace_id, gw, token)
+        if not isinstance(body, dict):
+            raise CoreError(400, "bad_result", "a result is a JSON object")
+        return Reactions(self.s).answered(workspace_id, gw, _sid(body.get("session_id")), body, f"own connector ({gw})")
 
     def _lapse(self, db, workspace_id: str, gw: str) -> None:
         """A lease that ran out means the connector stopped mid-turn: unclear, so never sent again by itself."""

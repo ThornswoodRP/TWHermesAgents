@@ -71,7 +71,7 @@ SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
             ("GET", "own"), ("POST", "own")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed", "page")
+OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted")
 SECURITY_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
@@ -205,6 +205,8 @@ class Api:
                 return 200, own.feed(self.ws, route[1], token, data)
             if route[2] == "page":
                 return 200, own.page_post(self.ws, route[1], token, data)
+            if route[2] == "reacted":
+                return 200, own.reacted(self.ws, route[1], token, data)
             if route[2] == "claim":
                 # Tailscale Serve sets X-Forwarded-For to the tailnet address the connector posts from
                 # (and replaces any it was sent); the core reads the tailnet's view of that machine.
@@ -235,6 +237,8 @@ class Api:
                 return 200, Chat(core.s).page_post(self.ws, token, data)
             if route[1] == "claim":
                 return 200, Chat(core.s).claim(self.ws, token, data.get("limit", 7))
+            if route[1] == "reacted":
+                return 200, Chat(core.s).reacted(self.ws, token, data)
             if route[1] == "result":
                 return 200, Chat(core.s).result(self.ws, token, str(data.get("id", "")), str(data.get("outcome", "")),
                                                 str(data.get("ref", "")), str(data.get("reason", "")))
@@ -298,6 +302,8 @@ class Api:
             return 200, Chat(core.s).summary(p)
         if method == "GET" and len(route) == 3 and route[0] == "chat" and route[2] == "messages":
             return 200, Chat(core.s).page(p, route[1], before=query.get("before"), wait=query.get("wait"))
+        if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "react":
+            return 200, Chat(core.s).react(p, route[1], data.get("message_id"), data.get("emoji"))
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1])
@@ -314,6 +320,9 @@ class Api:
                                              wait=query.get("wait"))
         if method == "GET" and len(route) == 3 and route[0] == "own":
             return 200, OwnChat(core.s).view(p, route[1], route[2])
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "react":
+            return 200, OwnChat(core.s).react(p, route[1], data.get("session_id"), data.get("message_id"),
+                                              data.get("emoji"))
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
             return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
                                              data.get("text"), data.get("idempotency_key"))

@@ -773,7 +773,10 @@ function dayWords(d) {
     year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' })
 }
 
-// Each item: { mine, who, at, text, mid, status, note, warn }.
+// Each item: { mine, who, agent, at, text, mid, status, note, warn, reactions, react, noReact }.
+// reactions: [{ emoji, by: 'patrick' or 'hermes', pending }], and agent names who 'hermes' is
+// (a Bot). react(emoji or null) sets Patrick's reaction; without it, noReact says why a message
+// here takes none.
 function bubbles(items) {
   const out = []
   let day = null, last = null
@@ -788,13 +791,76 @@ function bubbles(items) {
     const attrs = { class: 'msg ' + (m.mine ? 'mine' : 'theirs') }
     if (m.mid !== undefined && m.mid !== null) attrs['data-mid'] = String(m.mid)
     if (m.status) attrs['data-status'] = m.status
+    const bub = el('div', { class: 'bub' }, markdown(m.text))
+    if (m.mid !== undefined && m.mid !== null && !m.status) {
+      // Tapping a message (not a link or a button in it, and not while selecting text) opens its actions.
+      bub.tabIndex = 0
+      bub.title = 'Tap for reactions and copy'
+      bub.addEventListener('click', e => {
+        if (e.target.closest('a, button') || String(getSelection())) return
+        messageSheet(m)
+      })
+      bub.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === bub) messageSheet(m) })
+    }
+    const reacts = (m.reactions || []).map(r => {
+      const mineR = r.by === 'patrick'
+      const label = (mineR ? 'Your reaction ' : `${m.mine ? (m.agent || 'Hermes') : m.who}'s reaction `) + r.emoji +
+        (r.pending ? ', being set' : '')
+      return mineR && m.react
+        ? el('button', { type: 'button', class: 'react me' + (r.pending ? ' pending' : ''),
+            'aria-label': label + ', tap to take it off', onclick: () => m.react(null) }, r.emoji)
+        : el('span', { class: 'react' + (mineR ? ' me' : '') + (r.pending ? ' pending' : ''), role: 'img',
+            'aria-label': label }, r.emoji)
+    })
     out.push(el('div', attrs,
       !m.mine && (last === null || by !== last.by) ? el('div', { class: 'who' }, m.who) : null,
-      el('div', { class: 'bub' }, markdown(m.text)),
+      bub,
+      reacts.length ? el('div', { class: 'reacts' }, reacts) : null,
       el('div', { class: 'meta' + (m.warn ? ' warn' : '') }, [clock(m.at), m.note].filter(Boolean).join(' · '))))
     last = { by }
   }
   return out
+}
+
+// The reactions the phone offers; the core takes only these (own.py REACTIONS).
+const REACTIONS = ['\u{1F44D}', '\u2764\uFE0F', '\u{1F602}', '\u{1F62E}', '\u{1F622}', '\u{1F64F}', '\u2705', '\u{1F440}']
+
+function closeSheet() {
+  const old = document.querySelector('.sheet-back')
+  if (old) old.remove()
+}
+
+// A message's actions: a reaction (Hermes keeps one per person, so a new one
+// replaces yours and the same one again takes it off), and Copy text.
+function messageSheet(m) {
+  closeSheet()
+  const mineNow = ((m.reactions || []).find(r => r.by === 'patrick') || {}).emoji || null
+  const note = el('p', { class: 'quiet', role: 'status' })
+  const choose = emoji => { closeSheet(); m.react(emoji) }
+  const copy = el('button', { class: 'secondary', type: 'button', onclick: async () => {
+    try {
+      await navigator.clipboard.writeText(m.text)
+      note.textContent = 'Copied.'
+    } catch (e) {
+      note.textContent = 'This view does not allow copying. Press and hold the message text to copy it.'
+    }
+  } }, 'Copy text')
+  const back = el('div', { class: 'sheet-back' },
+    el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Message actions' },
+      m.react
+        ? el('div', { class: 'emoji-row' }, REACTIONS.map(e => el('button', { type: 'button', 'aria-label': 'React ' + e,
+            'aria-pressed': String(mineNow === e), onclick: () => choose(mineNow === e ? null : e) }, e)))
+        : el('p', { class: 'quiet' }, m.noReact || 'This message takes no reaction.'),
+      m.react && mineNow ? el('button', { class: 'secondary', type: 'button', onclick: () => choose(null) },
+        'Take my reaction off') : null,
+      copy,
+      el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'),
+      note))
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  const first = back.querySelector('button')
+  if (first) first.focus()
 }
 
 function svgIcon(path) {
@@ -1013,7 +1079,8 @@ function historyPart(gw, sid, t, name) {
       route()
     } }, 'Older messages'), olderNote)
   }
-  const items = msgs.map(m => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid }))
+  const items = msgs.map(m => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid,
+    reactions: m.reactions || [] }))
   if (!items.length) notes.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
   return { notes, items, gone: false }
 }
@@ -1024,6 +1091,38 @@ function pendingItems(mine, readAt) {
     .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status,
       note: STATE[m.status] + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : ''),
       warn: m.status === 'dead' || m.status === 'uncertain' }))
+}
+
+// Patrick's reaction on one message, through the chat's own route (path, with what names the chat).
+async function reactTo(path, chat, mid, emoji, status) {
+  status.textContent = emoji ? 'Setting your reaction...' : 'Taking your reaction off...'
+  const r = await call('POST', path, { ...chat, message_id: mid, emoji })
+  if (r.status === 200) { status.textContent = ''; return route() }
+  if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+  const d = r.body.detail || {}
+  const gw = (path.match(/^\/own\/(me|one)\//) || [])[1]
+  status.textContent = r.status === 0 ? 'Could not reach the core. Nothing changed.'
+    : (d.state && gw ? stateWords({ gateway: gw, ...d })[1] : said(r.body))
+}
+
+// Puts Patrick's wishes (the core's rows) over the reactions a page of Hermes's shows: what he asked
+// for shows at once, and Hermes's own copy takes over once a page asked for after it was set shows
+// it. One asked for in the same instant may not hold it, so the wish stays. react(mid, emoji) sets
+// one; without it, noReact says why not.
+function withReactions(items, rows, pageAt, react, noReact) {
+  const wishes = new Map((rows || []).map(w => [w.message_id, w]))
+  for (const item of items) {
+    let shown = item.reactions || []
+    const w = wishes.get(item.mid)
+    if (w && (w.status === 'queued' || w.status === 'leased' || (w.status === 'set' && (!pageAt || new Date(w.updated_at) >= pageAt)))) {
+      shown = shown.filter(r => r.by !== 'patrick')
+      if (w.emoji) shown.push({ emoji: w.emoji, by: 'patrick', pending: w.status !== 'set' })
+    }
+    if (w && w.status === 'failed') { item.note = 'Your reaction was not set: ' + (w.reason || 'no reason given'); item.warn = true }
+    item.reactions = shown
+    item.react = react ? emoji => react(item.mid, emoji) : null
+    item.noReact = noReact
+  }
 }
 
 async function ownChatView(gw, sid) {
@@ -1037,9 +1136,14 @@ async function ownChatView(gw, sid) {
   const name = GATEWAY[gw]
   const status = el('p', { class: 'warn', role: 'status' })
   function render() {
-    // The phone's copy of what Patrick sent gives way to Hermes's copy once Hermes holds it.
-    const readAt = t.newest && t.newest.read_at ? new Date(t.newest.read_at) : (v.as_of ? new Date(v.as_of) : null)
+    // The phone's copy of what Patrick sent gives way to Hermes's copy once Hermes holds it. Both
+    // times are the core's: handed_at is when it asked for the page, and Hermes was read after that.
+    const pageAt = t.newest && t.newest.handed_at ? new Date(t.newest.handed_at) : null
+    const readAt = pageAt || (v.as_of ? new Date(v.as_of) : null)
     const h = historyPart(gw, sid, t, name)
+    const canReact = v.can_send && v.online && !h.gone && !t.error
+    withReactions(h.items, v.reactions, pageAt, canReact ? (mid, emoji) => reactTo(`/own/${gw}/react`, { session_id: sid }, mid, emoji, status) : null,
+      `${name} is not answering, so a reaction cannot be set now.`)
     const items = h.items.concat(pendingItems(v.mine, readAt))
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, v.chat.title || 'Untitled chat',
@@ -1112,7 +1216,8 @@ async function chatView(target, tab) {
   function history() {
     if (!t.newest || t.newest.gone) {
       // Before the first page, or a Bot with no Bot Chat yet: what the feed last sent.
-      return { notes: [], items: v.history.map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at, text: m.text, mid: 'feed' + k })), keyed: false }
+      return { notes: [], items: v.history.map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at, text: m.text, mid: 'feed' + k,
+        noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from Hermes.' })), keyed: false }
     }
     const seen = new Set()
     const raw = t.older.concat(room ? t.newest.events : t.newest.messages).filter(m => !seen.has(idOf(m)) && seen.add(idOf(m)))
@@ -1133,9 +1238,15 @@ async function chatView(target, tab) {
         route()
       } }, 'Older messages'), olderNote)
     }
+    const noRoom = 'A room has no reactions in Hermes, so a message here takes none.'
     const items = raw.map(m => room
-      ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq }
-      : { mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid })
+      ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom }
+      : { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, reactions: m.reactions })
+    if (!room) {
+      withReactions(items, v.reactions, t.newest.handed_at ? new Date(t.newest.handed_at) : null, v.can_send
+        ? (mid, emoji) => reactTo(`/chat/${encodeURIComponent(v.target)}/react`, {}, mid, emoji, status) : null,
+        said({ error: 'chat_write_off' }))
+    }
     return { notes, items, keyed: true }
   }
   function render() {
@@ -1402,6 +1513,7 @@ async function route() {
   // Every route is a new view, so a page a chat asked for and gets back after
   // Patrick left it fills nothing (it once redrew a room over the Rooms list).
   viewSeq++
+  closeSheet()
   if (!csrf) {
     const me = await call('GET', '/me')
     if (me.status !== 200) return signInView(me.status === 0 ? said(me.body) : '')
@@ -1434,7 +1546,7 @@ async function route() {
 }
 
 async function poll() {
-  if (!csrf || document.visibilityState !== 'visible' || answering) return
+  if (!csrf || document.visibilityState !== 'visible' || answering || document.querySelector('.sheet-back')) return
   const path = location.pathname
   // A chat view reads itself again, unless something is being typed.
   const box = document.querySelector('textarea')
