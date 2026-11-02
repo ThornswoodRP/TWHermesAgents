@@ -9,8 +9,8 @@ A pull request merges when it is open, not a draft, from this repository,
 aimed at main, both "Guard rail tests" checks are a success on its head and
 nothing else on that head failed, and GitHub says it merges cleanly. It is
 merged with a merge commit at that exact head (a push after the checks
-stops it), and its branch is deleted so a pull request stacked on it is
-aimed at main and looked at in the next pass. Nothing is retried: a
+stops it), and its branch is deleted once every pull request stacked on
+it is aimed at main, so those are looked at in the next pass. Nothing is retried: a
 pull request that is not ready is said and left for the next run.
 """
 
@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
 REQUIRED = ("Guard rail tests (VM's Python)", "Guard rail tests (One's Python)")
 BAD = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
@@ -112,6 +113,26 @@ def one_pass(repo, call, say, wait=time.sleep):
         say(f"#{n} merged at {sha[:7]}")
         merged += 1
         ref = p["head"]["ref"]
+        # GitHub aims a stacked pull request at main only when its own
+        # delete-on-merge removes the branch; deleting it through the API
+        # closes them instead (2 Nov: #96 closed when #95's branch went).
+        # So each one stacked on it is aimed at main first, and the branch
+        # stays when any of them could not be.
+        status, stacked = call("GET", f"/repos/{repo}/pulls?state=open&base={quote(ref, safe='')}&per_page=100")
+        if status != 200:
+            say(f"  its branch {ref} stays: the pull requests on it did not read ({status})")
+            continue
+        moved = True
+        for sp in stacked:
+            st, body = call("PATCH", f"/repos/{repo}/pulls/{sp['number']}", {"base": "main"})
+            if st != 200:
+                say(f"  #{sp['number']} was not aimed at main ({st}): {body.get('message', '')}")
+                moved = False
+            else:
+                say(f"  #{sp['number']}, stacked on it, now aims at main")
+        if not moved:
+            say(f"  its branch {ref} stays, so what is stacked on it stays open")
+            continue
         status, body = call("DELETE", f"/repos/{repo}/git/refs/heads/{ref}")
         if status not in (204, 422):
             say(f"  its branch {ref} was not deleted ({status}): {body.get('message', '')}")
