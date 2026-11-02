@@ -158,6 +158,37 @@ class Answers(unittest.TestCase):
         r = self.w.core.answer(self.w.patrick(), **World.answer_args(new, key="key-00000002"))
         self.assertEqual(r["revision"], 2)
 
+    def test_a_revision_that_changes_nothing_is_not_a_new_one(self):
+        """2 Nov: two overlapping Bramble sweeps revised #5458's card to revision
+        3 in three minutes. The same words again leave the shown revision
+        answerable."""
+        same = self.w.core.revise_card(self.w.bramble, self.c["id"], expected_revision=1, title="Pick one",
+                                       body="What is wrong, what was measured, each option.", options=OPTIONS,
+                                       recommendation="a", scope_of_yes="Only this one change.")
+        self.assertTrue(same["unchanged"])
+        self.assertEqual((same["revision"], same["attention_revision"]), (1, 1))
+        events = self.w.store.db.execute("SELECT count(*) FROM events WHERE kind = 'decision.revised'").fetchone()[0]
+        self.assertEqual(events, 0)
+        pushes = self.w.store.db.execute("SELECT status FROM push_outbox").fetchall()
+        self.assertEqual([r[0] for r in pushes], ["queued"], "the shown revision's push stands")
+        self.assertEqual(self.w.core.answer(self.w.patrick(), **World.answer_args(self.c))["revision"], 1)
+
+    def test_any_changed_part_is_a_new_revision(self):
+        base = dict(title="Pick one", body="What is wrong, what was measured, each option.", options=OPTIONS,
+                    recommendation="a", scope_of_yes="Only this one change.")
+        changed = [dict(base, title="Pick one, again"), dict(base, body="New evidence."),
+                   dict(base, recommendation="b"), dict(base, scope_of_yes="Only this, and the test."),
+                   dict(base, options=[dict(o, label=o["label"] + "!") for o in OPTIONS]),
+                   dict(base, options=list(reversed(OPTIONS)))]
+        rev = 1
+        for kw in changed:
+            out = self.w.core.revise_card(self.w.bramble, self.c["id"], expected_revision=rev, **kw)
+            self.assertNotIn("unchanged", out, kw)
+            self.assertEqual(out["revision"], rev + 1, kw)
+            rev = out["revision"]
+            out = self.w.core.revise_card(self.w.bramble, self.c["id"], expected_revision=rev, **base)
+            rev = out["revision"]
+
     def test_a_wrong_hash_is_refused(self):
         args = World.answer_args(self.c)
         args["artifact_sha256"] = "f" * 64

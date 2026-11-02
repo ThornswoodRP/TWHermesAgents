@@ -175,9 +175,18 @@ class DecisionCore:
             if row["revision"] != expected_revision:
                 raise CoreError(409, "stale_revision", f"the card is at revision {row['revision']}",
                                 revision=row["revision"])
+            # Nothing changed is not a new revision: a new one makes the answer
+            # Patrick may be giving to this one stale, for nothing.
+            sha = sha256_hex(body)
+            shown = [tuple(o) for o in db.execute(
+                "SELECT key, label, consequence FROM decision_options WHERE decision_id = ? AND revision = ? "
+                "ORDER BY position", (decision_id, row["revision"])).fetchall()]
+            if (row["title"], row["artifact_sha256"], row["recommendation"], row["scope_of_yes"], shown) == (
+                    title, sha, recommendation, scope_of_yes,
+                    [(o["key"], o["label"], o["consequence"]) for o in options]):
+                return self._card(db, row) | {"unchanged": True}
             rev = row["revision"] + 1
             art_rev = row["artifact_revision"] + 1
-            sha = sha256_hex(body)
             now = self.s.now()
             db.execute("INSERT INTO artifact_revisions(artifact_id, revision, sha256, media_type, body, created_by, "
                        "created_at) VALUES(?,?,?,?,?,?,?)",

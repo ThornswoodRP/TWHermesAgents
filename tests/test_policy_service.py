@@ -312,6 +312,101 @@ class OwedWakes(unittest.TestCase):
         self.assertEqual(policy().data["admission"]["queue_new_per_hour"], 20)
 
 
+class OneSweepAtATime(unittest.TestCase):
+    """2 Nov: two webhook turns of Bramble's, at 3:57:55 and 3:58:00 PM, each
+    did the whole sweep and both revised #5458's card. One sweep runs at a
+    time; a wake that comes while one runs is owed, and runs after it."""
+
+    def sweep(self, s, task="wake"):
+        return s.admit("hermes", {"bot": "bramble", "task": task, "source": "webhook", "sweep": True})
+
+    def after(self):
+        import copy
+        data = copy.deepcopy(policy().data)
+        data["admission"]["stage"] = "after"
+        return data
+
+    def test_a_second_sweep_is_turned_away_while_one_runs_and_starts_once_it_ends(self):
+        s = service(data=self.after())
+        first = self.sweep(s)
+        self.assertEqual(first["state"], "admitted")
+        with self.assertRaises(Refused) as e:
+            self.sweep(s, "wake2")
+        self.assertIn("one sweep runs at a time", str(e.exception))
+        self.assertEqual(s.db.execute("SELECT COUNT(*) FROM tickets").fetchone()[0], 1, "no ticket spent on it")
+        s.finish("hermes", {"bot": "bramble", "ticket": first["ticket"]})
+        self.assertEqual(self.sweep(s, "wake3")["state"], "admitted")
+
+    def test_bramble_s_other_turns_and_other_bots_run_beside_a_sweep(self):
+        s = service(data=self.after())
+        self.sweep(s)
+        self.assertEqual(s.admit("hermes", {"bot": "bramble", "task": "room", "source": "discord"})["state"], "admitted")
+        self.assertEqual(s.admit("hermes", {"bot": "rift", "task": "t"})["state"], "admitted")
+
+    def test_a_waiting_sweep_is_turned_away_once_another_sweep_got_in(self):
+        s = service()
+        rift = s.admit("hermes", {"bot": "rift", "task": "t"})["ticket"]
+        waiting = self.sweep(s)
+        self.assertEqual(waiting["state"], "waiting")
+        s.finish("hermes", {"bot": "rift", "ticket": rift})
+        s.db.execute("UPDATE tickets SET state='admitted', admitted_at=?, seen_at=? WHERE id=?",
+                     ("2026-11-02T12:00:00+00:00", "2026-11-02T12:00:00+00:00", waiting["ticket"]))
+        s.db.execute("INSERT INTO tickets(id, bot, kind, risk, task, source, state, created_at, sweep) "
+                     "VALUES('w2','bramble','turn','high','wake2','webhook','waiting','2026-11-02T12:00:00+00:00',1)")
+        with self.assertRaises(Refused):
+            s.admit("hermes", {"bot": "bramble", "ticket": "w2"})
+        self.assertEqual(s.db.execute("SELECT state FROM tickets WHERE id='w2'").fetchone()[0], "done",
+                         "it holds no place in the line")
+
+    def test_only_the_router_sweeps(self):
+        with self.assertRaises(Refused):
+            service().admit("hermes", {"bot": "rift", "task": "t", "sweep": True})
+
+    def test_an_owed_wake_is_not_due_while_a_sweep_runs(self):
+        s = service(data=self.after())
+        first = self.sweep(s)
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "r"})
+        due = s.wake_due("hermes", {"bot": "bramble"})
+        self.assertFalse(due["due"])
+        self.assertIn("one sweep runs at a time", due["why_not"])
+        s.finish("hermes", {"bot": "bramble", "ticket": first["ticket"]})
+        self.assertTrue(s.wake_due("hermes", {"bot": "bramble"})["due"])
+
+    def test_a_sweep_pays_what_was_owed_when_it_started_and_not_what_came_during_it(self):
+        clock = Clock()
+        s = service(clock=clock, data=self.after())
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "before"})
+        clock.advance(seconds=1)
+        first = self.sweep(s)
+        clock.advance(seconds=5)
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "during"})
+        s.finish("hermes", {"bot": "bramble", "ticket": first["ticket"]})
+        out = s.wake_paid("hermes", {"bot": "bramble", "ticket": first["ticket"]})
+        self.assertFalse(out["paid"])
+        self.assertTrue(s.wake_due("hermes", {"bot": "bramble"})["due"])
+        clock.advance(seconds=5)
+        second = self.sweep(s, "owed")
+        s.finish("hermes", {"bot": "bramble", "ticket": second["ticket"]})
+        self.assertTrue(s.wake_paid("hermes", {"bot": "bramble", "ticket": second["ticket"]})["paid"])
+        self.assertFalse(s.wake_due("hermes", {"bot": "bramble"})["owed"])
+
+    def test_a_store_made_before_the_sweep_column_takes_it(self):
+        import sqlite3
+        db = Path(tempfile.mkdtemp()) / "policy.db"
+        old = sqlite3.connect(str(db))
+        old.execute("CREATE TABLE tickets (id TEXT PRIMARY KEY, bot TEXT NOT NULL, kind TEXT NOT NULL, "
+                    "risk TEXT NOT NULL, task TEXT NOT NULL, source TEXT NOT NULL, state TEXT NOT NULL, "
+                    "created_at TEXT NOT NULL, admitted_at TEXT, seen_at TEXT, finished_at TEXT, reason TEXT)")
+        old.execute("INSERT INTO tickets VALUES('t0','rift','turn','high','t','chat','done','2026-11-01T00:00:00+00:00',"
+                    "NULL,NULL,NULL,NULL)")
+        old.commit()
+        old.close()
+        s = service(db=db, data=self.after())
+        self.assertEqual(self.sweep(s)["state"], "admitted")
+        self.assertEqual(s.db.execute("SELECT sweep FROM tickets WHERE id='t0'").fetchone()[0], 0)
+
+
+
 class Operations(unittest.TestCase):
     def begin(self, s, **kw):
         args = dict(bot="bramble", task="t1", action="merge", repo=APP, target="pr/42", commit=HEAD)
