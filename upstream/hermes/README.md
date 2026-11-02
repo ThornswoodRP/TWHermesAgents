@@ -1,6 +1,6 @@
 # Fixes for Hermes itself, to send upstream
 
-Two causes found on 1 Nov 2026 are in Hermes, not in this repository, so
+Three causes found on 1 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM runs.
@@ -10,8 +10,8 @@ Hermes release.
 Apply them in order on a checkout of that commit:
 
 ```
-git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch
-python -m pytest -q tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py
+git am 0001-spill-path-idle-sandbox.patch 0002-ratelimit-headers-logged.patch 0003-spill-fallback-posix-path.patch
+scripts/run_tests.sh tests/tools/test_tool_result_storage.py tests/agent/test_ratelimit_headers_logged.py tests/agent/test_retry_delay_parsers_shared.py
 ```
 
 ## 0001: the "too large" note names a path the Bot can read
@@ -45,3 +45,24 @@ only the body and an 836-second cooldown.
 The fix keeps every `anthropic-ratelimit-*`, `x-ratelimit-*` and
 `retry-after` header of a refusal (counters, statuses and times; never a
 credential) and logs them in one line.
+
+## 0003: the sandbox fallback path is POSIX on every host
+
+Cause: when a terminal environment names no temp dir, Hermes writes an
+oversized result inside it at `STORAGE_DIR`, which came from the host's
+`tempfile.gettempdir()`. On Windows that is a backslash path, quoted by
+`shlex.quote`, that the environment's POSIX shell cannot use. Seen 2 Nov:
+`test_tool_use_id_cannot_escape_storage_dir` failed on One (Windows) on
+v0.22.5 with and without 0001 and 0002, and only there.
+
+The fix makes it `/tmp/hermes-results`, the same default as
+`BaseEnvironment.get_temp_dir()`, with a test that holds it.
+
+## Test results so far
+
+- Windows (One, Python 3.14, 2 Nov), 0001 and 0002: test_tool_result_storage
+  58 passed and 1 failed (the 0003 cause, also failing without the patches),
+  test_ratelimit_headers_logged 3 passed, test_retry_delay_parsers_shared 9
+  passed.
+- Linux: not run yet. The upstream pull requests wait on a Linux run of all
+  three.
