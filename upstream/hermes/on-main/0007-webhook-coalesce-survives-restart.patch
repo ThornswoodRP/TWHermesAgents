@@ -1,4 +1,4 @@
-From ebaaf97669d9cad517cde955f75fd7e8bded9586 Mon Sep 17 00:00:00 2001
+From 88ad2c9509fe159e9c0e5e21e21daddd0de018ca Mon Sep 17 00:00:00 2001
 From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 18:20:10 +0000
 Subject: [PATCH] fix(webhook): a coalesced delivery survives a gateway restart
@@ -27,8 +27,8 @@ given back so a resend runs.
 ---
  gateway/platforms/webhook.py             |  52 ++++++++-
  gateway/platforms/webhook_coalesce.py    | 132 +++++++++++++++++++++--
- tests/gateway/test_webhook_coalescing.py | 107 +++++++++++++++++-
- 3 files changed, 277 insertions(+), 14 deletions(-)
+ tests/gateway/test_webhook_coalescing.py | 115 +++++++++++++++++++-
+ 3 files changed, 284 insertions(+), 15 deletions(-)
 
 diff --git a/gateway/platforms/webhook.py b/gateway/platforms/webhook.py
 index 1982cee745..38fa84b545 100644
@@ -323,19 +323,22 @@ index 803b8598ce..8454e62b69 100644
 +            "count": entry.count, "superseded": list(entry.superseded),
 +            "dispatch_kwargs": {k: entry.dispatch_kwargs.get(k) for k in _SPOOLED_KWARGS}}
 diff --git a/tests/gateway/test_webhook_coalescing.py b/tests/gateway/test_webhook_coalescing.py
-index ba9a0cb1d5..80011acad3 100644
+index ba9a0cb1d5..e3c39297be 100644
 --- a/tests/gateway/test_webhook_coalescing.py
 +++ b/tests/gateway/test_webhook_coalescing.py
-@@ -3,6 +3,8 @@ a single agent run on the latest event's state; unrelated or unkeyed events are
+@@ -2,7 +2,11 @@
+ a single agent run on the latest event's state; unrelated or unkeyed events are never merged."""
  
  import asyncio
++import hashlib
++import hmac
  import json
 +import os
 +import stat
  from types import SimpleNamespace
  from unittest.mock import MagicMock
  
-@@ -33,7 +35,8 @@ def _capture_admissions(adapter, monkeypatch):
+@@ -33,7 +37,8 @@ def _capture_admissions(adapter, monkeypatch):
  
      monkeypatch.setattr(webhook_ingress, "admit_producer", _admit)
      monkeypatch.setattr(adapter, "_finalize_delivery", _finalize)
@@ -345,7 +348,20 @@ index ba9a0cb1d5..80011acad3 100644
      monkeypatch.setattr("gateway.session_authorities.authority_for_profile_id", lambda runner, pid: object())
      return admitted
  
-@@ -145,3 +148,105 @@ async def test_disconnect_flushes_pending_groups(monkeypatch):
+@@ -43,9 +48,11 @@ def _coalesce_route(**coalesce):
+             "coalesce": coalesce or {"key": "pull_request.number"}}
+ 
+ 
+-def _mock_request(body: bytes, route_name: str = "pr", delivery_id: str = ""):
++def _mock_request(body: bytes, route_name: str = "pr", delivery_id: str = "", secret: str = ""):
+     req = MagicMock()
+     req.headers = {"X-GitHub-Delivery": delivery_id} if delivery_id else {}
++    if secret:  # a route with a real secret only accepts a signed body
++        req.headers["X-Hub-Signature-256"] = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+     req.content_length = len(body)
+     req.match_info = {"route_name": route_name}
+     req.method = "POST"
+@@ -145,3 +152,107 @@ async def test_disconnect_flushes_pending_groups(monkeypatch):
      assert len(admitted) == 1
      assert admitted[0].message_id == "pend"
      assert adapter._coalescer.pending == {}
@@ -368,7 +384,9 @@ index ba9a0cb1d5..80011acad3 100644
 +    adapter = _make_adapter(routes={"pr": route})
 +    admitted = _capture_admissions(adapter, monkeypatch)
 +    for i in range(2):
-+        await adapter._handle_webhook(_mock_request(_payload(9), delivery_id=f"r{i}"))
++        resp = await adapter._handle_webhook(_mock_request(_payload(9), delivery_id=f"r{i}", secret="s3cret-hmac"))
++        assert (resp.status, json.loads(resp.text)["status"]) == (202, "coalesced")
++    assert [r["delivery_id"] for r in _spool(adapter).values()] == ["r1"]
 +    adapter.set_message_handler(None)  # drain_gateway_runtime
 +    await adapter.disconnect()
 +    assert admitted == []

@@ -83,7 +83,7 @@ are back to `select()`, and the Codex stand-ins take `model`.
 
 ## 0007: a coalesced webhook delivery survives a gateway restart
 
-Made against upstream main `f0d94882` (2 Nov 2026), in `on-main/`.
+Made against upstream main `013bde47` (2 Nov 2026), in `on-main/`.
 
 Cause, measured on the VM (gateway.log line 2032, 1 Nov 10:31:12 PM, during
 the #72 install's gateway stop): two GitHub deliveries on the coalesced
@@ -111,12 +111,20 @@ then next run, admitted and refused, a newer event during admission, a gone
 route and a bad spool); the existing helper's runner now has a session
 authority, as `producer_scope` requires. The coalescer's own spool logic
 passed a stand-alone run here; the gateway tests need upstream's test
-environment, so run them before the pull request is opened:
+environment with the `messaging` extra (aiohttp), so run them before the pull
+request is opened:
 
 ```
 git am on-main/0007-webhook-coalesce-survives-restart.patch
-scripts/run_tests.sh tests/gateway/test_webhook_coalescing.py tests/gateway/test_webhook_adapter.py tests/gateway/test_webhook_authority.py
+python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
+HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/gateway/test_webhook_coalescing.py tests/gateway/test_webhook_adapter.py tests/gateway/test_webhook_authority.py -q -rfE
 ```
+
+The first run on 2 Nov (with aiohttp) failed only the drain test, 5 of 5:
+its requests went to a route with a real HMAC secret unsigned, so the
+adapter answered 401 and nothing was ever coalesced or spooled. The test
+now signs them and checks each answer is `202 coalesced` and the spool holds
+the group before the stop. Upstream without 0007 passed 71 of 71.
 
 ## On upstream main
 
