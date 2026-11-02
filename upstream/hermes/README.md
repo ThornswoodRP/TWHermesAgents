@@ -51,7 +51,7 @@ credential) and logs them in one line.
 Cause: when a terminal environment names no temp dir, Hermes writes an
 oversized result inside it at `STORAGE_DIR`, which came from the host's
 `tempfile.gettempdir()`. On Windows that is a backslash path, quoted by
-`shlex.quote`, that the environment's POSIX shell cannot use. Seen 2 Nov:
+`shlex.quote`, that the environment's POSIX shell cannot use. Seen 1 Nov:
 `test_tool_use_id_cannot_escape_storage_dir` failed on One (Windows) on
 v0.22.5 with and without 0001 and 0002, and only there.
 
@@ -60,7 +60,7 @@ The fix makes it `/tmp/hermes-results`, the same default as
 
 ## Test results so far
 
-- Windows (One, Python 3.14, 2 Nov), 0001 and 0002: test_tool_result_storage
+- Windows (One, Python 3.14, 1 Nov), 0001 and 0002: test_tool_result_storage
   58 passed and 1 failed (the 0003 cause, also failing without the patches),
   test_ratelimit_headers_logged 3 passed, test_retry_delay_parsers_shared 9
   passed.
