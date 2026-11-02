@@ -14,7 +14,7 @@ const { chromium } = require('playwright')
 // opened card taken off, and the plan the app follows when the browser's
 // subscription is not the one the core has.
 // Started by test_decisions_phone_browser.py.
-const [port, code, card, high, third] = process.argv.slice(2)
+const [port, code, card, high, third, boardNext] = process.argv.slice(2)
 const base = `http://localhost:${port}`
 ;(async () => {
   // channel 'chromium': the full browser in its new headless mode. The bare
@@ -666,18 +666,20 @@ const base = `http://localhost:${port}`
     if (await page.getByLabel('Start a new chat').count()) throw new Error('a composer while it is off')
   })
   await page.getByRole('link', { name: 'Board' }).click()
-  await step('the Board, as text', () => page.getByText('Fix the <b>launcher</b> log').waitFor({ timeout: 5000 }))
-  await step("the Board shows each Bot's GitHub work under it, linked to github.com", async () => {
-    await page.getByText('#5033 The site hub says <i>which</i> page is open').waitFor({ timeout: 5000 })
-    await page.getByText('Pull request #5367 open · checks: 18 of 20 passed, 2 failed · auto-merge on').waitFor({ timeout: 3000 })
-    await page.getByText('Claimed, no pull request yet').waitFor({ timeout: 3000 })
-    const href = await page.locator('[data-item="ThornswoodRP/Thornswood#5033"]').getAttribute('href')
-    if (href !== 'https://github.com/ThornswoodRP/Thornswood/pull/5367') throw new Error('href ' + href)
-    const issue = await page.locator('[data-item="ThornswoodRP/Thornswood#5191"]').getAttribute('href')
-    if (issue !== 'https://github.com/ThornswoodRP/Thornswood/issues/5191') throw new Error('href ' + issue)
-    const heads = await page.locator('.row.head strong').allTextContents()
-    if (JSON.stringify(heads) !== JSON.stringify(['Bramble', 'Rift', 'Sprocket', 'Echo', 'Magpie', 'Wisp'])) throw new Error(JSON.stringify(heads))
-    await page.locator('[data-bot="rift"]', { hasText: 'Nothing claimed' }).waitFor({ timeout: 3000 })
+  await step("the Board shows only the turns running now, in the Bots' order, as text", async () => {
+    await page.getByText('Rebuild the <b>load order</b>').waitFor({ timeout: 5000 })
+    const rows = await page.locator('.row.doing').evaluateAll(rs => rs.map(r => [r.dataset.bot,
+      r.querySelector('.what').textContent, (r.querySelector('.t .quiet') || {}).textContent || '']))
+    const want = [['rift', 'Running a command', 'Rebuild the <b>load order</b>'], ['sprocket', 'Reading a file', 'Installer log'],
+      ['sprocket', 'Using the browser', 'Launcher news'], ['echo', 'Thinking', '']]
+    if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(rows))
+    // Bramble, Magpie and Wisp run nothing: no row, no heading, no history.
+    if (await page.locator('[data-bot="bramble"], [data-bot="magpie"], [data-bot="wisp"]').count()) throw new Error('an idle Bot')
+    if (!/^(just now|\d+ min|\d+ h \d+ min)$/.test(await page.locator('.row.doing .w').first().textContent())) throw new Error('how long')
+  })
+  await step('the Board follows a change by itself, with no tap', async () => {
+    require('fs').writeFileSync(boardNext, '')
+    await page.locator('[data-bot="rift"] .what', { hasText: 'Thinking' }).waitFor({ timeout: 8000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-board.png', fullPage: true })
   await page.getByRole('link', { name: 'Rooms' }).click()
@@ -723,7 +725,7 @@ const base = `http://localhost:${port}`
   await step("the room's first path opens the Workbench room", () => page.getByLabel('Message to Thornswood Workbench').waitFor({ timeout: 5000 }))
   await page.goto(base + '/m/work')
   await step('the old Work path opens the Board', async () => {
-    await page.getByText('Fix the <b>launcher</b> log').waitFor({ timeout: 5000 })
+    await page.getByText('Rebuild the <b>load order</b>').waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/board')) throw new Error('url ' + page.url())
   })
   await page.goto(base + '/m/settings')

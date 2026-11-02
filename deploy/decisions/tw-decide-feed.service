@@ -1,8 +1,8 @@
-# tw-decide-feed: reads the Bots' Kanban and the Workbench room read-only, and their
-# GitHub work through tw-git's read op over its socket (no credential here), as
-# the hermes user, and sends the decision core one snapshot of each (step 3).
+# tw-decide-feed: reads the Workbench room and the Bot Chats read-only, as the
+# hermes user, and sends the decision core one snapshot of each (step 3). The
+# Board is tw-decide-live's.
 [Unit]
-Description=Thornswood decision core feeds (Work and Room)
+Description=Thornswood decision core feeds (Room and Bot Chats)
 After=tw-decide.service
 
 [Service]

@@ -119,7 +119,7 @@ def build(policy: Policy, bot: str) -> dict:
             "deny": list(DENY_COMMANDS),
         },
         "plugins": {
-            "enabled": ["thornswood_guard"],
+            "enabled": ["thornswood_guard", "thornswood_live"],
             "auto_apply": False,
             "auto_update_check_hours": 0,
             "hook_callback_timeout": HOOK_TIMEOUT,

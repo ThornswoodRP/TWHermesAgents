@@ -51,7 +51,7 @@ class PhoneInChromium(unittest.TestCase):
         try:
             info = json.loads(server.stdout.readline())
             out = subprocess.run([shutil.which("node"), str(HERE / "decisions_phone_check.js"), str(port),
-                                  info["code"], info["card"], info["high"], info["third"]], env=ENV, capture_output=True, text=True, timeout=180)
+                                  info["code"], info["card"], info["high"], info["third"], info["board_next"]], env=ENV, capture_output=True, text=True, timeout=180)
         finally:
             server.terminate()
             server.wait(timeout=10)

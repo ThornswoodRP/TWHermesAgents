@@ -13,6 +13,7 @@ messages sent to it.
 """
 import json
 import sys
+import tempfile
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent)); sys.path.insert(0, str(HERE))
@@ -36,9 +37,17 @@ w.card(by=w.rift, task="load-order", title="Rebuild the load order now?", source
 f = Feeds(w.store)
 tw = f.new_token(w.ws, "work", by="t"); tr = f.new_token(w.ws, "room", by="t"); tb = f.new_token(w.ws, "bots", by="t")
 f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}]}]})
-f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "tasks": [{"id": "t1", "title": "Fix the <b>launcher</b> log", "assignee": "sprocket", "status": "running"}],
-                         "items": [{"repo": "ThornswoodRP/Thornswood", "number": 5033, "title": "The site hub says <i>which</i> page is open", "bot": "echo", "stage": "pr_open", "pr": 5367, "pr_repo": "ThornswoodRP/Thornswood", "pr_title": "The hub marks its open tab", "checks": "failing", "checks_line": "18 of 20 passed, 2 failed", "auto_merge": True, "updated_at": "2026-11-01T17:30:00+00:00"},
-                                   {"repo": "ThornswoodRP/Thornswood", "number": 5191, "title": "Generated content tables are built from their sources", "bot": "magpie", "stage": "claimed", "updated_at": "2026-11-01T17:00:00+00:00"}]})
+# The live Board: Rift running a command in a session with a title, Echo thinking with none, and Sprocket's
+# two turns at once. When the test makes the file BOARD_NEXT, Rift's command has ended and it is thinking.
+BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:00"},
+         {"bot": "rift", "title": "Rebuild the <b>load order</b>", "state": "tool", "tool": "terminal",
+          "since": "2026-11-01T17:40:00+00:00"},
+         {"bot": "sprocket", "title": "Installer log", "state": "tool", "tool": "read_file",
+          "since": "2026-11-01T17:50:00+00:00"},
+         {"bot": "sprocket", "title": "Launcher news", "state": "tool", "tool": "browser_navigate",
+          "since": "2026-11-01T17:55:00+00:00"}]
+f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "doing": BOARD})
+BOARD_NEXT = Path(tempfile.mkdtemp()) / "board-next"
 # A Bot's message in Markdown, longer than a list line: the Rooms list shows its plain words, cut at a word.
 ROOM_MD = ("@bramble it'll show up on #5367, and it'll run, not skip.\n- **Why it isn't there yet:** "
            "`Launcher builds` has `needs: pick` and [the guide](https://example.invalid/g) says so.\n\n## Next\n1. merge it")
@@ -289,8 +298,17 @@ def bots_pages():
         chat.doing(w.ws, tc, {"turns": [{"id": WISP, "state": "writing"}]})
         time.sleep(0.3)
 threading.Thread(target=bots_pages, daemon=True).start()
+def board_feed():
+    # What live_reader.py does on the VM: the Board sent again when it changes.
+    while not BOARD_NEXT.exists():
+        time.sleep(0.2)
+    nxt = [dict(d, state="thinking", tool="") if d["bot"] == "rift" else d for d in BOARD]
+    Feeds(Store(w.path, clock=w.clock)).put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:05+00:00",
+                                                              "doing": nxt})
+threading.Thread(target=board_feed, daemon=True).start()
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
 srv = make_server(api, "127.0.0.1", port)
-print(json.dumps({"code": code, "card": card["id"], "high": high["id"], "third": third["id"]}), flush=True)
+print(json.dumps({"code": code, "card": card["id"], "high": high["id"], "third": third["id"],
+                  "board_next": str(BOARD_NEXT)}), flush=True)
 srv.serve_forever()

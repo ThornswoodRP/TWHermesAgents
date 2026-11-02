@@ -662,60 +662,22 @@ function answered(c, o) {
 }
 let answerBack = null  // the Bot Chat a card was answered from
 
-// The Board: what each Bot is working on, read from GitHub (the issues it has
-// claimed and the pull requests from its branches) by the feed once in each 5
-// minutes, grouped by Bot in the Bots list's order. Hermes's Kanban tasks show
-// under them only when there are any (the Bots keep none now). Each row opens
-// the pull request while one is open, otherwise the issue, always on github.com.
-const STAGE = {
-  claimed: () => 'Claimed, no pull request yet',
-  pr_open: i => `Pull request #${i.pr} open`,
-  pr_draft: i => `Draft pull request #${i.pr}`,
-  merged: i => `Pull request #${i.pr} merged`,
-  closed: i => `Pull request #${i.pr} closed without merging`
-}
-const CHECKS = { passed: 'checks passed', failing: 'checks failing', running: 'checks running', none: 'no checks yet' }
-const REPO_SHORT = { 'ThornswoodRP/Thornswood': 'Thornswood', 'ThornswoodRP/Thornswood-Ops': 'Ops', 'ThornswoodRP/skymp': 'skymp' }
-const GH_REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/
+// The Board, live (Patrick, 2 Nov: "only what each is currently doing"): one row for each turn a Bot is
+// running now, in the Bots list's order, with the session's title, what the turn is doing and for how long.
+// A Bot with nothing running has no row, and nothing that ended stays. The VM sends it every 2 seconds while
+// it changes and the Board reads it again every 3 seconds while it is open. Its words are the Bot Chat's
+// live line (doingWords). When the VM has not sent it for a minute and a half, the Board says so instead of
+// showing what may have ended.
+const LIVE_MS = 3000
 
-function workLink(i) {
-  const open = (i.stage === 'pr_open' || i.stage === 'pr_draft') && i.pr && GH_REPO.test(i.pr_repo)
-  if (open) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
-  if (i.number && GH_REPO.test(i.repo)) return `https://github.com/${i.repo}/issues/${i.number}`
-  if (i.pr && GH_REPO.test(i.pr_repo)) return `https://github.com/${i.pr_repo}/pull/${i.pr}`
-  return null
-}
-
-function workRow(i) {
-  const progress = [STAGE[i.stage] ? STAGE[i.stage](i) : i.stage]
-  if (i.checks && (i.stage === 'pr_open' || i.stage === 'pr_draft')) {
-    progress.push(i.checks_line ? `checks: ${i.checks_line}` : CHECKS[i.checks] || i.checks)
-  }
-  if (i.auto_merge && i.stage === 'pr_open') progress.push('auto-merge on')
-  const href = workLink(i)
-  const attrs = href ? { href, target: '_blank', rel: 'noopener noreferrer' } : {}
-  const cls = 'row work' + (i.stage === 'merged' || i.stage === 'closed' ? ' done' : '')
-  return el(href ? 'a' : 'div', { ...attrs, class: cls, 'data-item': `${i.repo}#${i.number || 'pr' + i.pr}` },
-    el('div', { class: 't' },
-      el('strong', {}, (i.number ? `#${i.number} ` : '') + i.title),
-      el('span', { class: 'quiet' }, REPO_SHORT[i.repo] || i.repo),
-      el('span', { class: i.checks === 'failing' ? 'warn' : 'what' }, progress.join(' · '))),
-    el('div', { class: 'w' }, updated(i.updated_at)))
-}
-
-function botCount(open, done) {
-  if (!open && !done) return 'Nothing claimed'
-  return [open ? `${open} open` : null, done ? `${done} finished in the last day` : null].filter(Boolean).join(', ')
-}
-
-// Today's time alone; an older day with its date.
-function updated(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (isNaN(d)) return iso
-  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  return d.toDateString() === new Date().toDateString() ? time
-    : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+// How long a turn has run: under a minute, then minutes, then hours and minutes.
+function forHowLong(iso) {
+  const t = new Date(iso)
+  if (isNaN(t)) return ''
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (s < 60) return 'just now'
+  const m = Math.floor(s / 60)
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`
 }
 
 async function boardView() {
@@ -724,25 +686,23 @@ async function boardView() {
   if (refused(r)) return
   const work = r.body.work
   const bar = screenBar({ title: 'Board', heading: true })
-  if (!work) return show(bar, el('p', { class: 'quiet' }, 'No work has come in from the Bots yet.'))
-  const items = work.items
-  const tasks = work.tasks || []
+  if (!work || !Array.isArray(work.doing)) {
+    return show(bar, el('p', { class: 'quiet' }, 'The Board has not heard from the Bots yet.'))
+  }
+  if (!r.body.live) {
+    return show(bar, el('p', { class: 'warn', role: 'status' },
+      `The Board has not heard from the Bots since ${when(r.body.received_at)}, so it cannot say what they are doing.`))
+  }
   const rank = b => (ORDER.indexOf(b) + 1) || ORDER.length + 1
-  const bots = [...new Set([...ORDER, ...(items || []).map(i => i.bot)])].sort((a, b) => rank(a) - rank(b))
-  show(bar,
-    items ? bots.map(b => {
-      const mine = items.filter(i => i.bot === b)
-      const open = mine.filter(i => i.stage !== 'merged' && i.stage !== 'closed').length
-      return [
-        el('div', { class: 'row head', 'data-bot': b }, avatar(b, NAMES[b] || b),
-          el('div', { class: 't' }, el('strong', {}, NAMES[b] || b),
-            el('span', { class: 'quiet' }, botCount(open, mine.length - open)))),
-        mine.map(workRow)]
-    }) : el('p', { class: 'quiet' }, 'Nothing yet.'),
-    tasks.length ? [el('h2', { class: 'section' }, "Hermes's Kanban"),
-      el('table', {},
-        el('tr', {}, el('th', {}, 'Task'), el('th', {}, 'Who'), el('th', {}, 'State')),
-        tasks.map(t => el('tr', {}, el('td', {}, t.title), el('td', {}, t.assignee), el('td', {}, t.status))))] : null)
+  const rows = [...work.doing].sort((a, b) => rank(a.bot) - rank(b.bot) || (a.since < b.since ? -1 : 1))
+  show(bar, rows.length ? rows.map(d => el('div', { class: 'row doing', 'data-bot': d.bot },
+    avatar(d.bot, NAMES[d.bot] || d.bot),
+    el('div', { class: 't' },
+      el('strong', {}, NAMES[d.bot] || d.bot),
+      d.title ? el('span', { class: 'quiet' }, d.title) : null,
+      el('span', { class: 'what', 'data-doing': d.state }, doingWords(d))),
+    el('div', { class: 'w' }, forHowLong(d.since))))
+    : el('p', { class: 'quiet' }, 'No Bot is working right now.'))
 }
 
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
@@ -1893,7 +1853,8 @@ const TOOL_WORDS = {
   session_search: 'Searching past chats', clarify: 'Asking you something', cronjob_manage: 'Setting up a scheduled job',
   vision_analyze: 'Looking at an image', image_generate: 'Making an image', video_analyze: 'Watching a video',
   video_generate: 'Making a video', text_to_speech: 'Making audio', computer_use: 'Using the computer',
-  react_to_message: 'Reacting to a message'
+  react_to_message: 'Reacting to a message', tw_git: 'Working on GitHub', tw_files: 'Working in its folder',
+  tw_decide: 'Asking you on a card', send_message: 'Sending a message'
 }
 function doingWords(doing) {
   if (!doing) return 'Starting'
@@ -2802,5 +2763,10 @@ if ('serviceWorker' in navigator) {
   })
 }
 pollTimer = setInterval(poll, POLL_MS)
+// The Board is live: read again every 3 seconds while it is the page open and nothing is being answered.
+setInterval(() => {
+  if (csrf && document.visibilityState === 'visible' && !answering && location.pathname === '/m/board' &&
+    !document.querySelector('.sheet-back')) boardView()
+}, LIVE_MS)
 installBar()
 route()
