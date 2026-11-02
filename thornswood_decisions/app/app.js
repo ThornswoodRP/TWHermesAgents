@@ -586,20 +586,45 @@ async function cardView(id, note) {
 // stored): when the card was stored, when the core's worker handed its alert to the push service, and
 // when this phone got it (the service worker keeps that time on the phone, sw.js). To the second, so a
 // late alert says which hop was slow without anyone being asked to measure it.
+//
+// The phone's time goes beside the alert it belongs to: a revised card is alerted again, so the time
+// an earlier alert reached the phone is said as that (Patrick's screenshot, 2 Nov 4:01 PM: "card
+// 4:01:27 PM, not sent (queued), on this phone 4:01:21 PM"). While the alert is still on its way the
+// line follows it, read again from the core, so a card opened in the seconds before the worker's next
+// round does not keep saying "not sent" after it went.
+const ALERT_FOLLOW_MS = 3000
+const ALERT_FOLLOW_TRIES = 40
 function alertTimes(c) {
   if (!c.alert) return null
   const t = iso => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
   const line = el('p', { class: 'quiet alert-times', 'data-alert': c.alert.status })
-  const say = shown => {
-    line.textContent = 'Alert: card ' + t(c.alert.queued_at) +
-      (c.alert.sent_at ? ', sent ' + t(c.alert.sent_at) : ', not sent (' + c.alert.status + ')') +
-      (shown ? ', on this phone ' + t(shown) : '')
+  let alert = c.alert
+  let seen = null
+  const say = () => {
+    line.dataset.alert = alert.status
+    const mine = seen && (seen.attention_revision == null || seen.attention_revision === alert.attention_revision)
+    line.textContent = 'Alert: card ' + t(alert.queued_at) +
+      (alert.sent_at ? ', sent ' + t(alert.sent_at) : ', not sent (' + alert.status + ')') +
+      (seen ? (mine ? ', on this phone ' : ', an earlier alert on this phone ') + t(seen.shown_at) : '')
   }
-  say(null)
-  if ('caches' in window) {
-    caches.open('tw-alerts').then(k => k.match('/m/alerts/' + c.id)).then(r => r ? r.json() : null)
-      .then(j => { if (j && j.shown_at) say(j.shown_at) }).catch(() => {})
+  const look = () => 'caches' in window
+    ? caches.open('tw-alerts').then(k => k.match('/m/alerts/' + c.id)).then(r => r ? r.json() : null)
+      .then(j => { if (j && j.shown_at) seen = j }).catch(() => {})
+    : Promise.resolve()
+  say()
+  look().then(say)
+  const follow = async tries => {
+    if (tries <= 0 || !(alert.status === 'queued' || alert.status === 'leased')) return
+    await new Promise(r => setTimeout(r, ALERT_FOLLOW_MS))
+    if (!line.isConnected) return
+    const r = await call('GET', '/cards/' + encodeURIComponent(c.id))
+    if (r.status !== 200 || !r.body.alert || !line.isConnected) return
+    alert = r.body.alert
+    await look()
+    say()
+    follow(tries - 1)
   }
+  follow(ALERT_FOLLOW_TRIES)
   return line
 }
 

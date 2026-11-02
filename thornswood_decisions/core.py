@@ -442,9 +442,10 @@ class DecisionCore:
 
     @staticmethod
     def _alert_of(db, decision_id: str) -> dict | None:
-        r = db.execute("SELECT created_at, updated_at, status FROM push_outbox WHERE decision_id = ? "
+        r = db.execute("SELECT created_at, updated_at, status, attention_revision FROM push_outbox WHERE decision_id = ? "
                        "ORDER BY attention_revision DESC LIMIT 1", (decision_id,)).fetchone()
         if not r:
             return None
-        return {"queued_at": r["created_at"], "status": r["status"],
+        # Which alert this is: a revised card gets a new one, and the phone keeps when each reached it by this.
+        return {"queued_at": r["created_at"], "status": r["status"], "attention_revision": r["attention_revision"],
                 "sent_at": r["updated_at"] if r["status"] == "sent" else None}

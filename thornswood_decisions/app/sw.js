@@ -45,9 +45,12 @@ self.addEventListener('push', event => {
   let data = {}
   try { data = event.data ? event.data.json() : {} } catch (err) { data = {} }
   const id = typeof data.decision_id === 'string' && CARD_ID.test(data.decision_id) ? data.decision_id : null
-  // When this phone got the alert, kept on the phone only, so the card can say how long it took.
+  // When this phone got the alert, kept on the phone only, so the card can say how long it took, with which
+  // of the card's alerts it was: a revised card is alerted again, and a time from its first alert beside the
+  // second's state read as the second reaching the phone before it was queued (Patrick, 2 Nov 4:01 PM).
+  const rev = Number.isInteger(data.attention_revision) ? data.attention_revision : null
   if (id) event.waitUntil(caches.open(ALERTS).then(c => c.put(new Request('/m/alerts/' + id),
-    new Response(JSON.stringify({ shown_at: new Date().toISOString() }), { headers: { 'Content-Type': 'application/json' } }))))
+    new Response(JSON.stringify({ shown_at: new Date().toISOString(), attention_revision: rev }), { headers: { 'Content-Type': 'application/json' } }))))
   event.waitUntil(self.registration.showNotification('Hermes needs you', {
     tag: id ? 'decision:' + id : 'thornswood',
     renotify: false,

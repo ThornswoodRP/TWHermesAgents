@@ -141,6 +141,17 @@ const base = `http://localhost:${port}`
     const t = await page.locator('.alert-times').textContent({ timeout: 3000 })
     if (!/^Alert: card \d{1,2}:\d{2}:\d{2}\s?[AP]M, not sent \(\w+\)$/.test(t)) throw new Error('alert line ' + JSON.stringify(t))
   })
+  await step("the phone's time goes with its own alert: one from an earlier alert of the card is said as that", async () => {
+    const put = rev => page.evaluate(([id, rev]) => caches.open('tw-alerts').then(k => k.put(new Request('/m/alerts/' + id),
+      new Response(JSON.stringify({ shown_at: '2026-11-02T23:01:21Z', attention_revision: rev })))), [card, rev])
+    await put(0)
+    await page.reload()
+    await page.locator('.alert-times', { hasText: ', an earlier alert on this phone ' }).waitFor({ timeout: 5000 })
+    await put(1)
+    await page.reload()
+    await page.locator('.alert-times', { hasText: /, on this phone \d/ }).waitFor({ timeout: 5000 })
+    if ((await page.locator('.alert-times').textContent()).includes('earlier')) throw new Error('its own alert said as an earlier one')
+  })
   await step('an answered card offers no more choices', async () => {
     if (await page.getByRole('button', { name: /^Choose: / }).count()) throw new Error('choices on an answered card')
   })
