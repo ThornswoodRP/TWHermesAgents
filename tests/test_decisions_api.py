@@ -333,6 +333,20 @@ class Operator(unittest.TestCase):
         code, _, _ = self.run_cli("--db", self.db, "flag", "--workspace", "thornswood", "decision_write", "off")
         self.assertEqual(code, 0)
 
+    def test_a_flag_already_in_that_state_is_left_as_it_is(self):
+        # The install says the phone app's flags on at each run: only a change is an event.
+        self.run_cli("--db", self.db, "init", "--workspace", "thornswood")
+        on = ("--db", self.db, "flag", "--workspace", "thornswood", "session_manage_write", "on", "--patrick-switched")
+        for _ in range(2):
+            code, out, err = self.run_cli(*on)
+            self.assertEqual(code, 0, err)
+        s = Store(self.db)
+        self.addCleanup(s.close)
+        changed = s.db.execute("SELECT count(*) FROM events WHERE kind = 'flag.changed'").fetchone()[0]
+        self.assertEqual(changed, 1)
+        ws = s.db.execute("SELECT id FROM workspaces WHERE name = 'thornswood'").fetchone()[0]
+        self.assertTrue(s.flag(ws, "session_manage_write"))
+
     def test_test_cards_only_in_a_test_workspace(self):
         self.run_cli("--db", self.db, "init", "--workspace", "thornswood")
         code, _, err = self.run_cli("--db", self.db, "test-card", "--workspace", "thornswood")

@@ -81,6 +81,16 @@ PAGE_KINDS = ("chats", "archived", "messages")
 # Sessions Hermes's own pickers leave out (hermes_state_sessions.py INTERNAL_LISTING_SOURCES), and sub-agent runs.
 NOT_LISTED = ("kanban", "tool", "oneshot", "subagent")
 WINDOWS = os.name == "nt"
+# One's task runs the connector with pythonw, which has no console. Windows gives every console program it
+# starts (Hermes's python.exe for the readiness check each minute, hermes.exe for a turn, git for an
+# update) a console window of its own, which showed on Patrick's screen for as long as each one ran (2 Nov,
+# windows flashing open and shut). CREATE_NO_WINDOW starts it with none. Every child goes through quiet().
+CREATE_NO_WINDOW = 0x08000000
+
+
+def quiet() -> dict:
+    """What every child process of the connector is started with: on Windows, no console window."""
+    return {"creationflags": CREATE_NO_WINDOW} if WINDOWS else {}
 # The core's own rule for a chat id (own.py), checked again before it goes after --resume.
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -123,7 +133,7 @@ def helper_command(hermes_bin: str, helper: Path = HELPER, python: str | None = 
     if python:
         return [python, "-I", str(helper)]
     try:
-        out = subprocess.run([hermes_bin, "--print-runtime-command"], capture_output=True, timeout=60,
+        out = subprocess.run([hermes_bin, "--print-runtime-command"], capture_output=True, timeout=60, **quiet(),
                              check=False, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SystemExit(f"STOP: {hermes_bin} --print-runtime-command did not run ({type(exc).__name__})")
@@ -395,7 +405,7 @@ class Hermes:
         (the check itself could not run), which the phone tells apart (plan Part 1)."""
         req = json.dumps({"op": "ready", "profile": "", "name": self.name}).encode("utf-8")
         try:
-            out = subprocess.run(self.ready_cmd, input=req, capture_output=True,
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
                                  timeout=60, cwd=str(self.home_dir), check=False)
             got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
@@ -414,7 +424,7 @@ class Hermes:
         req = json.dumps({"op": "react", "profile": "", "session_id": session_id, "message_id": message_id,
                           "emoji": emoji}).encode("utf-8")
         try:
-            out = subprocess.run(self.ready_cmd, input=req, capture_output=True,
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
                                  timeout=60, cwd=str(self.home_dir), check=False)
             got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
@@ -432,7 +442,7 @@ class Hermes:
         req = json.dumps({"op": "session", "profile": "", "action": action, "session_id": session_id,
                           "title": title}).encode("utf-8")
         try:
-            out = subprocess.run(self.ready_cmd, input=req, capture_output=True,
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
                                  timeout=60, cwd=str(self.home_dir), check=False)
             got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
@@ -476,7 +486,7 @@ class Hermes:
                     seen[ev["type"]].pop("text", None)
 
         try:
-            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **quiet(),
                                     stderr=subprocess.DEVNULL, cwd=str(self.home_dir), text=True,
                                     encoding="utf-8", errors="replace")
         except OSError:
@@ -551,7 +561,7 @@ class Updater:
         # Credential Manager's own windows too. A fetch that cannot sign in fails, and says so.
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
         return self.run([self.git_bin, "-c", "credential.interactive=never", "-C", str(self.clone), *args],
-                        capture_output=True, timeout=120, check=False, stdin=subprocess.DEVNULL, env=env)
+                        capture_output=True, timeout=120, check=False, stdin=subprocess.DEVNULL, env=env, **quiet())
 
     def to(self, release: str) -> tuple[bool, str]:
         """(done, why not)."""
@@ -594,7 +604,7 @@ def supervise(argv: list[str], run=subprocess.Popen, sleep=time.sleep, rounds: i
     n = 0
     while rounds is None or n < rounds:
         n += 1
-        proc = run(child, stdin=subprocess.DEVNULL)
+        proc = run(child, stdin=subprocess.DEVNULL, **quiet())
         if job is not None:
             _in_job(job, proc)
         if proc.wait() != UPDATE_EXIT:

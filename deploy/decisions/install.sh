@@ -31,7 +31,10 @@
 # It starts tw-decide-peers once a minute, which reads the tailnet's view of
 # One (`tailscale status --json`, read only) so the phone says One is off only
 # when Tailscale says so.
-# It changes no flag and makes no pairing code.
+# Patrick's switch, 2 Nov ("I want all the features I have asked for on"):
+# it turns on the phone app's flags, PHONE_FLAGS below, in the thornswood
+# workspace; one already on is left as it is. decision_write and
+# connector_effects, the Bots' own, it never changes. It makes no pairing code.
 set -euo pipefail
 umask 022
 
@@ -174,6 +177,16 @@ if [[ -n "$room" ]]; then
 fi
 run verify >/dev/null || stop "the store's event chain does not hold: $opt/bin/tw-decide --db $db verify"
 ok "event chain holds"
+
+# 6b. The phone app's features, on, by Patrick's switch of 2 Nov: reading and
+# chatting with the Bots, alerts, his own Hermes and One, and renaming, hiding
+# and deleting his own chats. Each change is in the event chain; a flag already
+# on is left as it is, with no event.
+PHONE_FLAGS="mobile_read mobile_chat_write push_send own_chat_write session_manage_write"
+for f in $PHONE_FLAGS; do
+  run flag --workspace thornswood "$f" on --patrick-switched >/dev/null
+done
+ok "the phone app's features are on: $PHONE_FLAGS"
 
 # 7. The feed tokens and the connector's, once each, straight into the hermes user's files (0600).
 hh="$(getent passwd hermes | cut -d: -f6)"

@@ -89,7 +89,9 @@ def cmd_flag(store: Store, args) -> dict:
         raise CoreError(403, "not_switched",
                         "a flag in a real workspace goes on only at the switch from the report page, "
                         "once T33 passes and Patrick says so; pass --patrick-switched then")
-    store.set_flag(ws, args.name, on, by=OPERATOR)
+    # A flag already in that state is left as it is, with no event, so the install can say it each time.
+    if store.flag(ws, args.name) != on:
+        store.set_flag(ws, args.name, on, by=OPERATOR)
     return {"workspace": args.workspace, args.name: on}
 
 
