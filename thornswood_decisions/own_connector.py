@@ -405,6 +405,56 @@ def chat_exists(state_db: Path, session_id: str) -> bool:
         con.close()
 
 
+def _fork_child(row) -> bool:
+    """Hermes's _is_explicit_fork_child_row with include_reset (hermes_state_messages.py:1878): a branch,
+    delegate, tool or reset child of its parent is a conversation of its own."""
+    if row["source"] == "tool":
+        return True
+    try:
+        cfg = json.loads(row["model_config"]) if isinstance(row["model_config"], str) else row["model_config"]
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    markers = (cfg.get("_branched_from"), cfg.get("_delegate_from"), cfg.get("_reset_from"))
+    parent = row["parent_session_id"]
+    return parent in markers if parent else any(m is not None for m in markers)
+
+
+def turn_held(state_db: Path, session_id: str, since: float) -> bool:
+    """Whether another Hermes process holds this chat's turn, taken before `since` (when this connector's
+    own turn started), so the turn waits for it. Hermes runs one turn at a time in a conversation: a new
+    one waits for the turn lease (agent/turn_facade_lease.py:297, up to 30 minutes), keyed by the chat's
+    first compression ancestor (hermes_state_compression.py:683, mirrored here) in session_turn_leases.
+    Read only; any error is "not known to wait", never a guess."""
+    try:
+        con = _ro(state_db)
+    except (sqlite3.Error, OSError):
+        return False
+    try:
+        def row(sid):
+            return con.execute("SELECT id, parent_session_id, source, model_config, end_reason FROM sessions "
+                               "WHERE id = ?", (sid,)).fetchone()
+        current, seen = row(session_id), {session_id}
+        while current:
+            parent_id = current["parent_session_id"]
+            if not parent_id or parent_id in seen or _fork_child(current):
+                break
+            parent = row(parent_id)
+            if not parent or parent["end_reason"] != "compression":
+                break
+            seen.add(parent_id)
+            current = parent
+        key = current["id"] if current else session_id
+        held = con.execute("SELECT acquired_at, expires_at FROM session_turn_leases WHERE conversation_id = ?",
+                           (key,)).fetchone()
+        return bool(held) and held["acquired_at"] < since and held["expires_at"] > time.time()
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+
+
 def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, archived: bool = False) -> dict:
     """Chats Hermes's own pickers list, newest first, older than `before`, with `q` in the title; with
     `archived`, the ones Hermes hides instead (to bring one back)."""
@@ -523,6 +573,7 @@ def follow_turn(stream, seen: dict, tell) -> None:
         if not isinstance(ev, dict):
             continue
         kind = ev.get("type")
+        seen["events"] = seen.get("events", 0) + 1
         if kind in ("system", "result"):
             ev.pop("text", None)
             seen[kind] = ev
@@ -537,8 +588,10 @@ def follow_turn(stream, seen: dict, tell) -> None:
 
 
 class Hermes:
-    def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str):
+    def __init__(self, hermes_cmd: list[str], ready_cmd: list[str], home_dir: Path, name: str,
+                 state_db: Path | None = None):
         self.cmd, self.ready_cmd, self.home_dir, self.name = list(hermes_cmd), list(ready_cmd), home_dir, name
+        self.state_db = state_db  # Hermes's own state.db, read only, to see a turn wait for the chat's turn
 
     def ready(self) -> tuple[str, str]:
         """(state, why): is this Hermes's gateway running? Asked without starting one.
@@ -626,9 +679,26 @@ class Hermes:
     def _run(self, argv: list[str], session_id: str | None, doing=None) -> tuple[str, str, str, str | None]:
         seen: dict = {}
         tell = doing or (lambda state, tool: None)
+        began = time.time()
+        moved = threading.Event()  # the turn said more than its start: it has the chat's turn
+
+        def heard(state, tool):
+            if seen.get("events", 0) > 1:
+                moved.set()
+            tell(state, tool)
 
         def read(stream):
-            follow_turn(stream, seen, tell)
+            follow_turn(stream, seen, heard)
+
+        def held():
+            # While the turn has said nothing past its start, it may be waiting for a turn another Hermes
+            # process (Desktop) is running in the same chat: then the line says so, not "thinking".
+            waiting = False
+            while not moved.wait(2) and proc.poll() is None:
+                now = turn_held(self.state_db, session_id, began)
+                if now != waiting and not moved.is_set():
+                    waiting = now
+                    tell("waiting" if now else "thinking", None)
 
         try:
             proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **quiet(),
@@ -638,6 +708,8 @@ class Hermes:
             return "failed", "", "could not start the hermes command", None
         reader = threading.Thread(target=read, args=(proc.stdout,), daemon=True)
         reader.start()
+        if session_id and self.state_db is not None:
+            threading.Thread(target=held, daemon=True).start()
         try:
             code = proc.wait(timeout=TURN_SECONDS)
         except subprocess.TimeoutExpired:
@@ -1164,7 +1236,7 @@ def main(argv: list[str]) -> int:
         token = Path.home() / ".config" / "thornswood" / f"own-{args.gateway}.token"
     home = Path(args.hermes_home) if args.hermes_home else hermes_home()
     hermes = Hermes([args.hermes], helper_command(args.hermes, python=args.hermes_python, root=args.hermes_root), Path.home(),
-                    GATEWAYS[args.gateway])
+                    GATEWAYS[args.gateway], state_db=home / "state.db")
     here = Path(__file__).resolve().parent
     updater = Updater(Path(args.clone), args.git, here) if args.clone else None
     conn = OwnConnector(Core(args.core, args.gateway, read_token(token)), hermes, home / "state.db",

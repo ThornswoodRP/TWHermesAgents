@@ -30,9 +30,19 @@ card how Patrick answered it (`connector_outbox`, written by the answer's own
 commit in `core.py`). Its outcome is an effect receipt, and a confirmed one is
 the "Bot told" state.
 
-A chat message is never an answer, an approval or authority of any kind (07
-section 5). Text goes to Hermes and to the phone, never into the event chain
-or a log.
+A chat message answers a card only when Patrick says so on the phone (Pixel
+check, 2 Nov: "A chat is never an answer to a card" was wrong, "it should be").
+A Bot's Bot Chat shows the cards that Bot asked and that wait on him. When his
+words name one of a card's options (its label or its key, at the start of what
+he wrote), the app shows that the message answers that card and with which
+option, and he can take that off before sending. A message sent with it is that
+answer: `DecisionCore.answer` takes it with every check a tap has (the exact
+revision he saw, the card still waiting and not expired, the option on that
+revision, and a passkey sign-in from the last minutes for a high-risk card), and
+his words are the answer's note. The Bot is told the answer as for a tap, and
+gets his words as a chat message as well. The core never reads an answer out
+of a message by itself, and a Bot's words never answer anything. Text goes to
+Hermes and to the phone, never into the event chain or a log.
 """
 
 from __future__ import annotations
@@ -207,7 +217,11 @@ class Chat:
 
     # ── Patrick's side ────────────────────────────────────────────────────
 
-    def send(self, p: Principal, target: str, text, idempotency_key) -> dict:
+    def send(self, p: Principal, target: str, text, idempotency_key, answer=None) -> dict:
+        """One message to a Bot or a room. With `answer` (a card this Bot asked, the option, and the
+        revision, attention revision and artifact SHA-256 the phone showed), the message is also
+        Patrick's answer to that card: it is taken first, by DecisionCore.answer with all its checks, and
+        nothing is sent when it is refused."""
         self._patrick(p)
         if not self.s.flag(p.workspace_id, "mobile_chat_write"):
             raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
@@ -219,7 +233,13 @@ class Chat:
             raise CoreError(400, "bad_text", f"a message is at most {MAX_TEXT} characters")
         if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 200:
             raise CoreError(400, "bad_key", "a message carries an idempotency key of 8 to 200 characters")
-        body_sha = sha256_hex(canonical({"target": target, "text": text}))
+        receipt = None
+        if answer is not None:
+            if len(idempotency_key) > 192:
+                raise CoreError(400, "bad_key", "a message that answers a card carries a key of at most 192 characters")
+            receipt = self._answer(p, target, text, idempotency_key, answer)
+        body_sha = sha256_hex(canonical({"target": target, "text": text}
+                                        | ({"answer": receipt["response_id"]} if receipt else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -234,11 +254,32 @@ class Chat:
                        "status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,'queued',?,?)",
                        (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now))
             self.s.event(db, p.workspace_id, "chat.queued", mid, "patrick", {"target": target, "device": p.device_id})
-            receipt = {"message_id": mid, "target": target, "status": "queued", "created_at": now}
+            out = {"message_id": mid, "target": target, "status": "queued", "created_at": now}
+            if receipt:
+                out["answered"] = receipt
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
                        "result_json, created_at) VALUES(?,?,?,?,?,?,?)",
-                       (p.workspace_id, p.id, idempotency_key, "chat.send", body_sha, canonical(receipt), now))
-        return receipt
+                       (p.workspace_id, p.id, idempotency_key, "chat.send", body_sha, canonical(out), now))
+        return out
+
+    def _answer(self, p: Principal, target: str, text: str, idempotency_key: str, answer) -> dict:
+        """The card answer a message carries: only a card the Bot of this chat asked, through the one
+        answer path, with his words as its note. Its own key is the message's, so the same send again
+        is the same answer again, never a second one."""
+        if target not in self.bots(p.workspace_id):
+            raise CoreError(400, "no_cards_here", "only a Bot's Bot Chat answers a card")
+        if not isinstance(answer, dict) or not isinstance(answer.get("decision_id"), str):
+            raise CoreError(400, "bad_answer", "an answer names the card, the option and the revision shown")
+        core = DecisionCore(self.s)
+        if core.asker(p.workspace_id, answer["decision_id"]) != target:
+            raise CoreError(409, "not_this_bots_card", f"that card is not one {target.capitalize()} asked")
+        ints = [answer.get(k) for k in ("revision", "attention_revision")]
+        if not all(isinstance(i, int) and not isinstance(i, bool) for i in ints):
+            raise CoreError(400, "bad_answer", "an answer names the revision shown")
+        return core.answer(p, decision_id=answer["decision_id"], option_key=str(answer.get("option_key", "")),
+                           revision=ints[0], attention_revision=ints[1],
+                           artifact_sha256=str(answer.get("artifact_sha256", "")),
+                           idempotency_key=idempotency_key + ".answer", note=text[:2000])
 
     def react(self, p: Principal, target: str, message_id, emoji) -> dict:
         """Patrick's reaction on one message of a Bot's Bot Chat: exactly this emoji, or none (null).
@@ -304,6 +345,7 @@ class Chat:
                         "text": m["text"], "at": m["at"]} for m in (chat or {}).get("messages", [])]
             kind, name = "bot", target.capitalize()
         return {"target": target, "kind": kind, "name": name, "as_of": snap["as_of"], "history": history,
+                "cards": DecisionCore(self.s).asked_by(p, target) if kind == "bot" else [],
                 "mine": self._mine(p.workspace_id, target), "can_send": self.s.flag(p.workspace_id, "mobile_chat_write"),
                 "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target) if kind == "bot" else [],
                 "live": self.live_states(p.workspace_id).get(target) if kind == "bot" else None}

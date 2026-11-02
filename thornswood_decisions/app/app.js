@@ -548,6 +548,8 @@ async function cardView(id, note) {
     parts.push(el('p', { class: 'receipt' }, `Answered "${picked ? picked.label : c.receipt.option_key}" at ` +
       `${when(c.receipt.answered_at)} (revision ${c.receipt.revision}).`))
   }
+  const alertLine = alertTimes(c)
+  if (alertLine) parts.push(alertLine)
   if (c.superseded_by) {
     parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/decisions/' + c.superseded_by) },
       'This card was replaced. Open the new one'))
@@ -555,6 +557,27 @@ async function cardView(id, note) {
   parts.push(status)
   parts.push(el('button', { class: 'secondary', type: 'button', onclick: () => go('/m/decisions') }, 'Back'))
   show(el('div', { class: 'card' }, parts))
+}
+
+// Where a card's alert spent its time (Patrick, 2 Nov: a card reached his phone minutes after it was
+// stored): when the card was stored, when the core's worker handed its alert to the push service, and
+// when this phone got it (the service worker keeps that time on the phone, sw.js). To the second, so a
+// late alert says which hop was slow without anyone being asked to measure it.
+function alertTimes(c) {
+  if (!c.alert) return null
+  const t = iso => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  const line = el('p', { class: 'quiet alert-times', 'data-alert': c.alert.status })
+  const say = shown => {
+    line.textContent = 'Alert: card ' + t(c.alert.queued_at) +
+      (c.alert.sent_at ? ', sent ' + t(c.alert.sent_at) : ', not sent (' + c.alert.status + ')') +
+      (shown ? ', on this phone ' + t(shown) : '')
+  }
+  say(null)
+  if ('caches' in window) {
+    caches.open('tw-alerts').then(k => k.match('/m/alerts/' + c.id)).then(r => r ? r.json() : null)
+      .then(j => { if (j && j.shown_at) say(j.shown_at) }).catch(() => {})
+  }
+  return line
 }
 
 // A box card (a pull request that changes what runs on the live box): the
@@ -630,9 +653,14 @@ async function answer(c, o, status) {
 function answered(c, o) {
   toWorker({ close: c.id })
   flash = `Answered "${c.title}": ${o.label}.`
-  history.replaceState(null, '', '/m/decisions')
+  // Answered from a Bot Chat: back to that chat, where the card has gone.
+  const back = answerBack
+  answerBack = null
+  if (back) badgeNow()
+  history.replaceState(null, '', back || '/m/decisions')
   return route()
 }
+let answerBack = null  // the Bot Chat a card was answered from
 
 // The Board: what each Bot is working on, read from GitHub (the issues it has
 // claimed and the pull requests from its branches) by the feed once in each 5
@@ -1381,7 +1409,7 @@ function chatBar(back, backLabel, title, under, agent, label, more, live) {
 // The box at the foot of a chat. It grows with what is typed, up to six
 // lines, and keeps its draft (and the draft's idempotency key) while the
 // chat redraws. Enter is a new line; the button sends.
-function chatComposer(key, label, buttonLabel, send, status, gw, attach) {
+function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) {
   const draft = drafts[key] || (drafts[key] = { text: '', key: newKey() })
   if (!draft.files) draft.files = []
   // A reply being written shows the words it quotes, which open the message as sent.
@@ -1402,27 +1430,100 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach) {
     fit()
   })
   requestAnimationFrame(fit)
-  const button = el('button', { class: 'send', type: 'button', 'aria-label': buttonLabel, onclick: async () => {
+  // A message that answers a card (Patrick, 2 Nov: a chat should be an answer to a card): the line above
+  // the box says which card and which option his words name, and the x sends the words without it.
+  const answering = el('div', { class: 'answering', role: 'status', hidden: true })
+  const paint = () => {
+    if (!box.value.trim()) draft.noAnswer = false
+    const m = draft.noAnswer ? null : cardMatch(box.value, cards)
+    const was = draft.answer ? draft.answer.c.id + ':' + draft.answer.o.key : ''
+    if ((m ? m.c.id + ':' + m.o.key : '') !== was) draft.key = newKey()
+    draft.answer = m && m.c ? m : null
+    answering.replaceChildren(...(draft.answer ? [
+      el('div', { class: 'rq' }, el('strong', {}, 'Answers the card ' + (m.c.risk === 'high' ? '(high risk)' : '')),
+        el('span', {}, inlineMd(m.c.title, true), ': ', el('b', {}, inlineMd(m.o.label, true)))),
+      el('button', { class: 'back', type: 'button', 'aria-label': 'Send without answering the card', onclick: () => {
+        draft.noAnswer = true
+        paint()
+      } }, icon('x'))] : m ? [el('div', { class: 'rq' }, m.why)] : []))
+    answering.hidden = !m
+  }
+  box.addEventListener('input', paint)
+  paint()
+  const sendIt = async () => {
     const text = box.value.trim()
     const ready = draft.files.filter(f => f.id)
     if (draft.files.some(f => f.state === 'up')) { status.textContent = 'Wait for the files to finish uploading.'; return }
     if (!text && !ready.length) { status.textContent = 'Type a message first.'; return }
     status.textContent = 'Sending...'
     button.disabled = true
-    const s = await send(text, draft.key, draft.reply, ready.map(f => f.id))
+    const a = draft.answer
+    const s = await send(text, draft.key, draft.reply, ready.map(f => f.id), a ? { decision_id: a.c.id,
+      option_key: a.o.key, revision: a.c.revision, attention_revision: a.c.attention_revision,
+      artifact_sha256: a.c.artifact_sha256 } : undefined)
     button.disabled = false
-    if (s.status === 200) { drafts[key] = null; chatPlace.toEnd = true; return route() }
+    if (s.status === 200) {
+      if (a) { toWorker({ close: a.c.id }); badgeNow() }
+      drafts[key] = null
+      chatPlace.toEnd = true
+      return route()
+    }
     if (s.status === 401) { csrf = null; return signInView(said(s.body)) }
+    if (a && s.status === 403 && s.body.error === 'sign_in_again') {
+      // A high-risk card: the passkey is the yes, as on the card itself. Nothing is sent until it succeeds.
+      const again = el('button', { class: 'primary', type: 'button', 'data-confirm': a.o.key,
+        onclick: () => promptNow(again, status, sendIt) }, 'Answer ' + a.o.label + ' with your ' + signInWord())
+      status.replaceChildren(again)
+      return promptNow(again, status, sendIt)
+    }
     const d = s.body.detail || {}
     status.textContent = s.status === 0
       ? 'Could not reach the core. Sending again sends the same message, never a second one.'
       : (gw && d.state ? stateWords({ gateway: gw, ...d })[1] : said(s.body))
-  } }, icon('send'))
+  }
+  const button = el('button', { class: 'send', type: 'button', 'aria-label': buttonLabel, onclick: sendIt }, icon('send'))
   const plus = attach ? el('button', { class: 'plus', type: 'button', 'aria-label': 'Add photos or files',
     onclick: () => attachSheet(attach, draft, status) }, icon('plus')) : null
-  return [replying, attach ? attachStrip(attach, draft, status) : null,
+  return [replying, answering, attach ? attachStrip(attach, draft, status) : null,
     el('div', { class: 'composer', 'data-reply': draft.reply ? String(draft.reply.mid) : '',
-      'data-files': draft.files.map(f => f.local + ':' + f.state).join(' ') }, plus, box, button)]
+      'data-files': draft.files.map(f => f.local + ':' + f.state).join(' '),
+      'data-cards': (cards || []).map(c => c.id + ':' + c.revision + ':' + c.attention_revision).join(' ') },
+    plus, box, button)]
+}
+
+// Which card and option his words answer: the words start with an option's label or key, as a whole
+// word or more. The longest name wins ("Yes, after 4 PM" over "Yes"); the same length on two options
+// answers nothing and says so, so he taps the one he means on its card. Never a guess past that.
+function cardMatch(text, cards) {
+  const t = text.trim().toLowerCase()
+  if (!t || !cards || !cards.length) return null
+  let best = [], len = 0
+  for (const c of cards) {
+    for (const o of c.options) {
+      const n = Math.max(...[o.label, o.key].map(w => {
+        const v = String(w || '').trim().toLowerCase()
+        return v && t.startsWith(v) && (t.length === v.length || !/[\p{L}\p{N}]/u.test(t[v.length])) ? v.length : 0
+      }))
+      if (n > len) { best = [{ c, o }]; len = n } else if (n && n === len) best.push({ c, o })
+    }
+  }
+  if (best.length === 1) return best[0]
+  return best.length ? { why: 'Those words fit options on more than one card. Tap the one you mean on its card.' } : null
+}
+
+// The cards a Bot asked that wait on Patrick, at the end of its Bot Chat: each with its options, so a tap
+// answers it here as on Decisions, and a message whose words name an option answers it too (chatComposer).
+function chatCards(cards, back) {
+  if (!cards || !cards.length) return null
+  const status = el('p', { class: 'warn', role: 'status' })
+  return el('div', { class: 'chat-cards' }, cards.map(c => el('div', { class: 'card', 'data-card': c.id },
+    el('div', { class: 'cardhead' },
+      el('a', { href: '/m/decisions/' + encodeURIComponent(c.id), onclick: e => { e.preventDefault(); go('/m/decisions/' + c.id) } },
+        el('strong', {}, inlineMd(c.title, true))),
+      c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null),
+    el('div', { class: 'opts' }, c.options.map(o => el('button', {
+      class: o.key === c.recommendation ? 'primary' : 'secondary', type: 'button', 'data-option': o.key,
+      onclick: () => { answerBack = back; return choose(c, o, status) } }, inlineMd(o.label, true)))))), status)
 }
 
 // Photos and files on a message to his own Hermes (Patrick, 2 Nov: "no way to add files or photos or
@@ -1576,7 +1677,7 @@ function showChat(key, top, list, dock, items) {
     ? box.closest('.dock') : null
   const newBox = fresh.querySelector('.composer textarea')
   const same = k => fresh.querySelector('.composer').dataset[k] === box.closest('.composer').dataset[k]
-  if (oldDock && newBox && newBox.value === box.value && same('reply') && same('files')) {
+  if (oldDock && newBox && newBox.value === box.value && same('reply') && same('files') && same('cards')) {
     for (const n of [...old.childNodes]) if (n !== oldDock) n.remove()
     oldDock.before(...[top].flat(Infinity).filter(Boolean), el('div', { class: 'msgs' }, list))
   } else {
@@ -1797,6 +1898,8 @@ const TOOL_WORDS = {
 function doingWords(doing) {
   if (!doing) return 'Starting'
   if (doing.state === 'thinking') return 'Thinking'
+  // Hermes runs one turn at a time in a chat: this one waits for the turn Desktop is running in it.
+  if (doing.state === 'waiting') return 'Waiting for the turn already running in this chat'
   if (doing.state === 'writing') return 'Writing'
   const tool = doing.tool || ''
   return TOOL_WORDS[tool] || (tool.startsWith('browser') ? 'Using the browser' : tool ? `Using ${tool}` : 'Using a tool')
@@ -2214,11 +2317,13 @@ async function chatView(target, tab) {
     if (!items.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
     const dock = v.can_send
       ? [chatComposer(target, 'Message to ' + name, 'Send to ' + name,
-          (text, k) => call('POST', '/chat/' + encodeURIComponent(target), { text, idempotency_key: k }), status), status]
+          (text, k, reply, files, answer) => call('POST', '/chat/' + encodeURIComponent(target),
+            { text, idempotency_key: k, ...(answer ? { answer } : {}) }), status, null, null, v.cards), status]
       : [el('p', { class: 'quiet' }, said({ error: 'chat_write_off' }))]
     // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs.
     const turn = room ? null : v.mine.find(m => m.status === 'leased')
-    const list = turn ? [bubbles(items), workingItem(name, v.target, turn.doing)] : bubbles(items)
+    const list = [bubbles(items), turn ? workingItem(name, v.target, turn.doing) : null,
+      room ? null : chatCards(v.cards, location.pathname)]
     if (seqNow === viewSeq) {
       showChat(key, top, list, dock, items)
       if (turn) watchTurn('/chat/' + encodeURIComponent(v.target), seqNow, turn.id, name)
@@ -2479,6 +2584,12 @@ function badge(n) {
   const b = document.getElementById('badge')
   b.hidden = !n
   b.textContent = n ? String(n) : ''
+}
+
+// The badge read again at once after an answer made away from Decisions (a Bot Chat), not at the next poll.
+async function badgeNow() {
+  const list = await call('GET', '/cards')
+  if (list.status === 200) badge(list.body.cards.length)
 }
 
 function go(path) {

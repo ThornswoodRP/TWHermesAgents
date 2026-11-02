@@ -30,6 +30,9 @@ for bot in ("bramble", "rift", "sprocket", "echo", "magpie", "wisp"):
 card = w.card(title="Turn on the nightly backup check?")
 high = w.card(title="Delete the old test branches?", risk="high", source_key="high-1")
 third = w.card(title="Move the backup to Sunday?", source_key="third-1")
+# A card Rift asked, which waits in Rift's Bot Chat and is answered there by a message.
+w.core.assign_task(w.bramble, "load-order", "rift")
+w.card(by=w.rift, task="load-order", title="Rebuild the load order now?", source_key="rift-1")
 f = Feeds(w.store)
 tw = f.new_token(w.ws, "work", by="t"); tr = f.new_token(w.ws, "room", by="t"); tb = f.new_token(w.ws, "bots", by="t")
 f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}]}]})
