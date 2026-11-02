@@ -1,4 +1,4 @@
-From 2feacdad21a878db1f95e9a5542ae9d01dc722d6 Mon Sep 17 00:00:00 2001
+From 301b02e59ab697bd9a1ac1ccfdd6a9c7e541b3bc Mon Sep 17 00:00:00 2001
 From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 06:21:00 +0000
 Subject: [PATCH] desktop: list every connected gateway's scheduled jobs, and
@@ -364,10 +364,10 @@ index 0000000000..5e2fc76fd2
 +  return merged
 +}
 diff --git a/apps/desktop/electron/main.ts b/apps/desktop/electron/main.ts
-index e2c2707556..bcde3f19da 100644
+index 4ed1fe4d11..3a309e19f5 100644
 --- a/apps/desktop/electron/main.ts
 +++ b/apps/desktop/electron/main.ts
-@@ -214,6 +214,7 @@ import type { RegistryConnection } from './connection-registry'
+@@ -215,6 +215,7 @@ import type { RegistryConnection } from './connection-registry'
  import type { RosterProfileMetadata } from './connection-registry'
  import { liveWindowState, overlayWindowState } from './connection-window-state'
  import { describeCrashReason, installCrashForensics } from './crash-forensics'
@@ -375,8 +375,8 @@ index e2c2707556..bcde3f19da 100644
  import { adoptServedDashboardToken } from './dashboard-token'
  import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
  import { registerDeepLinkProtocol as registerDeepLinkProtocolWith } from './deep-link-protocol'
-@@ -16049,7 +16050,37 @@ function isNotFoundApiError(error) {
-   return /(?:^|\s)404\b/.test(String((error as any)?.message ?? error))
+@@ -16017,7 +16018,37 @@ async function teardownConnectionScopedProfileBackend(connectionId, profile) {
+   ])
  }
  
 +// The Scheduled jobs list across every connected gateway: the front
@@ -777,7 +777,7 @@ index ccf1837970..8705192e2a 100644
    return (
      <div className="mb-1 ml-[1.375rem] flex flex-col gap-px">
 diff --git a/apps/desktop/src/app/chat/sidebar/index.tsx b/apps/desktop/src/app/chat/sidebar/index.tsx
-index af11f540d2..3350a97c5a 100644
+index 187019389a..a065ff5db1 100644
 --- a/apps/desktop/src/app/chat/sidebar/index.tsx
 +++ b/apps/desktop/src/app/chat/sidebar/index.tsx
 @@ -23,7 +23,7 @@ import {
@@ -789,7 +789,7 @@ index af11f540d2..3350a97c5a 100644
  import { useI18n } from '@/i18n'
  import { comboTokens } from '@/lib/keybinds/combo'
  import { sessionMatchesSearch } from '@/lib/session-search'
-@@ -391,7 +391,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
+@@ -393,7 +393,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
     *  context-menu "Open in split" path passes just a `dir`. */
    onNewSessionSplit: NewSessionSplitHandler
    onManageCronJob: (jobId: string) => void
@@ -799,10 +799,10 @@ index af11f540d2..3350a97c5a 100644
  
  export function ChatSidebar({
 diff --git a/apps/desktop/src/app/contrib/wiring.tsx b/apps/desktop/src/app/contrib/wiring.tsx
-index f7c8705965..52f79385a1 100644
+index 304dcd37aa..9757d5c50f 100644
 --- a/apps/desktop/src/app/contrib/wiring.tsx
 +++ b/apps/desktop/src/app/contrib/wiring.tsx
-@@ -1128,8 +1128,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
+@@ -1138,8 +1138,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
      onThreadMessagesChange: handleThreadMessagesChange,
      onToggleSelectedPin: toggleSelectedPin,
      onTranscribeAudio: transcribeVoiceAudio,
