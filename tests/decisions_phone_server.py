@@ -47,6 +47,13 @@ w.store.set_flag(w.ws, "session_manage_write", True, by="t")
 own = OwnChat(w.store)
 to = f.new_token(w.ws, "own-one", by="t"); f.new_token(w.ws, "own-me", by="t")
 own.claim(w.ws, "one", to, 0, True)
+# A long paste as Hermes keeps it: the @file: reference where it was typed, the file's text below
+# "--- Attached Context ---" (agent/context_references.py), here holding a command too long for a phone.
+PASTE_REF = "@file:AppData/Local/hermes/composer-pastes/pasted_content_2026-11-02_03-17-07-762_54a0c5.txt"
+PASTE_CMD = ("gh pr merge 55 -R ThornswoodRP/Thornswood-Hermes --squash --match-head-commit "
+             "750aa15ef81f69c5b0be509a6ea44a9d50b0d494")
+PASTE_MSG = (f"Here is the plan {PASTE_REF}\n\n--- Attached Context ---\n\n\U0001F4C4 {PASTE_REF} (40 tokens)\n"
+             f"```\nStep 1. {PASTE_CMD}\n```")
 # His Bot Chat comes first, as One's connector lists it (own_connector.bot_chat).
 CHATS = [
     {"id": "s_obc", "title": "Bot Chat", "last_at": "2026-11-01T09:45:00+00:00", "preview": "Rift: load order is clean",
@@ -54,7 +61,10 @@ CHATS = [
     {"id": "s_plan", "title": "Plan the week", "last_at": "2026-11-01T17:30:00+00:00", "preview": "three things"},
     {"id": "s_long", "title": "A long chat", "last_at": "2026-11-01T16:00:00+00:00", "preview": "message 119"},
     {"id": "s_old", "title": "", "last_at": "2026-10-30T17:30:00+00:00", "preview": "older"},
-    {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"}]
+    {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"},
+    # A chat Hermes has not titled, named by its first message; its newest row a long paste from Hermes Desktop.
+    {"id": "s_paste", "title": "", "first": "Here is the plan", "last_at": "2026-10-29T12:00:00+00:00",
+     "preview": PASTE_MSG[:200]}]
 HIDDEN = []
 OPEN = [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
                                       {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]
@@ -100,6 +110,13 @@ con.execute("INSERT INTO sessions VALUES('s_obc', 'cli', 'Bot Chat', ?, ?, NULL,
             (epoch("2026-11-01T08:00:00+00:00"), epoch("2026-11-01T09:45:00+00:00")))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_obc', 'assistant', "
             "'Rift: load order is clean', ?)", (epoch("2026-11-01T09:45:00+00:00"),))
+# The untitled chat with the paste, and a reply holding the long command in a code block.
+con.execute("INSERT INTO sessions VALUES('s_paste', 'cli', NULL, ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-29T11:00:00+00:00"), epoch("2026-10-29T12:00:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_paste', 'user', ?, ?)",
+            (PASTE_MSG, epoch("2026-10-29T11:59:00+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_paste', 'assistant', ?, ?)",
+            (f"Run this:\n\n```\n{PASTE_CMD}\n```", epoch("2026-10-29T12:00:00+00:00")))
 con.commit()
 con.close()
 def set_reaction(r, db=None, sid=None):

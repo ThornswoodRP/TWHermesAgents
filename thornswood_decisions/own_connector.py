@@ -190,6 +190,34 @@ def _text(content) -> str:
     return ""
 
 
+# What Patrick wrote, apart from what Hermes attached to it: Hermes keeps an @file: reference where it was
+# typed and puts the file's text under "--- Attached Context ---" (agent/context_references.py); a long
+# paste in Hermes Desktop is such a file, composer-pastes/pasted_content_<stamp>.txt. A list line shows the
+# words, or "Pasted text" or the file's name, never the reference or the attached text (Hermes Desktop's
+# own rule, chat-messages/hydration.ts). The phone shows the whole message the same way (app.js authored).
+_ATTACHED = re.compile(r"(?:^|\n)--- Attached Context ---[ \t]*\n")
+_WARNINGS = re.compile(r"(?:^|\n)--- Context Warnings ---.*\Z", re.S)
+_REF = re.compile(r"""@(file|folder|url|image|tool|terminal):("[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)""")
+_PASTE = re.compile(r"(?:^|[\\/])pasted_content_[\w-]+\.txt$")
+
+
+def _ref_label(kind: str, target: str) -> str:
+    target = target[1:-1] if target[:1] in "\"'`" and target[-1:] == target[:1] else target
+    if kind == "file" and _PASTE.search(target):
+        return "Pasted text"
+    return [p for p in re.split(r"[\\/]", target) if p][-1] if target.strip("\\/") else target
+
+
+def line_of(text: str) -> str:
+    """One line for a list: what was written, else what was attached."""
+    cut = _ATTACHED.search(text)
+    words = _WARNINGS.sub("", text[:cut.start()] if cut else text)
+    labels = [_ref_label(m.group(1), m.group(2)) for m in _REF.finditer(words)]
+    words = _REF.sub("", words)
+    line = " ".join(words.split())
+    return line or ", ".join(dict.fromkeys(labels))
+
+
 # ── reading Hermes's chats ────────────────────────────────────────────────
 
 LIST_SQL = f"""
@@ -210,6 +238,11 @@ ORDER BY last_at DESC LIMIT ?
 # by that title, then goes on to its compression tip). The phone lists it first, by the id it goes on as.
 BOT_CHAT = "Bot Chat"
 BOT_CHAT_SQL = "SELECT id FROM sessions WHERE title = ? AND hidden = 1 AND archived = 0 ORDER BY started_at DESC LIMIT 1"
+# A list line comes from the newest message that has words: a turn whose newest row is a tool call or
+# an image alone once left his Hermes's Bot Chat with an empty line (2 Nov).
+LINE_LOOK = 20
+FIRST_SQL = ("SELECT content FROM messages WHERE session_id = ? AND active = 1 AND role = 'user' "
+             "AND content IS NOT NULL AND content != '' ORDER BY id LIMIT ?")
 MESSAGES_SQL = ("SELECT role, content, timestamp FROM messages WHERE session_id = ? AND active = 1 "
                 "AND role IN ('user', 'assistant') AND content IS NOT NULL AND content != '' "
                 "ORDER BY id DESC LIMIT ?")
@@ -227,13 +260,8 @@ def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = M
     try:
         bot = bot_chat(con)
         rows = [r for r in con.execute(LIST_SQL, (*NOT_LISTED, CHATS)).fetchall() if not bot or r["id"] != bot["id"]]
-        chats, previews = ([bot], {bot["id"]: bot["preview"]}) if bot else ([], {})
-        for r in rows[:CHATS - len(chats)]:
-            last = con.execute(MESSAGES_SQL, (r["id"], 1)).fetchone()
-            text = _text(last["content"]) if last else ""
-            chats.append({"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]),
-                          "preview": text[:200]})
-            previews[r["id"]] = text
+        chats = [bot] if bot else []
+        chats += [_row(con, r) for r in rows[:CHATS - len(chats)]]
         open_ids = [c["id"] for c in chats[:OPEN_RECENT]]
         open_ids += [w for w in wanted if w not in open_ids]
         opened = []
@@ -275,10 +303,35 @@ def bot_chat(con: sqlite3.Connection) -> dict | None:
     tip = con.execute(LINEAGE_SQL + "SELECT s.id, coalesce(s.last_activity_at, s.started_at) AS last_at "
                       "FROM descendants d JOIN sessions s ON s.id = d.id ORDER BY d.depth DESC, s.started_at DESC "
                       "LIMIT 1", (row["id"], row["id"])).fetchone()
-    last = con.execute(MESSAGES_SQL, (tip["id"], 1)).fetchone()
-    text = _text(last["content"]) if last else ""
-    return {"id": tip["id"], "title": BOT_CHAT, "last_at": _iso(tip["last_at"]), "preview": text[:200],
+    # Its line comes from its whole lineage: the chat it goes on as now may hold no message with words yet.
+    lineage = [r["id"] for r in con.execute(LINEAGE_SQL + "SELECT id FROM ancestors UNION SELECT id FROM descendants",
+                                            (row["id"], row["id"])).fetchall()]
+    return {"id": tip["id"], "title": BOT_CHAT, "last_at": _iso(tip["last_at"]), "preview": _line(con, lineage),
             "bot_chat": True}
+
+
+def _line(con: sqlite3.Connection, ids: list[str]) -> str:
+    """A chat's list line: the newest of its last LINE_LOOK messages that has words (line_of)."""
+    marks = ",".join("?" * len(ids))
+    for m in con.execute(MESSAGES_SQL.replace("session_id = ?", f"session_id IN ({marks})"), (*ids, LINE_LOOK)):
+        line = line_of(_text(m["content"]))
+        if line:
+            return line[:200]
+    return ""
+
+
+def _row(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
+    """One chat of the list. A chat Hermes has not titled is named by its first message, as Hermes Desktop
+    names it (chat-runtime.ts sessionTitle: the title, else the preview, the first message Patrick wrote);
+    `first` goes only with an untitled chat, so a rename still starts from Hermes's own title."""
+    row = {"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]), "preview": _line(con, [r["id"]])}
+    if not row["title"]:
+        for m in con.execute(FIRST_SQL, (r["id"], 5)):
+            first = line_of(_text(m["content"]))
+            if first:
+                row["first"] = first[:120]
+                break
+    return row
 
 
 def chat_exists(state_db: Path, session_id: str) -> bool:
@@ -310,10 +363,7 @@ def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, 
         bot = None if archived else bot_chat(con)
         rows = [r for r in con.execute(sql, (*args, n + 1)).fetchall() if not bot or r["id"] != bot["id"]]
         chats = [bot] if bot and not before and q.lower() in BOT_CHAT.lower() else []
-        for r in rows[:n - len(chats)]:
-            last = con.execute(MESSAGES_SQL, (r["id"], 1)).fetchone()
-            chats.append({"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]),
-                          "preview": (_text(last["content"]) if last else "")[:200]})
+        chats += [_row(con, r) for r in rows[:n - len(chats)]]
     finally:
         con.close()
     return {"chats": chats, "more": len(rows) > n - (1 if chats and chats[0].get("bot_chat") else 0)}

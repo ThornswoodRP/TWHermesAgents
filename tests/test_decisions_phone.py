@@ -314,7 +314,14 @@ class AppFiles(unittest.TestCase):
         js = (Path(__file__).resolve().parent.parent / "thornswood_decisions" / "app" / "app.js").read_text(encoding="utf-8")
         for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
             self.assertNotIn(bad, js)
-        self.assertNotIn("localStorage", js)
+        # The one thing kept in this browser's storage is the phone's copy of the chats it has shown
+        # (Patrick, 2 Nov: every open waited for One), under its one key, deleted at sign-out. Never a
+        # token, a key or the CSRF value.
+        uses = [ln.strip() for ln in js.splitlines() if "localStorage" in ln]
+        self.assertEqual(len(uses), 3, uses)
+        for ln in uses:
+            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\(KEPT\b", ln)
+        self.assertIn("forgetKept()\n      csrf = null", js)
 
 
 class FeedsIn(unittest.TestCase):

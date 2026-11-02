@@ -204,10 +204,11 @@ const base = `http://localhost:${port}`
   await page.getByRole('link', { name: 'Bots' }).click()
   await page.getByText('Its chats show here once it is turned on.').waitFor({ timeout: 5000 })
   await page.getByText('One', { exact: true }).click()
-  await step("One's chats, with full power for 30 minutes after the passkey", async () => {
+  await step("One's chats, signed in, with no line about the passkey's 30 minutes", async () => {
     await page.getByText('Plan the week', { exact: true }).waitFor({ timeout: 5000 })
     await page.getByText('Untitled chat', { exact: true }).waitFor({ timeout: 3000 })
-    await page.getByText(/^Full power until .+, 30 minutes after your passkey sign-in\.$/).waitFor({ timeout: 3000 })
+    await page.getByLabel('Start a new chat').waitFor({ timeout: 3000 })
+    if (await page.getByText(/passkey sign-in|Full power until/).count()) throw new Error('the passkey line is back')
     if (!page.url().endsWith('/m/hermes/one')) throw new Error('url ' + page.url())
   })
   await page.getByLabel('Start a new chat').fill('Start a list for the weekend.')
@@ -221,7 +222,7 @@ const base = `http://localhost:${port}`
   await step('a chat on One, as text, on its own deep link', async () => {
     await page.getByText('<b>three</b> things').waitFor({ timeout: 15000 })
     if (!page.url().endsWith('/m/hermes/one/s_plan')) throw new Error('url ' + page.url())
-    await page.getByText(/^You can send until .+ started from the phone or has \/yolo on\.$/).waitFor({ timeout: 3000 })
+    if (await page.getByText(/You can send until|\/yolo on/).count()) throw new Error('the send-window paragraph is back')
   })
   await page.getByLabel('Message to One').fill('Add the backup check.')
   await page.getByRole('button', { name: 'Send to One' }).click()
@@ -295,6 +296,82 @@ const base = `http://localhost:${port}`
     const want = Array.from({ length: 120 }, (_, i) => `message ${i}`)
     if (JSON.stringify(texts) !== JSON.stringify(want)) throw new Error(texts.length + ' ' + texts.slice(0, 3))
     if (await page.getByRole('button', { name: 'Older messages' }).count()) throw new Error('more offered at the first')
+  })
+  const jump = page.locator('#view .chat .jump')
+  await step('read further up, a chat offers Newest over the box, and it goes to the newest message', async () => {
+    await jump.waitFor({ state: 'visible', timeout: 3000 })
+    if ((await jump.textContent()).trim() !== 'Newest') throw new Error(await jump.textContent())
+    await jump.click()
+    await page.waitForFunction(() => innerHeight + scrollY >= document.documentElement.scrollHeight - 2, null, { timeout: 3000 })
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+    await jump.waitFor({ state: 'hidden', timeout: 3000 })
+  })
+  await step('a chat left for the list opens on its newest message again, and the list opens at its top', async () => {
+    await page.evaluate(() => scrollTo({ top: 0 }))
+    await page.getByRole('button', { name: 'All chats on One' }).click()
+    await page.getByText('A long chat', { exact: true }).waitFor({ timeout: 15000 })
+    const listAt = await page.evaluate(() => scrollY)
+    if (listAt !== 0) throw new Error('the list opened at ' + listAt)
+    await page.getByText('A long chat', { exact: true }).click()
+    await page.getByText('message 119', { exact: true }).waitFor({ timeout: 15000 })
+    await page.waitForTimeout(300)
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+    if (!(await jump.isHidden())) throw new Error('Newest is offered at the newest message')
+  })
+  await step('Back and Forward open the chat on its newest message too', async () => {
+    await page.evaluate(() => scrollTo({ top: 0 }))
+    await page.goBack()
+    await page.getByText('A long chat', { exact: true }).waitFor({ timeout: 15000 })
+    await page.goForward()
+    await page.getByText('message 119', { exact: true }).waitFor({ timeout: 15000 })
+    await page.waitForTimeout(300)
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+  })
+  // Android closes the app between opens: a fresh load keeps only the phone's copy.
+  const openTime = async () => {
+    const t0 = Date.now()
+    await page.goto(base + '/m/hermes/one/s_long')
+    await page.getByText('message 119', { exact: true }).waitFor({ timeout: 30000 })
+    return Date.now() - t0
+  }
+  await step("a chat opens at once from the phone's copy, without waiting for One", async () => {
+    const pageUrl = '**/api/v1/own/one/chats/s_long/messages*'
+    // One taking 6 seconds to answer, as a claim round trip to One can.
+    await page.route(pageUrl, r => { setTimeout(() => r.continue().catch(() => {}), 6000) })
+    await page.evaluate(() => localStorage.removeItem('hermes.kept.v1'))
+    const before = await openTime()
+    const after = await openTime()
+    await page.unroute(pageUrl)
+    await page.waitForTimeout(6500)
+    console.log(`MEASURE open a 120-message chat with One 6 s slow: no copy (as before) ${before} ms, from the phone's copy ${after} ms`)
+    if (before < 5000) throw new Error('the slow page was not waited for without a copy: ' + before + ' ms')
+    if (after > 3000) throw new Error('waited for One: ' + after + ' ms')
+    if (!(await inView('message 119'))) throw new Error('message 119 is not on screen')
+  })
+  await page.goto(base + '/m/hermes/one')
+  await step('a chat Hermes has not titled is named by its first message, and its line shows words, not a file path', async () => {
+    const row = page.locator('#view [data-chat="s_paste"]')
+    await row.waitFor({ timeout: 15000 })
+    const text = await row.textContent()
+    if (!text.includes('Here is the plan')) throw new Error(text)
+    if (/@file:|Attached Context|pasted_content/.test(text)) throw new Error(text)
+  })
+  await page.goto(base + '/m/hermes/one/s_paste')
+  await step('a pasted file shows as a chip that opens its text, never as @file paths and Attached Context', async () => {
+    const chip = page.locator('#view .msg.mine details.att')
+    await chip.waitFor({ timeout: 15000 })
+    if ((await chip.locator('summary').textContent()).trim() !== 'Pasted text \u00B7 40 tokens') throw new Error(await chip.locator('summary').textContent())
+    const mine = await page.locator('#view .msg.mine .bub').textContent()
+    if (/@file:|Attached Context|pasted_content/.test(mine)) throw new Error(mine)
+    if (!mine.includes('Here is the plan')) throw new Error(mine)
+    await chip.locator('summary').click()
+    await page.getByText(/^Step 1\. gh pr merge 55/).waitFor({ timeout: 3000 })
+  })
+  await step('a long command in a code block wraps on the phone, and Copy still copies it whole', async () => {
+    const fit = await page.locator('#view .msg.theirs .md-code pre').evaluate(n => ({ s: n.scrollWidth, c: n.clientWidth }))
+    if (fit.s > fit.c + 1) throw new Error(JSON.stringify(fit))
+    const wide = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
+    if (wide > 0) throw new Error('sideways scroll of ' + wide)
   })
   await page.goto(base + '/m/hermes/one/s_old')
   await step('a chat Hermes no longer has says so and offers no send', async () => {
@@ -585,6 +662,13 @@ const base = `http://localhost:${port}`
     manifest.body.start_url === '/m/decisions'
   if (!mOk) failed++
   console.log(mOk ? 'PASS manifest served: Hermes, opening on Decisions' : 'FAIL manifest ' + JSON.stringify(manifest))
+  await step("signing out deletes the phone's copy of the chats", async () => {
+    await page.goto(base + '/m/settings')
+    if (!(await page.evaluate(() => !!localStorage.getItem('hermes.kept.v1')))) throw new Error('no copy to delete')
+    await page.getByText('Sign out').click()
+    await page.getByText('Signed out.').waitFor({ timeout: 5000 })
+    if (await page.evaluate(() => localStorage.getItem('hermes.kept.v1'))) throw new Error('the copy is still there')
+  })
   const sawOwn = shownNames.length === 0
   if (!sawOwn) failed++
   console.log(sawOwn ? 'PASS every request names the gateways me and one, never Hermes or One' : 'FAIL shown names sent: ' + shownNames.join(' | '))

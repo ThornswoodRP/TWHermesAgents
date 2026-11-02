@@ -15,6 +15,9 @@
 // sessionStorage only so that a retry after a lost reply is the same request.
 // The key is never authority: the core decides, and a failed save reads the
 // card back ("checking outcome") before it offers to try again.
+//
+// The phone keeps a copy of the chats it has shown in this browser's storage
+// (keepThread), so a chat opens at once; signing out deletes it.
 
 'use strict'
 
@@ -48,6 +51,7 @@ function el(tag, attrs, ...children) {
 function show(...nodes) {
   const view = document.getElementById('view')
   view.replaceChildren(...nodes.flat(Infinity).filter(Boolean))
+  if (pageTop) { pageTop = false; scrollTo({ top: 0 }) }
 }
 
 function when(iso) {
@@ -77,7 +81,7 @@ function avatar(id, label) {
 const ICON = {
   back: 'M15 18l-6-6 6-6', send: 'M4 12l16-8-6 16-3-7z', x: 'M6 6l12 12M18 6L6 18', plus: 'M12 5v14M5 12h14',
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
-  more: 'M12 5h.01M12 12h.01M12 19h.01'
+  more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6'
 }
 function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg'
@@ -581,14 +585,14 @@ async function botsView() {
     gateways.map(g => listRow({ 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) }, {
       agent: g.gateway, title: GATEWAY[g.gateway],
       lines: [el('span', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
-        el('span', { class: 'quiet' }, g.last ? `${g.last.title || 'Untitled chat'}: ${g.last.preview.slice(0, 100)}`
+        el('span', { class: 'quiet' }, g.last ? `${chatName(g.last)}: ${preview(g.last.preview, 100)}`
           : (g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.'))],
       right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })),
     own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
     bots.map(b => listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
       agent: b.bot, title: NAMES[b.bot] || b.bot,
       lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
-        el('span', { class: 'quiet' }, b.last ? b.last.text.slice(0, 120) : 'No messages yet.')],
+        el('span', { class: 'quiet' }, b.last ? preview(b.last.text) : 'No messages yet.')],
       right: b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null })),
     el('p', { class: 'quiet foot' }, `The Bots' chats as of ${when(r.body.as_of) || 'nothing yet'}.`))
 }
@@ -598,13 +602,11 @@ async function botsView() {
 // made with full power; Hermes keeps a chat's own approval setting for good, so
 // in a chat started elsewhere a step that needs an approval is refused unless
 // that chat has /yolo on.
-function signInPart(v, status, existing) {
-  if (v.sign_in_until) {
-    const until = new Date(v.sign_in_until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    return el('p', { class: 'quiet' }, existing
-      ? `You can send until ${until}, 30 minutes after your passkey sign-in. A step that needs an approval runs only if this chat was started from the phone or has /yolo on.`
-      : `Full power until ${until}, 30 minutes after your passkey sign-in.`)
-  }
+// The passkey sign-in a send needs: nothing while it holds (the composer is the
+// sign that he can send), and a sign-in only once it has run out. Patrick, 2 Nov:
+// the paragraph that said until when he could send, on every chat, was clutter.
+function signInPart(v, status) {
+  if (v.sign_in_until) return null
   return el('div', { class: 'card' },
     el('p', { class: 'quiet' }, said({ error: 'passkey_needed' })),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
@@ -830,6 +832,81 @@ function markdown(text) {
   return el('div', { class: 'text md' }, blocksMd(lines))
 }
 
+// What Patrick wrote, apart from what Hermes attached to it. Hermes keeps an
+// @file: reference where it was typed and puts the file's text under a
+// "--- Attached Context ---" line (agent/context_references.py); a long paste
+// in Hermes Desktop is such a file, composer-pastes/pasted_content_<stamp>.txt.
+// Hermes Desktop shows the words and a chip for each file
+// (chat-messages/hydration.ts); so does the phone, and the chip opens the text.
+const ATTACHED = /(?:^|\n)--- Attached Context ---[ \t]*\n/
+const WARNINGS = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
+const REF = /@(file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)/g
+const PASTE = /(?:^|[\\/])pasted_content_[\w-]+\.txt$/
+
+function refLabel(raw) {
+  const kind = raw.slice(1, raw.indexOf(':'))
+  const target = raw.slice(raw.indexOf(':') + 1).replace(/^(["'`])(.*)\1$/, '$2')
+  if (kind === 'file' && PASTE.test(target)) return 'Pasted text'
+  return target.split(/[\\/]/).filter(Boolean).pop() || target
+}
+
+function authored(text) {
+  text = String(text || '')
+  const cut = text.match(ATTACHED)
+  let words = (cut ? text.slice(0, cut.index) : text).replace(WARNINGS, '')
+  const attached = cut ? text.slice(cut.index + cut[0].length) : ''
+  const refs = [...new Set([...words.matchAll(REF), ...attached.matchAll(REF)].map(m => m[0]))]
+  // Each attached file starts "<mark> <reference> (<n> tokens)" on a line of its own.
+  const starts = refs.map(raw => {
+    let at = -1, from = 0
+    while ((at = attached.indexOf(' ' + raw + ' (', from)) !== -1) {
+      const line = attached.lastIndexOf('\n', at) + 1
+      if (!/\s/.test(attached.slice(line, at))) return { raw, at: line }
+      from = at + 1
+    }
+    return { raw, at: -1 }
+  })
+  const found = starts.filter(x => x.at !== -1).sort((a, b) => a.at - b.at)
+  const files = refs.map(raw => {
+    const k = found.findIndex(x => x.raw === raw)
+    let body = '', tokens = null
+    if (k !== -1) {
+      const block = attached.slice(found[k].at, k + 1 < found.length ? found[k + 1].at : undefined).trim()
+      const nl = block.indexOf('\n')
+      const head = nl === -1 ? block : block.slice(0, nl)
+      const n = head.match(/\((\d+) tokens\)$/)
+      tokens = n ? Number(n[1]) : null
+      body = (nl === -1 ? '' : block.slice(nl + 1)).replace(/^(`{3,})[^\n]*\n([\s\S]*?)\n\1\s*$/, '$2')
+    }
+    return { raw, label: refLabel(raw), tokens, body }
+  })
+  if (cut || refs.length) for (const raw of refs) words = words.split(raw).join('')
+  return { words: words.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(), files }
+}
+
+// A chat's name: Hermes's title, else its first message, as Hermes Desktop names
+// an untitled chat (chat-runtime.ts sessionTitle). The connector sends `first`
+// only for a chat with no title.
+function chatName(c) {
+  return (c && (c.title || c.first)) || 'Untitled chat'
+}
+
+// One line for a list: the words, else what was attached.
+function preview(text, n = 120) {
+  const a = authored(text)
+  const line = a.words || a.files.map(f => f.label).join(', ')
+  return line.replace(/\s+/g, ' ').trim().slice(0, n)
+}
+
+function fileChips(files) {
+  return files.map(f => {
+    const what = f.tokens ? `${f.label} · ${f.tokens.toLocaleString()} tokens` : f.label
+    return f.body
+      ? el('details', { class: 'att' }, el('summary', {}, what), el('pre', {}, f.body))
+      : el('div', { class: 'att' }, el('span', {}, what))
+  })
+}
+
 function clock(iso) {
   const d = new Date(iso)
   return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -863,7 +940,9 @@ function bubbles(items) {
     const attrs = { class: 'msg ' + (m.mine ? 'mine' : 'theirs') }
     if (m.mid !== undefined && m.mid !== null) attrs['data-mid'] = String(m.mid)
     if (m.status) attrs['data-status'] = m.status
-    const bub = el('div', { class: 'bub' }, markdown(m.text))
+    // His own messages show what he wrote, with a chip for each file Hermes attached to it.
+    const own = m.mine ? authored(m.text) : null
+    const bub = el('div', { class: 'bub' }, own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
     if (m.mid !== undefined && m.mid !== null && !m.status) {
       // Tapping a message (not a link or a button in it, and not while selecting text) opens its actions.
       bub.tabIndex = 0
@@ -911,7 +990,9 @@ function messageSheet(m) {
   const choose = emoji => { closeSheet(); m.react(emoji) }
   const copy = el('button', { class: 'secondary', type: 'button', onclick: async () => {
     try {
-      await navigator.clipboard.writeText(m.text)
+      // His own message copies what he wrote (an attached paste's text when that is all), never Hermes's attachment block.
+      const a = m.mine ? authored(m.text) : null
+      await navigator.clipboard.writeText(a ? (a.words || a.files.map(f => f.body).join('\n\n')) : m.text)
       note.textContent = 'Copied.'
     } catch (e) {
       note.textContent = 'This view does not allow copying. Press and hold the message text to copy it.'
@@ -975,41 +1056,70 @@ function chatComposer(key, label, buttonLabel, send, status, gw) {
 }
 
 // Where a chat is scrolled. Opening a chat, or sending, goes to the newest
-// message. A redraw while Patrick reads further up keeps his place and says
-// how many came in below. Older messages keep the one he was looking at.
-const chatPlace = { key: null, seen: null, toEnd: false, keep: null }
+// message. A redraw while Patrick reads further up keeps his place, and the
+// button over the box takes him to the newest message, saying how many came in
+// below. Older messages keep the one he was looking at.
+//
+// Opening is a new page (a tap that goes somewhere, or Back), never "a chat
+// other than the last one drawn": he once left a chat for the list and came
+// back to the same chat, which was not "opening" by that test, so it kept the
+// list's place, at the top (2 Nov).
+const chatPlace = { key: null, seen: null, toEnd: false, keep: null, fresh: 0, last: null }
+let newPage = true    // the next route() draws a page Patrick went to, not a redraw of the one he is on
+let pageTop = false   // the next show() starts the page at its top
 
 function nearEnd() {
   return innerHeight + scrollY >= document.documentElement.scrollHeight - 120
+}
+
+function toNewest() {
+  chatPlace.fresh = 0
+  chatPlace.seen = chatPlace.last
+  scrollTo({ top: document.documentElement.scrollHeight })
+  placeJump()
+}
+
+// The button over the box: there whenever the newest message is out of sight.
+function placeJump() {
+  const jump = document.querySelector('#view .chat .jump')
+  if (!jump) return
+  if (nearEnd()) {
+    chatPlace.fresh = 0
+    chatPlace.seen = chatPlace.last
+  }
+  jump.hidden = nearEnd()
+  const n = chatPlace.fresh
+  jump.replaceChildren(icon('down', 16), n ? (n === 1 ? '1 new message' : `${n} new messages`) : 'Newest')
+  jump.setAttribute('aria-label', n ? `Go to the newest message, ${n} new` : 'Go to the newest message')
 }
 
 function showChat(key, top, list, dock, items) {
   const opening = chatPlace.key !== key
   const wasNearEnd = !opening && nearEnd()
   const mids = items.map(m => String(m.mid))
-  let fresh = 0
-  if (!opening && !wasNearEnd && !chatPlace.toEnd && chatPlace.seen !== null) {
-    const at = mids.lastIndexOf(chatPlace.seen)
-    fresh = at === -1 ? 0 : mids.length - 1 - at
-  }
   const toEnd = opening || wasNearEnd || chatPlace.toEnd
+  if (toEnd) {
+    chatPlace.fresh = 0
+  } else if (chatPlace.seen !== null) {
+    const at = mids.lastIndexOf(chatPlace.seen)
+    chatPlace.fresh = at === -1 ? 0 : mids.length - 1 - at
+  }
   const keep = chatPlace.keep
-  const row = fresh ? el('button', { class: 'newrow', type: 'button', onclick: () => {
-    row.remove()
-    chatPlace.seen = mids[mids.length - 1] ?? null
-    scrollTo({ top: document.documentElement.scrollHeight })
-  } }, fresh === 1 ? '1 new message' : `${fresh} new messages`) : null
-  show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), el('div', { class: 'dock' }, row, dock)))
+  const jump = el('button', { class: 'jump', type: 'button', onclick: toNewest })
+  jump.hidden = true
+  show(el('div', { class: 'chat' }, top, el('div', { class: 'msgs' }, list), el('div', { class: 'dock' }, jump, dock)))
   chatPlace.key = key
   chatPlace.toEnd = false
   chatPlace.keep = null
-  if (toEnd) chatPlace.seen = mids[mids.length - 1] ?? null
+  chatPlace.last = mids[mids.length - 1] ?? null
+  if (toEnd) chatPlace.seen = chatPlace.last
   if (keep) {
     const n = document.querySelector(`#view .msg[data-mid="${CSS.escape(keep)}"]`)
     if (n) n.scrollIntoView({ block: 'start' })
   } else if (toEnd) {
     scrollTo({ top: document.documentElement.scrollHeight })
   }
+  placeJump()
 }
 
 // ── full history of his own chats (step 2, plan Part 4) ────────────────────
@@ -1021,6 +1131,48 @@ function showChat(key, top, list, dock, items) {
 let viewSeq = 0          // each view, from route() and each chat render; a page that comes back late fills only its own
 const pickers = {}       // gw -> { q, results, more, extra }
 const threads = {}       // gw:sid -> { newest, older, olderMore, note }
+
+// The phone's copy of each chat it has shown, so a chat opens at once from it and
+// the page from Hermes then brings it up to date. Patrick, 2 Nov: every open asked
+// One again and showed nothing until One answered, because the app kept what it
+// fetched only while it stayed open, and Android closes it. The copy is this
+// browser's own storage for this app, the newest KEPT_MESSAGES of the KEPT_CHATS
+// chats opened last; signing out deletes it.
+const KEPT = 'hermes.kept.v1'
+const KEPT_CHATS = 30
+const KEPT_MESSAGES = 150
+
+function keptAll() {
+  try { return JSON.parse(localStorage.getItem(KEPT) || '{}') || {} } catch (e) { return {} }
+}
+
+// A thread as threads[] holds it, from the phone's copy, or null.
+function kept(key) {
+  const k = keptAll()[key]
+  return k && k.newest ? { newest: k.newest, older: k.older || [], olderMore: !!k.olderMore, note: '', error: null } : null
+}
+
+function keepThread(key, t) {
+  if (!t.newest || t.newest.gone) return
+  const all = keptAll()
+  const shown = (t.newest.messages || t.newest.events || []).length
+  const room = Math.max(KEPT_MESSAGES - shown, 0)
+  const older = t.older.slice(Math.max(t.older.length - room, 0))
+  all[key] = { at: Date.now(), newest: t.newest, older, olderMore: older.length < t.older.length || t.olderMore }
+  for (const k of Object.keys(all).sort((a, b) => all[b].at - all[a].at).slice(KEPT_CHATS)) delete all[k]
+  // Full storage drops the chats opened longest ago until it fits.
+  for (;;) {
+    try { localStorage.setItem(KEPT, JSON.stringify(all)); return } catch (e) {
+      const oldest = Object.keys(all).sort((a, b) => all[a].at - all[b].at)
+      if (oldest.length <= 1) return
+      delete all[oldest[0]]
+    }
+  }
+}
+
+function forgetKept() {
+  try { localStorage.removeItem(KEPT) } catch (e) {}
+}
 
 async function ownPage(path) {
   const sep = path.includes('?') ? '&' : '?'
@@ -1035,8 +1187,8 @@ async function ownPage(path) {
 function chatRow(gw, c, ops) {
   const o = ops ? lastOp(ops, c.id) : null
   return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
-    title: c.title || 'Untitled chat', tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
-    lines: [el('span', { class: 'quiet' }, c.preview.slice(0, 120)), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
+    title: chatName(c), tags: c.bot_chat ? el('span', { class: 'rec' }, 'Bot Mode') : null,
+    lines: [el('span', { class: 'quiet' }, preview(c.preview)), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
     right: at(c.last_at) || when(c.last_at) })
 }
 
@@ -1113,10 +1265,14 @@ async function gatewayView(gw) {
 
 // What Hermes holds of one of his own chats: notes to show above it, its
 // messages as bubbles, and the Older messages button when there are more.
-function historyPart(gw, sid, t, name) {
+function historyPart(gw, sid, t, name, feed) {
   if (t.error) return { notes: [el('p', { class: 'warn' }, t.error)], items: [], gone: false }
   if (!t.newest) {
-    return { notes: [el('p', { class: 'quiet' }, `Asking ${name} for this chat. It shows here within half a minute.`)], items: [], gone: false }
+    // Before the first page: the last messages the connector's feed sent, when it sent this chat's.
+    const items = (feed || []).map((m, k) => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: 'feed' + k,
+      noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from ' + name + '.' }))
+    return { notes: [el('p', { class: 'quiet' }, items.length ? `Asking ${name} for the rest of this chat.`
+      : `Asking ${name} for this chat. It shows here within half a minute.`)], items, gone: false }
   }
   if (t.newest.gone) {
     return { notes: [el('p', { class: 'warn' }, `This chat is gone from ${name}. Nothing sent here would reach it.`)], items: [], gone: true }
@@ -1137,6 +1293,7 @@ function historyPart(gw, sid, t, name) {
       }
       t.older = p.body.messages.concat(t.older)
       t.olderMore = p.body.more
+      keepThread(`own:${gw}:${sid}`, t)
       chatPlace.keep = String(msgs[0].mid)
       route()
     } }, 'Older messages'), olderNote)
@@ -1175,6 +1332,8 @@ async function reactTo(path, chat, mid, emoji, status) {
 function withReactions(items, rows, pageAt, react, noReact) {
   const wishes = new Map((rows || []).map(w => [w.message_id, w]))
   for (const item of items) {
+    // A message from the feed's copy has no Hermes id yet: it says so, and takes no reaction.
+    if (String(item.mid).startsWith('feed')) { item.react = null; continue }
     let shown = item.reactions || []
     const w = wishes.get(item.mid)
     if (w && (w.status === 'queued' || w.status === 'leased' || (w.status === 'set' && (!pageAt || new Date(w.updated_at) >= pageAt)))) {
@@ -1192,7 +1351,7 @@ async function ownChatView(gw, sid) {
   setTab('bots')
   const seqNow = ++viewSeq
   const key = `${gw}:${sid}`
-  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false, note: '', error: null })
+  const t = threads[key] || (threads[key] = kept('own:' + key) || { newest: null, older: [], olderMore: false, note: '', error: null })
   const r = await call('GET', `/own/${gw}/${encodeURIComponent(sid)}`)
   if (refused(r)) return
   const v = r.body
@@ -1203,7 +1362,7 @@ async function ownChatView(gw, sid) {
     // times are the core's: handed_at is when it asked for the page, and Hermes was read after that.
     const pageAt = t.newest && t.newest.handed_at ? new Date(t.newest.handed_at) : null
     const readAt = pageAt || (v.as_of ? new Date(v.as_of) : null)
-    const h = historyPart(gw, sid, t, name)
+    const h = historyPart(gw, sid, t, name, v.history)
     const canReact = v.can_send && v.online && !h.gone && !t.error
     withReactions(h.items, v.reactions, pageAt, canReact ? (mid, emoji) => reactTo(`/own/${gw}/react`, { session_id: sid }, mid, emoji, status) : null,
       `${name} is not answering, so a reaction cannot be set now.`)
@@ -1214,7 +1373,7 @@ async function ownChatView(gw, sid) {
     // His Bot Chat is kept as it is, so it offers no Rename, Hide or Delete (the core refuses them too).
     const manage = v.can_manage && v.online && !h.gone && !t.error && !ended && !(o && inFlight(o)) && !v.chat.bot_chat
     const top = [
-      chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, v.chat.title || 'Untitled chat',
+      chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
         `${name}, ${GATEWAY_WHAT[gw]}. A chat is never an answer to a card.`, gw, name,
         manage ? () => chatSheet(gw, sid, v.chat.title, v) : null),
       ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
@@ -1229,10 +1388,10 @@ async function ownChatView(gw, sid) {
       // Nothing sent here would reach a chat that is gone or hidden.
     } else if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
-        dock.push(signInPart(v, status, true), chatComposer(`own:${gw}:${sid}`, 'Message to ' + name, 'Send to ' + name,
+        dock.push(signInPart(v, status), chatComposer(`own:${gw}:${sid}`, 'Message to ' + name, 'Send to ' + name,
           (text, k) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k }), status, gw), status)
       } else {
-        dock.push(signInPart(v, status, true), status)
+        dock.push(signInPart(v, status), status)
       }
     } else if (!v.can_send) {
       dock.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
@@ -1257,6 +1416,7 @@ async function ownChatView(gw, sid) {
   }
   t.newest = p.body
   t.error = null
+  keepThread('own:' + key, t)
   render()
 }
 
@@ -1409,8 +1569,8 @@ async function hiddenView(gw) {
       const line = el('p', { class: 'warn', role: 'status' })
       return el('div', { class: 'row', 'data-chat': c.id },
         el('div', { class: 't' },
-          el('strong', {}, c.title || 'Untitled chat'),
-          el('span', { class: 'quiet' }, (c.preview || '').slice(0, 120)),
+          el('strong', {}, chatName(c)),
+          el('span', { class: 'quiet' }, preview(c.preview)),
           opLine(o, name),
           line),
         el('div', { class: 'w' },
@@ -1440,7 +1600,7 @@ async function roomsView() {
     rooms.length ? rooms.map(m => listRow({ onclick: () => go('/m/rooms/' + m.room_id) }, {
       agent: null, label: m.name, title: m.name,
       tags: m.unsettled ? el('span', { class: 'rec' }, `${m.unsettled} waiting`) : null,
-      lines: el('span', { class: 'quiet' }, m.last ? `${m.last.who}: ${m.last.text.slice(0, 120)}` : 'No messages yet.') }))
+      lines: el('span', { class: 'quiet' }, m.last ? `${m.last.who}: ${preview(m.last.text)}` : 'No messages yet.') }))
       : el('p', { class: 'quiet' }, 'No rooms yet.'))
 }
 
@@ -1455,7 +1615,7 @@ async function chatView(target, tab) {
   const room = v.kind === 'room'
   const name = room ? v.name : (NAMES[target] || target)
   const key = 'chat:' + v.target
-  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false, note: '', error: null })
+  const t = threads[key] || (threads[key] = kept(key) || { newest: null, older: [], olderMore: false, note: '', error: null })
   const idOf = m => room ? m.seq : m.mid
   const status = el('p', { class: 'warn', role: 'status' })
   function history() {
@@ -1479,6 +1639,7 @@ async function chatView(target, tab) {
         }
         t.older = (room ? p.body.events : p.body.messages).concat(t.older)
         t.olderMore = p.body.more
+        keepThread(key, t)
         chatPlace.keep = String(idOf(raw[0]))
         route()
       } }, 'Older messages'), olderNote)
@@ -1515,6 +1676,7 @@ async function chatView(target, tab) {
   const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages`)
   if (seqNow !== viewSeq || p.status !== 200 || p.body.pending) return
   t.newest = p.body
+  keepThread(key, t)
   // Never redrawn under someone typing; the next read shows it.
   const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
   if (!typing) render()
@@ -1734,6 +1896,7 @@ async function settingsView(note) {
     } }, 'Pair a Desktop'),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       await call('POST', '/sign-out')
+      forgetKept()
       csrf = null
       askOnOpen = false
       signInView('Signed out.')
@@ -1751,6 +1914,7 @@ function badge(n) {
 
 function go(path) {
   history.pushState(null, '', path)
+  newPage = true
   route()
 }
 
@@ -1758,6 +1922,15 @@ async function route() {
   // Every route is a new view, so a page a chat asked for and gets back after
   // Patrick left it fills nothing (it once redrew a room over the Rooms list).
   viewSeq++
+  // A page he went to starts fresh: a list at its top, a chat at its newest
+  // message (showChat). A redraw of the page he is on keeps his place.
+  if (newPage) {
+    newPage = false
+    pageTop = true
+    chatPlace.key = null
+    chatPlace.keep = null
+    chatPlace.toEnd = false
+  }
   closeSheet()
   if (!csrf) {
     const me = await call('GET', '/me')
@@ -1818,7 +1991,10 @@ document.addEventListener('click', event => {
   if (a) { event.preventDefault(); go(a.getAttribute('href')) }
 })
 document.getElementById('settings').addEventListener('click', () => go('/m/settings'))
-window.addEventListener('popstate', route)
+window.addEventListener('popstate', () => { newPage = true; route() })
+// The app keeps its own place on every page, so the browser does not put back an old one.
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
+addEventListener('scroll', placeJump, { passive: true })
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') { poll(); if (csrf) checkAlerts() }
 })

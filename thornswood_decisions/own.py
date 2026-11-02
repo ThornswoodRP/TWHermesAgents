@@ -62,6 +62,7 @@ MINE = 50
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
 CHAT_FIELDS = {"id": 128, "title": 120, "last_at": 40, "preview": 200}
+FIRST = 120   # a chat Hermes has not titled: its first message, which names it (own_connector._row)
 MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
 ROLES = ("user", "assistant")
 # What a connector says of its Hermes (migration 8): running, its gateway not running, or the
@@ -116,6 +117,18 @@ def _text(value, limit: int) -> str:
     return str(value)[:limit]
 
 
+def _chat_row(c: dict) -> dict:
+    """One chat as a connector sends it, kept to its fields and their lengths."""
+    row = {k: _text(c.get(k), n) for k, n in CHAT_FIELDS.items()}
+    row["id"] = _sid(row["id"])
+    first = _text(c.get("first"), FIRST)
+    if first and not row["title"]:
+        row["first"] = first
+    if c.get("bot_chat") is True:
+        row["bot_chat"] = True
+    return row
+
+
 def _sid(value) -> str:
     if not isinstance(value, str) or not SESSION_ID.match(value):
         raise CoreError(400, "bad_chat", "a chat's id is 1 to 128 letters, digits and _ . : -, starting with a "
@@ -153,10 +166,7 @@ def clean(body) -> dict:
     for c in chats:
         if not isinstance(c, dict):
             raise CoreError(400, "bad_feed", "each chat is an object")
-        row = {k: _text(c.get(k), n) for k, n in CHAT_FIELDS.items()}
-        row["id"] = _sid(row["id"])
-        if c.get("bot_chat") is True:
-            row["bot_chat"] = True
+        row = _chat_row(c)
         out_chats.append(row)
     ids = [c["id"] for c in out_chats]
     if len(set(ids)) != len(ids):
@@ -377,10 +387,7 @@ def clean_page(kind: str, body) -> dict:
         for c in chats:
             if not isinstance(c, dict):
                 raise CoreError(400, "bad_page", "each chat is an object")
-            row = {k: _text(c.get(k), n) for k, n in CHAT_FIELDS.items()}
-            row["id"] = _sid(row["id"])
-            if c.get("bot_chat") is True:
-                row["bot_chat"] = True
+            row = _chat_row(c)
             out.append(row)
         if len({c["id"] for c in out}) != len(out):
             raise CoreError(400, "bad_page", "the page names a chat twice")
