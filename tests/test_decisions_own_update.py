@@ -285,6 +285,19 @@ class UpdatesFromTheClone(unittest.TestCase):
         self.assertTrue(why.startswith("git fetch in clone failed"), why)
         self.assertEqual(self.versions(), ["VERSION = 'v1'\n"] * 2)
 
+    def test_git_never_prompts(self):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append((argv, kw))
+            return subprocess.CompletedProcess(argv, 128, b"", b"")
+
+        own_connector.Updater(self.clone, GIT, self.folder, run=run).to("d" * 40)
+        argv, kw = seen[0]
+        self.assertEqual(argv[1:3], ["-c", "credential.interactive=never"])
+        self.assertEqual((kw["env"]["GIT_TERMINAL_PROMPT"], kw["env"]["GCM_INTERACTIVE"]), ("0", "never"))
+        self.assertIs(kw["stdin"], subprocess.DEVNULL)
+
 
 class Supervises(unittest.TestCase):
     def test_it_starts_again_at_once_after_an_update_and_a_minute_after_any_other_stop(self):

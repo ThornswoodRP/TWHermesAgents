@@ -923,6 +923,43 @@ class OneInstall(unittest.TestCase):
         self.assertIn("PASS the connector's token is already in", r.stdout)
         self.assertFalse(self.calls.exists())
 
+    def github_origin(self, signed_in=True):
+        """origin is GitHub's address, as in Patrick's clone; git takes it from the scratch bare repo."""
+        import subprocess
+        origin = self.t / "origin.git"
+        for args in (("remote", "set-url", "origin", "https://github.com/ThornswoodRP/Thornswood-Hermes.git"),
+                     ("config", f"url.{origin}.insteadOf", "https://github.com/ThornswoodRP/Thornswood-Hermes.git")):
+            subprocess.run(["git", *args], cwd=self.clone, check=True, capture_output=True)
+        gh = self.bin / "gh"
+        gh.write_text(f"#!/bin/sh\n[ \"$1 $2\" = 'auth status' ] && exit {0 if signed_in else 1}\nexit 0\n", encoding="utf-8")
+        gh.chmod(0o755)
+        (self.t / "own-one.token").write_text("tok_already", encoding="ascii")
+        return gh
+
+    def helpers(self):
+        import subprocess
+        out = subprocess.run(["git", "config", "--local", "--get-all", "credential.https://github.com.helper"],
+                             cwd=self.clone, capture_output=True, text=True)
+        return out.stdout.splitlines()
+
+    def test_the_clone_signs_in_to_github_with_gh_so_git_never_prompts(self):
+        gh = self.github_origin()
+        r = self.install()
+        self.assertIn(f"PASS this clone signs in to GitHub with gh ({gh})", r.stdout, r.stdout + r.stderr)
+        self.assertIn("PASS own_connector.py and room_send.py from", r.stdout)
+        # The empty entry first, so the helpers set before it (One's helper selector) are dropped.
+        self.assertEqual(self.helpers(), ["", f"!'{gh}' auth git-credential"])
+        self.install()
+        self.assertEqual(self.helpers(), ["", f"!'{gh}' auth git-credential"], "set once, however often it runs")
+
+    def test_gh_not_signed_in_stops_before_any_fetch(self):
+        self.github_origin(signed_in=False)
+        r = self.install()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("FAIL gh is not signed in to github.com", r.stdout)
+        self.assertFalse((self.t / "own-connector" / "own_connector.py").exists())
+        self.assertEqual(self.helpers(), [])
+
     def test_finds_hermess_python_from_its_launcher_not_beside_it(self):
         import subprocess
         boot = "import runpy; " + "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"

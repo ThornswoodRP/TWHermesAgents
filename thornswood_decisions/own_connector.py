@@ -524,9 +524,12 @@ class Updater:
         self.clone, self.git_bin, self.folder, self.run = clone, git, folder, run
 
     def _git(self, *args: str) -> subprocess.CompletedProcess:
+        # Never a prompt: nobody is there under Task Scheduler. The clone signs in with gh, set by
+        # Install-OwnConnector.ps1 in its own config; credential.interactive=never stops Git
+        # Credential Manager's own windows too. A fetch that cannot sign in fails, and says so.
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
-        return self.run([self.git_bin, "-C", str(self.clone), *args], capture_output=True, timeout=120,
-                        check=False, stdin=subprocess.DEVNULL, env=env)
+        return self.run([self.git_bin, "-c", "credential.interactive=never", "-C", str(self.clone), *args],
+                        capture_output=True, timeout=120, check=False, stdin=subprocess.DEVNULL, env=env)
 
     def to(self, release: str) -> tuple[bool, str]:
         """(done, why not)."""

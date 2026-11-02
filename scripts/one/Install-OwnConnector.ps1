@@ -22,6 +22,10 @@ VM (1 Nov, answer A): nothing listens on One, and the VM never reaches in.
      which starts the connector at every sign-in, and starts it now. The task
      runs it under --supervise, which starts it again a minute after any stop.
 
+The clone signs in to GitHub with gh, set in its own git config only, so
+neither this script nor the connector's updates ever wait on a sign-in
+prompt (One's git otherwise opens its credential helper selector).
+
 After that the connector keeps itself current: the core names the release
 the VM runs (a commit of main that passed the whole suite on the VM), and
 the connector fetches main in this clone, takes its two files from that
@@ -137,7 +141,27 @@ Pass "$TokenFile is readable by its owner only"
 # 3. The connector's two files, from this clone.
 $commit = (& git -C $here rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { Fail "$here is not a clone of Thornswood-Hermes" }
+# Nobody is there to answer a sign-in prompt, here or when the connector updates itself from this
+# clone under Task Scheduler. One's git asks its credential helper selector by default, a window that
+# waits for a click, so a fetch would hang (2 Nov). This clone signs in to GitHub with gh instead, set
+# in this clone's own config only: the empty entry drops every helper set before it for github.com,
+# then gh answers with the account it is signed in as. Git never prompts.
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'never'
+$origin = "$(& git -C $here config --get remote.origin.url)".Trim()
+if ($origin -match '^https://github\.com/') {
+    $gh = (Get-Command gh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if (-not $gh) { Fail 'gh is not on PATH; this clone signs in to GitHub with it, so git never prompts' }
+    & $gh.Source auth status --hostname github.com *> $null
+    if ($LASTEXITCODE -ne 0) { Fail 'gh is not signed in to github.com; run gh auth login once, then this again' }
+    $helper = "!'" + ($gh.Source -replace '\\', '/') + "' auth git-credential"
+    & git -C $here config --local --replace-all credential.https://github.com.helper ''
+    & git -C $here config --local --add credential.https://github.com.helper $helper
+    if ($LASTEXITCODE -ne 0) { Fail "could not set this clone's GitHub sign-in to gh" }
+    Pass "this clone signs in to GitHub with gh ($($gh.Source)), so git never prompts"
+}
 & git -C $here fetch --quiet origin main
+if ($LASTEXITCODE -ne 0) { Fail "git fetch origin main failed in $here (exit $LASTEXITCODE)" }
 $main = (& git -C $here rev-parse origin/main).Trim()
 if ($commit -ne $main) { Fail "this clone is at $commit, not main's $main; git -C $here checkout --detach origin/main first" }
 New-Item -ItemType Directory -Force -Path $Folder | Out-Null
