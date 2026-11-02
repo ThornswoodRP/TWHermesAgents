@@ -361,20 +361,6 @@ class DecisionCore:
                                  "ORDER BY created_at", (p.workspace_id,)).fetchall()
         return [self._card(self.s.db, r) for r in rows]
 
-    def answered(self, p: Principal, *, hours: int = 24, limit: int = 10) -> list[dict]:
-        """The cards Patrick answered in the last day, newest first: the app's "Answered" list under Decisions."""
-        if p.kind not in ("patrick", "bramble"):
-            raise CoreError(403, "not_patrick", "only Patrick and Bramble read the answered list")
-        since = iso(self.s.clock() - timedelta(hours=hours))
-        rows = self.s.db.execute(
-            "SELECT d.id, d.title, d.risk, r.option_key, r.answered_at, o.label FROM decisions d "
-            "JOIN responses r ON r.decision_id = d.id "
-            "LEFT JOIN decision_options o ON o.decision_id = d.id AND o.revision = r.revision AND o.key = r.option_key "
-            "WHERE d.workspace_id = ? AND d.status = 'resolved' AND r.answered_at >= ? "
-            "ORDER BY r.answered_at DESC, r.rowid DESC LIMIT ?", (p.workspace_id, since, limit)).fetchall()
-        return [{"id": r["id"], "title": r["title"], "risk": r["risk"], "answered_at": r["answered_at"],
-                 "option": r["label"] or r["option_key"]} for r in rows]
-
     def artifact(self, p: Principal, decision_id: str, revision: int | None = None) -> dict:
         row = self._row(self.s.db, decision_id, p.workspace_id)
         self._may_read(p, row)
