@@ -368,7 +368,13 @@ if [[ ! -x "$runner_home/runner/bin/Runner.Listener" ]]; then
     || { rm -rf "$tmp"; stop "actions/runner $version could not be downloaded."; }
   got="$(sha256sum "$tmp/$tarball" | cut -d' ' -f1)"
   [[ "$got" == "$want" ]] || { rm -rf "$tmp"; stop "actions/runner $version is $got, not the pinned $want; nothing was unpacked."; }
-  runuser -u tw-runner -- tar -xzf "$tmp/$tarball" -C "$runner_home/runner"
+  # Root opens the package and tw-runner unpacks it from standard input:
+  # mktemp -d is root's alone (0700), so tw-runner cannot open a file in it
+  # (3 Nov, the VM's install of #115 stopped at "Cannot open: Permission
+  # denied" and put the last release back). Unpacking as tw-runner keeps every
+  # file it writes its own.
+  runuser -u tw-runner -- tar -xzf - -C "$runner_home/runner" < "$tmp/$tarball" \
+    || { rm -rf "$tmp"; stop "actions/runner $version could not be unpacked into $runner_home/runner."; }
   rm -rf "$tmp"
   "$runner_home/runner/bin/installdependencies.sh" >/dev/null || stop "the runner's own dependency install failed: $runner_home/runner/bin/installdependencies.sh"
   ok "actions/runner $version ($arch) unpacked in $runner_home/runner, SHA-256 as pinned"

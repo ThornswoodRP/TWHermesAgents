@@ -172,6 +172,13 @@ class Install(unittest.TestCase):
         self.assertIn('[[ "$got" == "$want" ]] || { rm -rf "$tmp"; stop', INSTALL)
         self.assertIn("runuser -u tw-runner -- tar", INSTALL)
 
+    def test_the_runner_unpacks_the_package_from_root_s_hands(self):
+        """mktemp -d is root's alone, so tw-runner reads the package on its
+        standard input and never by its path (3 Nov: the VM's install of #115
+        stopped at tar's "Cannot open: Permission denied")."""
+        self.assertIn('runuser -u tw-runner -- tar -xzf - -C "$runner_home/runner" < "$tmp/$tarball"', INSTALL)
+        self.assertNotIn('tar -xzf "$tmp/', INSTALL)
+
     def test_its_user_is_in_no_group_but_its_own(self):
         self.assertIn("--home-dir /srv/tw-runner --shell /usr/sbin/nologin --user-group tw-runner", INSTALL)
         self.assertIn('[[ "$(id -nG tw-runner)" == tw-runner ]] || stop', INSTALL)
