@@ -134,7 +134,7 @@ The shapes are in Developer-Guide.md "Test tasks and known issues". The bot post
 
 - **A red check:** reproduce it, find where it comes from (your change, the base, a dependency, the runner, the network) and fix it there, in its own PR if it isn't yours. If you can't fix it, it goes on the board with what was measured. Never re-run to fish for green, never merge past it.
 - **A refusal** (the gate, a broker, a permission): stop. Say what was refused and why. File what's missing for its owner. Never route around it or hand it to another Bot.
-- **Quota or capacity:** the task waits in the queue with its reason. No paid route.
+- **Quota or capacity:** the task waits in the queue with its reason. No paid route. A check that gets no runner because Actions minutes or billing ran out is quota too: the pull request waits for the self-hosted runners, and it is never a card about billing (the ops skill, section 13).
 - **An unknown outcome** (a merge, push, tag, Ship or deploy that timed out): read back the exact target before anything else. Never repeat it blind.
 - **A mistake of your own:** say so in one line, fix it, record it on the issue. If your earlier change was a band-aid, say so and revert it.
 
