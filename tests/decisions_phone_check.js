@@ -1093,6 +1093,20 @@ const base = `http://localhost:${port}`
     got = await layout()
     if (!got.list || !got.side) throw new Error(JSON.stringify(got))
   })
+  await step("a chat's details open on the right in place of Decisions, and close back to them", async () => {
+    await page.goto(base + '/m/hermes/one/s_plan')
+    await page.locator('#side').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+    await page.getByRole('button', { name: 'Chat details' }).click()
+    await page.locator('#side select[data-detail="model"]').waitFor({ timeout: 25000 })
+    if ((await page.locator('#side').getAttribute('aria-label')) !== 'Chat details') throw new Error('the pane is not named for the details')
+    await page.locator('#side').getByText('Approvals: it asks you before a command its rules flag.').waitFor({ timeout: 3000 })
+    await page.locator('#side').getByText('Messages sent while it works go into the running turn at its next step.').waitFor({ timeout: 3000 })
+    const got = await layout()
+    if (!got.list || !got.side || got.wider || got.sideText.includes('Waiting on you')) throw new Error(JSON.stringify(got))
+    await page.screenshot({ path: require('os').tmpdir() + '/tw-desktop-details.png' })
+    await page.getByRole('button', { name: 'Close details' }).click()
+    await page.locator('#side').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+  })
   await step('Decisions is not shown twice: on its own tab it is the middle, with no pane on the right', async () => {
     await page.goto(base + '/m/decisions')
     await page.locator('#view').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
@@ -1113,6 +1127,31 @@ const base = `http://localhost:${port}`
     if (got.list || got.side || got.agents || got.railWidth < 400 || !got.view.includes('Plan the week')) throw new Error(JSON.stringify(got))
   })
   await page.setViewportSize({ width: 412, height: 860 })
+
+  // ── a chat's details on the phone: a sheet ──
+  await page.goto(base + '/m/hermes/one/s_plan')
+  await page.getByRole('button', { name: 'Chat details' }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details' })
+  await step("a chat's details open in a sheet with what One holds for it, offering only models that cost nothing per message", async () => {
+    const model = details.locator('select[data-detail="model"]')
+    await model.waitFor({ timeout: 25000 })
+    const groups = await model.locator('optgroup').evaluateAll(gs => gs.map(g => g.label + ': ' + [...g.children].map(o => o.textContent).join(', ')))
+    if (groups.join(' | ') !== 'Covered by your sign-ins: gpt-5.5 (OpenAI Codex), gpt-5.5-mini (OpenAI Codex) | On this machine: qwen3-8b.gguf (Local)') throw new Error(groups.join(' | '))
+    if ((await details.locator('select[data-detail="reasoning"]').inputValue()) !== 'medium') throw new Error('thinking is not medium')
+    const wide = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+    if (wide) throw new Error('the sheet is wider than the phone')
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-details.png' })
+  await details.locator('select[data-detail="model"]').selectOption({ label: 'qwen3-8b.gguf (Local)' })
+  await details.locator('select[data-detail="reasoning"]').selectOption('high')
+  await details.locator('button[data-detail="save"]').click()
+  await step('a change goes to One and the sheet shows what One then holds', async () => {
+    await details.getByText('Its model and thinking changed.').waitFor({ timeout: 20000 })
+    const model = JSON.parse(await details.locator('select[data-detail="model"]').inputValue())
+    if (model.join() !== 'llamacpp,qwen3-8b.gguf') throw new Error('the model is ' + model)
+    if ((await details.locator('select[data-detail="reasoning"]').inputValue()) !== 'high') throw new Error('thinking is not high')
+  })
+  await details.getByRole('button', { name: 'Close details' }).click()
 
   // ── voice ──
   const barMode = () => page.evaluate(() => { const b = document.getElementById('voicebar'); return b && !b.hidden ? b.dataset.mode : null })

@@ -73,7 +73,7 @@ APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room
             ("GET", "own"), ("POST", "own"), ("POST", "voice"),
             ("GET", "tasks")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks")
+OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks", "control")
 # A file or photo for a message to his own Hermes comes as its own bytes, not JSON (own.py attach).
 ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/own/[a-z]+/attach$")
 # A recording to dictate from comes as its own bytes too (voice.py).
@@ -231,6 +231,8 @@ class Api:
                 return 200, own.session_done(self.ws, route[1], token, data)
             if route[2] == "tasks":
                 return 200, own.tasks(self.ws, route[1], token, data)
+            if route[2] == "control":
+                return 200, own.control_post(self.ws, route[1], token, data)
             if route[2] == "attachment":
                 return 200, Raw(own.attachment(self.ws, route[1], token, data.get("id"))[1])
             if route[2] == "claim":
@@ -360,6 +362,10 @@ class Api:
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "session":
             return 200, OwnChat(core.s).session(p, route[1], data.get("session_id"), data.get("op"),
                                                 data.get("title"), data.get("idempotency_key"))
+        if len(route) == 5 and route[0] == "own" and route[2] == "chats" and route[4] == "control":
+            if method == "GET":
+                return 200, OwnChat(core.s).control(p, route[1], route[3], wait=query.get("wait"))
+            return 200, OwnChat(core.s).control_set(p, route[1], route[3], data)
         if method == "GET" and len(route) == 5 and route[0] == "own" and route[2] == "chats" and route[4] == "messages":
             return 200, OwnChat(core.s).page(p, route[1], "messages", chat=route[3], before=query.get("before"),
                                              wait=query.get("wait"))
