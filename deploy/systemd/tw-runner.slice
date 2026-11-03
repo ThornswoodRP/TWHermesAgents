@@ -1,0 +1,16 @@
+# the guard rail tests' own GitHub runner, as tw-runner.
+# Generated from thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
+# A limit changes only by a PR to the policy, never on the box.
+[Unit]
+Description=Thornswood: the guard rail tests' own GitHub runner, as tw-runner
+Before=slices.target
+
+[Slice]
+MemoryAccounting=yes
+CPUAccounting=yes
+TasksAccounting=yes
+MemoryHigh=2560M
+MemoryMax=3G
+CPUWeight=50
+CPUQuota=100%
+TasksMax=512
