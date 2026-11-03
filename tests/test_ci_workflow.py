@@ -37,8 +37,21 @@ class Workflow(unittest.TestCase):
             self.assertRegex(u, r"^actions/[a-z-]+@[0-9a-f]{40}$")
 
     def test_the_vms_python_and_ones(self):
-        runs = {(m["os"], m["python"]) for m in self.wf["jobs"]["tests"]["strategy"]["matrix"]["include"]}
-        self.assertEqual(runs, {("ubuntu-24.04", "3.12"), ("windows-latest", "3.13")})
+        runs = {(m["runner"], m["python"]) for m in self.wf["jobs"]["tests"]["strategy"]["matrix"]["include"]}
+        self.assertEqual(runs, {("tw-hermes-vm", "3.12"), ("tw-hermes-box", "3.13")})
+
+    def test_every_job_runs_on_our_own_runners(self):
+        """3 Nov 2026: the included minutes ran out with the limit at $0, and
+        Patrick will not pay (A on q-hermes-ci-free-runners)."""
+        import json
+        self.assertEqual(self.wf["jobs"]["tests"]["runs-on"], "${{ matrix.runner }}")
+        merge = yaml.safe_load((REPO / ".github" / "workflows" / "merge-green.yml").read_text(encoding="utf-8"))
+        self.assertEqual(merge["jobs"]["merge"]["runs-on"], "tw-hermes-vm")
+        pin = json.loads((REPO / "deploy" / "runner" / "runner.json").read_text(encoding="utf-8"))
+        self.assertEqual(pin["labels"], ["tw-hermes-vm"])
+        for wf in (REPO / ".github" / "workflows").glob("*.yml"):
+            for name, job in yaml.safe_load(wf.read_text(encoding="utf-8"))["jobs"].items():
+                self.assertIn(job["runs-on"], ("${{ matrix.runner }}", "tw-hermes-vm"), f"{wf.name} {name}")
 
     def test_only_hashed_wheels(self):
         installs = [ln for ln in self.text.splitlines() if "pip install" in ln]
