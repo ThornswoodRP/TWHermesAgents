@@ -84,6 +84,26 @@ title, is already hidden or shown, or is already gone is done. It prints
 hidden chat titled exactly "Bot Chat", with every part Hermes compressed it
 into) is never changed. It needs no gateway.
 
+`tasks` reads, for the app's Tasks tab, what each named Hermes has going besides
+its chats (profile "" is the user's own Hermes), the way Hermes Desktop reads it
+(contracts.json "tasks"):
+
+    <hermes python> -I room_send.py < {"op": "tasks", "profiles": ["<bot or empty>", ...]}
+
+- subagents and background commands, from that profile's running gateway, never
+  started: `session.active_list` for its live chats, then `subagent.list` and
+  `process.list` for each (gateway/session_active_list.py, session_ancillary.py
+  read: Desktop's status stack polls the same three); a gateway that is not
+  running has none, and says its state;
+- scheduled jobs, with Hermes's own `cron.jobs.list_jobs` under that profile's
+  home, the reader Desktop's Scheduled jobs page gets from Hermes's dashboard
+  (hermes_cli/web_server_cron.py _call_cron_for_profile and _cron_store_scope);
+  a job whose latest run is claimed or running is running now (cron/executions.py).
+
+It prints {"tasks": {"<profile>": {"state", "subagents", "processes", "jobs", ...}}}.
+A part it could not read is null, with its reason beside it, never an empty list.
+Commands and errors are the ones Hermes already redacts for Desktop, cut short.
+
 `states` asks the same question of each Bot at once, for the phone's online
 dots: Hermes's own runtime state of each one's gateway (absent, starting,
 ready, draining, incompatible, inaccessible or conflict, gateway/runtime_contract.py),
@@ -123,6 +143,117 @@ def _found(profile: str):
         home = home / "profiles" / profile
     found = discover_gateway_endpoint(gateway_profile_home(home))
     return (found.endpoint if attachable(found) else None), found.state
+
+
+TASK_CHATS = 40      # the live chats whose subagents and background commands it reads, the newest first
+TASK_ROWS = 30       # at most this many of each kind for one Hermes
+TASK_SECONDS = 10    # one Hermes's gateway answers its part in this, or that part says it did not
+
+
+def _home(profile: str):
+    from pathlib import Path
+
+    from hermes_constants import get_default_hermes_root
+
+    home = Path(get_default_hermes_root())
+    return home / "profiles" / profile if profile else home
+
+
+def _cut(value, n: int):
+    return None if value is None else " ".join(str(value).split())[:n]
+
+
+def _jobs(profile: str) -> list:
+    """That profile's scheduled jobs, paused ones too, as Hermes lists them for Desktop."""
+    from agent.redact import redact_sensitive_text
+    from cron import jobs as cron_jobs
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home = _home(profile)
+    token = set_hermes_home_override(str(home))
+    try:
+        with cron_jobs.use_cron_store(home):
+            rows = cron_jobs.list_jobs(include_disabled=True)
+    finally:
+        reset_hermes_home_override(token)
+    out = []
+    for j in rows[:TASK_ROWS]:
+        run = j.get("latest_execution") if isinstance(j.get("latest_execution"), dict) else {}
+        err = j.get("last_error")
+        out.append({"id": _cut(j.get("id"), 64), "name": _cut(j.get("name"), 120),
+                    "schedule": _cut(j.get("schedule_display"), 80), "state": _cut(j.get("state"), 20),
+                    "next": _cut(j.get("next_run_at"), 40), "last": _cut(j.get("last_run_at"), 40),
+                    "last_status": _cut(j.get("last_status"), 30),
+                    # _format_job's own redaction (tools/cronjob_job_args.py)
+                    "last_error": _cut(redact_sensitive_text(err, force=True, redact_url_credentials=True), 200)
+                    if err else None,
+                    "running": run.get("status") in ("claimed", "running")})
+    return out
+
+
+async def _live(endpoint) -> dict:
+    """The subagents and background commands of the gateway's live chats."""
+    from hermes_cli.gateway_client import GatewayRPCError, connect_gateway
+
+    subs, procs, missed = [], [], []
+    async with connect_gateway(endpoint=endpoint) as client:
+        chats = (await client.rpc("session.active_list") or {}).get("sessions") or []
+        chats = sorted((c for c in chats if isinstance(c, dict) and isinstance(c.get("id"), str) and c["id"]),
+                       key=lambda c: float(c.get("started_at") or 0), reverse=True)[:TASK_CHATS]
+        for c in chats:
+            chat, title = c["id"][:128], _cut(c.get("title"), 120) or ""
+            try:
+                got_s = await client.rpc("subagent.list", session_id=c["id"]) or {}
+                got_p = await client.rpc("process.list", session_id=c["id"]) or {}
+            except GatewayRPCError as exc:
+                if str(exc) != "not_found":  # not_found: the chat closed after it was listed
+                    missed.append(str(exc))
+                continue
+            for r in got_s.get("subagents") or []:
+                if isinstance(r, dict):
+                    subs.append({"id": _cut(r.get("subagent_id"), 64), "chat": chat, "chat_title": title,
+                                 "goal": _cut(r.get("goal"), 300), "model": _cut(r.get("model"), 80),
+                                 "status": _cut(r.get("status"), 20), "depth": r.get("depth"),
+                                 "background": bool(r.get("delegation_id")), "tools": r.get("tool_count"),
+                                 "last_tool": _cut(r.get("last_tool"), 60), "started": r.get("started_at")})
+            for p in got_p.get("processes") or []:
+                if isinstance(p, dict):
+                    procs.append({"id": _cut(p.get("session_id"), 64), "chat": chat, "chat_title": title,
+                                  "command": _cut(p.get("command"), 200), "status": _cut(p.get("status"), 20),
+                                  "exit_code": p.get("exit_code"), "started": p.get("started_epoch"),
+                                  "ended": p.get("exited_at"), "why": _cut(p.get("completion_reason"), 40)})
+    out = {"subagents": subs[:TASK_ROWS], "processes": procs[:TASK_ROWS]}
+    if missed:
+        out["live_why"] = f"{len(missed)} of its chats did not answer ({missed[0][:40]})"
+    return out
+
+
+def _tasks(profile: str) -> dict:
+    out: dict = {}
+    try:
+        out["jobs"] = _jobs(profile)
+    except Exception as exc:  # its store could not be read: said, never an empty list
+        out["jobs"], out["jobs_why"] = None, f"Hermes could not read its scheduled jobs ({type(exc).__name__})"
+    try:
+        endpoint, state = _found(profile)
+    except Exception as exc:
+        endpoint, state = None, "check_failed"
+        out["live_why"] = f"could not find its gateway ({type(exc).__name__})"
+    out["state"] = str(state)
+    if endpoint is None:
+        out["subagents"] = out["processes"] = None
+        out.setdefault("live_why", f"its gateway is {state}")
+        return out
+    from hermes_cli.gateway_client import GatewayClientError
+
+    try:
+        out.update(asyncio.run(asyncio.wait_for(_live(endpoint), TASK_SECONDS)))
+    except (GatewayClientError, TimeoutError, asyncio.TimeoutError, OSError) as exc:
+        out["subagents"] = out["processes"] = None
+        out["live_why"] = (f"its gateway did not answer in {TASK_SECONDS} seconds"
+                           if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+                           else f"could not read its gateway ({type(exc).__name__}: {str(exc)[:60]})")
+    return out
 
 
 async def _send(endpoint, req: dict) -> dict:
@@ -235,6 +366,14 @@ def main() -> int:
             except Exception:  # this one's check could not run; the others still answer
                 states[name] = "check_failed"
         print(json.dumps({"states": states}))
+        return 0
+    if op == "tasks":
+        names = req.get("profiles")
+        if not (isinstance(names, list) and 0 < len(names) <= 16 and len(set(names)) == len(names)
+                and all(isinstance(n, str) and (n == "" or PROFILE.match(n)) for n in names)):
+            print(json.dumps({"tasks": None, "reason": "bad request"}))
+            return 2
+        print(json.dumps({"tasks": {name: _tasks(name) for name in names}}))
         return 0
     if op not in ("send", "ready", "react", "session") or not isinstance(profile, str):
         print(json.dumps({"sent": False, "reason": "bad request"}))

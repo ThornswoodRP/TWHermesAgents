@@ -743,6 +743,130 @@ async function boardView() {
     : el('p', { class: 'quiet' }, 'No Bot is working right now.'))
 }
 
+// ── Tasks: subagents, background commands and scheduled jobs (Patrick, 3 Nov) ──
+//
+// "I wanted to see the subagents, jobs, and background tasks on the Mobile and Desktop app." Every Hermes
+// keeps these per profile, so this one list holds all of them at once: Hermes, One and the six Bots, each
+// row with its agent's avatar, and a row of names to look at one of them only. What each part says comes
+// from that Hermes itself, read the way Hermes Desktop reads it (contracts.json "tasks"); a Hermes the core
+// has not heard from lately, or whose part could not be read, says so in one line at the foot, and none of
+// its rows are shown as though they were current.
+let tasksOnly = null   // the agent the list is narrowed to, for this visit; null is all of them
+
+function agentName(id) {
+  return GATEWAY[id] || NAMES[id] || id
+}
+
+function epochIso(sec) {
+  return typeof sec === 'number' ? new Date(sec * 1000).toISOString() : null
+}
+
+// Where a row's chat opens: one of Hermes's or One's chats, or a Bot's own chat.
+function taskChat(agent, chat) {
+  if (GATEWAY[agent]) return chat ? '/m/hermes/' + agent + '/' + encodeURIComponent(chat) : '/m/hermes/' + agent
+  return '/m/bots/' + agent
+}
+
+// When a job runs next, short enough for the pill on a phone: the time today, the day and time this week,
+// else the date.
+function nextWords(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d)) return ''
+  if (d.toDateString() === new Date().toDateString()) return at(iso)
+  if (d - Date.now() < 6 * 864e5) return d.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+// A job's state on the right: green only while it runs, as the other lists' dots; red when Hermes stopped it.
+function jobLine(j) {
+  if (j.running) return liveLine({ cls: 'on', words: 'Running now' })
+  if (j.state === 'error') return el('span', { class: 'rec off' }, 'Stopped')
+  if (j.state === 'paused') return el('span', { class: 'rec' }, 'Paused')
+  if (j.state === 'completed') return el('span', { class: 'rec' }, 'Done')
+  return el('span', { class: 'rec' }, j.next ? 'Next ' + nextWords(j.next) : 'Scheduled')
+}
+
+function taskRows(agents) {
+  const subs = [], procs = [], jobs = [], unheard = [], silent = []
+  for (const a of agents) {
+    const name = agentName(a.id)
+    if (!a.heard) { silent.push(name + (a.since ? ' (since ' + at(a.since) + ')' : '')); continue }
+    if (a.why) { unheard.push(`${name}: ${a.why}`); continue }
+    if (a.subagents === null || a.processes === null) unheard.push(`${name}: ${a.live_why || 'its gateway could not be read'}`)
+    if (a.jobs === null) unheard.push(`${name}: ${a.jobs_why || 'its scheduled jobs could not be read'}`)
+    for (const r of a.subagents || []) subs.push({ agent: a.id, ...r })
+    for (const r of a.processes || []) procs.push({ agent: a.id, ...r })
+    for (const r of a.jobs || []) jobs.push({ agent: a.id, ...r })
+  }
+  // The ones not heard from, in one sentence, before what the others could not read.
+  if (silent.length) unheard.unshift('Not heard from: ' + andList(silent))
+  return { subs, procs, jobs, unheard }
+}
+
+async function tasksView() {
+  setTab('tasks')
+  const r = await call('GET', '/tasks')
+  if (refused(r)) return
+  const agents = r.body.agents || []
+  const all = taskRows(agents)
+  const busy = new Set([...all.subs, ...all.procs, ...all.jobs].map(t => t.agent))
+  if (tasksOnly && !busy.has(tasksOnly)) tasksOnly = null
+  const mine = t => !tasksOnly || t.agent === tasksOnly
+  const subs = all.subs.filter(mine)
+  const procs = all.procs.filter(mine)
+  const jobs = all.jobs.filter(mine)
+  const name = t => agentName(t.agent)
+  const where = t => t.chat_title ? `${name(t)} · ${t.chat_title}` : name(t)
+  const pick = busy.size > 1 ? el('div', { class: 'picks', role: 'group', 'aria-label': 'Whose tasks' },
+    [null, ...agents.map(a => a.id).filter(id => busy.has(id))].map(id => el('button', {
+      type: 'button', class: 'pick-one', 'aria-pressed': String(tasksOnly === id),
+      onclick: () => { tasksOnly = id; tasksView() } }, id ? agentName(id) : 'All'))) : null
+  const live = (cls, words) => liveLine({ cls, words })
+  show(screenBar({ title: 'Tasks', heading: true }), pick,
+    subs.length ? [el('h2', { class: 'section' }, 'Subagents'), subs.map(t => listRow(
+      { 'data-task': 'subagent', onclick: () => go(taskChat(t.agent, t.chat)) }, {
+        agent: t.agent, title: t.goal || 'A subagent', lines: [el('span', { class: 'quiet' }, where(t)),
+          t.last_tool ? el('span', { class: 'what' }, toolWords(t.last_tool)) : null],
+        right: [t.status === 'running' || !t.status
+          ? live('on', t.background ? 'In the background' : 'Running')
+          : el('span', { class: t.status === 'failed' ? 'rec off' : 'rec' }, statusWords(t.status)),
+        forHowLong(epochIso(t.started))] }))] : null,
+    procs.length ? [el('h2', { class: 'section' }, 'Background tasks'), procs.map(t => listRow(
+      { 'data-task': 'process', onclick: () => go(taskChat(t.agent, t.chat)) }, {
+        agent: t.agent, title: el('code', { class: 'cmd' }, t.command || 'A command'), lines: [el('span', { class: 'quiet' }, where(t))],
+        right: t.status === 'running'
+          ? [live('on', 'Running'), forHowLong(epochIso(t.started))]
+          : [el('span', { class: t.exit_code === 0 ? 'rec' : 'rec off' },
+            t.exit_code === 0 ? 'Done' : t.exit_code === null ? 'Stopped' : `Failed (exit ${t.exit_code})`),
+          at(epochIso(t.ended))] }))] : null,
+    jobs.length ? [el('h2', { class: 'section' }, 'Scheduled jobs'), jobs.map(j => {
+      const failed = j.last_status && j.last_status !== 'ok'
+      return listRow({ 'data-task': 'job', onclick: () => go(taskChat(j.agent, null)) }, {
+        agent: j.agent, title: j.name || 'A job', lines: [el('span', { class: 'quiet' }, `${name(j)} · ${j.schedule || ''}`),
+          failed ? el('span', { class: 'warn' }, `Last run ${j.last_status === 'delivery_failed' ? 'was not delivered' : 'failed'}` +
+            (j.last_error ? `: ${j.last_error}` : '')) : null],
+        right: [jobLine(j)] })
+    })] : null,
+    subs.length || procs.length || jobs.length ? null
+      : el('p', { class: 'quiet' }, tasksOnly ? `${agentName(tasksOnly)} has nothing running and no scheduled jobs.`
+        : 'Nothing is running, and there are no scheduled jobs.'),
+    all.unheard.length ? el('p', { class: 'warn', role: 'status' }, all.unheard.join('. ') + '.') : null)
+}
+
+function andList(names) {
+  return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
+}
+
+function statusWords(s) {
+  return { running: 'Running', completed: 'Done', failed: 'Failed', interrupted: 'Stopped' }[s] || 'Running'
+}
+
+// A subagent's last tool in the words the line under a message uses for one (doingWords).
+function toolWords(tool) {
+  return doingWords({ state: 'tool', tool })
+}
+
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
 // What each Bot does, as the Thornswood Bots list says it, in the list's order.
 const WHAT = {
@@ -3325,6 +3449,7 @@ function mainView(path) {
   const card = path.match(/^decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card) return cardView(card[1])
   if (path === 'board') return boardView()
+  if (path === 'tasks') return tasksView()
   const bot = path.match(/^bots\/([a-z0-9][a-z0-9_-]{0,63})$/)
   if (bot) return chatView(bot[1], 'bots')
   const room = path.match(/^rooms\/([A-Za-z0-9_-]{1,64})$/)
@@ -3410,5 +3535,10 @@ setInterval(() => {
   if (csrf && document.visibilityState === 'visible' && !answering && location.pathname === '/m/board' &&
     !document.querySelector('.sheet-back')) boardView()
 }, LIVE_MS)
+// Tasks are read again every 5 seconds while they are the page open: the connectors report every 20 or 30.
+setInterval(() => {
+  if (csrf && document.visibilityState === 'visible' && !answering && location.pathname === '/m/tasks' &&
+    !document.querySelector('.sheet-back')) tasksView()
+}, 5000)
 installBar()
 route()
