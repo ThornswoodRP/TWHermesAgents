@@ -14,11 +14,6 @@ Type=simple
 User=hermes
 Group=tw-decide-voice
 EnvironmentFile=/etc/thornswood/tw-decide.env
-# The Whisper model, fetched by the install (whisper_models.py) into root's cache, outside the hermes
-# user's disk quota: read only here, and never downloaded by this service (2 Nov, "Disk quota exceeded").
-Environment=HF_HUB_CACHE=/var/lib/tw-decide-voice/hub
-Environment=HF_HUB_OFFLINE=1
-ReadOnlyPaths=-/var/lib/tw-decide-voice
 ExecStart=/opt/thornswood-hermes/bin/tw-decide-voice --hermes ${TW_HERMES_BIN}
 WorkingDirectory=~
 RuntimeDirectory=tw/decide-voice

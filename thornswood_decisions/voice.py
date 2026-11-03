@@ -61,13 +61,6 @@ class Voice:
         """Which local Whisper the voice worker found in Hermes, or None: for the install's line."""
         return self._ask({"op": "check"}).get("whisper")
 
-    def model(self) -> str:
-        """The model Hermes's stt.local.model names, for the install to fetch (whisper_models.py)."""
-        out = self._ask({"op": "model"})
-        if "model" not in out:
-            raise CoreError(502, "voice_failed", f"Whisper on the VM did not say its model: {out.get('reason') or 'no reason'}"[:300])
-        return str(out["model"])
-
     def prepare(self, timeout: float | None = None) -> str:
         """Has the worker load Hermes's local Whisper model now (the first time, a download of about
         150 MB for "base"): for the install, so the first recording does not wait on it."""

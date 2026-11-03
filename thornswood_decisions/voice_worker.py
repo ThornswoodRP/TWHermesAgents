@@ -14,14 +14,9 @@ long it took, and a failure's reason; never the words.
 The wire, one request per connection: one JSON line {"op": "transcribe", "type": <audio type>, "size": n},
 then exactly n bytes of audio. The answer is one JSON line: {"text": ...} or {"error": ..., "reason": ...}.
 {"op": "check"} answers {"whisper": <which local Whisper Hermes has, or null>}, for the install.
-{"op": "model"} answers {"model": <the model Hermes's `stt.local.model` names>}, so the install can fetch
-it. {"op": "prepare"} loads that model, as Hermes's own first transcription would, and keeps it loaded, so
-Patrick's first recording does not wait. It answers {"model": <name>} or {"error": ..., "reason": ...}.
-
-The model is never downloaded here. This runs as the Bots' `hermes` user, which has a disk quota, and the
-first download of "base" stopped every install at 4:47 PM on 2 Nov ("Disk quota exceeded"). The install
-fetches the model, pinned and hash-checked (whisper_models.py), into a root-owned cache this service only
-reads (HF_HUB_CACHE, with HF_HUB_OFFLINE=1, in tw-decide-voice.service).
+{"op": "prepare"} loads the model Hermes's `stt.local.model` names, as Hermes's own first transcription
+would, downloading it the first time, and keeps it loaded: the install asks it once, so Patrick's first
+recording does not wait on a download. It answers {"model": <name>} or {"error": ..., "reason": ...}.
 """
 
 from __future__ import annotations
@@ -63,26 +58,15 @@ def hermes_whisper() -> str | None:
     return "the local whisper command" if has_command and has_command() else None
 
 
-def _hermes_model():
-    """The model Hermes's own local transcription would use (stt.local.model, as
-    transcribe_audio_local_fallback reads it), and its stt.local settings."""
-    from tools import transcription_tools as t
-    from tools.transcription_common import DEFAULT_LOCAL_MODEL
-    local = t._load_stt_config().get("local") or {}
-    return t, t._normalize_local_model(local.get("model", DEFAULT_LOCAL_MODEL)), local
-
-
-def hermes_model() -> str:
-    return _hermes_model()[1]
-
-
 def hermes_prepare() -> str:
     """Hermes's own model load for local Whisper, with its stt.local settings: the cached model a
     transcription then uses (tools.transcription_tools._get_or_load_local_model, at the pinned commit)."""
-    from tools import transcription_tools
-    if not getattr(transcription_tools, "_HAS_FASTER_WHISPER", False):
+    from tools import transcription_tools as t
+    from tools.transcription_common import DEFAULT_LOCAL_MODEL
+    if not getattr(t, "_HAS_FASTER_WHISPER", False):
         raise RuntimeError("Hermes has no faster-whisper to load a model with")
-    t, name, local = _hermes_model()
+    local = t._load_stt_config().get("local") or {}
+    name = t._normalize_local_model(local.get("model", DEFAULT_LOCAL_MODEL))
     t._get_or_load_local_model(name, local)
     return name
 
@@ -120,8 +104,8 @@ def _read_line(conn: socket.socket) -> bytes:
 
 class Worker:
     def __init__(self, transcribe=hermes_transcribe, allow_uid: int | None = None, scratch: Path | None = None,
-                 whisper=hermes_whisper, prepare=hermes_prepare, model=hermes_model):
-        self.transcribe, self.whisper, self.prepare, self.model = transcribe, whisper, prepare, model
+                 whisper=hermes_whisper, prepare=hermes_prepare):
+        self.transcribe, self.whisper, self.prepare = transcribe, whisper, prepare
         self.allow_uid = allow_uid
         self.scratch = scratch or Path(tempfile.mkdtemp(prefix="tw-voice-"))
         self.scratch.mkdir(mode=0o700, exist_ok=True)
@@ -140,11 +124,6 @@ class Worker:
                 return {"whisper": self.whisper()}
             except Exception as exc:
                 return {"whisper": None, "reason": f"{type(exc).__name__}: {exc}"[:300]}
-        if isinstance(head, dict) and head.get("op") == "model":
-            try:
-                return {"model": self.model()}
-            except Exception as exc:
-                return {"error": "whisper_failed", "reason": f"{type(exc).__name__}: {exc}"[:300]}
         if isinstance(head, dict) and head.get("op") == "prepare":
             with self.one_at_a_time:
                 try:
@@ -152,7 +131,7 @@ class Worker:
                 except Exception as exc:
                     return {"error": "whisper_failed", "reason": f"{type(exc).__name__}: {exc}"[:300]}
         if not isinstance(head, dict) or head.get("op") != "transcribe":
-            return {"error": "bad_request", "reason": "the ops are check, model, prepare and transcribe"}
+            return {"error": "bad_request", "reason": "the ops are check, prepare and transcribe"}
         suffix = TYPES.get(str(head.get("type", "")).split(";")[0].strip().lower())
         size = head.get("size")
         if suffix is None:
