@@ -321,6 +321,51 @@ const base = `http://localhost:${port}`
     await page.locator('#view .msg.mine .att', { hasText: 'build notes.txt' }).waitFor({ timeout: 5000 })
     if (await page.locator('.files').count()) throw new Error('the picked file stayed above the box after sending')
   })
+  await step('on a computer, Enter sends and Shift+Enter is a new line, as in Hermes Desktop', async () => {
+    const box = page.getByLabel('Message to One')
+    await box.fill('First line')
+    await box.press('Shift+Enter')
+    await box.type('second line')
+    if (await box.inputValue() !== 'First line\nsecond line') throw new Error('Shift+Enter gave ' + JSON.stringify(await box.inputValue()))
+    const sent = page.waitForRequest(q => q.method() === 'POST' && /\/own\/one\/send$/.test(q.url()))
+    await box.press('Enter')
+    const body = JSON.parse((await sent).postData())
+    if (body.text !== 'First line\nsecond line') throw new Error('Enter sent ' + JSON.stringify(body.text))
+    await page.getByText('second line').waitFor({ timeout: 5000 })
+  })
+  await step('a paste of more than 3,000 characters goes as a Pasted content file, and the typed words stay', async () => {
+    const box = page.getByLabel('Message to One')
+    await box.fill('Read this:')
+    const long = 'The 4:47 PM run stopped at the model load. '.repeat(250)
+    await box.evaluate((b, text) => {
+      const dt = new DataTransfer()
+      dt.setData('text/plain', text)
+      b.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+    }, long)
+    await page.locator('.files .file.ok', { hasText: /Pasted content \(1\d KB\)/ }).waitFor({ timeout: 5000 })
+    if (await page.getByLabel('Message to One').inputValue() !== 'Read this:') throw new Error('the paste went into the box')
+    const sent = page.waitForRequest(q => q.method() === 'POST' && /\/own\/one\/send$/.test(q.url()))
+    await page.getByLabel('Message to One').press('Enter')
+    const body = JSON.parse((await sent).postData())
+    if (body.text !== 'Read this:' || body.attachments.length !== 1) throw new Error('send body ' + JSON.stringify(body))
+    await page.locator('#view .msg.mine').filter({ hasText: 'Read this:' }).waitFor({ timeout: 5000 })
+  })
+  await step('a box over 8,000 characters says so, and says it again on a second try', async () => {
+    const box = page.getByLabel('Message to One')
+    await box.fill('x'.repeat(8100))
+    const posts = []
+    const seen = q => { if (q.method() === 'POST' && /\/own\/one\/send$/.test(q.url())) posts.push(q.url()) }
+    page.on('request', seen)
+    await box.press('Enter')
+    const status = page.locator('#view p.again', { hasText: '8,100 characters' })
+    await status.waitFor({ timeout: 3000 })
+    await status.evaluate(s => s.classList.remove('again'))
+    await page.getByRole('button', { name: 'Send to One' }).click()
+    await status.waitFor({ timeout: 3000 })
+    page.off('request', seen)
+    if (posts.length) throw new Error('a box over the limit was sent')
+    await box.fill('')
+  })
   await step("Hermes's own reaction shows on the message it is on", () =>
     page.locator('#view .msg[data-mid="1"] .react[aria-label="Hermes\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
   const reactBody = []
@@ -584,6 +629,12 @@ const base = `http://localhost:${port}`
         return [before, ...during, list.style.transform]
       })
       if (JSON.stringify(moved) !== JSON.stringify([false, 'translateX(-72px)', true, ''])) throw new Error(JSON.stringify(moved))
+      // On a phone Enter is a new line; the button sends.
+      const tbox = tp.getByLabel('Message to One')
+      await tbox.fill('one')
+      await tbox.press('Enter')
+      if (await tbox.inputValue() !== 'one\n') throw new Error('Enter on a phone gave ' + JSON.stringify(await tbox.inputValue()))
+      await tbox.fill('')
       const wide = await tp.evaluate(() => document.documentElement.scrollWidth - innerWidth)
       if (wide > 0) throw new Error('the times push the page sideways by ' + wide)
     } finally { await touch.close() }
