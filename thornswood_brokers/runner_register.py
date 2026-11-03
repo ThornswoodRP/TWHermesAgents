@@ -17,13 +17,21 @@ from __future__ import annotations
 
 import json
 import os
-import pwd
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 PIN = Path("/opt/thornswood-hermes/current/deploy/runner/runner.json")
+
+
+def account(name: str):
+    """The runner's user from the system's accounts. pwd is Linux's alone, so it
+    is imported here, where the VM calls it, and the module still loads on
+    Windows, where the guard rail tests read it too (3 Nov: One's run could
+    not load test_runner)."""
+    import pwd
+    return pwd.getpwnam(name)
 
 
 def config_command(pin: dict) -> list[str]:
@@ -50,7 +58,7 @@ def register(pin: dict, token: str, *, run=subprocess.run, sleep=time.sleep) -> 
         raise SystemExit("STOP: nothing arrived on standard input, so there is no registration token. "
                          "Nothing was registered.")
     run(["systemctl", "stop", "tw-runner.service"])
-    user = pwd.getpwnam(pin["user"])
+    user = account(pin["user"])
 
     def as_runner():
         os.setgroups([])

@@ -117,10 +117,10 @@ class Egress(unittest.TestCase):
         def failing_meta():
             raise OSError("no route")
 
-        orig = (eg.fetch_meta, eg.table_present, eg.apply, eg.pwd.getpwnam)
+        orig = (eg.fetch_meta, eg.table_present, eg.apply, eg.account)
         try:
             eg.fetch_meta = failing_meta
-            eg.pwd.getpwnam = lambda name: type("P", (), {"pw_uid": 997})()
+            eg.account = lambda name: type("P", (), {"pw_uid": 997})()
             eg.table_present = lambda: True
             eg.apply = lambda text: applied.append(text)
             self.assertEqual(eg.main([]), 0)
@@ -130,7 +130,7 @@ class Egress(unittest.TestCase):
             self.assertEqual(len(applied), 1)
             self.assertNotIn("elements", applied[0])
         finally:
-            eg.fetch_meta, eg.table_present, eg.apply, eg.pwd.getpwnam = orig
+            eg.fetch_meta, eg.table_present, eg.apply, eg.account = orig
 
 
 class Unit(unittest.TestCase):
@@ -218,12 +218,12 @@ class Register(unittest.TestCase):
         return run
 
     def test_the_token_is_in_the_environment_and_on_no_command_line(self):
-        orig = self.rr.pwd.getpwnam
-        self.rr.pwd.getpwnam = lambda n: type("P", (), {"pw_uid": 997, "pw_gid": 997})()
+        orig = self.rr.account
+        self.rr.account = lambda n: type("P", (), {"pw_uid": 997, "pw_gid": 997})()
         try:
             out = self.rr.register(self.pin, "AAAATOKEN", run=self.run_fake(), sleep=lambda s: None)
         finally:
-            self.rr.pwd.getpwnam = orig
+            self.rr.account = orig
         self.assertIn("PASS", out[0])
         config = next(kw for cmd, kw in self.calls if cmd[0] == "./config.sh")
         cmd = next(cmd for cmd, kw in self.calls if cmd[0] == "./config.sh")
@@ -249,13 +249,13 @@ class Register(unittest.TestCase):
         self.assertFalse(any(cmd[0] == "./config.sh" for cmd, _ in self.calls))
 
     def test_a_config_that_did_not_register_leaves_the_runner_stopped(self):
-        orig = self.rr.pwd.getpwnam
-        self.rr.pwd.getpwnam = lambda n: type("P", (), {"pw_uid": 997, "pw_gid": 997})()
+        orig = self.rr.account
+        self.rr.account = lambda n: type("P", (), {"pw_uid": 997, "pw_gid": 997})()
         try:
             with self.assertRaises(SystemExit):
                 self.rr.register(self.pin, "AAAATOKEN", run=self.run_fake(registers=False), sleep=lambda s: None)
         finally:
-            self.rr.pwd.getpwnam = orig
+            self.rr.account = orig
         self.assertNotIn(["systemctl", "enable", "--quiet", "--now", "tw-runner.service"], [c for c, _ in self.calls])
 
     def test_every_new_file_is_placed(self):

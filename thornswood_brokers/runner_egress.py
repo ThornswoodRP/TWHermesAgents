@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import pwd
 import socket
 import subprocess
 import sys
@@ -122,9 +121,18 @@ def apply(text: str, run=subprocess.run) -> None:
         raise RuntimeError(f"nft refused the table: {r.stderr.strip()}")
 
 
+def account(name: str):
+    """The runner's user from the system's accounts. pwd is Linux's alone, so it
+    is imported here, where the VM calls it, and the module still loads on
+    Windows, where the guard rail tests read it too (3 Nov: One's run could
+    not load test_runner)."""
+    import pwd
+    return pwd.getpwnam(name)
+
+
 def main(argv: list[str]) -> int:
     p = pin()
-    uid = pwd.getpwnam(p["user"]).pw_uid
+    uid = account(p["user"]).pw_uid
     try:
         v4, v6 = lists_from_meta(fetch_meta(), p["egress"]["github_lists"])
         h4, h6 = resolve(p["egress"]["allow_hosts"])
