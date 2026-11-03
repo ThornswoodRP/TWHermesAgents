@@ -63,13 +63,15 @@ ON_THE_VM = unittest.skipIf(os.name == "nt" or not hasattr(socket, "SO_PEERCRED"
 class Running:
     """A voice worker on a socket in a scratch folder, served on a thread."""
 
-    def __init__(self, test, transcriber=None, allow_uid=None, whisper=lambda: "faster-whisper", prepare=lambda: "base"):
+    def __init__(self, test, transcriber=None, allow_uid=None, whisper=lambda: "faster-whisper", prepare=lambda: "base",
+                 model=lambda: "base"):
         self.dir = Path(tempfile.mkdtemp(prefix="tw-voice-test-"))
         test.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.path = str(self.dir / "voice.sock")
         self.t = transcriber or Transcriber()
         self.worker = voice_worker.Worker(self.t, allow_uid=os.getuid() if allow_uid is None else allow_uid,
-                                          scratch=self.dir / "scratch", whisper=whisper, prepare=prepare)
+                                          scratch=self.dir / "scratch", whisper=whisper, prepare=prepare,
+                                          model=model)
         test.addCleanup(self.worker.close)
         threading.Thread(target=self._serve, daemon=True).start()
         for _ in range(500):  # until it takes a connection
@@ -132,6 +134,9 @@ class TheWorker(unittest.TestCase):
 
     def test_check_says_which_whisper(self):
         self.assertEqual(self.r.raw(b'{"op": "check"}\n'), {"whisper": "faster-whisper"})
+
+    def test_model_says_which_model_hermes_uses(self):
+        self.assertEqual(self.r.raw(b'{"op": "model"}\n'), {"model": "base"})
 
     def test_prepare_loads_hermess_model_and_says_which(self):
         self.assertEqual(self.r.raw(b'{"op": "prepare"}\n'), {"model": "base"})
@@ -239,6 +244,7 @@ class TheCoresSide(unittest.TestCase):
                          {"text": "hey hermes what is on the board"})
         self.assertEqual(self.v.check(), "faster-whisper")
         self.assertEqual(self.v.prepare(), "base")
+        self.assertEqual(self.v.model(), "base")
 
     def test_only_patrick_and_only_a_recording(self):
         bot = types.SimpleNamespace(kind="service", label="Bramble")
@@ -418,6 +424,87 @@ class TheDeploy(unittest.TestCase):
         self.assertLess(step.index("pm install --extra stt-whisper"), step.index('ok "dictation uses Hermes\'s local Whisper'))
         self.assertIn("still finds no local Whisper", step)
         self.assertIn('model="$(voice_ask prepare)"', step)
+
+    def test_the_model_is_fetched_by_root_outside_the_hermes_users_quota_and_only_read_by_the_worker(self):
+        """4:47 PM, 2 Nov: Hermes's first load downloaded the model as hermes, and its disk quota refused it."""
+        sh = self.read("install.sh")
+        step = sh[sh.index("# 14. Dictation"):]
+        self.assertIn('model="$(voice_ask model)"', step)
+        self.assertIn('/usr/bin/python3 -I "$here/thornswood_decisions/whisper_models.py" --model "$model" '
+                      '--cache /var/lib/tw-decide-voice/hub', step)
+        self.assertLess(step.index("whisper_models.py"), step.index('model="$(voice_ask prepare)"'))
+        self.assertIn("install -d -m 0755 -o root -g root /var/lib/tw-decide-voice", sh)
+        unit = self.read("tw-decide-voice.service")
+        for line in ("Environment=HF_HUB_CACHE=/var/lib/tw-decide-voice/hub", "Environment=HF_HUB_OFFLINE=1",
+                     "ReadOnlyPaths=-/var/lib/tw-decide-voice"):
+            self.assertIn(line + "\n", unit)
+
+
+class PinnedModels(unittest.TestCase):
+    """whisper_models.py: the model from its pinned commit, each file's size and SHA-256 checked."""
+
+    def setUp(self):
+        from thornswood_decisions import whisper_models as wm
+        self.wm = wm
+        self.cache = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        self.files = {"config.json": b"{}", "model.bin": b"weights", "tokenizer.json": b"tok", "vocabulary.txt": b"v"}
+        import hashlib
+        self.pin = {"repo": "Systran/faster-whisper-base", "commit": "c" * 40,
+                    "files": {f: (len(b), hashlib.sha256(b).hexdigest()) for f, b in self.files.items()}}
+        p = mock.patch.dict(wm.MODELS, {"base": self.pin})
+        p.start()
+        self.addCleanup(p.stop)
+        self.urls = []
+
+    def get(self, body=None):
+        def get(url, to):
+            self.urls.append(url)
+            to.write_bytes(body if body is not None else self.files[url.rsplit("/", 1)[1]])
+        return get
+
+    def roomy(self, path):
+        return types.SimpleNamespace(free=10 * 1024 ** 3)
+
+    def test_it_lands_as_the_hubs_own_cache_from_the_pinned_commit(self):
+        snap = self.wm.fetch("base", self.cache, get=self.get(), free=self.roomy, say=lambda s: None)
+        top = self.cache / "models--Systran--faster-whisper-base"
+        self.assertEqual(snap, top / "snapshots" / ("c" * 40))
+        self.assertEqual((top / "refs" / "main").read_text(), "c" * 40)
+        for f, b in self.files.items():
+            self.assertEqual((snap / f).read_bytes(), b)
+            self.assertEqual(oct((snap / f).stat().st_mode & 0o777), "0o644")
+        self.assertEqual(sorted(self.urls), sorted(f"https://huggingface.co/Systran/faster-whisper-base/resolve/{'c' * 40}/{f}"
+                                                   for f in self.files))
+        self.urls.clear()
+        self.wm.fetch("base", self.cache, get=self.get(), free=self.roomy, say=lambda s: None)
+        self.assertEqual(self.urls, [], "files already there with their hash are kept")
+
+    def test_a_file_that_is_not_what_was_pinned_is_never_kept(self):
+        with self.assertRaises(self.wm.Stop):
+            self.wm.fetch("base", self.cache, get=self.get(b"something else"), free=self.roomy, say=lambda s: None)
+        snap = self.wm.snapshot(self.cache, "base")
+        self.assertEqual(list(snap.iterdir()), [])
+        self.assertFalse((snap.parent.parent / "refs" / "main").exists())
+
+    def test_too_little_room_or_an_unpinned_model_stops_before_any_download(self):
+        with self.assertRaises(self.wm.Stop) as e:
+            self.wm.fetch("base", self.cache, get=self.get(), free=lambda p: types.SimpleNamespace(free=1024), say=lambda s: None)
+        self.assertIn("free", str(e.exception))
+        with self.assertRaises(self.wm.Stop) as e:
+            self.wm.fetch("large-v3", self.cache, get=self.get(), free=self.roomy, say=lambda s: None)
+        self.assertIn("not pinned", str(e.exception))
+        self.assertEqual(self.urls, [])
+
+    def test_the_pin_for_base_is_the_hubs_listing_of_2_nov(self):
+        from thornswood_decisions import whisper_models as wm
+        mock.patch.stopall()
+        base = wm.MODELS["base"]
+        self.assertEqual(base["commit"], "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66")
+        self.assertEqual(base["files"]["model.bin"],
+                         (145217532, "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9"))
+        # faster-whisper's own allow list for a model (faster_whisper/utils.py download_model).
+        self.assertEqual(sorted(base["files"]), ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"])
 
 
 class TheApp(unittest.TestCase):

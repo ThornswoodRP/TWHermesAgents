@@ -121,6 +121,7 @@ ok "group tw-decide-bots: hermes alone"
 install -d -m 0755 -o root -g root /srv/tw /etc/thornswood
 install -d -m 0700 -o tw-decide -g tw-decide "$state"
 install -d -m 0700 -o tw-push -g tw-push /srv/tw/push
+install -d -m 0755 -o root -g root /var/lib/tw-decide-voice  # dictation's Whisper models, root's (step 14)
 old_room=""; old_origin=""  # TW_HERMES_BIN is found again each time
 if [[ -f "$envfile" ]]; then
   old_room="$(sed -n 's/^TW_DECIDE_ROOM=//p' "$envfile")"
@@ -403,7 +404,12 @@ if [[ -z "$whisper" ]]; then
   [[ -n "$whisper" ]] || stop "Hermes installed its stt-whisper extra, but dictation still finds no local Whisper: journalctl -u tw-decide-voice -n 50"
 fi
 ok "dictation uses Hermes's local Whisper: $whisper"
-# The model Hermes's stt.local.model names, loaded now (downloaded the first time, from Whisper's own
-# model host, as Hermes's first transcription would), so the first recording does not wait on it.
+# The model Hermes's stt.local.model names, fetched here as root, pinned and hash-checked, into the
+# cache tw-decide-voice.service reads (HF_HUB_CACHE, offline). Never by the hermes user: its disk quota
+# refused the download at 4:47 PM on 2 Nov and stopped every install.
+model="$(voice_ask model)" || stop "dictation did not say which Whisper model Hermes uses: journalctl -u tw-decide-voice -n 50"
+/usr/bin/python3 -I "$here/thornswood_decisions/whisper_models.py" --model "$model" --cache /var/lib/tw-decide-voice/hub \
+  || stop "the Whisper model $model was not fetched; what it printed is above."
+# Loaded now, from that cache, so the first recording does not wait on it.
 model="$(voice_ask prepare)" || stop "Whisper on the VM did not load its model: journalctl -u tw-decide-voice -n 50"
 ok "Whisper's model $model is loaded for dictation"
