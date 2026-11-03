@@ -49,6 +49,9 @@ WRITE = {
 }
 READ = {"contents": "read", "pull_requests": "read", "issues": "read", "actions": "read", "checks": "read", "metadata": "read"}
 CHECKS_APP = "github-actions"
+# Each App's own login, as GitHub names the author of what it writes
+# (Thornswood records/github-apps.json, the slugs).
+APP_LOGIN = {"bramble": "thornswood-bramble[bot]", "workers": "thornswood-workers[bot]"}
 QUEUE_STATE = """query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
   repository(owner: $owner, name: $name) {
     mergeQueue(branch: $branch) { id }
@@ -423,6 +426,38 @@ class GitService:
 
         return self._guarded_write(bot, task, "comment", repo, f"issue/{number}/{digest}", "", write=write, read_back=find)
 
+    def open_issue(self, caller: str, args: dict) -> dict:
+        """A new issue, unclaimed, through the Bot's own App. Any Bot files what it
+        finds; an answered card's DECIDED.md line needs one when the card has no issue
+        (thornswood_decisions/chat.py _decided_text). Patrick's answer on
+        dec_zf92laU0xp8mvmyfa8C7pA, 2 Nov 2026: five of his answers waited on it.
+
+        The body ends with the write's marker, so a lost answer is found by it and
+        never filed twice. No label and no assignee: Todo, unclaimed."""
+        bot, repo, task = self._bot(args), self._repo(args), self._task(args)
+        title, body = str(args.get("title") or ""), str(args.get("body") or "")
+        self._check(self.rules.open_issue(bot, repo, title, body))
+        app = "bramble" if bot == "bramble" else self._app(bot)
+        digest = hashlib.sha256(json.dumps([repo, title, body]).encode()).hexdigest()[:16]
+        marker = f"<!-- tw:{digest} -->"
+
+        def find():
+            path = (f"/repos/{repo}/issues?state=all&creator={quote(APP_LOGIN[app])}"
+                    "&sort=created&direction=desc&per_page=100")
+            for i in self.gh.get(app, repo, path):
+                if not i.get("pull_request") and marker in (i.get("body") or ""):
+                    return {"number": i["number"], "url": i.get("html_url")}
+            return None
+
+        def write():
+            r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues",
+                             {"title": title, "body": f"{body}\n\n{marker}"})
+            if r.status != 201:
+                raise GitHubError(r.status, str((r.body or {}).get("message") if isinstance(r.body, dict) else r.body))
+            return {"number": r.body["number"]}
+
+        return self._guarded_write(bot, task, "open_issue", repo, f"issue-new/{digest}", "", write=write, read_back=find)
+
     def label(self, caller: str, args: dict) -> dict:
         bot, repo, task = self._bot(args), self._repo(args), self._task(args)
         number, label, action = int(args.get("number")), str(args.get("label") or ""), args.get("action")
@@ -650,7 +685,7 @@ class GitService:
         return self.ask("ledger_event", {k: args.get(k) for k in ("repo", "issue", "event", "release", "note")})
 
     # Every op that changes something on GitHub.
-    WRITES = ("push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "start_run")
+    WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "start_run")
 
     def _executor_only(self, name: str, op: Callable[[str, dict], dict]) -> Callable[[str, dict], dict]:
         """One executor at a time (plan phases 4 and 5): until the cutover the
@@ -666,5 +701,6 @@ class GitService:
 
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
-        names = ("base", "push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "start_run", "read", "refused", "ledger_event")
+        names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "start_run",
+                 "read", "refused", "ledger_event")
         return {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}

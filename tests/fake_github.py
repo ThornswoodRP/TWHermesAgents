@@ -128,7 +128,11 @@ class FakeGitHub:
             self.token_permissions[f"tok-{len(self.tokens)}"] = dict(body.get("permissions") or {})
             return Response(201, {"token": f"tok-{len(self.tokens)}", "expires_at": "x"}, {})
         assert headers["Authorization"].startswith("token tok-"), headers
-        refused = self._pr_write_refused(method, path, headers["Authorization"][len("token "):])
+        token = headers["Authorization"][len("token "):]
+        # Who writes: the App whose installation the token was minted for.
+        self.app_login = {"177392923": "thornswood-bramble[bot]", "177393064": "thornswood-workers[bot]"}.get(
+            self.tokens[int(token.split("-")[1]) - 1]["installation"], "someone")
+        refused = self._pr_write_refused(method, path, token)
         if refused:
             return refused
         resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
@@ -258,6 +262,16 @@ class FakeGitHub:
             if raw is None:
                 return Response(404, {"message": "Not Found"}, {})
             return Response(200, {"content": base64.b64encode(raw).decode()}, {})
+        if rest[0] == "issues" and len(rest) == 1:
+            if method == "GET":
+                found = [i for (r, _), i in sorted(self.issues.items(), key=lambda kv: -kv[0][1]) if r == repo
+                         and (not query.get("creator") or i["user"]["login"] == query["creator"])]
+                return Response(200, json.loads(json.dumps(found[(page - 1) * 100: page * 100])), {})
+            n = max([k[1] for k in self.issues if k[0] == repo] + [k[1] for k in self.prs if k[0] == repo] + [99]) + 1
+            self.issues[(repo, n)] = {"number": n, "user": {"login": self.app_login}, "assignees": [], "labels": [],
+                                      "state": "open", "title": body["title"], "body": body["body"],
+                                      "html_url": f"https://github.com/{repo}/issues/{n}"}
+            return Response(201, {"number": n}, {})
         if rest[0] == "issues":
             n = int(rest[1])
             issue = self.issues.get((repo, n))

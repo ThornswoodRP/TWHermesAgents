@@ -28,7 +28,7 @@ from test_decisions_api import ORIGIN, Served, answer_body
 from thornswood_decisions import backup, connector, feed_reader, store as store_mod
 from thornswood_decisions.chat import Chat, room_event_id
 from thornswood_decisions.feeds import Feeds
-from thornswood_decisions.schema import MIGRATIONS
+from thornswood_decisions.schema import MIGRATIONS, REPLAY_15, _replay
 from thornswood_decisions.store import CoreError, Store, migrate
 
 ROOM = "54b3ad46-3419-4adb-b60d-c79cb347fcee"
@@ -276,6 +276,64 @@ class ConnectorSide(unittest.TestCase):
         with self.assertRaises(CoreError) as e:  # only a leased message can be put back
             self.chat.result(self.w.ws, self.tok, "msg_nope", "not_ready")
         self.assertEqual(e.exception.reason, "no_item")
+
+    def test_an_answer_whose_turn_the_fleet_queue_turned_away_goes_back_and_says_why(self):
+        # 2 Nov: Patrick's answer on the #5327 ad18c2c card reached Bramble while the queue turned turns
+        # away; the connector called it sent and nothing ran it. Now it comes back not_ready, unspent.
+        flags(self.w, "connector_effects")
+        card = self.answered()
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        why = "the fleet queue turned the turn away: 2 turn already running; the fleet runs at most 2 at once"
+        self.assertEqual(self.chat.result(self.w.ws, self.tok, cx, "not_ready", reason=why)["status"], "queued")
+        row = self.outbox(cx)
+        self.assertEqual((row["status"], row["attempts"], row["reason"]), ("queued", 0, why))
+        self.assertEqual(self.receipts(cx), [])
+        self.assertFalse(self.w.core.states(card["id"])["bot_told"])
+        m = self.send("rift", "hello", "key-00000022")
+        self.chat.claim(self.w.ws, self.tok)
+        self.chat.result(self.w.ws, self.tok, m, "not_ready", reason="the fleet queue has no room for a turn of rift's: x")
+        self.assertEqual(self.chat.view(self.w.patrick(), "rift")["mine"][0]["waits"],
+                         "the fleet queue has no room for a turn of rift's: x")
+
+    def test_migration_15_sends_each_named_answer_once_more_and_nothing_else(self):
+        self.assertEqual(MIGRATIONS[14], _replay(REPLAY_15))
+        self.assertEqual(len(REPLAY_15), 6)
+        self.assertIn("dec_2XL-fP9HNMMtGBXp_5KW1A", REPLAY_15)
+        flags(self.w, "connector_effects")
+        told = self.answered(key="key-00000150", title="Told")
+        cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
+        self.chat.result(self.w.ws, self.tok, cx, "confirmed", "turn finished")
+        waiting = self.answered(key="key-00000151", title="Waiting")
+        other = self.answered(key="key-00000152", title="Not named")
+        ox = self.chat.claim(self.w.ws, self.tok)["items"]
+        for i in ox:
+            if i["id"] != self.w.store.db.execute("SELECT id FROM connector_outbox WHERE decision_id = ?",
+                                                  (waiting["id"],)).fetchone()[0]:
+                self.chat.result(self.w.ws, self.tok, i["id"], "confirmed", "turn finished")
+        before = {r[0]: tuple(r[1:]) for r in self.w.store.db.execute(
+            "SELECT id, status, attempts, body_json FROM connector_outbox")}
+        for stmt in [_replay((told["id"], waiting["id"], "dec_gone"))]:
+            self.w.store.db.executescript(stmt)
+        rows = self.w.store.db.execute("SELECT id, decision_id, status, target, body_json, idempotency_key "
+                                       "FROM connector_outbox ORDER BY rowid").fetchall()
+        new = [r for r in rows if r["id"] not in before]
+        self.assertEqual([(r["decision_id"], r["status"], r["target"], r["idempotency_key"]) for r in new],
+                         [(told["id"], "queued", "bramble", f"again:{cx}")])
+        self.assertEqual(new[0]["body_json"], before[cx][2], "the same answer, word for word")
+        self.assertEqual({r[0]: tuple(r[1:]) for r in self.w.store.db.execute(
+            "SELECT id, status, attempts, body_json FROM connector_outbox") if r[0] in before}, before,
+            "every message already there stays as it was")
+        # It goes to the Bot that asked, as a new message, once the one on its way there has its result.
+        leased = self.w.store.db.execute("SELECT id FROM connector_outbox WHERE status = 'leased'").fetchone()[0]
+        self.chat.result(self.w.ws, self.tok, leased, "confirmed", "turn finished")
+        went = []
+        for _ in range(5):
+            for i in self.chat.claim(self.w.ws, self.tok)["items"]:
+                went.append(i["id"])
+                self.chat.result(self.w.ws, self.tok, i["id"], "confirmed", "turn finished")
+        self.assertEqual(went.count(new[0]["id"]), 1)
+        self.assertTrue(self.w.core.states(told["id"])["bot_told"])
+        self.assertTrue(self.w.store.verify_events()[0])
 
     def test_a_real_failure_of_the_answer_still_dies(self):
         flags(self.w, "connector_effects")

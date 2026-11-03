@@ -198,6 +198,29 @@ class GitHubRules:
             return Verdict.no(f"'{name}' is {latest.conclusion} on {pr.head_sha[:12]}; red is fixed at its cause, never merged past or re-run")
         return Verdict.yes()
 
+    # Issues
+
+    # What the guide's "How an issue and a comment are written" keeps off the
+    # public board: a footer or a session link, and a closing --- line.
+    NOT_PLAIN = re.compile(r"(?im)generated (by|with) \[?claude|claude\.ai/code|^---\s*\Z")
+
+    def open_issue(self, bot: str, repo: str, title: str, body: str) -> Verdict:
+        """A new issue on the board: any Bot, in a repo the Bots work in, plain, and
+        unclaimed (a finding goes on the board unclaimed, in Todo; the broker sends no
+        label and no assignee, so whoever picks it claims it the usual way)."""
+        p = self.policy
+        if repo == p.data["repos"]["hermes"]:
+            return Verdict.no("no Bot writes to Thornswood-Hermes; every change there is Patrick's")
+        if p.data["merge"]["base"].get(repo) is None:
+            return Verdict.no(f"{repo} is not a repo the Bots work in")
+        if not title.strip() or len(title) > 256 or "\n" in title:
+            return Verdict.no("an issue has a title of one line, at most 256 characters")
+        if not body.strip():
+            return Verdict.no("an issue says what it is for and when it is done")
+        if self.NOT_PLAIN.search(body):
+            return Verdict.no("an issue is plain: no footer, no session link and no closing --- line")
+        return Verdict.yes(f"a new issue in {repo}, unclaimed")
+
     # Claims
 
     def add_label(self, bot: str, issue: Issue, label: str, *, decision_id: str | None = None) -> Verdict:
