@@ -16,6 +16,16 @@ To apply the v0.22.5 series on a checkout of that commit:
 git am v0.22.5/*.patch
 ```
 
+## On v0.23.0
+
+The VM and Patrick's Desktop run Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`), the version `thornswood_decisions/contracts.json` pins. None of these fixes is in v0.23.0 yet. Applied one after another with `git am --3way`, these apply on it as they are:
+
+```bash
+git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-headers-logged.patch v0.22.5/0003-spill-fallback-posix-path.patch v0.22.5/0004-aux-codex-pick-by-model.patch v0.22.5/0005-desktop-relay-local-source-once-it-signals.patch main/0006-desktop-scheduled-jobs-every-gateway.patch v0.22.5/0008-desktop-ready-wait-on-remote.patch main/0007-webhook-coalesce-survives-restart.patch main/0010-display-watch-profile-scope.patch
+```
+
+The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already has the upstream code their `main/` copies were made for. Neither does 0009: v0.23.0 has upstream's rewrite of that flow.
+
 ## The patches
 
 | # | Fixes | Upstream pull request | Base for `main/` |

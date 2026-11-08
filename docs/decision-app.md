@@ -50,7 +50,7 @@ All of it is the decision core, `thornswood_decisions/`, one service on the Bots
 
 For every chat:
 
-- **Delivery** is honest: only Hermes saying so is "sent", only nothing sent is "not sent", and everything else is "uncertain", never sent again by itself. A gateway that is not ready leaves the message queued, and it goes the moment the gateway answers ready.
+- **Delivery** is honest: only Hermes saying so is "sent", only nothing sent is "not sent", and everything else is "uncertain", never sent again by itself. A gateway that is not ready, or a Bot whose turn the fleet queue would not admit, leaves the message queued, and it goes the moment the gateway answers ready and the queue has room. A turn the queue turns away after all counts the same way, never as sent.
 - **A running turn** follows the chat's busy setting, as Desktop does: the message steers the turn, interrupts it or waits in Hermes's queue, and the app says which.
 - **A live line** under the message being answered says what the turn is doing ("Thinking", "Writing", "Running a command"), read from Hermes's own event stream. Never the words, a tool's input or its output.
 - **History** pages back to a chat's first message, across Hermes's compression, held in the core's memory only, never in its store or a log.
