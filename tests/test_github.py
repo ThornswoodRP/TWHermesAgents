@@ -77,6 +77,41 @@ class Pushes(unittest.TestCase):
         self.assertFalse(self.r.push("ops", APP, "refs/heads/ops/1-x").allowed)
 
 
+class OpsIsBrambles(unittest.TestCase):
+    """Ops is private on GitHub Free, which keeps no rules there, so the
+    workers' App is not installed on it and no worker writes in it: only
+    Bramble's App can change Ops's main, and only by merging."""
+
+    OPS = "ThornswoodRP/Thornswood-Ops"
+
+    def setUp(self):
+        self.r = rules()
+
+    def test_a_worker_neither_pushes_nor_opens_a_pull_request_in_ops(self):
+        for bot in ("rift", "sprocket", "echo", "magpie", "wisp"):
+            with self.subTest(bot=bot):
+                v = self.r.push(bot, self.OPS, f"refs/heads/{bot}/12-x")
+                self.assertFalse(v.allowed)
+                self.assertIn("Bramble's alone", v.reason)
+                self.assertFalse(self.r.open_pr(bot, self.OPS, f"{bot}/12-x", "main").allowed)
+
+    def test_a_worker_neither_labels_nor_edits_in_ops(self):
+        self.assertFalse(self.r.add_label("rift", issue(repo=self.OPS), "claimed: Rift").allowed)
+        self.assertFalse(self.r.remove_label("rift", issue(repo=self.OPS, labels=["claimed: Rift"]), "claimed: Rift").allowed)
+        self.assertFalse(self.r.edit_pr("rift", pr(repo=self.OPS, head_ref="rift/12-x", author_bot="rift")).allowed)
+
+    def test_bramble_still_works_in_ops(self):
+        self.assertTrue(self.r.push("bramble", self.OPS, "refs/heads/bramble/12-x").allowed)
+        self.assertTrue(self.r.open_pr("bramble", self.OPS, "bramble/12-x", "main").allowed)
+        self.assertTrue(self.r.add_label("bramble", issue(repo=self.OPS), "claimed: Bramble").allowed)
+
+    def test_the_workers_app_is_on_the_two_public_repos_only(self):
+        p = policy()
+        self.assertEqual(sorted(p.data["github_apps"]["workers"]["repos"]), [APP, "ThornswoodRP/skymp"])
+        self.assertEqual(p.reader_for(self.OPS), "bramble")
+        self.assertEqual(p.reader_for(APP), "workers")
+
+
 class PullRequests(unittest.TestCase):
     def setUp(self):
         self.r = rules()

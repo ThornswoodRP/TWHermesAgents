@@ -142,6 +142,26 @@ class VmCheck(unittest.TestCase):
         r = self.run_check()
         self.assertTrue(any("seats" in s for s in r["stop"]), r["stop"])
 
+    def test_the_room_check_passes_for_the_bound_room_seating_the_policys_bots(self):
+        r = check_script.run_room(self.home, "room-wb", self.c)
+        self.assertEqual(r["stop"], [])
+        self.assertEqual(len(r["pass"]), 1)
+
+    def test_the_room_check_needs_no_hermes_version(self):
+        # The install runs it at each release, whatever Hermes the VM runs.
+        self.stamp("c" * 40)
+        self.assertEqual(check_script.run_room(self.home, "room-wb", self.c)["stop"], [])
+
+    def test_the_room_check_stops_on_another_room_or_other_members(self):
+        self.assertTrue(any("bound to room" in s for s in check_script.run_room(self.home, "room-x", self.c)["stop"]))
+        con = sqlite3.connect(self.db)
+        con.execute("DELETE FROM hosted_rooms")
+        con.commit()
+        con.close()
+        self.add_room("room-wb", "Thornswood Workbench", SIX[:5] + ["patrick-hermes"])
+        stops = check_script.run_room(self.home, "room-wb", self.c)["stop"]
+        self.assertTrue(any("but the policy seats" in s for s in stops), stops)
+
     def test_the_check_writes_nothing(self):
         before = hashlib.sha256(self.db.read_bytes()).hexdigest()
         files_before = sorted(p.name for p in self.home.iterdir())

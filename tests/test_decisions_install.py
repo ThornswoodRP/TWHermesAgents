@@ -181,6 +181,12 @@ class Scripts(unittest.TestCase):
         self.assertNotIn(" pair ", src)
         self.assertIn("readlink -f \"$opt/current\"", src)
 
+    def test_the_core_install_checks_the_room_seats_the_policys_bots(self):
+        src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('runuser -u hermes -- python3 -I "$here/scripts/check-hermes-contract.py"', src)
+        self.assertIn('--room "$room"', src)
+        self.assertIn('|| stop "the Workbench room does not match the policy', src)
+
     def test_the_core_install_puts_python3_venv_in_itself(self):
         src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
         self.assertIn("if ! python3 -c 'import ensurepip, venv' 2>/dev/null; then\n"

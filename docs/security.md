@@ -35,7 +35,8 @@ All six Bots and their containers still belong to the one `hermes` user, so a co
 | A worker's workflow change is pushed by Bramble | Broker; GitHub | `push()` refuses a worker push that changes a workflow. Bramble may push to `magpie/...` only to carry one. The workers' App has no Workflows permission |
 | Own branch, own pull requests | Broker | `push()` refuses `main`, tags, another Bot's branch, deletes and refs other than the Bot's own `<bot>/<issue>-<what>` branches (`branches.pattern`) |
 | No settings, environments, secrets, rulesets, collaborators or webhooks | Broker | `admin_call()`: an unknown write is refused until the policy names it |
-| A finding goes on the board plain and unclaimed | Broker | `open_issue()`: any Bot, through its own App, in Thornswood, Ops or the fork only; no label and no assignee, so it lands in Todo unclaimed; a one-line title, and a body with no footer, no session link and no closing `---` line. The body ends with the write's marker, so a lost answer is read back and the issue is never filed twice |
+| Thornswood-Ops is Bramble's alone | Broker; GitHub | `github.py`: a worker's push, pull request, edit, label and comment in Ops is refused, and every read there goes through Bramble's App (`policy.yaml` `github_apps.<app>.repos`). The workers' App is not installed on Ops. Ops is private on GitHub Free, which keeps no rules there, so this stands in for a ruleset; Thornswood's and the fork's `main` refuse any push but a pull request |
+| A finding goes on the board plain and unclaimed | Broker | `open_issue()`: any Bot, through its own App, in Thornswood or the fork, and in Ops only Bramble, whose App alone is installed there; no label and no assignee, so it lands in Todo unclaimed; a one-line title, and a body with no footer, no session link and no closing `---` line. The body ends with the write's marker, so a lost answer is read back and the issue is never filed twice |
 | Claims by `claimed: <Bot>` labels only | Broker | `add_label()`: only the six claim labels; a worker only its own, Bramble any; retired labels never on a new claim; a claim race stops both. Bramble makes the six labels from the policy with `tw_git claim_labels` and reads them back |
 | Hands off named people's work and the retired lanes | Broker | `policy.yaml` `hands_off`: those people as author or assignee, the lane labels and the lane branch prefixes |
 | No repository-level secrets; the default `GITHUB_TOKEN` read only | GitHub | Set on each repository; Magpie checks the names |
@@ -55,7 +56,7 @@ All six Bots and their containers still belong to the one `hermes` user, so a co
 | No keys on the VM except the Discord token and one download-only Nexus key | Guard | `apply.py` reads every `.env` by name, never by value, and stops on a secret-shaped name (a KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, PRIVATE, AUTH or COOKIE part) that is not allowed: the Discord token only in the gateway's own `.env`; no GitHub, Nexus, signing, Azure, Cloudflare, Google, OpenAI, OpenRouter or Anthropic API key; no `signing.json`, box key, `.pfx`, `.p12` or private-key `.pem` anywhere in Hermes's home. The Nexus key, when it comes, belongs to its own `tw-gamedata` user (`oracle_other_users`), never to Hermes |
 | A flagged command is judged by Thornswood's rules | Guard | Hermes's own approval check runs in smart mode with Thornswood's rules in its system prompt (`profile_config.py` `SMART_POLICY`): it denies a command that reads a credential, writes to a remote, changes the machine or touches files outside `/workspace` and `/tmp`, and approves reads, builds, tests and local git. The deny list and the guard plugin still refuse first, whatever the check says |
 | The `hermes` user holds no GitHub write credential | Guard | `apply.py` refuses `GH_TOKEN`, `GITHUB_TOKEN` and `GITHUB_APP_*` |
-| No extra spend on models | Guard | Each config's model order is fixed: Claude through Patrick's subscription sign-in, then OpenAI Codex. `apply.py` refuses any provider that bills by use (`paid_providers`), any `base_url` or `api_key`, a faster service tier, helper calls that could reach paid OpenRouter (`auxiliary.free_only: true`), or the wrong order. The credits and Qwen routes stay out of every chain until `admission_proxy.ready` is set; `routes.py` holds their rules and `credits_open()` stops new work with $10 of the month's credit left |
+| No extra spend on models | Guard | Each config's model order is fixed: Claude through Patrick's subscription sign-in, then OpenAI Codex. `apply.py` refuses any provider that bills by use (`paid_providers`), any `base_url` or `api_key`, a faster service tier, helper calls that could reach paid OpenRouter (`auxiliary.free_only: true`), or the wrong order. The credits and Qwen routes each stay out of every chain, and `tw-policy` refuses them, until a pull request sets that route true in `admission_proxy.ready`; `routes.py` holds their rules and `credits_open()` stops new work with $10 of the month's credit left |
 | Hermes on Discord takes instructions only from Patrick | Guard; Text; Discord | `apply.py` refuses `DISCORD_ALLOW_ALL_USERS`, `DISCORD_ALLOWED_ROLES` and `DISCORD_ALLOW_BOTS` (`policy.yaml` `secrets`), and each Bot's `SOUL.md` says it. In Discord, Hermes's slash commands are hidden and limited to the Owner role |
 
 ### The host
@@ -77,6 +78,7 @@ All six Bots and their containers still belong to the one `hermes` user, so a co
 |---|---|---|
 | Only Patrick answers, behind a passkey | Code | `core.py`, `auth.py`, `passkey.py`: a Bot is a service principal and never holds a session; a high-risk card needs a passkey sign-in from the last five minutes |
 | The core listens on loopback only | Code | `api.py` `make_server` refuses any other address; the phone reaches it through Tailscale Serve |
+| The Workbench room seats exactly the policy's Bots | Install | Each release's `deploy/decisions/install.sh` runs `check-hermes-contract.py --room` as `hermes`: the room the core is bound to must be the one live Workbench in Hermes's room store and seat exactly the Bots `policy.yaml` lists, or the install stops with the reason. Membership is set in Hermes Desktop (**Manage groups**) |
 | Push alerts carry nothing | Code | `push.py` and `sw.js`: one line, "Hermes needs you", no body; the payload holds only ids, and the push service sees only ciphertext |
 
 ## The attack tests
@@ -115,7 +117,7 @@ These stay in each Bot's `SOUL.md` and the `thornswood-ops` and `thornswood-guid
 - Never start the launcher or the game.
 - The writing rules: no em dashes, Mountain time on the 12-hour clock, they/them by default, and Thornswood's own word list.
 - One fix per pull request, a failing test first, and `Refs` or `Closes` by the rule.
-- A room message is never permission. Room membership is set in Hermes Desktop (**Manage groups**); `policy.yaml` lists each Bot's rooms.
+- A room message is never permission.
 - A refusal is a stop. The guard says this in every system prompt too.
 
 ## Known limits
@@ -123,7 +125,5 @@ These stay in each Bot's `SOUL.md` and the `thornswood-ops` and `thornswood-guid
 What the code above does not hold yet, each with what is missing:
 
 - **No disk cap inside a container.** The VM's ext4 store cannot enforce one in podman (Hermes needs XFS with project quotas). The Bots' broker trees have theirs.
-- **The credits and Qwen routes are off.** They stay out of the Bots' model chains until their keys are in place and the canary passes, and `admission_proxy.ready` turns them on.
-- **Thornswood-Ops has no ruleset.** Thornswood, the engine fork and this repository protect their default branches with rulesets nobody can bypass. Ops is private on GitHub Free, which offers none, so nothing on GitHub stops the workers' App from pushing to its `main`, and the broker is the only stop there.
-- **Two descriptions of push alerts.** `thornswood_guard/notify.py` and `policy.yaml` `notifications` are not what the decision core reads; the phone's alerts come from the core's own outbox (`push.py`).
+- **The credits and Qwen routes are off.** Each turns on when a pull request sets it ready in `admission_proxy.ready`, once its key is in the proxy's file and the proxy's attack tests pass on the VM. Qwen's key is on the VM; the credits key is not yet.
 - **The game box's backup drop.** The install sets up the box's SFTP jail only once the box's public key is in `deploy/keys/box-drop.pub`, which is not in the repository yet.
