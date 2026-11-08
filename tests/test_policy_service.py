@@ -50,6 +50,9 @@ def pilot_data() -> dict:
     import copy
     data = copy.deepcopy(policy().data)
     data["admission"]["stage"] = "pilot"
+    # The route mechanics are tested with both proxy routes ready; Routes
+    # tests a route that is not.
+    data["admission_proxy"]["ready"] = {"credits": True, "qwen": True}
     return data
 
 
@@ -556,6 +559,17 @@ class Routes(unittest.TestCase):
         with self.assertRaises(Refused) as e:
             s2.route_admit("tw-proxy", {"bot": "bramble", "route": "credits"})
         self.assertIn("low-risk", str(e.exception))
+
+    def test_a_route_that_is_not_ready_is_refused_even_to_an_admitted_turn(self):
+        data = pilot_data()
+        data["admission_proxy"]["ready"] = {"credits": False, "qwen": True}
+        s = service(data=data)
+        s.set_task_risk("hermes", {"bot": "bramble", "task": "triage", "risk": "low"})
+        s.admit("hermes", {"bot": "bramble", "task": "triage"})
+        with self.assertRaises(Refused) as e:
+            s.route_admit("tw-proxy", {"bot": "bramble", "route": "credits"})
+        self.assertIn("not ready", str(e.exception))
+        self.assertTrue(s.route_admit("tw-proxy", {"bot": "bramble", "route": "qwen"})["admitted"])
 
     def test_a_closed_route_is_a_wait_with_its_opening_time(self):
         s = service()

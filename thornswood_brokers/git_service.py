@@ -247,7 +247,7 @@ class GitService:
         return out
 
     def _issue(self, repo: str, number: int) -> Issue:
-        raw = self.gh.get("workers", repo, f"/repos/{repo}/issues/{int(number)}")
+        raw = self.gh.get(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{int(number)}")
         return Issue(repo=repo, number=int(number), author_login=raw["user"]["login"],
                      assignees=[a["login"] for a in raw.get("assignees", [])],
                      labels=[l["name"] for l in raw.get("labels", [])], open=raw.get("state") == "open",
@@ -255,7 +255,7 @@ class GitService:
 
     def _ref_sha(self, repo: str, branch: str) -> str | None:
         try:
-            raw = self.gh.get("workers", repo, f"/repos/{repo}/git/ref/heads/{quote(branch)}")
+            raw = self.gh.get(self.policy.reader_for(repo), repo, f"/repos/{repo}/git/ref/heads/{quote(branch)}")
         except GitHubError as e:
             if e.status == 404:
                 return None
@@ -328,6 +328,8 @@ class GitService:
         bot, repo = self._bot(args), self._repo(args)
         if repo == self.policy.data["repos"]["fork"] and not self.policy.bots[bot].get("fork_branches"):
             raise Refused(f"only Wisp works in the engine fork, not {self.policy.bot_name(bot)}")
+        if not self.policy.app_reaches(self._app(bot), repo):
+            raise Refused(f"{self.policy.bot_name(bot)} does not work in {repo}; it is Bramble's alone")
         base = self.policy.data["merge"]["base"][repo]
         mirror = self._mirror(repo, self._app(bot))
         sha = self._git(mirror, "rev-parse", f"refs/remotes/origin/{base}")
@@ -394,7 +396,9 @@ class GitService:
         number, body = int(args.get("number")), str(args.get("body") or "")
         if not body.strip():
             raise Refused("a comment says something")
-        issue_raw = self.gh.get("workers", repo, f"/repos/{repo}/issues/{number}")
+        if (no := self.rules._outside_app(bot, repo)) is not None:
+            raise Refused(no.reason)
+        issue_raw = self.gh.get(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{number}")
         if issue_raw.get("pull_request"):
             self._check(self.rules.edit_pr(bot, self._pr(repo, number)))
         else:
@@ -625,7 +629,8 @@ class GitService:
         return out
 
     def read(self, caller: str, args: dict) -> dict:
-        """A GET for any Bot, as the workers' App, in the three repos only."""
+        """A GET for any Bot, in the three repos only: as the workers' App, or
+        Bramble's in Ops, where the workers' App is not installed."""
         bot, repo = self._bot(args), self._repo(args)
         path = str(args.get("path") or "")
         root = f"/repos/{repo}"
@@ -635,7 +640,7 @@ class GitService:
         if not inside or ".." in path:
             raise Refused(f"reads stay inside {root}")
         self._check(self.rules.admin_call(bot, "GET", path))
-        return {"body": self.gh.get("workers", repo, path)}
+        return {"body": self.gh.get(self.policy.reader_for(repo), repo, path)}
 
     def refused(self, caller: str, args: dict) -> dict:
         """Any other write a Bot asks for: named, and refused with the rule's reason."""

@@ -69,11 +69,20 @@
   "github_apps": {
     "bramble": {
       "workflows": true,
-      "may_merge": true
+      "may_merge": true,
+      "repos": [
+        "ThornswoodRP/Thornswood",
+        "ThornswoodRP/skymp",
+        "ThornswoodRP/Thornswood-Ops"
+      ]
     },
     "workers": {
       "workflows": false,
-      "may_merge": false
+      "may_merge": false,
+      "repos": [
+        "ThornswoodRP/Thornswood",
+        "ThornswoodRP/skymp"
+      ]
     }
   },
   "executor": "bramble",
@@ -277,6 +286,10 @@
       {
         "name": "DISCORD_BOT_TOKEN",
         "where": "root"
+      },
+      {
+        "name": "TW_PROXY_TOKEN",
+        "where": "each_profile"
       }
     ],
     "oracle_settings": [
@@ -302,12 +315,6 @@
         "name": "QWEN_API_KEY",
         "user": "tw-proxy",
         "use": "route 4, added by the admission proxy to low-risk Qwen packets"
-      }
-    ],
-    "oracle_later": [
-      {
-        "name": "TW_PROXY_TOKEN",
-        "where": "each_profile"
       }
     ],
     "qwen_env_file": "/home/hermes/.config/thornswood/qwen.env",
@@ -365,14 +372,6 @@
       "hosts.yml",
       ".git-credentials"
     ]
-  },
-  "notifications": {
-    "push_kinds": [
-      "decision",
-      "main-approval"
-    ],
-    "lock_screen_text": "Thornswood needs you",
-    "link": "/cards/{card_id}?rev={revision}"
   },
   "wake": {
     "app": "bramble",
@@ -559,7 +558,10 @@
     "qwen_max_tokens": 8192,
     "qwen_lease_seconds": 900,
     "upstream_timeout_seconds": 900,
-    "ready": false
+    "ready": {
+      "credits": false,
+      "qwen": false
+    }
   },
   "admission": {
     "stage": "after",

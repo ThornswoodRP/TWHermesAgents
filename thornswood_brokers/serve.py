@@ -126,7 +126,7 @@ def main(argv: list[str]) -> None:
         env = load_env(cfg["env_file"])
         tokens = load_tokens(cfg["tokens_file"], policy) if Path(cfg["tokens_file"]).exists() else {}
         if not tokens:
-            logger.warning("no proxy tokens yet; every request is refused until admission_proxy.ready and the install make them")
+            logger.warning("no proxy tokens yet; every request is refused until the install makes them")
         proxy = Proxy(policy, _asker(policy), env, tokens)
         server = Server(cfg["listen"], proxy)
         logger.info("tw-proxy listening on %s", cfg["listen"])

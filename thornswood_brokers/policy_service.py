@@ -32,7 +32,7 @@ from typing import Callable
 
 from thornswood_guard.decisions import Decision
 from thornswood_guard.policy import Policy, Verdict
-from thornswood_guard.routes import credits_open, route_allowed
+from thornswood_guard.routes import credits_open, proxy_ready_in, route_allowed
 
 from . import host as hostmod
 from .wire import Refused
@@ -646,6 +646,9 @@ class PolicyService:
         route = args.get("route")
         if route not in ("credits", "qwen"):
             raise Refused(f"the proxy carries routes 2 and 4 only, not {route}")
+        if route not in proxy_ready_in(self.policy):
+            raise Refused(f"route {route} is not ready (policy.yaml admission_proxy.ready); a PR sets it once "
+                          "its key is in the proxy's file and the proxy's tests passed on the VM")
         turn = self.active(bot)
         if turn is None:
             raise Refused(f"{bot} has no admitted turn; a turn with no ticket never reaches a route")

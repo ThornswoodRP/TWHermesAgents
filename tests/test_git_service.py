@@ -93,8 +93,10 @@ class World:
 
     CHECKS = {APP: ("Launcher builds", "Build check result"), OPS: ("check",), FORK: ("build-pr",)}
 
-    def green_pr(self, number: int = 42, branch: str = "sprocket/3561-path-fence",
+    def green_pr(self, number: int = 42, branch: str = "",
                  files: list[str] | None = None, repo: str = OPS, checks: bool = True) -> str:
+        # Ops is Bramble's alone (policy.yaml github_apps): its pull requests are Bramble's own.
+        branch = branch or ("bramble/3561-path-fence" if repo == OPS else "sprocket/3561-path-fence")
         base = "thornswood/engine-changes" if repo == FORK else "main"
         sha = self.push(branch.split("/")[0], branch, {"launcher/PathFence.cs": "fence\n"}, repo=repo, base=base)["sha"]
         self.fake.add_pr(repo, number, head_ref=branch, head_sha=sha, base=base,
@@ -223,9 +225,9 @@ class Merge(unittest.TestCase):
 
     def test_attack_9_a_worker_cannot_merge_its_own_pr(self):
         w = World()
-        sha = w.green_pr()
+        sha = w.green_pr(branch="wisp/3561-path-fence", repo=FORK)
         with self.assertRaises(Refused) as e:
-            w.merge(bot="sprocket", sha=sha)
+            w.merge(bot="wisp", sha=sha, repo=FORK)
         self.assertIn("only Bramble merges", str(e.exception))
         self.assertEqual(w.fake.writes("PUT"), [])
 
@@ -551,6 +553,20 @@ class PullRequestsAndIssues(unittest.TestCase):
                      f"/repos/{APP}-Ops/issues/1", f"/repos/{APP}x", f"/repos/{APP}..", ""):
             with self.subTest(path=path), self.assertRaises(Refused):
                 w.git.read("hermes", {"bot": "rift", "repo": APP, "path": path})
+
+    def test_ops_is_read_through_brambles_app_and_never_written_by_a_worker(self):
+        # The workers' App is not installed on Ops (policy.yaml github_apps).
+        w = World()
+        w.fake.add_issue(OPS, 12, labels=["claimed: Rift"])
+        before = len(w.fake.tokens)
+        self.assertEqual(w.git.read("hermes", {"bot": "rift", "repo": OPS, "path": f"/repos/{OPS}/issues/12"})["body"]["number"], 12)
+        self.assertEqual({t["installation"] for t in w.fake.tokens[before:]}, {"177392923"})
+        with self.assertRaises(Refused) as e:
+            w.git.comment("hermes", {"bot": "rift", "repo": OPS, "task": "t", "number": 12, "body": "Done."})
+        self.assertIn("Bramble's alone", str(e.exception))
+        with self.assertRaises(Refused):
+            w.git.base("hermes", {"bot": "rift", "repo": OPS})
+        self.assertEqual(w.fake.writes("POST", "/comments"), [])
 
     def test_only_bramble_keeps_the_ledger(self):
         w = World()

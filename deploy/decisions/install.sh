@@ -33,6 +33,8 @@
 # it makes my-hermes's connector token once, straight into that user's
 # ~/.config/thornswood/own-me.token (0600), and starts tw-decide-own as that
 # user, which does nothing and copies nothing while own_chat_write is off.
+# Each run checks the bound room seats exactly the Bots policy.yaml lists, and
+# stops when it does not.
 # It starts tw-decide-peers once a minute, which reads the tailnet's view of
 # One (`tailscale status --json`, read only) so the phone says One is off only
 # when Tailscale says so.
@@ -130,6 +132,14 @@ room="${room:-$old_room}"; origin="${origin:-$old_origin}"
 printf 'TW_DECIDE_ROOM=%s\nTW_DECIDE_ORIGIN=%s\nTW_HERMES_BIN=%s\n' "$room" "$origin" "$hermes_bin" > "$envfile.new"
 chmod 0644 "$envfile.new"; mv "$envfile.new" "$envfile"
 ok "$state is 0700 tw-decide; room '${room:-not set}', origin '${origin:-not set}'"
+# The room's members are the policy's (policy.yaml bots.<bot>.rooms). Hermes keeps
+# them in its own room store, set when the room was made; read-only, as hermes.
+if [[ -n "$room" ]]; then
+  seated="$(runuser -u hermes -- python3 -I "$here/scripts/check-hermes-contract.py" \
+    --home "$(getent passwd hermes | cut -d: -f6)/.hermes" --room "$room" 2>&1)" \
+    || stop "the Workbench room does not match the policy: $(grep '^STOP' <<<"$seated" | head -1)"
+  ok "$(grep "^PASS" <<<"$seated" | head -1 | cut -c6-)"
+fi
 
 # 3. The venv, root's, from the exact hashes. Rebuilt only when the list changes.
 want="$(sha256sum "$here/deploy/decisions/requirements.txt" | cut -d' ' -f1)"

@@ -58,6 +58,15 @@ class GitHubRules:
         self.policy = policy
         self.decisions = decisions
 
+    def _outside_app(self, bot: str, repo: str) -> Verdict | None:
+        """A refusal when the Bot's App is not installed on the repo: the
+        workers' App is not on Ops, which is Bramble's alone (policy.yaml
+        github_apps)."""
+        if self.policy.app_reaches(self.policy.app_of(bot), repo):
+            return None
+        return Verdict.no(f"{self.policy.bot_name(bot)} does not write in {repo}: it is Bramble's alone, since GitHub "
+                          "keeps no rules on that private repository and the workers' App is not installed there")
+
     # Pushes
 
     def push(self, bot: str, repo: str, ref: str, *, force: bool = False,
@@ -68,6 +77,8 @@ class GitHubRules:
             return Verdict.no(f"{bot} is not one of the six Bots")
         if repo == p.data["repos"]["hermes"]:
             return Verdict.no("no Bot writes to Thornswood-Hermes; every change there is Patrick's")
+        if (no := self._outside_app(bot, repo)) is not None:
+            return no
         if not ref.startswith("refs/heads/"):
             return Verdict.no(f"{ref} is not a branch; tags and other refs are never pushed by a Bot")
         branch = ref[len("refs/heads/"):]
@@ -101,6 +112,8 @@ class GitHubRules:
         p = self.policy
         if repo == p.data["repos"]["hermes"]:
             return Verdict.no("no Bot opens a pull request in Thornswood-Hermes")
+        if (no := self._outside_app(bot, repo)) is not None:
+            return no
         want_base = p.data["merge"]["base"].get(repo)
         if want_base is None:
             return Verdict.no(f"{repo} is not a repo the Bots work in")
@@ -113,6 +126,8 @@ class GitHubRules:
 
     def edit_pr(self, bot: str, pr: PullRequest) -> Verdict:
         """Title, body, ready for review, and comments on its own PR."""
+        if (no := self._outside_app(bot, pr.repo)) is not None:
+            return no
         if self._hands_off_pr(pr):
             return Verdict.no(self._hands_off_reason(pr.author_login, pr.head_ref))
         if pr.author_bot == bot:
@@ -202,6 +217,8 @@ class GitHubRules:
 
     def add_label(self, bot: str, issue: Issue, label: str, *, decision_id: str | None = None) -> Verdict:
         p = self.policy
+        if (no := self._outside_app(bot, issue.repo)) is not None:
+            return no
         if self._hands_off_issue(issue):
             return Verdict.no(self._hands_off_reason(issue.author_login, None, issue))
         prefix = p.data["claims"]["prefix"]
@@ -224,6 +241,8 @@ class GitHubRules:
     def remove_label(self, bot: str, issue: Issue, label: str, *, decision_id: str | None = None,
                      cutover_commit: str = "") -> Verdict:
         p = self.policy
+        if (no := self._outside_app(bot, issue.repo)) is not None:
+            return no
         if self._hands_off_issue(issue):
             return Verdict.no(self._hands_off_reason(issue.author_login, None, issue))
         prefix = p.data["claims"]["prefix"]

@@ -88,6 +88,13 @@ class Policy:
                     or not all(isinstance(n, str) and n for n in names)
                     or len(set(names)) != len(names)):
                 raise PolicyError(f"the merge rule names no required checks for {repo}")
+        apps = self.data.get("github_apps") or {}
+        for app in ("bramble", "workers"):
+            reach = (apps.get(app) or {}).get("repos")
+            if not isinstance(reach, list) or not set(reach) <= set(self.data.get("merge", {}).get("base", {})):
+                raise PolicyError(f"github_apps.{app}.repos lists the repos the App is installed on, each one the merge rule names")
+        if set((apps.get("bramble") or {}).get("repos") or []) != set(self.data.get("merge", {}).get("base", {})):
+            raise PolicyError("Bramble's App is installed on every repo the Bots work in")
         auto = self.data.get("merge", {}).get("auto_merge")
         if (not isinstance(auto, dict) or set(auto) != set(self.data.get("merge", {}).get("base", {}))
                 or not all(isinstance(v, list) and all(isinstance(n, str) and n for n in v) for v in auto.values())):
@@ -111,6 +118,15 @@ class Policy:
 
     def app_of(self, bot: str) -> str:
         return self.bots[bot]["app"]
+
+    def app_reaches(self, app: str, repo: str) -> bool:
+        """Whether the App is installed on the repo (github_apps.<app>.repos)."""
+        return repo in self.data["github_apps"][app]["repos"]
+
+    def reader_for(self, repo: str) -> str:
+        """The App that reads a repo for any Bot: the workers' where it is
+        installed, Bramble's where only Bramble's is (Ops)."""
+        return "workers" if self.app_reaches("workers", repo) else "bramble"
 
     def claim_labels(self) -> dict[str, str]:
         return {v["claim_label"]: bot for bot, v in self.bots.items()}
