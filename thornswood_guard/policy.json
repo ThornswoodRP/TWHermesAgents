@@ -5,7 +5,7 @@
     "app": "ThornswoodRP/Thornswood",
     "fork": "ThornswoodRP/skymp",
     "ops": "ThornswoodRP/Thornswood-Ops",
-    "hermes": "ThornswoodRP/Thornswood-Hermes"
+    "hermes": "ThornswoodRP/TWHermesAgents"
   },
   "bots": {
     "bramble": {
@@ -121,7 +121,15 @@
     "robot_authors": [
       "dependabot[bot]",
       "thornswood-pin-robot[bot]"
-    ]
+    ],
+    "auto_merge_people": [
+      "EvilPatrick06",
+      "WiccanDjinn"
+    ],
+    "workflow_authors": [
+      "github-actions[bot]"
+    ],
+    "outside_label": "outside work"
   },
   "runs": {
     "main_without_patrick": true,
@@ -464,6 +472,14 @@
           "hermes",
           "root"
         ]
+      },
+      "decide_git": {
+        "path": "/run/tw/decide-git/git.sock",
+        "group": "tw-decide-git",
+        "clients": [
+          "tw-git",
+          "root"
+        ]
       }
     },
     "state": {
@@ -678,7 +694,7 @@
     }
   },
   "follow_main": {
-    "url": "git@github.com:ThornswoodRP/Thornswood-Hermes.git",
+    "url": "git@github.com:ThornswoodRP/TWHermesAgents.git",
     "read_key": "/etc/thornswood/hermes-read-key",
     "known_hosts": "/etc/thornswood/github_known_hosts",
     "mirror": "/srv/tw/follow/thornswood-hermes.git",

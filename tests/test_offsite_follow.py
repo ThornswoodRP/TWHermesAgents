@@ -357,7 +357,7 @@ class FollowMain(unittest.TestCase):
         f = self.follower(vm)
 
         def run(args, **kw):
-            if "fetch" in args and "git@github.com:ThornswoodRP/Thornswood-Hermes.git" in args:
+            if "fetch" in args and "git@github.com:ThornswoodRP/TWHermesAgents.git" in args:
                 return subprocess.CompletedProcess(args, 128, "", "Permission denied (publickey).")
             return vm(args, **kw)
 
@@ -423,6 +423,40 @@ class FollowMain(unittest.TestCase):
                  if k in " ".join(c)]
         self.assertEqual(len(order), 4, vm.calls)
         self.assertEqual(order, sorted(order))
+
+    def test_the_connector_starts_only_once_every_bot_runs_the_release(self):
+        # 2 Nov: answers put back in the queue by a migration of the core's install would reach a Bot
+        # still on the release before, without tw_git's open_issue, until apply.py and the reload.
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.core_installed(f, NEW)
+        core = f.opt / "releases" / NEW / "deploy" / "decisions" / "install.sh"
+        core.write_text("#!/usr/bin/env bash\n# --connector-later\n")
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(vm.ran("decisions/install.sh"),
+                         [f"bash {f.opt}/releases/{NEW}/deploy/decisions/install.sh {NEW} --connector-later"])
+        order = [i for i, c in enumerate(vm.calls) for k in ("decisions/install.sh", "runuser", "tw-reload-bots",
+                                                              "tw-canary", "systemctl start tw-decide-connector")
+                 if k in " ".join(c)]
+        self.assertEqual(len(order), 5, vm.calls)
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(len(vm.ran("is-active --quiet tw-decide-connector.service")), 1)
+
+    def test_a_release_whose_core_install_starts_the_connector_itself_gets_no_flag(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.core_installed(f, NEW)
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertNotIn("--connector-later", " ".join(vm.ran("decisions/install.sh")))
+        self.assertEqual(vm.ran("tw-decide-connector"), [])
+
+    def test_the_cores_install_leaves_the_connector_stopped_when_asked(self):
+        text = (follow_main.Path(follow_main.__file__).resolve().parents[1] / "deploy" / "decisions" /
+                "install.sh").read_text(encoding="utf-8")
+        self.assertIn("--connector-later) connector_later=1; shift ;;", text)
+        step = text[text.index("# 10. The connector."):text.index("# 11.")]
+        self.assertIn('if [[ -n "$connector_later" ]]; then', step)
+        self.assertLess(step.index("connector_later"), step.index("systemctl restart tw-decide-connector.service"))
 
     def test_no_decision_core_on_the_vm_means_no_core_install(self):
         vm = FakeVM(NEW)

@@ -422,3 +422,8 @@ a.mention { text-decoration: none; }
 @media (min-width: 1000px) {
   body.wide .voicebar { margin: 0 var(--side) 0 calc(var(--rail) + var(--list)); }
 }
+
+/* A status line said again (sayAgain): a short pulse, so a second refusal is seen. */
+@keyframes again { from { opacity: .25; } to { opacity: 1; } }
+.again { animation: again .35s ease-out; }
+@media (prefers-reduced-motion: reduce) { .again { animation: none; } }

@@ -5,7 +5,7 @@
 #
 #   /opt/thornswood-hermes/releases/<commit>/deploy/install.sh <commit> [--move-gateway]
 #
-# Idempotent: run it again after any merge to Thornswood-Hermes. It makes the
+# Idempotent: run it again after any merge to TWHermesAgents. It makes the
 # broker users and folders, puts the units, slices, check helper socket and SFTP jail
 # in place, points /opt/thornswood-hermes/current at this commit, and starts
 # the brokers. It never reads a secret's value: keys are moved by name and
@@ -87,7 +87,7 @@ hermes_home="$(getent passwd hermes | cut -d: -f6)"
 
 # 1. Groups and users. The groups say who may connect; every op still checks
 # the caller's user.
-for g in tw-policy-clients tw-git-clients tw-files-clients tw-decide-bots tw-checks tw-spool $(for b in $bots; do echo "tw-work-$b"; done); do
+for g in tw-policy-clients tw-git-clients tw-files-clients tw-decide-bots tw-decide-git tw-checks tw-spool $(for b in $bots; do echo "tw-work-$b"; done); do
   getent group "$g" >/dev/null || groupadd --system "$g"
 done
 mkuser() {
@@ -101,7 +101,9 @@ for u in tw-policy tw-files tw-git tw-proxy tw-backup tw-offsite tw-boxdrop tw-c
 usermod -a -G tw-backup tw-offsite
 for b in $workers; do mkuser "tw-$b"; usermod -a -G "tw-work-$b" "tw-$b"; done
 usermod -a -G tw-policy-clients,tw-git-clients,tw-files-clients,tw-decide-bots hermes
-usermod -a -G tw-policy-clients,tw-spool tw-git
+usermod -a -G tw-policy-clients,tw-spool,tw-decide-git tw-git
+# tw-git alone reads Patrick's answers on outside pull request cards (#132).
+[[ "$(getent group tw-decide-git | cut -d: -f4)" == tw-git ]] || stop "the tw-decide-git group's members are '$(getent group tw-decide-git | cut -d: -f4)'; it must be tw-git alone."
 usermod -a -G "tw-policy-clients,tw-checks,tw-spool,$(for b in $bots; do printf 'tw-work-%s,' "$b"; done | sed 's/,$//')" tw-files
 usermod -a -G tw-policy-clients tw-proxy
 for u in tw-policy tw-files tw-git tw-proxy; do
@@ -264,7 +266,7 @@ if [[ ! -f "$read_key" ]]; then
 fi
 chown root:root "$read_key" "$read_key.pub"; chmod 0400 "$read_key"; chmod 0644 "$read_key.pub"
 install -m 0644 -o root -g root "$here/deploy/ssh/github_known_hosts" "$(pol follow_main.known_hosts)"
-ok "the VM's read key for Thornswood-Hermes: $(cat "$read_key.pub")"
+ok "the VM's read key for TWHermesAgents: $(cat "$read_key.pub")"
 
 # 6. The code: this commit, root-owned, as current.
 install -d -m 0755 "$opt/bin"

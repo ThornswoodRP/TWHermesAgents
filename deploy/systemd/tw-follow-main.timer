@@ -1,7 +1,7 @@
 # Every ten minutes: a merge on main is installed within ten minutes, with
 # nobody sending it (Patrick's answer A on q-retire-hermes-one, 31 Oct).
 [Unit]
-Description=Thornswood-Hermes follows main, every 10 minutes
+Description=TWHermesAgents follows main, every 10 minutes
 
 [Timer]
 OnBootSec=5min

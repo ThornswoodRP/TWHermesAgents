@@ -3,7 +3,7 @@
 # canary, and puts the earlier release back if any of that fails
 # (thornswood_brokers/follow_main.py). Root, because the install is root's.
 [Unit]
-Description=Thornswood-Hermes follows main
+Description=TWHermesAgents follows main
 After=network-online.target
 Wants=network-online.target
 

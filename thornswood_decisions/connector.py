@@ -60,7 +60,10 @@ Every half minute, whatever connector_effects says, it also tells the core each
 Bot's gateway state for the phone's online dots (`POST /api/v1/connector/live`):
 Hermes's own runtime state, from `room_send.py` op `states`, which finds each
 gateway the way the readiness check does and never starts one. The core names
-the Bots to check in its answer.
+the Bots to check in its answer. Those reports and the phone's pages run on a
+thread of their own, apart from the claims: a Bot's turn holds its round for
+as long as it runs, up to 15 minutes, and the core calls a Bot "not heard from"
+after two minutes without a report.
 """
 
 from __future__ import annotations
@@ -78,6 +81,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 from .own_connector import follow_turn, probe_env
@@ -96,6 +100,15 @@ BOT_CHAT = "Bot Chat"
 PAGE_BYTES = 480 * 1024  # under the core's 512 KB
 HELPER = Path(__file__).with_name("room_send.py")
 HELPER_FAILED = "the connector's Hermes helper"  # how a helper failure's reason begins (chat.py HELPER_FAILED)
+# How the reason begins when a Bot Chat message waits for the fleet queue (tw-policy) instead of the
+# gateway (chat.py FLEET). The Bots' turn gate turns away a turn the queue has no room for, and that turn
+# runs nothing (thornswood_guard/brokers.py TURNED_AWAY_DIR). 2 Nov 2026: Patrick's answer on the #5327
+# ad18c2c card went to Bramble while the queue was turning turns away, the turn ended saying it had not
+# started, and the connector called it sent. Now a message goes only when the queue would admit its turn,
+# and one whose turn was turned away all the same goes back in the queue, unspent, like a gateway that
+# was not ready.
+FLEET = "the fleet queue"
+TURNED_AWAY_DIR = ("local", "thornswood-hermes", "turned-away")
 ROOM_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -169,10 +182,31 @@ def _tail(data: bytes, n: int = 160) -> str:
 class Hermes:
     """The two stock ways into the Bots' Hermes."""
 
-    def __init__(self, hermes_cmd: list[str], helper_cmd: list[str] | str, home: Path, helper: Path = HELPER):
+    def __init__(self, hermes_cmd: list[str], helper_cmd: list[str] | str, home: Path, helper: Path = HELPER,
+                 fleet=None):
         # A Python's path alone (the tests' stand-ins) runs the helper file straight with it.
         self.cmd, self.home = list(hermes_cmd), home
         self.helper_cmd = [helper_cmd, "-I", str(helper)] if isinstance(helper_cmd, str) else list(helper_cmd)
+        # fleet(bot) -> (room, why not): whether the fleet queue would admit a turn of that Bot now
+        # (fleet_room). None where the Bots have no queue (brokers.ready off): every turn runs.
+        self.fleet = fleet
+
+    def turned_away(self, bot: str, since: float) -> str | None:
+        """Why the queue turned away the Bot Chat turn that started at `since` (time.time()), from the
+        note the Bots' turn gate left for that session; None when it ran. The note is taken once read."""
+        sid = bot_chat_id(self.home / ".hermes", bot)
+        if sid is None:
+            return None
+        note = self.home.joinpath(".hermes", "profiles", bot, *TURNED_AWAY_DIR, f"{sid}.json")
+        try:
+            got = json.loads(note.read_text(encoding="utf-8"))
+            at = datetime.fromisoformat(got["at"]).timestamp()
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if at < since:
+            return None
+        note.unlink(missing_ok=True)
+        return str(got.get("reason") or "no reason given")[:150]
 
     def _helper(self, req: dict, timeout: float) -> dict | None:
         """The helper's one JSON answer; None when it did not answer in time. A helper that could not start,
@@ -207,6 +241,10 @@ class Hermes:
         if got.get("helper_failed"):
             return "failed", str(got.get("reason"))[:200]
         if got.get("ready") is True:
+            if profile and self.fleet is not None:
+                room, why = self.fleet(profile)
+                if not room:
+                    return "not_ready", f"{FLEET} has no room for a turn of {profile}'s: {why}"[:200]
             return "ready", ""
         return "not_ready", str(got.get("reason") or "the Bots' gateway is not ready")[:200]
 
@@ -266,6 +304,7 @@ class Hermes:
                 f.write(text)
             argv = [*self.cmd, "-p", bot, "chat", "--in", str(self.home), "-c", BOT_CHAT, "--create-if-missing",
                     "-Q", "--format", "stream-json", "--query-file", str(path)]
+            started = time.time()
             try:
                 proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, cwd=str(self.home), text=True,
@@ -285,8 +324,33 @@ class Hermes:
                 reader.join(30)
                 proc.stdout.close()
         if code == 0:
+            if self.fleet is not None:
+                why = self.turned_away(bot, started)
+                if why is not None:
+                    # The turn ran nothing: the message goes back in the queue as it was, and goes again
+                    # once the queue has room (check, above).
+                    return "not_ready", "", f"{FLEET} turned the turn away: {why}"
             return "confirmed", "turn finished", ""
         return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
+
+
+def fleet_room(policy_file: Path | None = None):
+    """fleet(bot) for Hermes: tw-policy's turn_room, asked over its socket as the Bots' own user, or None
+    when the Bots have no queue (brokers.ready off). A queue that does not answer has no room."""
+    from thornswood_guard.brokers import BrokerRefused, call
+    from thornswood_guard.policy import Policy
+    policy = Policy.load(policy_file) if policy_file else Policy.load()
+    if not policy.data["brokers"].get("ready"):
+        return None
+    sock = policy.data["brokers"]["sockets"]["policy"]["path"]
+
+    def fleet(bot: str) -> tuple[bool, str]:
+        try:
+            got = call(sock, "turn_room", {"bot": bot}, timeout=CHECK_SECONDS)
+        except BrokerRefused as e:
+            return False, f"tw-policy did not answer ({e})"
+        return bool(got.get("room")), str(got.get("why_not") or "")
+    return fleet
 
 
 class Core:
@@ -453,6 +517,8 @@ class Connector:
                 if gateway[r["id"]] not in self.waiting:
                     self.say(f"FAIL {r['reason']}; {gateway[r['id']] or 'the room'}'s messages wait in the queue"
                              if helper else
+                             f"NOTE {r['reason']}; {gateway[r['id']]}'s messages wait in the queue"
+                             if r["reason"].startswith(FLEET) else
                              f"NOTE {gateway[r['id']] or 'the room'}'s gateway is not ready ({r['reason']}); "
                              "its messages wait in the queue")
                 self.waiting[gateway[r["id"]]] = r["reason"]
@@ -511,13 +577,25 @@ class Connector:
                 self.say(f"FAIL page: the core answered {status}")
         return sent
 
-    def forever(self) -> None:
-        # Pages every few seconds, whatever connector_effects says; the claim every few seconds, or every
-        # half minute while the core says connector_effects is off.
-        claim_at = 0.0
+    def reads(self, sleep=time.sleep) -> None:
+        """The phone's pages and each Bot's state, every few seconds, whatever connector_effects says. Reading
+        only, so it never waits on a claim round: a round waits for its turns, and on 8 Nov a three-minute turn
+        to Bramble left all six Bots "not heard from" on the phone while it ran."""
         while True:
             self.pages()
             self.live()
+            sleep(POLL_SECONDS)
+
+    def forever(self) -> None:
+        # The reads on their own thread; the claim every few seconds, or every half minute while the core says
+        # connector_effects is off. A reads thread that raised stops the connector, as it did when both shared
+        # this loop, with its traceback in the journal.
+        reader = threading.Thread(target=self.reads, name="reads", daemon=True)
+        reader.start()
+        claim_at = 0.0
+        while True:
+            if not reader.is_alive():
+                raise SystemExit("STOP: the thread for pages and Bot states stopped")
             if time.monotonic() >= claim_at:
                 n = self.once()
                 claim_at = time.monotonic() + (POLL_SECONDS * 6 if n < 0 else 0)
@@ -538,7 +616,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--core", default=CORE)
     ap.add_argument("--once", action="store_true", help="one round, then stop")
     args = ap.parse_args(argv)
-    hermes = Hermes([args.hermes], helper_command(args.hermes, args.hermes_python, args.hermes_root), home)
+    hermes = Hermes([args.hermes], helper_command(args.hermes, args.hermes_python, args.hermes_root), home,
+                    fleet=fleet_room())
     if args.check_ready is not None:
         if not PROFILE_ID.match(args.check_ready):
             raise SystemExit("STOP: --check-ready takes a Bot's profile name")

@@ -286,6 +286,36 @@ Bramble never got the answer. Now:
   receipt is that failure), on a card still answered. Its failed receipt stays
   as history. Chat messages are left as they are. Its way back changes nothing.
 
+## An answer whose turn the fleet queue turned away is not delivered (2 Nov)
+
+Patrick answered the #5327 ad18c2c card (dec_2XL-fP9HNMMtGBXp_5KW1A) while
+the fleet queue was turning turns away. The Bots' turn gate let Bramble's turn
+say only that it had not started, the `hermes` command ended with 0, and the
+connector called the answer sent: nothing ever ran it. Five more answers
+reached Bramble while tw_git had no op to open the issue each DECIDED.md line
+needs. Now:
+
+- the connector asks tw-policy's `turn_room` (as the Bots' own user, over the
+  policy socket) before it hands a Bot a message, as part of that Bot's
+  readiness check. While the queue would not admit a turn, the message is
+  `not_ready` with the queue's reason (it begins `the fleet queue`), stays in
+  the core's queue unspent, and the phone shows it waiting with that reason.
+  Nothing is asked when the Bots have no queue (`brokers.ready` off).
+- a turn the queue turns away all the same (the queue filled in between, or
+  tw-policy stopped answering) leaves a note for its session in the profile
+  (`local/thornswood-hermes/turned-away/<session id>.json`, when and why).
+  After a Bot Chat turn ends, the connector reads the note for that Bot Chat;
+  one written since the turn started makes the message `not_ready` too, and
+  the note is taken.
+- the VM's follower starts the connector only once `apply.py` and
+  `tw-reload-bots` have every Bot on the new release (`--connector-later`), so
+  no message reaches a Bot still on the tools of the release before.
+- migration 16 sends the six answers to Bramble once more (`REPLAY_16`): each
+  card's newest "Bot told" message goes in the queue again as a new message
+  with the same answer, only for a card still answered and none of whose
+  messages is already waiting or on its way. Tw_git has `open_issue` in the
+  same release, so Bramble files each issue and its DECIDED.md line.
+
 ### The install stops every worker before the store migrates (1 Nov)
 
 At 10:53 PM the install of the fix above ran migration 11, which put Patrick's
@@ -322,7 +352,7 @@ The browser check: a chat's actions, a rename that shows at once and then from O
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:
 
-- **Hermes v0.22.5** is upstream commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e` (tag `v0.22.5`, also `rc.3-v0.22.5`), the same commit the 29 Oct audit read.
+- **Hermes v0.23.0** is upstream commit `2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19` (tag `v0.23.0`), read again on 8 Nov. Until then it was v0.22.5 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the commit the 29 Oct audit read; v0.22.5's update check made every hermes command on the VM take 40 seconds (ThornswoodRP/Thornswood#5520).
 - **The six profile ids:** `bramble`, `rift`, `sprocket`, `echo`, `magpie`, `wisp`, each matching Hermes's `PROFILE_ID_RE`.
 - **The Workbench room** is a hosted room in the gateway's `shared-state.db`, reached through the `groups.*` methods. `groups.send` appends one `message.user` event with `{text, thread_id}`; its `event_id` is a retry key the gateway turns into a stable event id; `groups.log` pages events after a cursor, 500 at most.
 - **A Bot's DM** is its canonical, hidden "Bot Chat" session. It is found by exact title before anything is created. From another machine a turn goes through the api_server platform's `/p/<profile>/v1/runs` with an `Idempotency-Key`; on the Bots' own machine (step 4) it goes through `hermes -p <profile> chat -c "Bot Chat" --query-file`, as Hermes's message_agent does, with no key and no listener. A timeout after a turn was taken is never resent.

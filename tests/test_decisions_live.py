@@ -5,7 +5,8 @@ Checks that each dot comes from what is really running, never a made-up value:
 - room_send.py op states: Hermes's own runtime state of each Bot's gateway, found without starting one;
   a Bot whose check raises is check_failed and the others still answer.
 - the Bots' connector: its first report asks the core which Bots to check, then reports their states at
-  once and every half minute after that; a helper that could not run says why.
+  once and every half minute after that; a helper that could not run says why; the reports and the
+  phone's pages go on while a claim round waits for a Bot's turn, and a reads thread that raised stops it.
 - the core: only the connector's token, only bound Bots, only Hermes's states; it is held in memory and
   read back by the Bots list and each Bot Chat; a report older than two minutes is "not heard from",
   never the last state it said.
@@ -21,6 +22,8 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -141,6 +144,66 @@ class ConnectorReports(unittest.TestCase):
         c.live(self.clock)
         self.assertEqual(self.lines, ["FAIL live: the core answered 500"])
 
+
+
+class ReadsBesideTurns(unittest.TestCase):
+    """forever() with a claim round held by a Bot's turn, as on 8 Nov when a three-minute turn to Bramble left
+    all six Bots "not heard from"."""
+
+    def setUp(self):
+        self.patched = [(connector, n, getattr(connector, n)) for n in ("POLL_SECONDS", "LIVE_SECONDS")]
+        connector.POLL_SECONDS, connector.LIVE_SECONDS = 0.01, 0.02
+        self.turn = threading.Event()
+        self.addCleanup(self.turn.set)
+
+    def tearDown(self):
+        for mod, name, value in self.patched:
+            setattr(mod, name, value)
+
+    def run_forever(self, c):
+        stopped = []
+
+        def run():
+            try:
+                c.forever()
+            except SystemExit as exc:
+                stopped.append(str(exc))
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t, stopped
+
+    def test_reports_and_pages_go_on_while_a_turn_holds_the_round(self):
+        core = FakeCore()
+        c = connector.Connector(core, FakeHermes({b: "ready" for b in BOTS}), say=lambda line: None,
+                                hermes_home=Path("/nonexistent"))
+        rounds = []
+
+        def once():
+            rounds.append(1)
+            self.turn.wait(5)  # the turn, still running
+            return 1
+        c.once = once
+        self.run_forever(c)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and sum(p == "/connector/live" for p, _ in core.posts) < 4:
+            time.sleep(0.01)
+        self.assertEqual(rounds, [1])
+        lives = [b for p, b in list(core.posts) if p == "/connector/live"]
+        self.assertGreaterEqual(len(lives), 4)
+        self.assertEqual(lives[-1]["states"]["bramble"], "ready")
+        self.assertIn("/connector/pages", [p for p, _ in list(core.posts)])
+
+    def test_a_reads_thread_that_raised_stops_the_connector(self):
+        c = connector.Connector(FakeCore(), FakeHermes({}), say=lambda line: None, hermes_home=Path("/nonexistent"))
+
+        def pages():
+            raise RuntimeError("the store went away")
+        c.pages = pages
+        c.once = lambda: 0
+        t, stopped = self.run_forever(c)
+        t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(stopped, ["STOP: the thread for pages and Bot states stopped"])
 
 class CoreKeeps(unittest.TestCase):
     def setUp(self):

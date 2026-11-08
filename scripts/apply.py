@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply one merged version of Thornswood-Hermes to the six existing profiles
+"""Apply one merged version of TWHermesAgents to the six existing profiles
 and to the gateway's own profile.
 
 Runs on the Oracle VM as the `hermes` user, from a checkout of the exact

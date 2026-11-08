@@ -29,6 +29,8 @@ from thornswood_decisions.schema import MIGRATIONS
 from thornswood_decisions.store import CoreError
 
 ORIGIN = "https://hermes.example.ts.net"
+GOOGLE_PM = "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4"
+BITWARDEN = "d548826e-79b4-db40-a3d8-11116f7e8349"
 RP_ID = "hermes.example.ts.net"
 ROOM = "54b3ad46-3419-4adb-b60d-c79cb347fcee"
 BOTS = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
@@ -208,9 +210,12 @@ class PhoneFingerprint(unittest.TestCase):
         self.dev, self.s, self.p = phone(self.w)
         self.pk = Passkeys(self.w.store, ORIGIN)
 
+    def key(self, aaguid: str = GOOGLE_PM):
+        return self.SoftKey(ORIGIN, RP_ID, aaguid=aaguid)
+
     def add(self, key):
         return self.pk.register(self.p, key.create(self.pk.register_options(self.p, on_phone=True)),
-                                "Fingerprint on this phone")
+                                "Fingerprint on this phone", on_phone=True)
 
     def test_the_phone_key_asks_for_the_phone_itself_with_its_lock(self):
         opts = self.pk.register_options(self.p, on_phone=True)
@@ -234,7 +239,7 @@ class PhoneFingerprint(unittest.TestCase):
         self.pk.register_options(p)  # the passkey is still offered there
 
     def test_a_sign_in_names_the_phone_key_and_is_checked_as_any_passkey(self):
-        key = self.SoftKey(ORIGIN, RP_ID)
+        key = self.key()
         added = self.add(key)
         self.assertEqual(added["credential_id"], passkey.b64url(key.credential_id))
         opts = self.pk.sign_in_options(self.w.ws, added["credential_id"])
@@ -251,7 +256,7 @@ class PhoneFingerprint(unittest.TestCase):
         self.assertNotIn("hints", opts)
 
     def test_no_user_verification_is_refused_for_the_phone_key_too(self):
-        key = self.SoftKey(ORIGIN, RP_ID)
+        key = self.key()
         added = self.add(key)
         key.verified = False
         with self.assertRaises(CoreError) as cm:
@@ -259,7 +264,7 @@ class PhoneFingerprint(unittest.TestCase):
         self.assertEqual(cm.exception.reason, "passkey_refused")
 
     def test_a_removed_or_unknown_phone_key_is_not_named(self):
-        key = self.SoftKey(ORIGIN, RP_ID)
+        key = self.key()
         added = self.add(key)
         for cred in (passkey.b64url(b"\x01" * 16), "not base64 at all!"):
             with self.assertRaises(CoreError) as cm:
@@ -272,7 +277,7 @@ class PhoneFingerprint(unittest.TestCase):
         self.assertEqual((cm.exception.status, cm.exception.reason), (404, "no_phone_key"))
 
     def test_a_revoked_phone_is_not_named(self):
-        added = self.add(self.SoftKey(ORIGIN, RP_ID))
+        added = self.add(self.key())
         self.w.core.auth.revoke_device(self.p, self.dev)
         with self.assertRaises(CoreError) as cm:
             self.pk.sign_in_options(self.w.ws, added["credential_id"])
@@ -285,6 +290,96 @@ class PhoneFingerprint(unittest.TestCase):
         with self.assertRaises(CoreError) as cm:
             self.pk.sign_in_options(self.w.ws, added["credential_id"])
         self.assertEqual(cm.exception.reason, "no_phone_key")
+
+
+    # 8 Nov: the fingerprint button opened Bitwarden. The key added on 2 Nov had been saved in
+    # Bitwarden, and the core took it as the phone's own without looking at which app made it.
+
+    def test_a_phone_key_saved_in_a_passkey_app_is_refused_and_nothing_is_kept(self):
+        for aaguid, name in ((BITWARDEN, "Bitwarden"), (passkey.NO_AAGUID, "did not say its name"),
+                             ("12345678-1234-1234-1234-123456789abc", "a passkey app")):
+            with self.assertRaises(CoreError) as cm:
+                self.add(self.key(aaguid))
+            self.assertEqual((cm.exception.status, cm.exception.reason), (409, "saved_in_app"))
+            self.assertIn(name, str(cm.exception))
+            self.assertIn("Google Password Manager", str(cm.exception))
+            self.assertIn(name, cm.exception.detail["maker"])
+        self.assertEqual(self.w.store.db.execute("SELECT count(*) FROM passkeys").fetchone()[0], 0)
+
+    def test_a_plain_passkey_from_a_passkey_app_is_still_taken(self):
+        key = self.key(BITWARDEN)
+        added = self.pk.register(self.p, key.create(self.pk.register_options(self.p)), "Bitwarden")
+        listed = {k["id"]: k for k in self.pk.list(self.p)}
+        self.assertEqual((listed[added["passkey_id"]]["maker"], listed[added["passkey_id"]]["phone_key"]),
+                         ("Bitwarden", False))
+        # and it is never named as this phone's fingerprint
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in_options(self.w.ws, added["credential_id"])
+        self.assertEqual(cm.exception.reason, "no_phone_key")
+
+    def test_the_phone_key_records_its_maker(self):
+        added = self.add(self.key())
+        row = self.w.store.db.execute("SELECT aaguid, phone_key FROM passkeys WHERE id = ?",
+                                      (added["passkey_id"],)).fetchone()
+        self.assertEqual(tuple(row), (GOOGLE_PM, 1))
+        listed = {k["id"]: k for k in self.pk.list(self.p)}[added["passkey_id"]]
+        self.assertEqual((listed["maker"], listed["phone_key"]), ("Google Password Manager", True))
+        body = json.loads(self.w.store.db.execute(
+            "SELECT body_json FROM events WHERE kind = 'passkey.added' AND subject = ?", (added["passkey_id"],)).fetchone()[0])
+        self.assertEqual(body["maker"], "Google Password Manager")
+
+    def test_a_phone_key_of_unknown_maker_is_not_asked_for_and_says_why(self):
+        key = self.key()
+        added = self.add(key)
+        # As the key made on 2 Nov stands after migration 15: a phone key with no recorded maker.
+        self.w.store.db.execute("UPDATE passkeys SET aaguid = NULL WHERE id = ?", (added["passkey_id"],))
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in_options(self.w.ws, added["credential_id"])
+        self.assertEqual((cm.exception.status, cm.exception.reason), (409, "phone_key_in_app"))
+        # the passkey way in still works, and the same key may answer it there
+        opts = self.pk.sign_in_options(self.w.ws)
+        self.assertEqual(self.pk.sign_in(self.w.ws, key.get(opts))[0], self.dev)
+
+    def test_a_new_phone_key_retires_the_old_one_and_leaves_the_passkeys(self):
+        plain = self.pk.register(self.p, self.key(BITWARDEN).create(self.pk.register_options(self.p)), "Bitwarden")
+        first = self.add(self.key())
+        second = self.add(self.key())
+        live = {k["id"] for k in self.pk.list(self.p)}
+        self.assertEqual(live, {plain["passkey_id"], second["passkey_id"]})
+        body = json.loads(self.w.store.db.execute(
+            "SELECT body_json FROM events WHERE kind = 'passkey.revoked' AND subject = ?", (first["passkey_id"],)).fetchone()[0])
+        self.assertEqual(body["replaced_by"], second["passkey_id"])
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in_options(self.w.ws, first["credential_id"])
+        self.assertEqual(cm.exception.reason, "no_phone_key")
+
+    def test_a_desktop_cannot_register_a_phone_key(self):
+        _, _, p = desktop(self.w)
+        opts = self.pk.register_options(p)
+        with self.assertRaises(CoreError) as cm:
+            self.pk.register(p, self.key().create(opts), "Fingerprint on this phone", on_phone=True)
+        self.assertEqual((cm.exception.status, cm.exception.reason), (403, "not_a_phone"))
+
+
+class PhoneKeyMigration(unittest.TestCase):
+    def test_schema_15_marks_the_phone_keys_the_app_made_before_it(self):
+        con = sqlite3.connect(":memory:", isolation_level=None)
+        con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        from thornswood_decisions.store import _statements
+        for m in range(1, 15):
+            for stmt in _statements(MIGRATIONS[m - 1]):
+                con.execute(stmt)
+        cols = [r[1] for r in con.execute("PRAGMA table_info(passkeys)")]
+        self.assertNotIn("aaguid", cols)
+        con.execute("PRAGMA foreign_keys = OFF")
+        for i, label in enumerate(("passkey", "Fingerprint on this phone", "One")):
+            con.execute("INSERT INTO passkeys(id, workspace_id, principal_id, device_id, credential_id, public_key, "
+                        "label, created_at) VALUES(?, 'ws', 'pr', 'dv', ?, x'00', ?, 'now')", (f"pk{i}", f"c{i}", label))
+        for stmt in _statements(MIGRATIONS[14]):
+            con.execute(stmt)
+        rows = dict(con.execute("SELECT label, phone_key FROM passkeys").fetchall())
+        self.assertEqual(rows, {"passkey": 0, "Fingerprint on this phone": 1, "One": 0})
+        self.assertEqual(con.execute("SELECT count(*) FROM passkeys WHERE aaguid IS NOT NULL").fetchone()[0], 0)
 
 
 class PasskeyWithoutLibraryOrOrigin(unittest.TestCase):
@@ -355,6 +450,13 @@ class AppRoutes(unittest.TestCase):
         h = {"Cookie": cookie, "Origin": ORIGIN, "X-CSRF-Token": paired["csrf"]}
         status, _, body = s.call("POST", "/passkeys/register/options", headers=h, body={"on_phone": True})
         self.assertEqual((status, body["authenticatorSelection"]["authenticatorAttachment"]), (200, "platform"))
+        if HAVE_PASSKEY_LIB:
+            # The app's register sends on_phone, so a key saved in Bitwarden is refused with its name.
+            from thornswood_decisions.softkey import SoftKey
+            cred = SoftKey(ORIGIN, RP_ID, aaguid=BITWARDEN).create(body)
+            status, _, out = s.call("POST", "/passkeys/register", headers=h,
+                                    body={"credential": cred, "label": "Fingerprint on this phone", "on_phone": True})
+            self.assertEqual((status, out["error"], out["detail"]["maker"]), (409, "saved_in_app", "Bitwarden"))
         status, _, body = s.call("POST", "/passkeys/sign-in/options", headers={"Origin": ORIGIN}, body={"phone_key": 5})
         self.assertEqual((status, body["error"]), (400, "bad_field"))
         status, _, body = s.call("POST", "/passkeys/sign-in/options", headers={"Origin": ORIGIN},

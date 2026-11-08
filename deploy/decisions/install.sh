@@ -2,7 +2,7 @@
 # Install the decision core on the Oracle VM, as root, from the root-owned
 # copy of the commit Patrick merged:
 #
-#   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> [--room <id>] [--origin <url>]
+#   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> [--room <id>] [--origin <url>] [--connector-later]
 #
 # tw-follow-main puts that copy there and points /opt/thornswood-hermes/current
 # at it once main reaches the VM; run this after it, at the same commit.
@@ -45,14 +45,15 @@
 set -euo pipefail
 umask 022
 
-commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>]}"
+commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>] [--connector-later]}"
 shift
-room=""; origin=""
+room=""; origin=""; connector_later=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --room) room="${2:-}"; shift 2 ;;
     --origin) origin="${2:-}"; shift 2 ;;
-    *) echo "STOP: the options are --room <id> and --origin <url>, not $1."; exit 1 ;;
+    --connector-later) connector_later=1; shift ;;
+    *) echo "STOP: the options are --room <id>, --origin <url> and --connector-later, not $1."; exit 1 ;;
   esac
 done
 opt=/opt/thornswood-hermes
@@ -118,6 +119,10 @@ getent group tw-decide-bots >/dev/null || stop "there is no tw-decide-bots group
 members="$(getent group tw-decide-bots | cut -d: -f4)"
 [[ "$members" == hermes ]] || stop "the tw-decide-bots group's members are '$members'; it must be hermes alone."
 ok "group tw-decide-bots: hermes alone"
+getent group tw-decide-git >/dev/null || stop "there is no tw-decide-git group; deploy/install.sh makes it, run that first."
+members="$(getent group tw-decide-git | cut -d: -f4)"
+[[ "$members" == tw-git ]] || stop "the tw-decide-git group's members are '$members'; it must be tw-git alone."
+ok "group tw-decide-git: tw-git alone"
 
 # 2. The store's folder: tw-decide's only. The settings file: root's, no secrets.
 install -d -m 0755 -o root -g root /srv/tw /etc/thornswood
@@ -285,6 +290,10 @@ for _ in $(seq 1 20); do [[ -S /run/tw/decide-bots/bots.sock ]] && break; sleep 
 [[ "$(stat -c '%a %G' /run/tw/decide-bots/bots.sock)" == "660 tw-decide-bots" ]] \
   || stop "the Bots' route's socket is $(stat -c '%a %G' /run/tw/decide-bots/bots.sock), not 660 tw-decide-bots"
 ok "the Bots' route listens on /run/tw/decide-bots/bots.sock (660, tw-decide-bots)"
+[[ -S /run/tw/decide-git/git.sock ]] || stop "the Bots' route did not open tw-git's socket: journalctl -u tw-decide-bots -n 50"
+[[ "$(stat -c '%a %G' /run/tw/decide-git/git.sock)" == "660 tw-decide-git" ]] \
+  || stop "tw-git's socket is $(stat -c '%a %G' /run/tw/decide-git/git.sock), not 660 tw-decide-git"
+ok "tw-git's answers socket listens on /run/tw/decide-git/git.sock (660, tw-decide-git)"
 
 # 9. The feeds, once now and then once a minute, when the room is known.
 if [[ -n "$room" ]]; then
@@ -311,12 +320,20 @@ ok "the live Board runs"
 
 # 10. The connector. While connector_effects is off it asks the core every half
 # minute and does nothing else. Only Patrick changes connector_effects.
+# --connector-later (the VM's follower, thornswood_brokers/follow_main.py):
+# it stays stopped, as step 5b left it, and the follower starts it once
+# apply.py and tw-reload-bots have every Bot on this release, so no message
+# reaches a Bot still running the tools of the release before.
 systemctl enable --quiet tw-decide-connector.service
-systemctl reset-failed tw-decide-connector.service
-systemctl restart tw-decide-connector.service
-sleep 2
-systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
-ok "the connector runs (it waits while connector_effects is off)"
+if [[ -n "$connector_later" ]]; then
+  ok "the connector stays stopped until every Bot runs this release; the follower starts it"
+else
+  systemctl reset-failed tw-decide-connector.service
+  systemctl restart tw-decide-connector.service
+  sleep 2
+  systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
+  ok "the connector runs (it waits while connector_effects is off)"
+fi
 
 # 11. The push worker, once the origin is known (it names it in every VAPID
 # header). While push_send is off it says its public keys to the core and then
