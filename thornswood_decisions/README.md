@@ -322,7 +322,7 @@ The browser check: a chat's actions, a rename that shows at once and then from O
 
 `contracts.json` records what the core relies on in Hermes, each fact with the file and line it was read from at the pinned commit:
 
-- **Hermes v0.22.5** is upstream commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e` (tag `v0.22.5`, also `rc.3-v0.22.5`), the same commit the 29 Oct audit read.
+- **Hermes v0.23.0** is upstream commit `2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19` (tag `v0.23.0`), read again on 8 Nov. Until then it was v0.22.5 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the commit the 29 Oct audit read; v0.22.5's update check made every hermes command on the VM take 40 seconds (ThornswoodRP/Thornswood#5520).
 - **The six profile ids:** `bramble`, `rift`, `sprocket`, `echo`, `magpie`, `wisp`, each matching Hermes's `PROFILE_ID_RE`.
 - **The Workbench room** is a hosted room in the gateway's `shared-state.db`, reached through the `groups.*` methods. `groups.send` appends one `message.user` event with `{text, thread_id}`; its `event_id` is a retry key the gateway turns into a stable event id; `groups.log` pages events after a cursor, 500 at most.
 - **A Bot's DM** is its canonical, hidden "Bot Chat" session. It is found by exact title before anything is created. From another machine a turn goes through the api_server platform's `/p/<profile>/v1/runs` with an `Idempotency-Key`; on the Bots' own machine (step 4) it goes through `hermes -p <profile> chat -c "Bot Chat" --query-file`, as Hermes's message_agent does, with no key and no listener. A timeout after a turn was taken is never resent.

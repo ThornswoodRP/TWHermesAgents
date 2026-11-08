@@ -2,16 +2,16 @@
   "about": "What the decision core relies on in Hermes, read from the pinned Hermes source, not guessed (07 section 11.2, step 0). Each fact names the file and line it was read from at the pinned commit. scripts/check-hermes-contract.py checks the VM against this file and changes nothing.",
   "version": 1,
   "hermes": {
-    "version": "0.22.5",
-    "tag": "v0.22.5",
-    "commit": "bf0203a794a07aac3ff764972ab9087baa4e4f4e",
+    "version": "0.23.0",
+    "tag": "v0.23.0",
+    "commit": "2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19",
     "upstream": "https://github.com/NousResearch/hermes-agent",
-    "read_on": "2026-10-31",
-    "how_read": "The tag v0.22.5 (also rc.3-v0.22.5) points at this commit in the upstream repository. It is the same commit the 29 Oct source audit used (07 section 1, `bf0203a7`). The VM's install is said to be v0.22.5 stable (02 'Built on 30 Oct'); the check script confirms the commit there."
+    "read_on": "2026-11-08",
+    "how_read": "The tag v0.23.0 (tagged 5 Nov 2026) points at this commit in the upstream repository. Every fact below was read again at this commit on 8 Nov, moved from v0.22.5 (`bf0203a7`, the 29 Oct source audit's commit): each named file and symbol is still there, and the values the core relies on (the gateway states, the room protocol version and log limit, the Bot Chat title, the profile id rule, the reactions key, the title limit, the chat flags, the runtime command, the room send payload, the approval rules, the stream-json result) are the same. v0.23.0 also stops the update check from fetching history in a partial clone, which made every hermes command on the VM take 40 seconds on v0.22.5 (ThornswoodRP/Thornswood#5520). The check script confirms the commit on the VM."
   },
   "profiles": {
     "id_pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
-    "id_pattern_source": "hermes_constants.py:395 PROFILE_ID_RE",
+    "id_pattern_source": "hermes_constants.py:401 PROFILE_ID_RE",
     "home": "~/.hermes/profiles/<id>/",
     "ids": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"],
     "states": "Each Bot's gateway state for the phone's online dots is Hermes's own RuntimeState of that profile's gateway (absent, starting, ready, draining, incompatible, inaccessible, conflict), found the way the readiness check finds it and never started (room_send.py op states).",
@@ -21,7 +21,7 @@
     "name": "Thornswood Workbench",
     "members": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"],
     "store": "~/.hermes/shared-state.db, table hosted_rooms (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, revision, created_at, updated_at, disbanded_at)",
-    "store_source": "gateway/hosted_rooms.py:88 (schema), :404 default_db_path (profile gateways resolve to the root shared-state.db)",
+    "store_source": "gateway/hosted_rooms.py:89 (schema), :411 default_db_path (profile gateways resolve to the root shared-state.db)",
     "protocol_version": 2,
     "protocol_version_source": "gateway/hosted_rooms.py:23",
     "transport": "JSON-RPC methods groups.* on the gateway's native connection (the one Desktop uses through hermes serve); not on the api_server platform",
@@ -32,39 +32,39 @@
       "result": "{event: RoomEvent, client_event_id, accepted, driver_started}",
       "idempotency": "the gateway maps event_id to user:<sha256 of the key>, so the same key is the same event",
       "only_kind": "message.user; the actor is set by the gateway, never by the caller",
-      "source": "tui_gateway/contracts/groups_bot_relay.py:246, methods_groups.py:381, hosted_rooms.py:250 user_event_id, hosted_room_discussion.py:61 _USER_PAYLOAD_FIELDS"
+      "source": "tui_gateway/contracts/groups_bot_relay.py:282, methods_groups.py:416, hosted_rooms.py:251 user_event_id, hosted_room_discussion.py:70 _USER_PAYLOAD_FIELDS"
     },
     "read": {
       "method": "groups.log",
       "params": {"room_id": "string", "since_seq": "int cursor", "limit": "at most 500"},
       "result": "{events: [RoomEvent], cursor, latest_seq, has_more, authority: {gateway_id, epoch}}",
       "event": "{room_id, seq, event_id, kind, actor: {kind, id}, authority_epoch, payload, created_at}",
-      "source": "tui_gateway/contracts/groups_bot_relay.py:38 RoomEvent, :275 GroupsLogParams; hosted_rooms.py:33 MAX_LOG_LIMIT"
+      "source": "tui_gateway/contracts/groups_bot_relay.py:44 RoomEvent, :329 GroupsLogParams; hosted_rooms.py:33 MAX_LOG_LIMIT"
     },
     "driver": "groups.capabilities answers driver:true only when the room driver can run turns; the core requires it before it shows the room as live",
-    "driver_source": "tui_gateway/methods_groups.py:238",
+    "driver_source": "tui_gateway/methods_groups.py:254",
     "client": "The same user reaches the running gateway with hermes_cli.gateway_client.connect_gateway(endpoint=...) after hermes_cli.gateway_runtime.discover_gateway_endpoint (which never starts a gateway) and attachable(); groups.send's payload needs thread_id too (Desktop sends the event id), and its event id is user:<sha256 of the key>.",
-    "client_source": "hermes_cli/gateway_client.py:262 connect_gateway, gateway_runtime.py:53 attachable and :289 discover_gateway_endpoint, hermes_constants.py:296 get_default_hermes_root; gateway/hosted_room_discussion.py:199 validate_user_payload (text and thread_id required); apps/desktop/src/plugins/hermes-bots/canonical-group-send.ts:104"
+    "client_source": "hermes_cli/gateway_client.py:319 connect_gateway, gateway_runtime.py:53 attachable and :289 discover_gateway_endpoint, hermes_constants.py:302 get_default_hermes_root; gateway/hosted_room_discussion.py:224 validate_user_payload (text and thread_id required); apps/desktop/src/plugins/hermes-bots/canonical-group-send.ts:104"
   },
   "bot_chat": {
     "title": "Bot Chat",
-    "title_source": "tools/bot_mode_probe.py:31 BOT_CHAT_TITLE",
+    "title_source": "tools/bot_mode_probe.py:37 BOT_CHAT_TITLE",
     "one_per_profile": "Bot Mode keeps one canonical, hidden session titled 'Bot Chat' per profile; a title is unique, so a second create collides. Look it up before creating.",
     "transport": "the api_server platform (loopback HTTP, default port 8642), per profile under /p/<profile>/, Authorization: Bearer <API_SERVER_KEY>",
-    "transport_source": "gateway/platforms/api_server.py:81-103 (routes), :1124 and :1487 (the key), :4474-4478 (the /p/<profile>/ mirror)",
+    "transport_source": "gateway/platforms/api_server.py:63-84 (routes), :1058 and :1413 (the key), :3974-3978 (the /p/<profile>/ mirror)",
     "find": "GET /p/<profile>/api/sessions?limit=200&title=Bot%20Chat&include_hidden=1, then the row whose title is exactly 'Bot Chat'",
-    "find_source": "hermes_cli/subcommands/peer.py:99 _find_bot_chat",
+    "find_source": "hermes_cli/subcommands/peer.py:142 _find_bot_chat",
     "create_if_missing": "POST /p/<profile>/api/sessions with exactly {title: 'Bot Chat', source}; any other field is refused (bot_chat_parameters_unsupported)",
-    "create_source": "hermes_cli/subcommands/peer.py:118 _ensure_bot_chat; gateway/platforms/api_server_bot_chat.py:26 and :34",
+    "create_source": "hermes_cli/subcommands/peer.py:161 _ensure_bot_chat; gateway/platforms/api_server_bot_chat.py:26 and :34",
     "send": "POST /p/<profile>/v1/runs with {input, session_id} and an Idempotency-Key header (1 to 255 characters); the same key replays the same run",
-    "send_source": "hermes_cli/subcommands/peer.py:312 _peer_run and :324",
+    "send_source": "hermes_cli/subcommands/peer.py:360 _peer_run and :372",
     "status": "GET /p/<profile>/v1/runs/<run_id> and /v1/runs/<run_id>/events",
     "history": "GET /p/<profile>/api/sessions/<id>/messages",
     "uncertain": "A timeout after the run was accepted means the message is already in the Bot Chat: never resend it. The core marks it effect.uncertain and reads the run back first (peer.py:355-366).",
     "local_send": "On the Bots' own machine, Hermes's message_agent sends to a Bot Chat with `hermes -p <profile> chat --in ~ -c 'Bot Chat' --create-if-missing -Q --query-file <file>`, as the same user; no API_SERVER_KEY and no api_server listener. The connector (step 4) uses this, so nothing in the gateway's settings changes. Only exit 0 is a confirmed send; anything else is unclear and never resent.",
-    "local_send_source": "tools/bot_mode_dm.py:11-13 (transports), hermes_cli/_parser.py:237 --query-file and :285 --create-if-missing, hermes_cli/gateway_chat.py:374 (the query-file contract)",
+    "local_send_source": "tools/bot_mode_dm.py:11-13 (transports), hermes_cli/_parser.py:241 --query-file and :289 --create-if-missing, hermes_cli/gateway_chat.py:376 (the query-file contract)",
     "history_local": "Each profile's ~/.hermes/profiles/<id>/state.db: sessions (id, title, archived, started_at) and messages (session_id, role, content, timestamp, active). The Bot Chat is the session titled 'Bot Chat'; read only, roles user and assistant, active rows.",
-    "history_local_source": "hermes_state_common.py:461 (sessions), :531 (messages); hermes_state.py:180 state.db"
+    "history_local_source": "hermes_state_common.py:461 (sessions), :531 (messages); hermes_state.py:181 state.db"
   },
   "desktop_plugin": {
     "layout": "~/.hermes/plugins/thornswood-decisions/ with dashboard/manifest.json {name, api: plugin_api.py}, dashboard/plugin_api.py (a FastAPI router), desktop/plugin.js",
@@ -74,7 +74,7 @@
     "who_is_calling": "on a signed-in hermes serve the route sees request.state.session (user_id, email, provider) or request.state.token_principal (an opaque service id); neither is Patrick by itself, so Desktop pairs once with the core",
     "caller_subject": "the plugin names the Hermes sign-in as hermes_cli/web_server_sessions.py:93-104 does: a native grant's subject; a verified session through gateway.session_identity.authenticated_subject (:296); a token principal; with no sign-in gate, the serve's own session token as legacy-token-owner (web_server.py:292)",
     "remote_desktop_half": "against a remote backend the desktop half is not copied from the remote plugins folder; it goes in desktop-plugins/<id>/plugin.js on the Desktop machine (desktop-plugin-sdk.md, One package, both SDKs, the note)",
-    "source": "website/docs/developer-guide/desktop-plugin-sdk.md (A backend for your plugin; Calling it from the plugin; Security model); hermes_cli/dashboard_auth/base.py:10 Session, :25 TokenPrincipal; middleware.py:213; token_auth.py:84"
+    "source": "website/docs/developer-guide/desktop-plugin-sdk.md (A backend for your plugin; Calling it from the plugin; Security model); hermes_cli/dashboard_auth/base.py:10 Session, :25 TokenPrincipal; middleware.py:303; token_auth.py:84"
   },
   "kanban": {
     "read": "GET /api/plugins/kanban/board and /api/plugins/kanban/tasks/<task_id> on hermes serve",
@@ -84,45 +84,45 @@
   "own_chat": {
     "gateways": "Besides the Bots' gateway (thornswood-bots), Patrick's Desktop picker shows my-hermes (his own Hermes on the VM, user patrick-hermes) and This device (his Hermes on One). The phone reaches both through own_connector.py, run as that Hermes's own user.",
     "home": "Hermes keeps its state in ~/.hermes, or %LOCALAPPDATA%\\hermes on Windows, unless HERMES_HOME says otherwise; the chats are in state.db there.",
-    "home_source": "hermes_constants.py:51-58 (the platform default), :296 get_default_hermes_root",
+    "home_source": "hermes_constants.py:57-64 (the platform default), :302 get_default_hermes_root",
     "runtime": "A launcher says how it starts its runtime: hermes --print-runtime-command prints a JSON list [python, \"-I\", \"-c\", bootstrap], the bootstrap ending in runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True). On One that Python is in Hermes's own store and nothing lies beside hermes.exe; the readiness helper runs in the same bootstrap with runpy.run_path in place of that entry.",
     "runtime_source": "hermes_cli/_launchers.py:39 runtime_command, :75 print_runtime_command, :481 the launcher's --print-runtime-command; hermes_cli/windows_ssh_runtime.py:363 (no python.exe beside a bin launcher is assumed)",
     "list": "Read only from state.db: sessions with archived = 0 and hidden = 0, source not kanban, tool, oneshot (Hermes's own pickers leave these out) or subagent, not a sub-agent run (model_config $._delegate_from), and not a session that ended with end_reason 'compression' (a compressed chat goes on in a newer session, which is the one listed). Newest first by last_activity_at.",
-    "list_source": "hermes_state_sessions.py:239 INTERNAL_LISTING_SOURCES, :112 _session_filter_where, :155 _expand_compression_lineage_ids; hermes_state_common.py:461 (sessions), :531 (messages)",
+    "list_source": "hermes_state_sessions.py:241 INTERNAL_LISTING_SOURCES, :114 _session_filter_where, :157 _expand_compression_lineage_ids; hermes_state_common.py:461 (sessions), :531 (messages)",
     "turn": "hermes chat -Q --format stream-json --query-file <file>, with --resume <session id> for a chat that is there, or --yolo --source cli --in <home> for a new one. stream-json prints one JSON object a line and ends with {type: result, session_id, exit_code, error?}; only exit 0 with exit_code 0 is a confirmed turn. --format stream-json runs through the gateway's own client (launch_gateway_chat).",
-    "turn_source": "hermes_cli/_parser.py:237 --query-file, :272 --format, :275 --resume, :307 --yolo, :317 --source; hermes_cli/stream_json.py:87 emit_result; hermes_cli/main.py:1682 cmd_chat",
+    "turn_source": "hermes_cli/_parser.py:241 --query-file, :276 --format, :279 --resume, :311 --yolo, :321 --source; hermes_cli/stream_json.py:87 emit_result; hermes_cli/main.py:1684 cmd_chat",
     "history": "Full history pages back through state.db, read only: a chat's messages are those of its whole compression lineage (the sessions it went on from, each ended with end_reason 'compression', and those it goes on as), user and assistant, active = 1, not the compression summary (_compressed_summary = 1), ordered by Hermes's own message id. A resume of a compressed chat's id lands on the newest continuation (get_compression_tip), and a resume of a chat Hermes does not have is refused, never a new chat.",
-    "history_source": "hermes_state_sessions.py:46 _LINEAGE_CTE_SQL; hermes_state_common.py:531 (messages: id AUTOINCREMENT, active, _compressed_summary); hermes_cli/main.py:1357 _resolve_session_by_name_or_id (compression tip), :1543 a miss kept for \"Session not found\"; hermes_cli/cli_agent_setup_mixin.py:589 the resume aborts on a missing session",
+    "history_source": "hermes_state_sessions.py:46 _LINEAGE_CTE_SQL; hermes_state_common.py:531 (messages: id AUTOINCREMENT, active, _compressed_summary); hermes_cli/main.py:1359 _resolve_session_by_name_or_id (compression tip), :1545 a miss kept for \"Session not found\"; hermes_cli/cli_agent_setup_mixin.py:590 the resume aborts on a missing session",
     "resume_keeps_settings": "A chat's launch settings (yolo, source, model, cwd and the rest of _POLICY) are frozen when the chat is made. A resume that passes one that differs is refused, and a resume that passes none keeps them. So --yolo and --source go only on a new chat, and a phone turn in a chat started elsewhere runs with that chat's own approvals.",
-    "resume_keeps_settings_source": "hermes_cli/gateway_chat.py:22 _POLICY, :202 the source of a new session, :297 check_resume_policy",
+    "resume_keeps_settings_source": "hermes_cli/gateway_chat.py:22 _POLICY, :203 the source of a new session, :299 check_resume_policy",
     "approvals": "A gateway-admitted -Q turn is a finite turn, so approvals follow approvals.single_query_mode (default deny): a step that needs an approval is refused unless --yolo was frozen into the chat, or the chat has /yolo on. Hardline and deny rules run before yolo either way.",
-    "approvals_source": "tools/approval_context.py:198 _is_single_query_approval_context, :347 _binary_approval_mode; tools/approval.py:327 _yolo_active",
+    "approvals_source": "tools/approval_context.py:198 _is_single_query_approval_context, :347 _binary_approval_mode; tools/approval.py:350 _yolo_active",
     "ready": "Whether that Hermes's gateway runs is asked without starting one, as for the Bots (room_send.py op ready, with profile empty).",
     "ready_source": "hermes_cli/gateway_runtime.py:289 discover_gateway_endpoint",
     "probe": "The helper's quick ops (ready, react, session; the Bots' ready, states, send, react) run with HERMES_DISABLE_LAZY_INSTALLS=1, Hermes's own switch that keeps a start from finishing an owed source update (dependency sync, launchers, product builds: minutes) before anything else, as Hermes's own probes run. A turn runs without it.",
     "probe_source": "hermes_cli/venv_sync.py:343 prepare_launch (:371 why `gateway status` is spared it, :374 the switch); hermes_bootstrap.py:588 calls it at every start; hermes_cli/doctor_platform.py:541 and cron/scheduler_script.py set it for their probes",
     "busy": "A message into a chat whose turn runs is handed over as Desktop's box hands it: config.get {key: busy, session_id} answers the chat's busy_input_mode, else display.busy_input_mode, else interrupt (queue for the TUI); steer is session.steer and interrupt is session.redirect, each {session_id, text, execution_generation}, answered queued, redirected or rejected, rejected meaning queue it as the next prompt; queue, a file, a slash command or a turn parked on a prompt is prompt.submit, whose receipt is started or queued. A resume's snapshot gives pending (each admission's status, started for the running one), prompts and execution_generation, and session.info events replace pending. `hermes chat` builds its view as hermes_cli.gateway_chat_view.GatewayChatView at run time, so room_send.py's turn puts a view in its place that changes only submit, then runs hermes_cli.main as Hermes's own launcher does.",
-    "busy_source": "gateway/session_busy_controls.py:30 busy_config, :175 correct; gateway/session_controls.py:638 the resume snapshot, :690 submit; gateway/session_contract.py:53 AdmissionReceipt; gateway/session_authority.py:412 _publish_pending; hermes_cli/gateway_chat.py:163 the view's import; hermes_cli/gateway_chat_view.py:39 __init__, :218 _session_info, :301 submit, :496 run; apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts:276-298 and :439 steerDraft; apps/desktop/src/app/chat/composer/busy-submit-state.ts:35; apps/desktop/src/app/session/hooks/use-busy-input-mode.ts:57"
+    "busy_source": "gateway/session_busy_controls.py:30 busy_config, :176 correct; gateway/session_controls.py:700 the resume snapshot, :759 submit; gateway/session_contract.py:53 AdmissionReceipt; gateway/session_authority.py:467 _publish_pending; hermes_cli/gateway_chat.py:163 the view's import; hermes_cli/gateway_chat_view.py:92 __init__, :260 _session_info, :343 submit, :535 run; apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts:276-298 and :477 steerDraft; apps/desktop/src/app/chat/composer/busy-submit-state.ts:35; apps/desktop/src/app/session/hooks/use-busy-input-mode.ts:57"
   },
   "reactions": {
     "store": "Hermes keeps reactions on a message row, in messages.display_metadata under \"reactions\": a list of {emoji, author, at, seen?}, author \"user\" or \"agent\". Older rows carry the JSON as a string inside a string.",
-    "store_source": "hermes_state.py:1629 REACTIONS_METADATA_KEY; hermes_state_messages.py:189 _decode_display_metadata, :517 _reaction_list",
+    "store_source": "hermes_state.py:1631 REACTIONS_METADATA_KEY; hermes_state_messages.py:190 _decode_display_metadata, :518 _reaction_list",
     "rule": "One reaction per author per message (Tapback): set_message_reaction(session_id, row_id, emoji, author) with a different emoji replaces, the same emoji again takes it off, None takes it off, and a row outside the chat's visible lineage returns None.",
-    "rule_source": "hermes_state_messages.py:522 set_message_reaction, :548 get_message_reactions, :555 _reaction_row_query",
+    "rule_source": "hermes_state_messages.py:523 set_message_reaction, :549 get_message_reactions, :556 _reaction_row_query",
     "write": "In a process of Hermes's own, as Hermes's own user: hermes_state_registry.acquire(db_path or None) for the SessionDB (None is this user's own state.db; a profile's is ~/.hermes/profiles/<id>/state.db), then release_or_close. Hermes's own react_to_message tool does the same; Desktop's message.react calls the same set_message_reaction. room_send.py op react reads the reaction first and writes only when it differs, so asking twice never takes it off.",
-    "write_source": "hermes_state_registry.py:195 acquire, :474 release_or_close; tools/react_to_message_tool.py:15 and :46; gateway/session_reactions.py:28; tui_gateway/methods_session.py:1311 message.react",
+    "write_source": "hermes_state_registry.py:195 acquire, :474 release_or_close; tools/react_to_message_tool.py:15 and :46; gateway/session_reactions.py:28; tui_gateway/methods_session.py:1306 message.react",
     "the_model": "Hermes tells the model about Patrick's reactions once, on a later turn, as a note, and only when display.message_reactions is on in that Hermes's config.",
-    "the_model_source": "tui_gateway/methods_prompt.py:204 (gated on display.message_reactions), hermes_state_messages.py:563 take_unseen_reactions"
+    "the_model_source": "tui_gateway/methods_prompt.py:204 (gated on display.message_reactions), hermes_state_messages.py:564 take_unseen_reactions"
   },
   "sessions": {
     "rename": "hermes sessions rename: SessionDB.set_session_title(session_id, title), the user's own title; it raises ValueError on a title another chat holds or one over MAX_TITLE_LENGTH (100), and the CLI refuses an empty title or one with a newline first. room_send.py op session, action rename, does the same, and does nothing when Hermes's sanitized title is the one asked for.",
-    "rename_source": "hermes_cli/sessions_cmd.py:826 _cmd_rename; hermes_state_titles.py:49 sanitize_title, :165 set_session_title; hermes_state.py:1609 MAX_TITLE_LENGTH",
+    "rename_source": "hermes_cli/sessions_cmd.py:855 _cmd_rename; hermes_state_titles.py:49 sanitize_title, :165 set_session_title; hermes_state.py:1611 MAX_TITLE_LENGTH",
     "archive": "Hermes's archive and bring back: SessionDB.set_session_archived(session_id, archived) hides or shows the chat and its whole compression lineage and keeps every message, as the TUI's session.archive does. An archived chat is not in Hermes's own chat lists (archived = 0 in own_connector LIST_SQL); a page of kind archived lists them.",
-    "archive_source": "hermes_state_sessions.py:951 set_session_archived; tui_gateway/methods_session.py:1255 session.archive",
+    "archive_source": "hermes_state_sessions.py:953 set_session_archived; tui_gateway/methods_session.py:1250 session.archive",
     "delete": "hermes sessions delete: SessionDB.delete_session(session_id, sessions_dir=<hermes home>/sessions, exclude_active_write_guards=True). It deletes the chat with its messages, its compression lineage (the parts it was compressed from) and its delegate children (side tasks), orphans a branch off it, and removes their session files. It raises SessionActiveWriteGuardError while a turn lease or compression lock holds it or a child, and RuntimeStoreError session_busy (a queued or running turn) or unknown_execution (a turn lost across a gateway restart; hermes sessions discard acknowledges it). It returns False for a chat that is not there, which the helper counts as done.",
-    "delete_source": "hermes_cli/sessions_cmd.py:629 _cmd_delete; hermes_state_sessions.py:1719 delete_session; hermes_state_errors.py:196 SessionActiveWriteGuardError; hermes_state_runtime.py RuntimeStoreError",
+    "delete_source": "hermes_cli/sessions_cmd.py:658 _cmd_delete; hermes_state_sessions.py:1702 delete_session; hermes_state_errors.py:196 SessionActiveWriteGuardError; hermes_state_runtime.py RuntimeStoreError",
     "bot_chat": "His Bot Chat is the hidden chat titled exactly CANONICAL_BOT_CHAT_TITLE ('Bot Chat'): Bot Mode and every Bot's message to him find it by that title (SessionDB.get_session_by_title, resolve_session_by_title), Hermes refuses a user rename of it, keeps it hidden when it is pinned, and its desktop offers no rename for it and lists it only on the bot row. room_send.py op session refuses every action on it and on every part of its compression lineage (SessionDB.get_compression_lineage from the canonical row), and the core refuses a chat the connector listed with bot_chat.",
-    "bot_chat_source": "hermes_state.py:1623 CANONICAL_BOT_CHAT_TITLE; hermes_state_titles.py:110 the rename guard, :195 get_session_by_title, :203 resolve_session_by_title; hermes_state_sessions.py:1040 set_session_pinned; hermes_state_compression.py:914 get_compression_lineage; apps/desktop/src/components/pane-shell/workspace-scope.ts:76 workspaceSessionRenameable",
+    "bot_chat_source": "hermes_state.py:1625 CANONICAL_BOT_CHAT_TITLE; hermes_state_titles.py:110 the rename guard, :195 get_session_by_title, :203 resolve_session_by_title; hermes_state_sessions.py:1042 set_session_pinned; hermes_state_compression.py:916 get_compression_lineage; apps/desktop/src/components/pane-shell/workspace-scope.ts:76 workspaceSessionRenameable",
     "where": "In a process of Hermes's own, as Hermes's own user, with hermes_state_registry.acquire(None) for this user's own state.db, then release_or_close: room_send.py op session. Only the own connectors (me, one) ask for it, never the Bots' connector, so no Bot Chat or room is renamed, hidden or deleted from the phone."
   }
 }
