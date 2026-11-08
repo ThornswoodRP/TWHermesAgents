@@ -102,6 +102,14 @@ class Script(unittest.TestCase):
         if with_guard:
             shutil.copytree(REPO / "thornswood_guard", pdir / "plugins" / "thornswood_guard",
                             ignore=shutil.ignore_patterns("__pycache__"))
+            # The brokers' sockets point into this profile, where none
+            # listens: on the VM the real tw-policy answers at its own path
+            # (3 Nov: "no wake is owed" where "did not answer" was meant).
+            pol = pdir / "plugins" / "thornswood_guard" / "policy.json"
+            data = json.loads(pol.read_text(encoding="utf-8"))
+            for name, sock in data["brokers"]["sockets"].items():
+                sock["path"] = str(pdir / "no-broker" / f"{name}.sock")
+            pol.write_text(json.dumps(data), encoding="utf-8")
         return pdir
 
     def run_script(self, pdir):

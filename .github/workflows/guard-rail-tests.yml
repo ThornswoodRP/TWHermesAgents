@@ -5,8 +5,14 @@
 # PyYAML and, once the decision core's install is merged, its venv libraries,
 # all from hash-pinned wheels. The job holds no
 # secret and can write nothing: read-only contents, no persisted credential.
-# It runs on included free minutes only; the account's spending limit stays
-# at $0, so when those run out the job does not start and nothing merges.
+# GitHub's included minutes for a private repository ran out on 2 Nov 2026
+# (Hermes used 476 Linux and 834 Windows minutes in two days) and the
+# spending limit stays at $0, so both checks run on runners of our own
+# (Patrick's A on q-hermes-ci-free-runners, 3 Nov): Linux on the Oracle VM
+# (deploy/runner: the tw-runner user, its own folder, a network that reaches
+# only GitHub and the package feeds) and Windows on the box, each under a
+# user of its own. Only this repository's own branches run here: a fork's
+# pull request runs no workflow in a private repository.
 name: Guard rail tests
 on:
   pull_request:
@@ -25,12 +31,12 @@ jobs:
       matrix:
         include:
           - where: VM's Python
-            os: ubuntu-24.04
+            runner: tw-hermes-vm
             python: "3.12"
           - where: One's Python
-            os: windows-latest
+            runner: tw-hermes-box
             python: "3.13"
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
