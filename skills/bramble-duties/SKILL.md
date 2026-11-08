@@ -231,9 +231,9 @@ to work the queue.
    or its issue cites his answer, or it is agreed plan work (Patrick, 2 Nov
    2026: "I shouldnt have had to fucking do a card for that", about the
    #5334 tunnel note he had answered A on the day before). A card goes to
-   him only for a step that weakens security, spends money (listed, never
-   recommended, and never Actions minutes or billing, which he will not pay
-   for: the ops skill, section 13) or touches a
+   him only for a step that weakens security, spends money (a paid option is
+   listed, never recommended, and Actions minutes or billing never get a
+   card: docs/DECIDED.md, "No paid Actions usage") or touches a
    secret, or for a question you need answered that he has not already
    decided. Never ask whether to do what he already told you to do ("they
    better not ask questions like do you want to do this thign that you told
