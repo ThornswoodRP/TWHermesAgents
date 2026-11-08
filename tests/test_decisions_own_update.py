@@ -184,14 +184,14 @@ class SaysWhatItDoes(unittest.TestCase):
         self.assertEqual(e.exception.code, own_connector.UPDATE_EXIT)
 
     def test_a_failed_update_is_said_and_not_tried_again_for_the_same_release(self):
-        up = FakeUpdater([(False, "git fetch in Thornswood-Hermes failed (exit 128)"), (True, "")])
+        up = FakeUpdater([(False, "git fetch in TWHermesAgents failed (exit 128)"), (True, "")])
         c, core = self.conn(release=B, updater=up)
         c.once()
         c.once()
         self.assertEqual(up.asked, [B])
         self.assertIsNone(c.leaving)
         self.assertEqual(core.claims[-1]["update_why"],
-                         "could not update to bbbbbbbbbbbb: git fetch in Thornswood-Hermes failed (exit 128)")
+                         "could not update to bbbbbbbbbbbb: git fetch in TWHermesAgents failed (exit 128)")
         st = own.OwnChat(self.w.store).chats(self.w.patrick(), "one")["connector"]
         self.assertIn("could not update", st["update_why"])
         core.release = C

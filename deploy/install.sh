@@ -5,7 +5,7 @@
 #
 #   /opt/thornswood-hermes/releases/<commit>/deploy/install.sh <commit> [--move-gateway]
 #
-# Idempotent: run it again after any merge to Thornswood-Hermes. It makes the
+# Idempotent: run it again after any merge to TWHermesAgents. It makes the
 # broker users and folders, puts the units, slices, check helper socket and SFTP jail
 # in place, points /opt/thornswood-hermes/current at this commit, and starts
 # the brokers. It never reads a secret's value: keys are moved by name and
@@ -268,7 +268,7 @@ if [[ ! -f "$read_key" ]]; then
 fi
 chown root:root "$read_key" "$read_key.pub"; chmod 0400 "$read_key"; chmod 0644 "$read_key.pub"
 install -m 0644 -o root -g root "$here/deploy/ssh/github_known_hosts" "$(pol follow_main.known_hosts)"
-ok "the VM's read key for Thornswood-Hermes: $(cat "$read_key.pub")"
+ok "the VM's read key for TWHermesAgents: $(cat "$read_key.pub")"
 
 # 6. The code: this commit, root-owned, as current.
 install -d -m 0755 "$opt/bin"

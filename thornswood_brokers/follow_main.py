@@ -3,7 +3,7 @@
 
 Runs as root from tw-follow-main.timer. Each run:
 
-  1. fetches main of Thornswood-Hermes over ssh with the VM's own read-only
+  1. fetches main of TWHermesAgents over ssh with the VM's own read-only
      deploy key (/etc/thornswood/hermes-read-key, root's alone; GitHub lets a
      deploy key read one repository and, without "Allow write access", never
      write), against GitHub's published host keys only;
@@ -58,6 +58,7 @@ from thornswood_guard.policy import Policy
 
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
+CONNECTOR = "tw-decide-connector.service"
 
 
 def _text(b) -> str:
@@ -165,7 +166,7 @@ class Follower:
         except Stop as e:
             if "Permission denied" in str(e) or "publickey" in str(e):
                 pub = self._at(self.r["read_key"] + ".pub")
-                raise Stop("fetch", "GitHub refused the VM's read key. Add it to Thornswood-Hermes as a deploy key, "
+                raise Stop("fetch", "GitHub refused the VM's read key. Add it to TWHermesAgents as a deploy key, "
                                     "with Allow write access left off: " + (pub.read_text().strip() if pub.exists() else str(pub)))
             raise
         return self.sh("fetch", self.git("-C", str(self.mirror), "rev-parse", "refs/heads/main")).stdout.strip()
@@ -219,7 +220,22 @@ class Follower:
         if not core.exists():
             raise Stop("install", f"the decision core is installed here ({self.r['decide_env']}), "
                                   f"but {commit[:12]} has no deploy/decisions/install.sh to keep it at this release")
-        self.sh("install", ["bash", str(core), commit])
+        # A release whose core install can leave the connector stopped gets it stopped until every Bot
+        # runs this release (start_connector, after the reload and the canary): a message handed to a Bot
+        # still on the release before would meet its old tools. 2 Nov 2026: Patrick's answers that waited
+        # on tw_git's open_issue are put back in the queue by a migration, and the core's install runs
+        # that migration before apply.py and tw-reload-bots give the Bots the op.
+        self.connector_later = "--connector-later" in core.read_text(encoding="utf-8", errors="replace")
+        self.sh("install", ["bash", str(core), commit] + (["--connector-later"] if self.connector_later else []))
+
+    def start_connector(self) -> None:
+        """The connector the core's install left stopped, started now every Bot runs this release."""
+        if not getattr(self, "connector_later", False):
+            return
+        self.connector_later = False
+        self.sh("connector", ["systemctl", "reset-failed", CONNECTOR])
+        self.sh("connector", ["systemctl", "start", CONNECTOR])
+        self.sh("connector", ["systemctl", "is-active", "--quiet", CONNECTOR])
 
     def apply(self, dest: Path, commit: str) -> None:
         # hermes never runs git against the root-owned release: git refuses a
@@ -371,6 +387,7 @@ class Follower:
             self.apply(dest, tip)
             self.restart()
             self.canary()
+            self.start_connector()
         except Stop as e:
             self.say(f"STOP {tip[:12]} failed at {e.step}: {e}")
             back = self.put_back(before, dest)
@@ -409,6 +426,7 @@ class Follower:
             self.apply(dest, before)
             self.restart()
             self.canary()
+            self.start_connector()
         except Stop as e:
             self.say(f"FAIL putting back {before[:12]} failed too, at {e.step}: {e}")
             return f"putting back {before} failed at {e.step}: {e}"

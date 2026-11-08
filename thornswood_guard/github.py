@@ -82,7 +82,7 @@ class GitHubRules:
         if not p.is_bot(bot):
             return Verdict.no(f"{bot} is not one of the six Bots")
         if repo == p.data["repos"]["hermes"]:
-            return Verdict.no("no Bot writes to Thornswood-Hermes; every change there is Patrick's")
+            return Verdict.no("no Bot writes to TWHermesAgents; every change there is Patrick's")
         if not ref.startswith("refs/heads/"):
             return Verdict.no(f"{ref} is not a branch; tags and other refs are never pushed by a Bot")
         branch = ref[len("refs/heads/"):]
@@ -115,7 +115,7 @@ class GitHubRules:
     def open_pr(self, bot: str, repo: str, head_ref: str, base_ref: str) -> Verdict:
         p = self.policy
         if repo == p.data["repos"]["hermes"]:
-            return Verdict.no("no Bot opens a pull request in Thornswood-Hermes")
+            return Verdict.no("no Bot opens a pull request in TWHermesAgents")
         want_base = p.data["merge"]["base"].get(repo)
         if want_base is None:
             return Verdict.no(f"{repo} is not a repo the Bots work in")
@@ -196,7 +196,7 @@ class GitHubRules:
         if p.app_of(bot) != "bramble" or not p.data["github_apps"]["bramble"]["may_merge"]:
             return Verdict.no("merges go only through Bramble's GitHub App")
         if pr.repo == p.data["repos"]["hermes"]:
-            return Verdict.no("Bramble never merges in Thornswood-Hermes")
+            return Verdict.no("Bramble never merges in TWHermesAgents")
         if self._hands_off_pr(pr):
             return Verdict.no(self._hands_off_reason(pr.author_login, pr.head_ref))
         if pr.merged:
@@ -255,7 +255,7 @@ class GitHubRules:
             return Verdict.no(f"only Bramble closes a pull request, and only on Patrick's answer; "
                               f"{p.bot_name(bot) if p.is_bot(bot) else bot} never does")
         if pr.repo == p.data["repos"]["hermes"]:
-            return Verdict.no("Bramble never closes anything in Thornswood-Hermes")
+            return Verdict.no("Bramble never closes anything in TWHermesAgents")
         if self._hands_off_pr(pr):
             return Verdict.no(self._hands_off_reason(pr.author_login, pr.head_ref))
         if pr.merged or not open_now:
@@ -311,6 +311,29 @@ class GitHubRules:
         if latest.conclusion != "success":
             return Verdict.no(f"'{name}' is {latest.conclusion} on {pr.head_sha[:12]}; red is fixed at its cause, never merged past or re-run")
         return Verdict.yes()
+
+    # Issues
+
+    # What the guide's "How an issue and a comment are written" keeps off the
+    # public board: a footer or a session link, and a closing --- line.
+    NOT_PLAIN = re.compile(r"(?im)generated (by|with) \[?claude|claude\.ai/code|^---\s*\Z")
+
+    def open_issue(self, bot: str, repo: str, title: str, body: str) -> Verdict:
+        """A new issue on the board: any Bot, in a repo the Bots work in, plain, and
+        unclaimed (a finding goes on the board unclaimed, in Todo; the broker sends no
+        label and no assignee, so whoever picks it claims it the usual way)."""
+        p = self.policy
+        if repo == p.data["repos"]["hermes"]:
+            return Verdict.no("no Bot writes to Thornswood-Hermes; every change there is Patrick's")
+        if p.data["merge"]["base"].get(repo) is None:
+            return Verdict.no(f"{repo} is not a repo the Bots work in")
+        if not title.strip() or len(title) > 256 or "\n" in title:
+            return Verdict.no("an issue has a title of one line, at most 256 characters")
+        if not body.strip():
+            return Verdict.no("an issue says what it is for and when it is done")
+        if self.NOT_PLAIN.search(body):
+            return Verdict.no("an issue is plain: no footer, no session link and no closing --- line")
+        return Verdict.yes(f"a new issue in {repo}, unclaimed")
 
     # Claims
 

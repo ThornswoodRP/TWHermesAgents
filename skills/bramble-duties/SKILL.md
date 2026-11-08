@@ -2,7 +2,7 @@
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, and run the Ops run notes and the Desk's list. Use on every GitHub wake and whenever asked to work the queue.
 version: 1.4.0
-author: Thornswood-Hermes (repo-owned; scripts/apply.py installs it, never edit it on the VM)
+author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
   hermes:
@@ -69,7 +69,7 @@ In all three:
   that names the check and links its run. Do nothing else with it.
 - No merge needs a card or Patrick's yes, and none is recorded in
   DECIDED.md.
-- Never merge ThornswoodRP/Thornswood-Hermes. Patrick's own Hermes merges it.
+- Never merge ThornswoodRP/TWHermesAgents. Patrick's own Hermes merges it.
 
 ## 2. A pull request the merge queue dropped
 
@@ -231,7 +231,9 @@ to work the queue.
    or its issue cites his answer, or it is agreed plan work (Patrick, 2 Nov
    2026: "I shouldnt have had to fucking do a card for that", about the
    #5334 tunnel note he had answered A on the day before). A card goes to
-   him only for a step that weakens security, spends money or touches a
+   him only for a step that weakens security, spends money (a paid option is
+   listed, never recommended, and Actions minutes or billing never get a
+   card: docs/DECIDED.md, "No paid Actions usage") or touches a
    secret, or for a question you need answered that he has not already
    decided. Never ask whether to do what he already told you to do ("they
    better not ask questions like do you want to do this thign that you told

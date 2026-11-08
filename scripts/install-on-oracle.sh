@@ -2,7 +2,7 @@
 # Install the brokers, units, slices and backups on the Oracle VM from the
 # commit Patrick merged (Phase 2).
 #
-# Runs on One, from a clone of Thornswood-Hermes, after Patrick merges:
+# Runs on One, from a clone of TWHermesAgents, after Patrick merges:
 #
 #   scripts/install-on-oracle.sh <full commit of main> [--move-gateway] [--quotas]
 #

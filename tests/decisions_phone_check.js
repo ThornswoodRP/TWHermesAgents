@@ -593,7 +593,7 @@ const base = `http://localhost:${port}`
     await linked.waitFor({ timeout: 15000 })
     const chips = await linked.locator('a.chip-link').evaluateAll(ns => ns.map(a => [a.textContent, a.getAttribute('href'), !!a.querySelector('svg')]))
     const want = [['plan thread', 'https://claude.ai/code/project/chan_1?thread=cmsg_9', true],
-      ['Artifact', 'https://claude.ai/artifact/AbC123', true], ['Thornswood-Hermes #96', 'https://github.com/ThornswoodRP/Thornswood-Hermes/pull/96', true],
+      ['Artifact', 'https://claude.ai/artifact/AbC123', true], ['TWHermesAgents #96', 'https://github.com/ThornswoodRP/TWHermesAgents/pull/96', true],
       ['720-555-0199', 'tel:7205550199', true]]
     if (JSON.stringify(chips) !== JSON.stringify(want)) throw new Error(JSON.stringify(chips))
     const www = linked.locator('a', { hasText: 'www.example.com' })
@@ -1055,7 +1055,7 @@ const base = `http://localhost:${port}`
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
   // Each signed-in view gets one in every kind of text it shows, at Pixel widths and with larger text.
-  const LONG = 'https://github.com/ThornswoodRP/Thornswood-Hermes/pull/44/commits/2e308db923bf40880adae89d38fedb307c18aa46'
+  const LONG = 'https://github.com/ThornswoodRP/TWHermesAgents/pull/44/commits/2e308db923bf40880adae89d38fedb307c18aa46'
   for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3], [1440, 1]]) {
     await page.setViewportSize({ width, height: 860 })
     for (const view of ['/m/bots', '/m/rooms', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',
