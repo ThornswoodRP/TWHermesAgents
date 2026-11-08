@@ -708,6 +708,13 @@
     "decide_db": "/srv/tw/decide/core.db",
     "decide_user": "tw-decide",
     "decide_python": "/opt/thornswood-hermes/decisions-venv/bin/python3",
-    "pause_file": "/etc/thornswood/follow-main.paused"
+    "pause_file": "/etc/thornswood/follow-main.paused",
+    "report": {
+      "app": "workers",
+      "app_login": "thornswood-workers[bot]",
+      "ledger_repo": "ops",
+      "ledger_issue": 249,
+      "board_repo": "app"
+    }
   }
 }

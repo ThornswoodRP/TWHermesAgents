@@ -246,7 +246,17 @@ class FollowMain(unittest.TestCase):
     def follower(self, vm: FakeVM, installed: str | None = OLD) -> follow_main.Follower:
         self.root = Path(tempfile.mkdtemp())
         self.said: list[str] = []
-        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append)
+        # What tw-git is handed (vm_install); a test sets self.refuse_report to
+        # have it not answer.
+        self.reports: list[dict] = []
+        self.refuse_report = False
+
+        def report(args):
+            if self.refuse_report:
+                raise follow_main.wire.Refused("the broker at /run/tw/git/git.sock is not answering")
+            self.reports.append(json.loads(json.dumps(args)))
+            return {"ledger": 1, "board": None}
+        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append, report=report)
         if installed:
             (f.opt / "releases" / installed).mkdir(parents=True)
             (f.opt / "current").symlink_to(f.opt / "releases" / installed)
@@ -363,8 +373,13 @@ class FollowMain(unittest.TestCase):
 
         f.run_ = run
         self.assertEqual(f.follow(), 1)
-        self.assertIn("deploy key", self.said[-1])
-        self.assertIn("Allow write access left off", self.said[-1])
+        stop = [line for line in self.said if line.startswith("STOP")][-1]
+        self.assertIn("deploy key", stop)
+        self.assertIn("Allow write access left off", stop)
+        # GitHub hears the sentence, never the key itself.
+        self.assertEqual([(r["result"], r["step"]) for r in self.reports], [("fetch failed", "fetch")])
+        self.assertIn("Allow write access left off", self.reports[0]["reason"])
+        self.assertNotIn("ssh-", self.reports[0]["reason"])
 
     def test_a_red_suite_installs_nothing_and_is_not_tried_again(self):
         vm = FakeVM(NEW, fail={"systemd-run": 1})
@@ -684,6 +699,90 @@ class FollowMain(unittest.TestCase):
         self.assertNotIn(f.r["pause_file"], (REPO / "deploy" / "install.sh").read_text())
 
 @unittest.skipUnless(os.geteuid() == 0 and shutil.which("runuser"), "needs root, to hand the release to another user as the VM does")
+class Reports(unittest.TestCase):
+    """Each new result goes to tw-git (ThornswoodRP/Thornswood#5564)."""
+
+    follower = FollowMain.follower
+
+    def test_an_install_is_reported_with_its_commit_and_what_ran_before(self):
+        f = self.follower(FakeVM(NEW))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(len(self.reports), 1)
+        r = self.reports[0]
+        self.assertEqual((r["result"], r["commit"], r["before"], r["step"]), ("installed", NEW, OLD, None))
+        self.assertEqual(r["installed"], f.installed())
+        self.assertRegex(r["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        st = json.loads(f.state_file.read_text())
+        self.assertIsNone(st["report_pending"])
+        self.assertEqual(st["reported"]["commit"], NEW)
+
+    def test_nothing_new_reports_nothing(self):
+        f = self.follower(FakeVM(OLD))
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(self.reports, [])
+
+    def test_a_red_suite_reports_its_step_and_count_but_none_of_the_output(self):
+        vm = FakeVM(NEW)
+
+        def run(args, **kw):
+            if args[0] == "systemd-run":
+                return subprocess.CompletedProcess(args, 1, "Ran 412 tests\nFAILED (failures=1)\nsecret line from 10.0.0.7\n", "")
+            return vm(args, **kw)
+        f = self.follower(vm)
+        f.run_ = run
+        self.assertEqual(f.follow(), 1)
+        r = self.reports[0]
+        self.assertEqual((r["result"], r["commit"], r["step"], r["installed"]), ("not installed", NEW, "tests", OLD))
+        self.assertIn("the suite fails at", r["reason"])
+        self.assertIn("Ran 412 tests", r["reason"])
+        self.assertNotIn("secret line", r["reason"])
+        # Not tried again, and not said again.
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(len(self.reports), 1)
+
+    def test_a_failed_canary_reports_the_put_back(self):
+        f = self.follower(FakeVM(NEW, fail={"tw-canary": 1}))
+        self.assertEqual(f.follow(), 1)
+        r = self.reports[0]
+        self.assertEqual((r["result"], r["step"]), ("failed", "canary"))
+        self.assertTrue(r["put_back"])
+
+    def test_a_result_tw_git_did_not_take_goes_first_at_the_next_run(self):
+        f = self.follower(FakeVM(NEW))
+        self.refuse_report = True
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(self.reports, [])
+        self.assertTrue(any(line.startswith("REPORT NOT SENT") for line in self.said))
+        self.assertEqual(json.loads(f.state_file.read_text())["report_pending"]["commit"], NEW)
+        # The install moved current, as deploy/install.sh does on the VM.
+        (f.opt / "releases" / NEW).mkdir(parents=True, exist_ok=True)
+        (f.opt / "current").unlink()
+        (f.opt / "current").symlink_to(f.opt / "releases" / NEW)
+        self.refuse_report = False
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual([r["commit"] for r in self.reports], [NEW])
+        self.assertIsNone(json.loads(f.state_file.read_text())["report_pending"])
+        # And once taken, nothing goes again.
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(len(self.reports), 1)
+
+    def test_a_fetch_that_fails_the_same_way_is_reported_once_and_its_end_too(self):
+        vm = FakeVM(OLD)
+        f = self.follower(vm)
+
+        def broken(args, **kw):
+            if "fetch" in args and args[-1].startswith("+refs/heads/main"):
+                return subprocess.CompletedProcess(args, 128, "", "Could not resolve host")
+            return vm(args, **kw)
+        f.run_ = broken
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual([r["result"] for r in self.reports], ["fetch failed"])
+        f.run_ = vm
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual([r["result"] for r in self.reports], ["fetch failed", "fetched"])
+
+
 class ApplyAsAnotherUser(unittest.TestCase):
     """The real git, a release root owns and a hermes that is not root: the
     apply, then the put-back's apply of the earlier release."""

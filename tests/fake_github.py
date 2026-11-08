@@ -278,21 +278,27 @@ class FakeGitHub:
                 return Response(404, {"message": "Not Found"}, {})
             return Response(200, {"content": base64.b64encode(raw).decode()}, {})
         if rest[0] == "issues" and len(rest) == 1:
+            # The repository's issues: listed by state (open unless asked) and
+            # creator, or a new one, opened as the App the token is for.
             if method == "GET":
+                state = query.get("state", "open")
                 found = [i for (r, _), i in sorted(self.issues.items(), key=lambda kv: -kv[0][1]) if r == repo
+                         and (state == "all" or i.get("state", "open") == state)
                          and (not query.get("creator") or i["user"]["login"] == query["creator"])]
                 return Response(200, json.loads(json.dumps(found[(page - 1) * 100: page * 100])), {})
             n = max([k[1] for k in self.issues if k[0] == repo] + [k[1] for k in self.prs if k[0] == repo] + [99]) + 1
             self.issues[(repo, n)] = {"number": n, "user": {"login": self.app_login}, "assignees": [], "labels": [],
-                                      "state": "open", "title": body["title"], "body": body["body"],
+                                      "state": "open", "title": body["title"], "body": body.get("body"),
                                       "html_url": f"https://github.com/{repo}/issues/{n}"}
-            return Response(201, {"number": n}, {})
+            return Response(201, json.loads(json.dumps(self.issues[(repo, n)])), {})
         if rest[0] == "issues":
             n = int(rest[1])
             issue = self.issues.get((repo, n))
             if issue is None:
                 return Response(404, {"message": "Not Found"}, {})
             if len(rest) == 2:
+                if method == "PATCH":
+                    issue.update({k: v for k, v in body.items() if k in ("state", "state_reason", "title", "body")})
                 return Response(200, issue, {})
             if rest[2] == "comments":
                 if method == "GET":
