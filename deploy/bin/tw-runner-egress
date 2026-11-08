@@ -1,0 +1,6 @@
+#!/usr/bin/python3 -I
+# tw-runner-egress.service runs this as root: the table of what tw-runner may reach.
+import sys
+sys.path.insert(0, "/opt/thornswood-hermes/current")
+from thornswood_brokers.runner_egress import main  # noqa: E402
+sys.exit(main(sys.argv[1:]))
