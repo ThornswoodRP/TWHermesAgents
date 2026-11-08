@@ -48,7 +48,7 @@ from .files_service import check_argv
 Result = tuple[str, bool, str]
 Run = Callable[..., subprocess.CompletedProcess]
 
-# Hermes's own container flags (tools/environments/docker.py, v0.22.5) with
+# Hermes's own container flags (tools/environments/docker.py, v0.23.0) with
 # docker_network: false.
 HERMES_PODMAN_ARGS = ["--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--cap-add", "CHOWN", "--cap-add", "FOWNER",
                       "--tmpfs", "/tmp:rw,nosuid,size=512m", "--network=none", "--pids-limit", "2048",
