@@ -23,6 +23,14 @@ also run the notes. Since 1 Nov the Desk only keeps the report page. Do every
 step through `tw_git` and `tw_decide`. A refusal is a stop: say what was
 refused and why, and do not try another route.
 
+A refusal stops that step for this wake, not for good. A refusal written
+down earlier, by you or anybody, is not today's answer: at each wake ask the
+same tool for the same step again, the same way, and carry on if it is no
+longer refused. A line that holds work on a refusal says when it was asked
+and what it said, and you replace it with today's answer each wake. (4 Nov
+2026: every run note stayed held on a start_run refusal from 2 Nov that
+Hermes #101 had fixed, because nothing asked again.)
+
 ## 1. The Bots' pull requests go on auto-merge, Ops merges when green
 
 Every finished check suite in the three repositories is gathered into one
