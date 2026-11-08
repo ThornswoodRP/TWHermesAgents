@@ -70,9 +70,12 @@ It checks everything first and changes nothing if any check fails. It never touc
 ## Running the tests
 
 ```bash
-python -m pip install pyyaml
+python -m pip install --require-hashes --only-binary :all: --no-deps -r tests/requirements-ci.txt
+python -m pip install --require-hashes --only-binary :all: --no-deps -r deploy/decisions/requirements.txt
 python -m unittest discover -s tests
 ```
+
+These are the libraries CI installs, at their pinned versions. `scripts/test-at-head.sh` stops before it sets any status unless the Python it runs on One (`TWH_ONE_PYTHON`) has every one of them.
 
 Every push to a PR, and every push to `main`, runs `.github/workflows/guard-rail-tests.yml` on runners of our own. Until 2 Nov 2026 they were GitHub's (Patrick's answer B on q-hermes-tests-without-one, 31 Oct). On 2 Nov the included minutes for private repositories ran out: Hermes used 476 Linux and 834 Windows minutes in two days, a Windows minute counts as two, and the spending limit stays at $0. Patrick will not pay, so his A on q-hermes-ci-free-runners (3 Nov) moved both checks:
 
