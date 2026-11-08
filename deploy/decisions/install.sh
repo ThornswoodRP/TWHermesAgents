@@ -2,7 +2,7 @@
 # Install the decision core on the Oracle VM, as root, from the root-owned
 # copy of the commit Patrick merged:
 #
-#   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> [--room <id>] [--origin <url>]
+#   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> [--room <id>] [--origin <url>] [--connector-later]
 #
 # tw-follow-main puts that copy there and points /opt/thornswood-hermes/current
 # at it once main reaches the VM; run this after it, at the same commit.
@@ -43,14 +43,15 @@
 set -euo pipefail
 umask 022
 
-commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>]}"
+commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>] [--connector-later]}"
 shift
-room=""; origin=""
+room=""; origin=""; connector_later=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --room) room="${2:-}"; shift 2 ;;
     --origin) origin="${2:-}"; shift 2 ;;
-    *) echo "STOP: the options are --room <id> and --origin <url>, not $1."; exit 1 ;;
+    --connector-later) connector_later=1; shift ;;
+    *) echo "STOP: the options are --room <id>, --origin <url> and --connector-later, not $1."; exit 1 ;;
   esac
 done
 opt=/opt/thornswood-hermes
@@ -309,12 +310,20 @@ ok "the live Board runs"
 
 # 10. The connector. While connector_effects is off it asks the core every half
 # minute and does nothing else. Only Patrick changes connector_effects.
+# --connector-later (the VM's follower, thornswood_brokers/follow_main.py):
+# it stays stopped, as step 5b left it, and the follower starts it once
+# apply.py and tw-reload-bots have every Bot on this release, so no message
+# reaches a Bot still running the tools of the release before.
 systemctl enable --quiet tw-decide-connector.service
-systemctl reset-failed tw-decide-connector.service
-systemctl restart tw-decide-connector.service
-sleep 2
-systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
-ok "the connector runs (it waits while connector_effects is off)"
+if [[ -n "$connector_later" ]]; then
+  ok "the connector stays stopped until every Bot runs this release; the follower starts it"
+else
+  systemctl reset-failed tw-decide-connector.service
+  systemctl restart tw-decide-connector.service
+  sleep 2
+  systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
+  ok "the connector runs (it waits while connector_effects is off)"
+fi
 
 # 11. The push worker, once the origin is known (it names it in every VAPID
 # header). While push_send is off it says its public keys to the core and then

@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import socket
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -100,6 +103,16 @@ SWEEP_PLATFORMS = ("webhook",)
 OWED_WAKE_MARK = "[Thornswood owed wake]"
 OWED_WAKE_JOB = "tw-owed-wake"
 OWED_FILE = ("local", "thornswood-hermes", "owed-wake")
+# Every other turn the queue turns away leaves a note here, one file per
+# session (<session id>.json: when, and why), so whoever handed the turn its
+# message can tell it never ran. The decision core's connector reads the note
+# for a Bot Chat turn it started and puts that message back in its queue
+# instead of calling it delivered (2 Nov 2026: Patrick's answer on the #5327
+# ad18c2c card reached Bramble while the queue was turning turns away; the
+# turn said it had not started, the connector saw it end and called it
+# sent, and nothing ever ran it).
+TURNED_AWAY_DIR = ("local", "thornswood-hermes", "turned-away")
+SESSION_FILE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
 class TurnGate:
@@ -107,11 +120,12 @@ class TurnGate:
 
     def __init__(self, policy: Policy, bot: str, ask: Caller, *, wait_seconds: float = TURN_WAIT,
                  sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
-                 owed_file: Path | None = None):
+                 owed_file: Path | None = None, turned_away_dir: Path | None = None):
         self.policy = policy
         self.bot = bot
         self.ask = ask
         self.owed_file = owed_file
+        self.turned_away_dir = turned_away_dir
         self.wait_seconds = wait_seconds
         self.sleep = sleep
         self.clock = clock
@@ -151,6 +165,21 @@ class TurnGate:
             logger.error("a wake was turned away and could not be owed (%s, then %s); the next wake does its sweep",
                          failed, e)
 
+    def _note_turned_away(self, kwargs: dict, why: str) -> None:
+        """Leave the note TURNED_AWAY_DIR describes for this session. Never raises: the turn still says it
+        was not admitted, as before."""
+        sid = str(kwargs.get("session_id") or "")
+        if self.turned_away_dir is None or not SESSION_FILE.match(sid):
+            return
+        try:
+            self.turned_away_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self.turned_away_dir / f".{sid}.{os.getpid()}.tmp"
+            tmp.write_text(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "reason": why[:300]}),
+                           encoding="utf-8")
+            os.replace(tmp, self.turned_away_dir / f"{sid}.json")
+        except OSError as e:
+            logger.error("a turn was turned away and its note could not be left (%s)", e)
+
     def before_llm(self, **kwargs):
         key = self._key(kwargs)
         task = str(kwargs.get("task_id") or key or "chat")
@@ -182,6 +211,7 @@ class TurnGate:
                     if sweep:
                         self._owe(why)
                         return {"context": self._owed(why)}
+                    self._note_turned_away(kwargs, why)
                     return {"context": self._queued(why)}
                 self.sleep(pause)
                 pause = min(pause * 2, 5.0)
@@ -191,6 +221,7 @@ class TurnGate:
             if sweep:
                 self._owe(str(e))
                 return {"context": self._owed(str(e))}
+            self._note_turned_away(kwargs, str(e))
             return {"context": self._queued(str(e))}
 
     def _queued(self, reason: str) -> str:
@@ -255,7 +286,8 @@ class TurnGate:
                 pass
 
 
-GIT_OPS = ["base", "push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "close_pr", "start_run", "read", "ledger_event"]
+GIT_OPS = ["base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr", "start_run",
+           "read", "ledger_event"]
 FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
              "remove", "run_check"]
 
@@ -264,7 +296,8 @@ TW_GIT_SCHEMA = {
     "description": (
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
         "guard rails before the write. Ops: base (get the base branch for a new tree), push (push your branch from "
-        "the bundle tw_files made), open_pr, edit_pr, comment, label (add or remove), claim_labels (Bramble only: "
+        "the bundle tw_files made), open_pr, edit_pr, open_issue (a new issue, unclaimed, with a plain title and "
+        "body: no footer, no session link, no closing --- line), comment, label (add or remove), claim_labels (Bramble only: "
         "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only: "
         "in Thornswood and the fork it turns GitHub's auto-merge on for a Bot's pull request at its exact head, and "
         "GitHub merges once the required checks pass; in Ops, where GitHub has no auto-merge, it merges a green one), "
@@ -380,8 +413,9 @@ def register(ctx, policy: Policy, bot: str, ask: Caller | None = None) -> TurnGa
         return None
     ask = ask or socket_caller(policy)
     # Installed at <profile>/plugins/thornswood_guard/brokers.py.
-    owed = Path(__file__).resolve().parents[2].joinpath(*OWED_FILE) if policy.is_router(bot) else None
-    gate = TurnGate(policy, bot, ask, owed_file=owed)
+    profile = Path(__file__).resolve().parents[2]
+    owed = profile.joinpath(*OWED_FILE) if policy.is_router(bot) else None
+    gate = TurnGate(policy, bot, ask, owed_file=owed, turned_away_dir=profile.joinpath(*TURNED_AWAY_DIR))
     ctx.register_hook("pre_llm_call", gate.before_llm)
     ctx.register_hook("on_session_end", gate.after_turn)
     ctx.register_hook("agent_loop_stopped", gate.stopped)
