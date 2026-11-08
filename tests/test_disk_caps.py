@@ -19,6 +19,8 @@ if not _sys.platform.startswith("linux"):
     # VM half of scripts/test-at-head.sh.
     raise _unittest.SkipTest("the disk caps are the Oracle VM's; their tests run there")
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -139,11 +141,20 @@ class TheCanary(unittest.TestCase):
         with mock.patch.object(canary.shutil, "chown"):
             c.disk_quota()
 
+    def _finish(self, c) -> tuple[int, str]:
+        """finish() prints the canary's PASS and FAIL lines; they are what these tests check,
+        so they are read here and kept out of the suite's own output."""
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            rc = c.finish()
+        return rc, printed.getvalue()
+
     def test_the_cap_comes_off_before_the_group_is_deleted(self):
         c, calls = self._canary()
         self._disk_quota(c)
         self.assertEqual(c.results[-1][1], True, c.results)
-        self.assertEqual(c.finish(), 0)
+        rc, printed = self._finish(c)
+        self.assertEqual(rc, 0, printed)
+        self.assertIn("PASS 3: writing past the disk quota is refused", printed)
         quota = [a for a in calls if a[:1] in (["setquota"], ["groupdel"])]
         self.assertEqual(quota, [["setquota", "-g", "tw-work-canary", "0", str(32 * 1024), "0", "0", "/"],
                                  ["setquota", "-g", "tw-work-canary", "0", "0", "0", "0", "/"],
@@ -152,7 +163,10 @@ class TheCanary(unittest.TestCase):
     def test_a_cap_that_will_not_come_off_keeps_the_group(self):
         c, calls = self._canary(setquota_off_fails=True)
         self._disk_quota(c)
-        self.assertEqual(c.finish(), 1)
+        rc, printed = self._finish(c)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAIL cleaning up: the cap on tw-work-canary was not taken off (refused); "
+                      "tw-work-canary is kept so its gid is not handed on with a cap", printed)
         self.assertNotIn(["groupdel", "tw-work-canary"], calls)
 
 

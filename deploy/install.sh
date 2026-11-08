@@ -97,12 +97,6 @@ mkuser() {
   fi
 }
 for u in tw-policy tw-files tw-git tw-proxy tw-backup tw-offsite tw-boxdrop tw-ci; do mkuser "$u"; done
-# tw-runner runs the guard rail tests' GitHub runner (step 7d); its home is
-# its own folder, and it is in no group but its own.
-if ! id tw-runner >/dev/null 2>&1; then
-  useradd --system --no-create-home --home-dir /srv/tw-runner --shell /usr/sbin/nologin --user-group tw-runner
-fi
-[[ "$(id -nG tw-runner)" == tw-runner ]] || stop "tw-runner is in the groups '$(id -nG tw-runner)'; it must be in its own alone."
 # tw-offsite reads the VM's archives (tw-backup:tw-backup 0440) to copy them to Drive.
 usermod -a -G tw-backup tw-offsite
 for b in $workers; do mkuser "tw-$b"; usermod -a -G "tw-work-$b" "tw-$b"; done
@@ -359,37 +353,6 @@ if [[ -z "$(swapon --show --noheadings)" ]]; then
   ok "a 4 GB swapfile is on, and in /etc/fstab for every boot"
 fi
 
-# 7d. The guard rail tests' own GitHub runner (deploy/runner; Patrick's A on
-# q-hermes-ci-free-runners, 3 Nov 2026: GitHub's included minutes for a
-# private repository ran out and the spending limit stays at $0). Unpacked
-# here from GitHub's release, checked against the pinned SHA-256, into
-# tw-runner's own folder; registered once by tw-runner-register (Patrick's
-# token on standard input). After that the runner updates itself, so a
-# runner already unpacked is left as it is.
-runner_pin="$here/deploy/runner/runner.json"
-rp() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])); [v:=v[k] for k in sys.argv[2].split(".")]; print(v)' "$runner_pin" "$1"; }
-runner_home="$(rp home)"
-install -d -m 0700 -o tw-runner -g tw-runner "$runner_home" "$runner_home/runner"
-if [[ ! -x "$runner_home/runner/bin/Runner.Listener" ]]; then
-  case "$(uname -m)" in
-    x86_64) arch=x64 ;;
-    aarch64) arch=arm64 ;;
-    *) stop "no actions/runner build is pinned for $(uname -m)." ;;
-  esac
-  version="$(rp version)"; want="$(rp "sha256.$arch")"
-  tarball="actions-runner-linux-$arch-$version.tar.gz"
-  tmp="$(mktemp -d)"
-  curl -fsSL --retry 3 -o "$tmp/$tarball" "https://github.com/actions/runner/releases/download/v$version/$tarball" \
-    || { rm -rf "$tmp"; stop "actions/runner $version could not be downloaded."; }
-  got="$(sha256sum "$tmp/$tarball" | cut -d' ' -f1)"
-  [[ "$got" == "$want" ]] || { rm -rf "$tmp"; stop "actions/runner $version is $got, not the pinned $want; nothing was unpacked."; }
-  runuser -u tw-runner -- tar -xzf "$tmp/$tarball" -C "$runner_home/runner"
-  rm -rf "$tmp"
-  "$runner_home/runner/bin/installdependencies.sh" >/dev/null || stop "the runner's own dependency install failed: $runner_home/runner/bin/installdependencies.sh"
-  ok "actions/runner $version ($arch) unpacked in $runner_home/runner, SHA-256 as pinned"
-fi
-[[ "$(stat -c '%U:%G %a' "$runner_home")" == "tw-runner:tw-runner 700" ]] || stop "$runner_home is $(stat -c '%U:%G %a' "$runner_home"), not tw-runner:tw-runner 700."
-
 # 8. Units and slices. Every file in deploy/systemd is placed here or named
 # as handled below; one the install does not know stops it (1 Nov: the
 # first .path unit, tw-offsite.path, was left out by a list of suffixes, and
@@ -422,22 +385,6 @@ systemctl enable --quiet --now tw-checks.socket tw-policy.service tw-git.service
 systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
 systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
 ok "units in place and started"
-# The runner's network table first, then the runner, once it is registered.
-# Never restarted here: tw-runner needs tw-runner-egress, so a restart of the
-# table's unit would stop the runner and any check it is running. The
-# refresh unit puts the table on again instead.
-systemctl enable --quiet tw-runner-egress.service tw-runner-egress.timer
-systemctl start tw-runner-egress.service tw-runner-egress.timer
-systemctl start tw-runner-egress-refresh.service || stop "tw-runner's network table did not go on: journalctl -u tw-runner-egress-refresh -n 20"
-nft list table inet tw_runner >/dev/null 2>&1 || stop "there is no tw_runner table, so tw-runner's network is not limited."
-if [[ -f "$runner_home/runner/.runner" ]]; then
-  # Started when it is not running; a running one keeps its check, and
-  # takes a changed unit at its next start.
-  systemctl enable --quiet --now tw-runner.service
-  ok "tw-runner is registered and $(systemctl is-active tw-runner.service || true)"
-else
-  echo "SKIP tw-runner: not registered yet. Patrick's one line: gh api -X POST repos/ThornswoodRP/Thornswood-Hermes/actions/runners/registration-token --jq .token | ssh thornswood-bots \"sudo /opt/thornswood-hermes/bin/tw-runner-register\""
-fi
 
 # 8b. Bramble's wake: Tailscale Funnel publishes the one webhook path, and
 # only it, on wake.funnel_port, to the gateway's loopback receiver; then the
