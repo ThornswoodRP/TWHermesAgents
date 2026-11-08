@@ -149,3 +149,39 @@ def _quiet(fn, *a):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Two sockets in one broker, as tw-decide-bots serves the Bots and tw-git (#132).
+TWO = r"""
+import sys, os
+sys.path.insert(0, sys.argv[1])
+from thornswood_brokers import wire
+from thornswood_brokers.serve import run_until_stopped
+me = wire.user_name(os.getuid())
+a = wire.Server(sys.argv[2], {"bots": (lambda c, x: "bots", {me})}, mode=0o600)
+b = wire.Server(sys.argv[3], {"git": (lambda c, x: "git", {me})}, mode=0o600)
+print("ready", flush=True)
+run_until_stopped(wire.Servers(a, b), "tw-test")
+print("stopped", flush=True)
+"""
+
+
+class TwoSockets(unittest.TestCase):
+    def test_each_socket_answers_only_its_own_ops_and_one_stop_stops_both(self):
+        from thornswood_brokers import wire
+        d = Path(tempfile.mkdtemp())
+        proc = subprocess.Popen([_sys.executable, "-I", "-c", TWO, str(REPO), str(d / "a.sock"), str(d / "b.sock")],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        self.assertEqual(proc.stdout.readline().strip(), "ready")
+        for _ in range(50):
+            if (d / "b.sock").exists():
+                break
+            time.sleep(0.1)
+        self.assertEqual(wire.call(d / "a.sock", "bots"), "bots")
+        self.assertEqual(wire.call(d / "b.sock", "git"), "git")
+        with self.assertRaises(wire.Refused):
+            wire.call(d / "b.sock", "bots")
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(proc.wait(timeout=30), 0)
+        self.assertIn("stopped", proc.stdout.read())

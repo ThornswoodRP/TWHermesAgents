@@ -134,6 +134,11 @@ def cmd_serve_bots(store: Store, args) -> None:
     route = BotRoute(args.db, args.workspace)
     server = wire.Server(args.socket, route.ops(), mode=0o660, group=args.group or None)
     print(f"tw-decide-bots listening on {args.socket} for workspace {args.workspace}", flush=True)
+    if args.git_socket:
+        # tw-git's own socket (#132): only Patrick's outside answers, read only.
+        git = wire.Server(args.git_socket, route.git_ops(), mode=0o660, group=args.git_group or None)
+        print(f"tw-decide-bots answers tw-git on {args.git_socket}", flush=True)
+        server = wire.Servers(server, git)
     try:
         run_until_stopped(server, "tw-decide-bots")
     finally:
@@ -305,6 +310,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--workspace", required=True)
     p.add_argument("--socket", required=True, help="the Unix socket the Bots' tw_decide tool calls")
     p.add_argument("--group", default="", help="the group that may connect (the Bots' user is its only member)")
+    p.add_argument("--git-socket", default="", help="tw-git's own socket, for Patrick's outside answers only (#132)")
+    p.add_argument("--git-group", default="", help="the group that may connect to it (tw-git is its only member)")
     p = sub.add_parser("feed-token")
     p.add_argument("--workspace", required=True)
     p.add_argument("--name", choices=FEED_NAMES, required=True)

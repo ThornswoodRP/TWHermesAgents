@@ -37,6 +37,7 @@ class FakeGitHub:
         self.remotes = self.root / "remotes"
         self.prs: dict[tuple[str, int], dict] = {}
         self.pr_files: dict[tuple[str, int], list[str]] = {}
+        self.pr_commits: dict[tuple[str, int], list[dict]] = {}
         self.check_runs: dict[tuple[str, str], list[dict]] = {}
         self.issues: dict[tuple[str, int], dict] = {}
         self.comments: dict[tuple[str, int], list[dict]] = {}
@@ -237,6 +238,20 @@ class FakeGitHub:
             if len(rest) == 2 and method == "PATCH":
                 pr.update(body)
                 return Response(200, pr, {})
+            if rest[2] == "commits":
+                commits = self.pr_commits.get((repo, n))
+                if commits is None:
+                    # By default the head commit, made by the Bot whose branch it is
+                    # (the files broker's identity), or by the PR's author.
+                    bot = pr["head"]["ref"].split("/")[0]
+                    login = pr["user"]["login"]
+                    if bot in ("bramble", "rift", "sprocket", "echo", "magpie", "wisp"):
+                        who, author = {"name": bot, "email": f"{bot}@bots.thornswood.invalid"}, None
+                    else:
+                        who, author = {"name": login, "email": f"1+{login}@users.noreply.github.com"}, {"login": login}
+                    commits = [{"sha": pr["head"]["sha"], "author": author,
+                                "commit": {"author": who, "message": "a change"}}]
+                return Response(200, commits[(page - 1) * 100: page * 100], {})
             if rest[2] == "files":
                 files = self.pr_files[(repo, n)][(page - 1) * 100: page * 100]
                 return Response(200, [{"filename": f} for f in files], {})
