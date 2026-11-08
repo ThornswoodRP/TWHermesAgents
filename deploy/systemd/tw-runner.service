@@ -1,0 +1,50 @@
+# The guard rail tests' own GitHub runner (deploy/runner, Patrick's A on
+# q-hermes-ci-free-runners, 3 Nov 2026), for this repository's pull requests
+# only: forks never run workflows in a private repository, and the jobs hold
+# no secret. It runs as tw-runner, a user in no other group, in tw-runner.slice, with
+# no capability, no sudo, the Bots' and brokers' folders and every home out
+# of sight, and a network that reaches only GitHub and the package feeds
+# (tw-runner-egress). It is enabled only once tw-runner-register has registered it.
+[Unit]
+Description=Thornswood-Hermes: the guard rail tests' GitHub runner
+After=network-online.target tw-runner-egress.service
+Wants=network-online.target
+Requires=tw-runner-egress.service
+
+[Service]
+User=tw-runner
+Group=tw-runner
+Slice=tw-runner.slice
+WorkingDirectory=/srv/tw-runner/runner
+Environment=HOME=/srv/tw-runner
+ExecStart=/srv/tw-runner/runner/run.sh
+KillSignal=SIGINT
+TimeoutStopSec=5min
+Restart=always
+RestartSec=15
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/tw-runner
+ProtectHome=yes
+InaccessiblePaths=-/srv/tw -/etc/thornswood -/var/lib/thornswood -/var/lib/tw-offsite -/var/lib/tw-decide-voice -/run/tw -/opt/thornswood-hermes/releases
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

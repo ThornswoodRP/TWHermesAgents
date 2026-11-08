@@ -617,6 +617,13 @@
       "CPUQuota": "100%",
       "TasksMax": 1024
     },
+    "tw-runner.slice": {
+      "MemoryHigh": "2560M",
+      "MemoryMax": "3G",
+      "CPUWeight": 50,
+      "CPUQuota": "100%",
+      "TasksMax": 512
+    },
     "hermes-user.slice": {
       "MemoryHigh": "3584M",
       "MemoryMax": "4G",

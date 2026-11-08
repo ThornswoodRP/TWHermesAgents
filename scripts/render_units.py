@@ -20,6 +20,7 @@ WHAT = {
     "tw-hermes.slice": "the gateway (six profiles and the room) and hermes serve, as hermes",
     "tw-brokers.slice": "tw-policy, tw-files, tw-git and tw-proxy, each as its own user",
     "tw-sandbox.slice": "every Tier B check, as tw-<bot>",
+    "tw-runner.slice": "the guard rail tests' own GitHub runner, as tw-runner",
     "hermes-user.slice": "the hermes user's own manager: the Tier A podman containers",
 }
 
