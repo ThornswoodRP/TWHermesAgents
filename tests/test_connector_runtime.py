@@ -21,6 +21,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -346,15 +347,22 @@ class TheFleetQueue(unittest.TestCase):
         self.assertTrue(c._still_waiting())
         self.assertIn("has no room", c.waiting["bramble"])
 
-    def test_fleet_room_is_off_while_the_brokers_are_off_and_asks_the_policy_socket_when_on(self):
+    def brokers(self, ready: bool) -> dict:
         import copy
         from helpers import policy
         data = copy.deepcopy(policy().data)
-        data["brokers"]["ready"] = False
+        data["brokers"]["ready"] = ready
+        return data
+
+    def test_fleet_room_is_off_while_the_brokers_are_off(self):
         off = self.dir / "off.json"
-        off.write_text(json.dumps(data), encoding="utf-8")
+        off.write_text(json.dumps(self.brokers(False)), encoding="utf-8")
         self.assertIsNone(connector.fleet_room(off))
-        data["brokers"]["ready"] = True
+
+    # The brokers' sockets are Unix sockets, and the connector runs on the VM; Windows has none.
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "the brokers' sockets are Unix sockets, which only the VM has")
+    def test_fleet_room_asks_the_policy_socket_while_the_brokers_are_on(self):
+        data = self.brokers(True)
         data["brokers"]["sockets"]["policy"]["path"] = str(self.dir / "no.sock")
         on = self.dir / "on.json"
         on.write_text(json.dumps(data), encoding="utf-8")
