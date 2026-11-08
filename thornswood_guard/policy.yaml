@@ -614,15 +614,6 @@ slices:
     CPUWeight: 50
     CPUQuota: 100%
     TasksMax: 1024
-  # The guard rail tests' own runner (deploy/runner, 3 Nov): GitHub's
-  # included minutes for a private repository ran out on 2 Nov and the
-  # spending limit stays at $0, so the Linux check runs here, as tw-runner.
-  tw-runner.slice:
-    MemoryHigh: 2560M
-    MemoryMax: 3G
-    CPUWeight: 50
-    CPUQuota: 100%
-    TasksMax: 512
   # Tier A: the hermes user's own manager runs the rootless podman containers,
   # so its user slice (user-<uid of hermes>.slice) carries the sandbox caps too.
   hermes-user.slice:
