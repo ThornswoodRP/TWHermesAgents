@@ -122,8 +122,7 @@ These stay in each Bot's `SOUL.md` and the `thornswood-ops` and `thornswood-guid
 What the code above does not hold yet, each with what is missing:
 
 - **No disk cap inside a container.** The VM's ext4 store cannot enforce one in podman (Hermes needs XFS with project quotas). The Bots' broker trees have theirs.
-- **The credits and Qwen routes are off.** They enter the Bots' model chains only once `admission_proxy.ready` is set, after the install has made each Bot's proxy token.
-- **Two repositories have no ruleset yet.** Thornswood and the engine fork protect their default branches with rulesets nobody can bypass. Thornswood-Ops and this repository have none yet. On Ops, nothing on GitHub stops the workers' App from pushing to `main`, so the broker is the only stop there.
-- **The Projects board.** Neither App `tw-git` holds can read the organisation's Projects board; that needs the Organization projects permission. `scripts/check-board-access.sh`, run as `tw-git`, tests it read only.
+- **The credits and Qwen routes are off.** They stay out of the Bots' model chains until their keys are in place and the canary passes, and `admission_proxy.ready` turns them on.
+- **Thornswood-Ops has no ruleset.** Thornswood, the engine fork and this repository protect their default branches with rulesets nobody can bypass. Ops is private on GitHub Free, which offers none, so nothing on GitHub stops the workers' App from pushing to its `main`, and the broker is the only stop there.
 - **Two descriptions of push alerts.** `thornswood_guard/notify.py` and `policy.yaml` `notifications` are not what the decision core reads; the phone's alerts come from the core's own outbox (`push.py`).
 - **The game box's backup drop.** The install sets up the box's SFTP jail only once the box's public key is in `deploy/keys/box-drop.pub`, which is not in the repository yet.
