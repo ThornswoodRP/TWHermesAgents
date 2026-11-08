@@ -53,7 +53,7 @@ class Unit(unittest.TestCase):
                 ("tw-decide-feed", "#!/usr/bin/python3 -I", "feed_reader")):
             lines = (DEPLOY / name).read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0], shebang, name)
-            self.assertIn('sys.path.insert(0, "/opt/thornswood-hermes/current")', lines)
+            self.assertIn('sys.path.insert(0, str(Path(__file__).resolve().parents[2]))', lines)
             self.assertIn(f"from thornswood_decisions.{module} import main  # noqa: E402", lines)
 
     def test_the_feed_runs_as_hermes_on_loopback_only(self):

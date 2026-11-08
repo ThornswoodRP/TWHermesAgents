@@ -19,6 +19,7 @@ a real Hermes or a real core.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -259,6 +260,37 @@ class UpdatesFromTheClone(unittest.TestCase):
         self.assertEqual((self.folder / "COMMIT").read_text(encoding="ascii"), v2)
         self.assertEqual(own_connector.own_commit(self.folder), v2)
         self.assertEqual(sorted(p.name for p in self.folder.iterdir()), ["COMMIT", "own_connector.py", "room_send.py"])
+
+    def moved(self, version, packages):
+        """A release that keeps its packages in `packages`, as its deploy/layout.json says."""
+        self.git("rm", "-q", "-r", "--ignore-unmatch", "thornswood_decisions")
+        d = self.work / packages / "thornswood_decisions"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "own_connector.py").write_text(f"VERSION = '{version}'\n", encoding="utf-8")
+        (d / "room_send.py").write_text(f"VERSION = '{version}'\n", encoding="utf-8")
+        (self.work / "deploy").mkdir(exist_ok=True)
+        (self.work / "deploy" / "layout.json").write_text(json.dumps({"packages": packages}), encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", version)
+        self.git("push", "-q", "origin", "main")
+        return self.git("rev-parse", "HEAD")
+
+    def test_it_takes_its_files_from_where_the_release_keeps_its_packages(self):
+        v2 = self.moved("v2", "src")
+        self.assertEqual(self.up.to(v2), (True, ""))
+        self.assertEqual(self.versions(), ["VERSION = 'v2'\n"] * 2)
+        self.assertEqual(sorted(p.name for p in self.folder.iterdir()), ["COMMIT", "own_connector.py", "room_send.py"])
+
+    def test_a_layout_that_names_no_folder_inside_the_release_changes_nothing(self):
+        self.moved("v2", "src")
+        for packages in ("../outside", "/abs", None, 7):
+            (self.work / "deploy" / "layout.json").write_text(json.dumps({"packages": packages}), encoding="utf-8")
+            self.git("commit", "-q", "-am", f"layout {packages}")
+            self.git("push", "-q", "origin", "main")
+            bad = self.git("rev-parse", "HEAD")
+            self.assertEqual(self.up.to(bad), (False, f"could not read where {bad[:12]} keeps its packages "
+                                                      "(deploy/layout.json)"))
+            self.assertEqual(self.versions(), ["VERSION = 'v1'\n"] * 2)
 
     def test_a_commit_that_is_not_on_main_changes_nothing(self):
         self.git("checkout", "-q", "-b", "side")

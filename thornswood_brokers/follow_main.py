@@ -51,7 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from thornswood_guard.policy import Policy
@@ -71,6 +71,22 @@ class Stop(Exception):
     def __init__(self, step: str, why: str):
         super().__init__(why)
         self.step = step
+
+
+def packages_in(release: Path) -> Path:
+    """Where a release keeps its Python packages, as its own deploy/layout.json says,
+    so this copy reads another release's code wherever that release keeps it. A
+    release made before the file existed keeps them at its root."""
+    try:
+        packages = json.loads((release / "deploy" / "layout.json").read_text(encoding="utf-8"))["packages"]
+    except FileNotFoundError:
+        return release
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise Stop("put back", f"{release.name[:12]}'s deploy/layout.json does not say where its packages are ({exc})")
+    rel = PurePosixPath(packages) if isinstance(packages, str) else None
+    if rel is None or rel.is_absolute() or ".." in rel.parts:
+        raise Stop("put back", f"{release.name[:12]}'s deploy/layout.json names {packages!r}, not a folder inside it")
+    return release / rel
 
 
 class Follower:
@@ -298,7 +314,8 @@ class Follower:
         """How many store migrations a release's own code knows."""
         c = self.sh("put back", ["python3", "-I", "-c",
                                  "import sys; sys.path.insert(0, sys.argv[1]); "
-                                 "from thornswood_decisions.schema import MIGRATIONS; print(len(MIGRATIONS))", str(dest)])
+                                 "from thornswood_decisions.schema import MIGRATIONS; print(len(MIGRATIONS))",
+                                 str(packages_in(dest))])
         try:
             return int(c.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -335,7 +352,7 @@ class Follower:
         self.sh("put back", ["runuser", "-u", self.r["decide_user"], "--", str(self._at(self.r["decide_python"])), "-I", "-c",
                              "import sys; sys.path.insert(0, sys.argv[1]); "
                              "from thornswood_decisions.cli import main; sys.exit(main(sys.argv[2:]))",
-                             str(failed), "--db", str(self._at(self.r["decide_db"])), "downgrade", "--to", str(to)])
+                             str(packages_in(failed)), "--db", str(self._at(self.r["decide_db"])), "downgrade", "--to", str(to)])
 
     def drop_units_not_in(self, dest: Path) -> list[str]:
         """Stops and disables the core's units that the release going back in

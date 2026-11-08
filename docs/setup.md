@@ -29,7 +29,7 @@ It refuses unless that commit is `main`'s tip. It bundles the commit, copies it 
 - puts the units, slices, check helper socket and SFTP jails in place;
 - with `--quotas`, turns on group quotas for the filesystem holding `/srv/tw` (ext4) and sets each Bot's disk cap;
 - with `--move-gateway`, moves the Hermes gateway into `tw-hermes-gateway.service` in `tw-hermes.slice`;
-- points `/opt/thornswood-hermes/current` at the release and starts the brokers.
+- points `/opt/thornswood-hermes/current` at the release and starts the brokers. Each command in `/opt/thornswood-hermes/bin` is a link to its file in `current`, so that one rename moves every command and the code it runs at once, and `/opt/thornswood-hermes/plugins` points at the release's Hermes plugins.
 
 Anything it cannot do safely is a `STOP` line saying what is missing, and nothing after it runs. Run it again after fixing the cause; it is safe to repeat.
 

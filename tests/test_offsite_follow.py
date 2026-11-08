@@ -671,6 +671,51 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(out["from"], str(rel))
         self.assertEqual(out["argv"], ["--db", str(f._at("/srv/tw/decide/core.db")), "downgrade", "--to", "5"])
 
+    def release_keeping_packages_in(self, packages: str) -> Path:
+        rel = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, rel, True)
+        pkg = rel / packages / "thornswood_decisions"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "schema.py").write_text("MIGRATIONS = [1, 2, 3]\n")
+        (pkg / "cli.py").write_text("import sys\ndef main(argv):\n    print(sys.path[0])\n    return 3\n")
+        (rel / "deploy").mkdir()
+        (rel / "deploy" / "layout.json").write_text(json.dumps({"packages": packages}))
+        return rel
+
+    def test_another_releases_code_is_read_where_its_layout_keeps_it(self):
+        # The copy of the follower that runs is the installed one; a release it
+        # puts back or downgrades from may keep its packages somewhere else.
+        f = self.follower(FakeVM(NEW))
+        rel = self.release_keeping_packages_in("src")
+        f.run_ = lambda args, **kw: subprocess.run([_sys.executable, *args[1:]], **kw)
+        self.assertEqual(f.known_schema(rel), 3)
+        f.run_ = lambda args, **kw: subprocess.run([_sys.executable, *args[5:]], **kw)
+        with self.assertRaises(follow_main.Stop) as e:
+            f.downgrade(rel, 2)
+        self.assertIn(str(rel / "src"), str(e.exception))
+
+    def test_a_release_made_before_the_layout_file_keeps_its_packages_at_its_root(self):
+        rel = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, rel, True)
+        self.assertEqual(follow_main.packages_in(rel), rel)
+
+    def test_a_layout_naming_no_folder_inside_the_release_stops(self):
+        for packages in ("../elsewhere", "/opt", 7):
+            rel = self.release_keeping_packages_in("src")
+            (rel / "deploy" / "layout.json").write_text(json.dumps({"packages": packages}))
+            with self.assertRaises(follow_main.Stop):
+                follow_main.packages_in(rel)
+        rel = self.release_keeping_packages_in("src")
+        (rel / "deploy" / "layout.json").write_text("{")
+        with self.assertRaises(follow_main.Stop):
+            follow_main.packages_in(rel)
+
+    def test_this_repositorys_layout_names_where_its_packages_are(self):
+        packages = follow_main.packages_in(REPO)
+        for name in ("thornswood_guard", "thornswood_brokers", "thornswood_decisions", "thornswood_live"):
+            self.assertTrue((packages / name / "__init__.py").is_file(), name)
+
     def test_a_pause_file_stops_everything_and_survives_an_install(self):
         vm = FakeVM(NEW)
         f = self.follower(vm)

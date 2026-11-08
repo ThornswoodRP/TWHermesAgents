@@ -268,10 +268,17 @@ chown root:root "$read_key" "$read_key.pub"; chmod 0400 "$read_key"; chmod 0644 
 install -m 0644 -o root -g root "$here/deploy/ssh/github_known_hosts" "$(pol follow_main.known_hosts)"
 ok "the VM's read key for TWHermesAgents: $(cat "$read_key.pub")"
 
-# 6. The code: this commit, root-owned, as current.
+# 6. The code: this commit, root-owned, as current. Each launcher in $opt/bin
+# is a link to its file in current, and finds its code from where it really is,
+# so the one rename of current moves every launcher and the code they run
+# together: no launcher of one release ever runs another release's code. The
+# Hermes plugins Patrick's own Hermes loads are linked at $opt/plugins, so his
+# plugin link names no folder inside a release.
+link_in() { ln -sfnT "$1" "$2.new" && mv -T "$2.new" "$2"; }
 install -d -m 0755 "$opt/bin"
-for f in "$here"/deploy/bin/*; do install -m 0755 -o root -g root "$f" "$opt/bin/"; done
-ln -sfn "$here" "$opt/current.new" && mv -T "$opt/current.new" "$opt/current"
+for f in "$here"/deploy/bin/*; do link_in "$opt/current/deploy/bin/${f##*/}" "$opt/bin/${f##*/}"; done
+link_in "$here" "$opt/current"
+link_in "$here/plugins" "$opt/plugins"
 ok "$opt/current is $commit"
 
 # 7. Checks start through tw-checks.socket (step 8), never sudo: the sudoers

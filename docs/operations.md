@@ -114,4 +114,4 @@ It decrypts the archive there, copies it to a private folder on the VM, stops th
 | `apply.py`, the follower and the tests | The VM's system `python3` (3.12, with PyYAML) |
 | The guard and live plugins | Hermes's own runtime, under `/home/hermes/.hermes/tools/` with its environment in `/home/hermes/.hermes/installs/`. It has no YAML library, so the guard reads `policy.json` |
 | The decision core and its workers | The core's own venv, `/opt/thornswood-hermes/decisions-venv`, with hash-pinned wheels from `deploy/decisions/requirements.txt` |
-| The brokers and command wrappers | The system `python3` with `-I`, importing only from `/opt/thornswood-hermes/current` |
+| The brokers and command wrappers | The system `python3` with `-I`, importing only from the release their link in `/opt/thornswood-hermes/bin` leads to |
