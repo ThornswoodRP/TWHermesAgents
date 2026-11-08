@@ -80,7 +80,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .own_connector import follow_turn
+from .own_connector import follow_turn, probe_env
 
 CORE = "http://127.0.0.1:9135/api/v1"
 POLL_SECONDS = 5
@@ -178,8 +178,11 @@ class Hermes:
         """The helper's one JSON answer; None when it did not answer in time. A helper that could not start,
         or did not answer in JSON, answers {"helper_failed": True, "reason": ...} with its stderr's tail."""
         try:
+            # Read only, so with Hermes's own switch that keeps a start from finishing an update first
+            # (own_connector.PROBE_ENV).
             out = subprocess.run(self.helper_cmd, input=json.dumps(req).encode("utf-8"),
-                                 capture_output=True, timeout=timeout, cwd=str(self.home), check=False)
+                                 capture_output=True, timeout=timeout, cwd=str(self.home), check=False,
+                                 env=probe_env())
         except subprocess.TimeoutExpired:
             return None
         except OSError as exc:
