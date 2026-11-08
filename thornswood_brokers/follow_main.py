@@ -3,7 +3,7 @@
 
 Runs as root from tw-follow-main.timer. Each run:
 
-  1. fetches main of Thornswood-Hermes over ssh with the VM's own read-only
+  1. fetches main of TWHermesAgents over ssh with the VM's own read-only
      deploy key (/etc/thornswood/hermes-read-key, root's alone; GitHub lets a
      deploy key read one repository and, without "Allow write access", never
      write), against GitHub's published host keys only;
@@ -165,7 +165,7 @@ class Follower:
         except Stop as e:
             if "Permission denied" in str(e) or "publickey" in str(e):
                 pub = self._at(self.r["read_key"] + ".pub")
-                raise Stop("fetch", "GitHub refused the VM's read key. Add it to Thornswood-Hermes as a deploy key, "
+                raise Stop("fetch", "GitHub refused the VM's read key. Add it to TWHermesAgents as a deploy key, "
                                     "with Allow write access left off: " + (pub.read_text().strip() if pub.exists() else str(pub)))
             raise
         return self.sh("fetch", self.git("-C", str(self.mirror), "rev-parse", "refs/heads/main")).stdout.strip()

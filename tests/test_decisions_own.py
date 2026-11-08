@@ -948,8 +948,8 @@ class OneInstall(unittest.TestCase):
         """origin is GitHub's address, as in Patrick's clone; git takes it from the scratch bare repo."""
         import subprocess
         origin = self.t / "origin.git"
-        for args in (("remote", "set-url", "origin", "https://github.com/ThornswoodRP/Thornswood-Hermes.git"),
-                     ("config", f"url.{origin}.insteadOf", "https://github.com/ThornswoodRP/Thornswood-Hermes.git")):
+        for args in (("remote", "set-url", "origin", "https://github.com/ThornswoodRP/TWHermesAgents.git"),
+                     ("config", f"url.{origin}.insteadOf", "https://github.com/ThornswoodRP/TWHermesAgents.git")):
             subprocess.run(["git", *args], cwd=self.clone, check=True, capture_output=True)
         gh = self.bin / "gh"
         gh.write_text(f"#!/bin/sh\n[ \"$1 $2\" = 'auth status' ] && exit {0 if signed_in else 1}\nexit 0\n", encoding="utf-8")

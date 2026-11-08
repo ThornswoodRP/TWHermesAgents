@@ -36,7 +36,7 @@ FORK = "ThornswoodRP/skymp"
 # main's ruleset on Thornswood (read 2 Nov 2026) and the fork branch's.
 APP_RULES = ["Build check result", "Test tasks in the pull request", "Release note"]
 FORK_RULES = ["build-pr", "save-directory-linux"]
-HERMES = "ThornswoodRP/Thornswood-Hermes"
+HERMES = "ThornswoodRP/TWHermesAgents"
 
 
 class World:

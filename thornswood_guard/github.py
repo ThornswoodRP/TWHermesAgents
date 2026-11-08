@@ -82,7 +82,7 @@ class GitHubRules:
         if not p.is_bot(bot):
             return Verdict.no(f"{bot} is not one of the six Bots")
         if repo == p.data["repos"]["hermes"]:
-            return Verdict.no("no Bot writes to Thornswood-Hermes; every change there is Patrick's")
+            return Verdict.no("no Bot writes to TWHermesAgents; every change there is Patrick's")
         if not ref.startswith("refs/heads/"):
             return Verdict.no(f"{ref} is not a branch; tags and other refs are never pushed by a Bot")
         branch = ref[len("refs/heads/"):]
@@ -115,7 +115,7 @@ class GitHubRules:
     def open_pr(self, bot: str, repo: str, head_ref: str, base_ref: str) -> Verdict:
         p = self.policy
         if repo == p.data["repos"]["hermes"]:
-            return Verdict.no("no Bot opens a pull request in Thornswood-Hermes")
+            return Verdict.no("no Bot opens a pull request in TWHermesAgents")
         want_base = p.data["merge"]["base"].get(repo)
         if want_base is None:
             return Verdict.no(f"{repo} is not a repo the Bots work in")
@@ -196,7 +196,7 @@ class GitHubRules:
         if p.app_of(bot) != "bramble" or not p.data["github_apps"]["bramble"]["may_merge"]:
             return Verdict.no("merges go only through Bramble's GitHub App")
         if pr.repo == p.data["repos"]["hermes"]:
-            return Verdict.no("Bramble never merges in Thornswood-Hermes")
+            return Verdict.no("Bramble never merges in TWHermesAgents")
         if self._hands_off_pr(pr):
             return Verdict.no(self._hands_off_reason(pr.author_login, pr.head_ref))
         if pr.merged:
@@ -255,7 +255,7 @@ class GitHubRules:
             return Verdict.no(f"only Bramble closes a pull request, and only on Patrick's answer; "
                               f"{p.bot_name(bot) if p.is_bot(bot) else bot} never does")
         if pr.repo == p.data["repos"]["hermes"]:
-            return Verdict.no("Bramble never closes anything in Thornswood-Hermes")
+            return Verdict.no("Bramble never closes anything in TWHermesAgents")
         if self._hands_off_pr(pr):
             return Verdict.no(self._hands_off_reason(pr.author_login, pr.head_ref))
         if pr.merged or not open_now:

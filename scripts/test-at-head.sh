@@ -4,7 +4,7 @@
 # rule reads. This repo's private Actions minutes are held at $0, so GitHub's
 # own runners never start; a commit status costs nothing.
 #
-# Runs on One, from a clone of Thornswood-Hermes, by Hermes on One (or the
+# Runs on One, from a clone of TWHermesAgents, by Hermes on One (or the
 # Desk) after every push to a PR:
 #
 #   scripts/test-at-head.sh <full commit>
@@ -16,7 +16,7 @@ set -euo pipefail
 
 commit="${1:?usage: test-at-head.sh <full commit>}"
 host="thornswood-bots"
-repo="ThornswoodRP/Thornswood-Hermes"
+repo="ThornswoodRP/TWHermesAgents"
 context="Guard rail tests (One and VM)"
 here="$(cd "$(dirname "$0")/.." && pwd)"
 

@@ -68,7 +68,7 @@ if ($Register) {
     foreach ($root in $passing) {
         $full = [System.IO.Path]::GetFullPath($root).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
         if ($here.StartsWith($full, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Fail "this copy is under $root, which gets cleaned up; clone Thornswood-Hermes to $(Join-Path $HOME 'Thornswood-Hermes') and run -Register from there"
+            Fail "this copy is under $root, which gets cleaned up; clone TWHermesAgents to $(Join-Path $HOME 'TWHermesAgents') and run -Register from there"
             exit 1
         }
     }
