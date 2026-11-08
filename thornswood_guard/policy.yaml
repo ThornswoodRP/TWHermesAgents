@@ -1,6 +1,6 @@
 # The Bots' guard rails, as data. Every rule the code enforces reads its
 # numbers and names from here, so a change to a rule is a change to this file,
-# reviewed and merged by Patrick. RULES.md says where each rule comes from.
+# reviewed and merged by Patrick. docs/security.md says how each rule is held.
 
 version: 1
 
