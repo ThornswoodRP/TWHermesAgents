@@ -74,12 +74,12 @@ python -m pip install pyyaml
 python -m unittest discover -s tests
 ```
 
-Every push to a PR, and every push to `main`, runs `.github/workflows/guard-rail-tests.yml` on GitHub's own runners (Patrick's answer B on q-hermes-tests-without-one, 31 Oct, once One was off the list):
+Every push to a PR, and every push to `main`, runs `.github/workflows/guard-rail-tests.yml` on runners of our own. Until 2 Nov 2026 they were GitHub's (Patrick's answer B on q-hermes-tests-without-one, 31 Oct). On 2 Nov the included minutes for private repositories ran out: Hermes used 476 Linux and 834 Windows minutes in two days, a Windows minute counts as two, and the spending limit stays at $0. Patrick will not pay, so his A on q-hermes-ci-free-runners (3 Nov) moved both checks:
 
-- **Guard rail tests (VM's Python)**: Ubuntu 24.04 with Python 3.12, the VM's, with PyYAML and the decision core's libraries;
-- **Guard rail tests (One's Python)**: Windows with Python 3.13, so the suite keeps working for a Windows checkout.
+- **Guard rail tests (VM's Python)**: on the Oracle VM, label `tw-hermes-vm`, with Python 3.12, the VM's, PyYAML and the decision core's libraries. It runs as `tw-runner` (`deploy/runner`, `tw-runner.service`), a user in no group but its own, with no capability, the Bots' and brokers' folders and every home out of sight, in `tw-runner.slice`, and a network that reaches only GitHub's web, api, git and actions ranges and the package feeds, on port 443 (`tw-runner-egress`, the same guard as the box's runners). `tw-runner-register` registers it once with a token on standard input.
+- **Guard rail tests (One's Python)**: on the box, label `tw-hermes-box`, with Python 3.13, so the suite keeps working for a Windows checkout, under a runner account of its own with the box runners' guards.
 
-Every library comes from a hash-pinned wheel (`tests/requirements-ci.txt`, `deploy/decisions/requirements.txt`). The job holds no secret, reads the repo only, and keeps no credential. It runs on the account's included free minutes, and the spending limit stays at $0: if the minutes run out, the job doesn't start and nothing merges until they come back. Nothing pre-merge runs on the VM itself; the VM is checked when each merge is applied there (`send-to-oracle.sh --check` today, and the VM's own pull of main once #21 merges).
+Only this repository's own branches run there: a fork's pull request runs no workflow in a private repository. Every library comes from a hash-pinned wheel (`tests/requirements-ci.txt`, `deploy/decisions/requirements.txt`). The job holds no secret, reads the repo only, and keeps no credential. `merge-green.yml` runs on the VM's runner too.
 
 `scripts/test-at-head.sh` and its **Guard rail tests (One and VM)** status are no longer the merge rule. The script stays for a run by hand from a machine with the VM's ssh key.
 
