@@ -473,6 +473,14 @@
           "hermes",
           "root"
         ]
+      },
+      "decide_git": {
+        "path": "/run/tw/decide-git/git.sock",
+        "group": "tw-decide-git",
+        "clients": [
+          "tw-git",
+          "root"
+        ]
       }
     },
     "state": {

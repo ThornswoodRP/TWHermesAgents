@@ -113,10 +113,12 @@ What holds whatever you decide (tw_git refuses the rest):
   `tw_git merge` refuses any pull request that is not a Bot's or a robot's.
 - Work by anyone not on `merge.auto_merge_people` never merges, even inside
   a Bot's own pull request: tw_git reads every commit's author and every
-  Co-authored-by line and refuses. Only a Thornswood-Hermes pull request,
-  on Patrick's word for that one person, adds a name to the list.
-- You never close, edit or label an outside pull request. The one thing
-  tw_git lets you do on it is comment. Closing one is Patrick's decision.
+  Co-authored-by line and refuses, until Patrick answers "let them merge"
+  for that person on their card (step 4). tw_git reads that answer from the
+  decision core itself.
+- You never edit or label an outside pull request, and you close one only
+  with `tw_git close_pr`, which closes nothing unless Patrick's answer on
+  its card says to. The one other thing you do on it is comment.
 
 The review, of the exact head:
 
@@ -150,23 +152,41 @@ The review, of the exact head:
      Open the card below, and comment once on theirs that it is waiting
      for a decision. Nothing more happens to it until Patrick answers.
 4. The card: one `tw_decide open_card` per outside pull request, kind
-   `outside_pr`, with what the review measured (each finding with its file
-   and line), whose it is, a recommendation and the exact scope of a yes.
-   Its options, by case:
-   - Carried: **A** let `<login>` merge (their name goes on
-     `merge.auto_merge_people` by a Thornswood-Hermes pull request; then
-     the carried pull request merges like any Bot's), **B** keep the carried
-     pull request open without merging, **C** drop the carried pull request
-     and ask the author for changes.
-   - Not carried: **A** close it (say why), **B** carry it after all (what
-     would need fixing), **C** leave it open.
-   One card only; a new head on theirs is a new revision of the same card
-   (`revise_card`), never a second card. Ask nothing he has already
-   answered for that pull request.
-5. When he answers, `tw_decide get_card`, do what the answer names and
-   nothing more, `report_work_done`, and say it in the Workbench room. A
-   step only Patrick or his Hermes can take (the Thornswood-Hermes change
-   that adds a name) is said in the room with the card's id.
+   `question`, with what the review measured (each finding with its file and
+   line), whose it is, a recommendation and the exact scope of a yes. Its
+   `links` are what tw_git reads, so they are exact:
+   - `{"kind": "pr", "ref": "outside:<owner>/<repo>#<number>@<their login>"}`,
+     exactly one;
+   - `{"kind": "pr", "ref": "carried:<owner>/<repo>#<number>"}` for each Bot
+     pull request carrying their work, so a carried card is opened once the
+     carried pull request is up.
+   The options tw_git carries out have fixed keys, and their labels must
+   start with the words given here (the core refuses a card whose label
+   says otherwise):
+   - `allow`, label "Let <their login> merge ...": their work merges like a
+     Bot's from then on, and once every carried pull request merged, theirs
+     is closed as replaced.
+   - `close`, label "Close ...": tw_git closes their pull request and every
+     carried one.
+   Any other option (`keep`, `carry`, ...) closes and allows nothing. By
+   case: carried, offer `allow`, `keep` (nothing merges or closes) and
+   `close`; not carried, offer `close`, `carry` (what would need fixing)
+   and `keep`. Use `source_key` `outside:<owner>/<repo>#<number>`, so you
+   never open a second card for the same pull request; a new head on theirs
+   is a `revise_card`. Ask nothing he has already answered for that pull
+   request.
+5. When he answers, `tw_decide get_card`, then:
+   - `allow`: review the carried pull request and `tw_git merge` it as any
+     Bot's (step 1). Once it has merged, `tw_git close_pr` theirs, with one
+     comment linking what merged.
+   - `close`: one comment on theirs saying why, then `tw_git close_pr` on
+     theirs and on each carried one.
+   - `carry`: carry it as in step 3, then open the carried card for it
+     (`source_key` `outside-carried:<owner>/<repo>#<number>`).
+   - `keep`: nothing more.
+   Then `report_work_done` and say it in the Workbench room. tw_git refuses
+   a close or a merge that his answer does not cover; that refusal is a
+   stop, never a reason to ask him again.
 
 ## 4. The run notes and the Desk's list
 

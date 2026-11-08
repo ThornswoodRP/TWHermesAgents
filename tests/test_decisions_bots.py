@@ -141,6 +141,81 @@ class Socket(unittest.TestCase):
                 wire.call(sock, "my_cards", {"bot": "bramble"})
 
 
+OUTSIDE_OPTIONS = [
+    {"key": "allow", "label": "Let rahul05ranjan merge", "consequence": "Their work in #5550 merges like a Bot's."},
+    {"key": "keep", "label": "Keep it open", "consequence": "Nothing merges or closes."},
+    {"key": "close", "label": "Close both", "consequence": "Bramble closes #5517 and #5550 with thanks."},
+]
+OUTSIDE_LINKS = [{"kind": "pr", "ref": "outside:ThornswoodRP/Thornswood#5517@rahul05ranjan"},
+                 {"kind": "pr", "ref": "carried:ThornswoodRP/Thornswood#5550"}]
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"),
+                     "the route's ops are served by the brokers' wire, which is Linux code (Unix sockets, pwd)")
+class OutsideAnswers(unittest.TestCase):
+    """#132: tw-git reads Patrick's answers on Bramble's outside pull request
+    cards from the core, on a socket of its own, and carries them out."""
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+        self.route = BotRoute(self.w.path, "test")
+        self.addCleanup(self.route.close)
+        self.ops = self.route.ops()
+
+    def call(self, op, bot, **args):
+        handler, _ = self.ops[op]
+        return json.loads(json.dumps(handler("hermes", json.loads(json.dumps(dict(args, bot=bot))))))
+
+    def card(self, **kw):
+        return self.call("open_card", "bramble", **card_args(options=OUTSIDE_OPTIONS, recommendation="allow",
+                                                             links=OUTSIDE_LINKS, **kw))
+
+    def answers(self):
+        handler, callers = self.route.git_ops()["outside_answers"]
+        self.assertEqual(callers, {"tw-git", "root"})
+        return handler("tw-git", {})
+
+    def test_only_patricks_answer_on_the_current_revision_is_read(self):
+        card = self.card()
+        self.assertEqual(self.answers(), [])
+        self.w.core.answer(self.w.patrick(device=self.w.device()), **World.answer_args(card, option="allow"))
+        got = self.answers()
+        self.assertEqual(len(got), 1)
+        self.assertEqual({k: got[0][k] for k in ("repo", "number", "author", "option")},
+                         {"repo": "ThornswoodRP/Thornswood", "number": 5517, "author": "rahul05ranjan",
+                          "option": "allow"})
+        self.assertEqual(got[0]["carried"], [{"repo": "ThornswoodRP/Thornswood", "number": 5550}])
+
+    def test_an_ordinary_card_is_not_an_outside_answer(self):
+        card = self.call("open_card", "bramble", **card_args(links=[{"kind": "pr", "ref": "ThornswoodRP/Thornswood#1"}]))
+        self.w.core.answer(self.w.patrick(device=self.w.device()), **World.answer_args(card))
+        self.assertEqual(self.answers(), [])
+
+    def test_the_labels_of_the_options_tw_git_carries_out_say_what_they_do(self):
+        for key, label in (("close", "Keep it open"), ("allow", "Let someone-else merge")):
+            opts = [dict(o, label=label) if o["key"] == key else o for o in OUTSIDE_OPTIONS]
+            with self.assertRaises(Exception) as e:
+                self.call("open_card", "bramble", **card_args(options=opts, recommendation="keep", links=OUTSIDE_LINKS))
+            self.assertIn("outside_label", str(e.exception))
+
+    def test_a_revision_keeps_the_labels_honest(self):
+        card = self.card()
+        opts = [dict(o, label="Keep it") if o["key"] == "close" else o for o in OUTSIDE_OPTIONS]
+        with self.assertRaises(Exception) as e:
+            self.call("revise_card", "bramble", decision_id=card["id"], expected_revision=1, title="t2", body="b2",
+                      options=opts, recommendation="keep", scope_of_yes="s")
+        self.assertIn("outside_label", str(e.exception))
+
+    def test_one_outside_pull_request_per_card_and_bramble_alone_opens_one(self):
+        two = OUTSIDE_LINKS + [{"kind": "pr", "ref": "outside:ThornswoodRP/Thornswood#5523@rahul05ranjan"}]
+        with self.assertRaises(Exception):
+            self.call("open_card", "bramble", **card_args(options=OUTSIDE_OPTIONS, recommendation="allow", links=two))
+        with self.assertRaises(Exception):
+            self.call("open_card", "bramble", **card_args(options=OUTSIDE_OPTIONS, recommendation="allow",
+                                                          links=[{"kind": "pr", "ref": "outside:nonsense"}]))
+
+
 class Deploy(unittest.TestCase):
     def unit(self):
         cp = configparser.ConfigParser(strict=False, interpolation=None)
@@ -150,7 +225,7 @@ class Deploy(unittest.TestCase):
     def test_it_runs_as_the_cores_user_with_no_network(self):
         u = self.unit()
         self.assertEqual(u["User"], "tw-decide")
-        self.assertEqual(u["SupplementaryGroups"], "tw-decide-bots")
+        self.assertEqual(u["SupplementaryGroups"], "tw-decide-bots tw-decide-git")
         self.assertEqual(u["PrivateNetwork"], "yes")
         self.assertEqual(u["RestrictAddressFamilies"], "AF_UNIX")
         self.assertEqual(u["ReadWritePaths"], "/srv/tw/decide")
@@ -160,9 +235,24 @@ class Deploy(unittest.TestCase):
         u = self.unit()
         self.assertIn(f"--socket {sock['path']}", u["ExecStart"])
         self.assertIn(f"--group {sock['group']}", u["ExecStart"])
-        self.assertEqual(u["RuntimeDirectory"], "tw/decide-bots")
+        self.assertEqual(u["RuntimeDirectory"], "tw/decide-bots tw/decide-git")
         self.assertTrue(sock["path"].startswith("/run/tw/decide-bots/"))
         self.assertLessEqual(set(CALLERS), set(sock["clients"]))  # every op's callers (BotRoute.ops)
+
+    def test_tw_gits_socket_is_the_policys(self):
+        sock = policy().data["brokers"]["sockets"]["decide_git"]
+        u = self.unit()
+        self.assertIn(f"--git-socket {sock['path']}", u["ExecStart"])
+        self.assertIn(f"--git-group {sock['group']}", u["ExecStart"])
+        self.assertTrue(sock["path"].startswith("/run/tw/decide-git/"))
+        self.assertIn(sock["group"], u["SupplementaryGroups"].split())
+        from thornswood_decisions.bots import GIT_CALLERS
+        self.assertEqual(set(GIT_CALLERS), set(sock["clients"]))
+        git = (REPO / "deploy" / "systemd" / "tw-git.service").read_text(encoding="utf-8")
+        self.assertIn(sock["group"], [l for l in git.splitlines() if l.startswith("SupplementaryGroups=")][0].split("=")[1].split())
+        text = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('[[ "$members" == tw-git ]]', text)
+        self.assertIn('"660 tw-decide-git"', text)
 
     def test_the_install_checks_the_group_and_the_socket(self):
         text = (DEPLOY / "install.sh").read_text(encoding="utf-8")

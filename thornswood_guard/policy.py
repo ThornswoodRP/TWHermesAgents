@@ -172,6 +172,15 @@ class Policy:
         m = NOREPLY.fullmatch(email)
         return bool(m) and self.trusted_login(m.group(1))
 
+    @staticmethod
+    def credit_login(login: str | None, email: str) -> str | None:
+        """The GitHub login a credit names: the account GitHub links the
+        commit to, or the login in a GitHub noreply address."""
+        if login:
+            return login.lower()
+        m = NOREPLY.fullmatch((email or "").strip().lower())
+        return m.group(1) if m else None
+
     def rule_checks(self, repo: str) -> list[str]:
         """The checks GitHub's rules on the base branch must require before
         auto-merge is turned on there."""

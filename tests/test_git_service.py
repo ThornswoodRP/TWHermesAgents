@@ -57,8 +57,16 @@ class World:
         p = policy()
         apps = {k: dict(v, key_file="/nonexistent") for k, v in p.data["brokers"]["apps"].items()}
         gh = GitHub(apps, transport=self.fake, signer=lambda data, key: b"sig")
+        # Patrick's answers on outside pull request cards, as tw-decide-bots
+        # gives them to tw-git (#132); tests add to it.
+        self.answers: list[dict] = []
         self.git = GitService(p, gh, self.ask, mirrors=self.root / "mirrors", spool=self.spool,
-                              git_base=f"file://{self.fake.remotes}/", allow_file_protocol=True)
+                              git_base=f"file://{self.fake.remotes}/", allow_file_protocol=True,
+                              ask_decide=self.ask_decide)
+
+    def ask_decide(self, op: str, args: dict):
+        assert op == "outside_answers", op
+        return json.loads(json.dumps(self.answers))
 
     def ask(self, op: str, args: dict) -> dict:
         handler, callers = self.policy.ops()[op]
@@ -462,6 +470,108 @@ class OutsideWork(unittest.TestCase):
             w.merge(number=5517, sha="e" * 40, repo=APP)
 
 
+class OutsideAnswers(unittest.TestCase):
+    """#132: tw-git carries out Patrick's answer on an outside pull request
+    card itself: "close" closes the pull request it names, "allow" lets that
+    person's work merge, and nothing closes without an answer."""
+
+    RAHUL = "Rahul <12345+rahul05ranjan@users.noreply.github.com>"
+
+    def world(self, option=None, carried=(51,)) -> World:
+        w = World()
+        w.fake.add_pr(APP, 5517, head_ref="patch-1", head_sha="e" * 40, files=["a"], author="rahul05ranjan")
+        w.fake.prs[(APP, 5517)]["head"]["repo"] = {"full_name": "rahul05ranjan/Thornswood"}
+        if option:
+            w.answers.append({"decision_id": "dec_1", "repo": APP, "number": 5517, "author": "rahul05ranjan",
+                              "carried": [{"repo": APP, "number": n} for n in carried], "option": option,
+                              "answered_at": "2026-11-08T21:00:00Z"})
+        return w
+
+    def carried(self, w: World, number: int = 51) -> str:
+        sha = w.push("sprocket", "sprocket/5513-fix", {"launcher/PathFence.cs": "fence\n"}, repo=APP)["sha"]
+        w.fake.add_pr(APP, number, head_ref="sprocket/5513-fix", head_sha=sha, files=["launcher/PathFence.cs"])
+        w.fake.prs[(APP, number)]["labels"] = [{"name": "outside work"}]
+        w.fake.pr_commits[(APP, number)] = [{"sha": sha, "author": None, "commit": {
+            "author": {"name": "Sprocket (Thornswood Bot)", "email": "sprocket@bots.thornswood.invalid"},
+            "message": f"Fix the path fence\n\nCo-authored-by: {self.RAHUL}\n"}}]
+        return sha
+
+    def close(self, w, number=5517, bot="bramble"):
+        return w.git.close_pr("hermes", {"bot": bot, "repo": APP, "task": "5513", "number": number})
+
+    def test_let_them_merge_puts_the_carried_work_on_auto_merge(self):
+        w = self.world("allow")
+        sha = self.carried(w)
+        out = w.merge(number=51, sha=sha, repo=APP)
+        self.assertTrue(out["auto_merge"])
+
+    def test_without_that_answer_the_carried_work_waits(self):
+        for option in (None, "keep", "close"):
+            w = self.world(option)
+            sha = self.carried(w)
+            with self.assertRaises(Refused) as e:
+                w.merge(number=51, sha=sha, repo=APP)
+            self.assertIn("rahul05ranjan", str(e.exception))
+            self.assertEqual(w.fake.auto_merged, [])
+
+    def test_an_allow_for_a_pull_request_someone_else_opened_lets_nobody_merge(self):
+        w = self.world("allow")
+        w.fake.prs[(APP, 5517)]["user"] = {"login": "someone-else"}
+        sha = self.carried(w)
+        with self.assertRaises(Refused):
+            w.merge(number=51, sha=sha, repo=APP)
+
+    def test_close_closes_the_outside_pull_request_and_the_carried_one(self):
+        w = self.world("close")
+        self.carried(w)
+        self.assertTrue(self.close(w)["done"])
+        self.assertEqual(w.fake.prs[(APP, 5517)]["state"], "closed")
+        self.assertTrue(self.close(w, 51)["done"])
+        self.assertEqual(w.fake.prs[(APP, 51)]["state"], "closed")
+        self.assertEqual([c[2] for c in w.fake.writes("PATCH", "/pulls/")], [{"state": "closed"}] * 2)
+
+    def test_nothing_closes_without_patricks_answer(self):
+        for option in (None, "keep", "carry"):
+            w = self.world(option)
+            with self.assertRaises(Refused) as e:
+                self.close(w)
+            self.assertIn("answer", str(e.exception))
+            self.assertEqual(w.fake.prs[(APP, 5517)]["state"], "open")
+
+    def test_allow_closes_theirs_only_once_ours_merged(self):
+        w = self.world("allow")
+        self.carried(w)
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("#51", str(e.exception))
+        w.fake.prs[(APP, 51)]["merged"] = True
+        self.assertTrue(self.close(w)["done"])
+        self.assertEqual(w.fake.prs[(APP, 5517)]["state"], "closed")
+
+    def test_only_bramble_closes_and_never_a_pull_request_the_card_does_not_name(self):
+        w = self.world("close")
+        with self.assertRaises(Refused):
+            self.close(w, bot="sprocket")
+        w.green_pr(repo=APP)
+        with self.assertRaises(Refused):
+            self.close(w, number=42)
+        self.assertEqual(w.fake.prs[(APP, 42)]["state"], "open")
+
+    def test_a_card_that_names_a_teams_pull_request_as_outside_closes_nothing(self):
+        w = self.world("close")
+        w.fake.prs[(APP, 5517)]["user"] = {"login": "EvilPatrick06"}
+        w.fake.prs[(APP, 5517)]["head"]["repo"] = {"full_name": APP}
+        with self.assertRaises(Refused):
+            self.close(w)
+
+    def test_with_no_route_to_the_answers_nothing_closes(self):
+        w = self.world("close")
+        w.git.ask_decide = None
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("no route", str(e.exception))
+
+
 class AutoMerge(unittest.TestCase):
     """Patrick, 2 Nov 2026: "He shouldn't have to be merging to begin with".
     In Thornswood and the fork tw-git turns GitHub's auto-merge on for a Bot's
@@ -822,6 +932,7 @@ class OneExecutor(unittest.TestCase):
             "label": {"bot": "sprocket", "repo": APP, "task": "t", "number": 42, "label": "claimed: Sprocket"},
             "claim_labels": {"bot": "bramble", "repo": APP, "task": "t"},
             "merge": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "sha": sha},
+            "close_pr": {"bot": "bramble", "repo": APP, "task": "t", "number": 42},
             "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml",
                           "commit": main, "inputs": {}},
         }

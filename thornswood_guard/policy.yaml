@@ -129,8 +129,10 @@ merge:
   # Co-authored-by line credits, must be one of these people, a Bot (the
   # files broker's commit_email), a robot above or one of our own workflows
   # (workflow_authors). Work by anyone else, carried into a Bot's pull request
-  # with credit, never merges until that person is on this list. A login goes
-  # on it only on Patrick's word for that person, quoted here with the date.
+  # with credit, merges only once Patrick answered "let them merge" for that
+  # person on their outside pull request card, which tw-git reads from the
+  # decision core itself (#132), or once he puts them on this list, quoted
+  # here with the date.
   auto_merge_people: ["EvilPatrick06", "WiccanDjinn"]
   # The commits our own workflows make (engine-pin.yml commits as GitHub
   # Actions for the pin robot's pull request).
@@ -488,6 +490,13 @@ brokers:
       path: /run/tw/decide-bots/bots.sock
       group: tw-decide-bots
       clients: [hermes, root]
+    # tw-git's own socket on tw-decide-bots (#132): Patrick's answers on
+    # Bramble's outside pull request cards, read only, so tw-git closes the
+    # pull request or lets the author's work merge only on his answer.
+    decide_git:
+      path: /run/tw/decide-git/git.sock
+      group: tw-decide-git
+      clients: [tw-git, root]
   state:
     policy_db: /srv/tw/policy/policy.db
     git_mirrors: /srv/tw/git

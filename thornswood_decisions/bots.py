@@ -21,6 +21,7 @@ in the room (Chat._told_text), so the Bot learns the answer either way.
 
 from __future__ import annotations
 
+import re
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -36,6 +37,21 @@ CALLERS = {"hermes", "root"}
 
 # How long a card waits for Patrick before it expires, at most.
 MAX_EXPIRY_DAYS = 14
+
+# Who may read Patrick's answers on Bramble's outside pull request cards (#132):
+# tw-git alone, on a socket of its own, so it can carry out "close it" and
+# "let them merge" itself.
+GIT_CALLERS = {"tw-git", "root"}
+
+# An outside pull request card (bramble-duties section 3) names, as pr links,
+# the pull request and its author, and any Bot pull request carrying its work:
+#   outside:ThornswoodRP/Thornswood#5517@rahul05ranjan
+#   carried:ThornswoodRP/Thornswood#5550
+OUTSIDE_LINK = re.compile(r"outside:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)@([A-Za-z0-9][A-Za-z0-9-]*)")
+CARRIED_LINK = re.compile(r"carried:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)")
+# The two answers tw-git carries out, and the words their labels must start
+# with, so the key Patrick picks is the thing the label he reads says.
+OUTSIDE_ACTIONS = {"close": "Close", "allow": "Let {author} merge"}
 
 
 class BotRoute:
@@ -75,6 +91,7 @@ class BotRoute:
         if not isinstance(links, list) or not all(isinstance(x, dict) and isinstance(x.get("kind"), str)
                                                   and isinstance(x.get("ref"), str) for x in links):
             raise CoreError(400, "links", "links is a list of {kind, ref}")
+        self._check_outside(p, [x["ref"] for x in links if x["kind"] == "pr"], _options(args))
         return self.core.open_card(
             p, kind=_text(args, "kind"), title=_text(args, "title"), body=_text(args, "body"),
             options=_options(args), recommendation=_text(args, "recommendation"),
@@ -84,6 +101,9 @@ class BotRoute:
             links=[(x["kind"], x["ref"]) for x in links])
 
     def revise_card(self, p: Principal, args: dict) -> dict:
+        refs = [r["ref"] for r in self.store.db.execute(
+            "SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'pr'", (_text(args, "decision_id"),))]
+        self._check_outside(p, refs, _options(args))
         return self.core.revise_card(
             p, _text(args, "decision_id"), expected_revision=_int(args, "expected_revision"),
             title=_text(args, "title"), body=_text(args, "body"), options=_options(args),
@@ -118,6 +138,67 @@ class BotRoute:
     def report_work_done(self, p: Principal, args: dict) -> dict:
         self.core.report_work_done(p, _text(args, "decision_id"), _text(args, "detail"))
         return {"recorded": True}
+
+    # ── outside pull request cards (#132) ─────────────────────────────────
+
+    @staticmethod
+    def _check_outside(p: Principal, refs: list[str], options: list[dict]) -> None:
+        """An outside pull request card names exactly one outside pull request,
+        only Bramble opens one, and the options tw-git carries out say so in
+        their labels: "close" starts "Close", "allow" starts "Let <author> merge"."""
+        outside = [m for m in (OUTSIDE_LINK.fullmatch(r) for r in refs) if m]
+        if not outside:
+            if any(r.startswith("outside:") for r in refs):
+                raise CoreError(400, "outside_link", "an outside link is outside:<owner>/<repo>#<number>@<login>")
+            return
+        if len(outside) != 1:
+            raise CoreError(400, "outside_link", "an outside pull request card names one outside pull request")
+        if p.kind != "bramble":
+            raise CoreError(403, "not_bramble", "only Bramble opens an outside pull request card")
+        bad = [r for r in refs if r.startswith("carried:") and not CARRIED_LINK.fullmatch(r)]
+        if bad:
+            raise CoreError(400, "carried_link", "a carried link is carried:<owner>/<repo>#<number>")
+        author = outside[0].group(3)
+        for o in options:
+            want = OUTSIDE_ACTIONS.get(o["key"])
+            if want and not o["label"].startswith(want.format(author=author)):
+                raise CoreError(400, "outside_label",
+                                f"option {o['key']!r} is carried out by tw-git, so its label starts "
+                                f"{want.format(author=author)!r}")
+
+    def outside_answers(self) -> list[dict]:
+        """Patrick's answers on Bramble's outside pull request cards, newest
+        last: what each card names and the option he picked on its current
+        revision. Only answered cards Bramble asked, and only his answers."""
+        db = self.store.db
+        rows = db.execute(
+            "SELECT d.id, r.option_key, r.answered_at FROM decisions d "
+            "JOIN principals b ON b.id = d.requested_by "
+            "JOIN responses r ON r.decision_id = d.id AND r.revision = d.revision "
+            "JOIN principals who ON who.id = r.principal_id "
+            "WHERE d.workspace_id = ? AND d.status = 'resolved' AND b.kind = 'bramble' AND who.kind = 'patrick' "
+            "ORDER BY r.answered_at, d.id", (self.ws,)).fetchall()
+        out = []
+        for row in rows:
+            refs = [r["ref"] for r in db.execute("SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'pr'",
+                                                 (row["id"],))]
+            outside = [m for m in (OUTSIDE_LINK.fullmatch(r) for r in refs) if m]
+            if len(outside) != 1:
+                continue
+            m = outside[0]
+            carried = [{"repo": c.group(1), "number": int(c.group(2))}
+                       for c in (CARRIED_LINK.fullmatch(r) for r in refs) if c]
+            out.append({"decision_id": row["id"], "repo": m.group(1), "number": int(m.group(2)),
+                        "author": m.group(3), "carried": carried, "option": row["option_key"],
+                        "answered_at": row["answered_at"]})
+        return out
+
+    def git_ops(self) -> dict:
+        """tw-git's one op, for its own socket: read Patrick's outside answers."""
+        def handle(caller: str, args: dict):
+            with self.lock:
+                return self.outside_answers()
+        return {"outside_answers": (handle, set(GIT_CALLERS))}
 
     def _with_answer(self, card: dict) -> dict:
         """The four states, and once Patrick answered, the words the Bot is told."""
