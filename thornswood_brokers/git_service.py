@@ -27,7 +27,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from thornswood_guard.github import SHA, CheckRun, GitHubRules, Issue, PullRequest
+from thornswood_guard.github import SHA, CheckRun, Credit, GitHubRules, Issue, PullRequest
 from thornswood_guard.policy import Policy, Verdict
 
 from .github_api import GitHub, GitHubError, quote
@@ -67,6 +67,8 @@ AUTO_MERGE = """mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMerg
   }
 }"""
 WORKFLOW_DIR = ".github/workflows/"
+# A Co-authored-by line in a commit message: the credit for someone else's work.
+CO_AUTHOR = re.compile(r"^co-authored-by:[ \t]*(.*?)[ \t]*<([^>\n]+)>[ \t]*$", re.IGNORECASE | re.MULTILINE)
 
 
 class RemoteDecisions:
@@ -202,10 +204,23 @@ class GitService:
                 files.append(f["previous_filename"])
         if raw.get("changed_files", 0) > len({f for f in files}):
             raise Refused(f"PR {number} changes {raw['changed_files']} files and GitHub listed {len(files)}; nothing merges unseen")
+        # Whose work it holds: every commit's author and each Co-authored-by
+        # line (Patrick, 8 Nov 2026: outside work merges only on his word).
+        commits = self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls/{int(number)}/commits")
+        if raw.get("commits", 0) > len(commits):
+            raise Refused(f"PR {number} has {raw['commits']} commits and GitHub listed {len(commits)}; nothing merges unseen")
+        credits = []
+        for c in commits:
+            sha, body = c.get("sha", ""), c.get("commit") or {}
+            author = body.get("author") or {}
+            credits.append(Credit(commit=sha, name=author.get("name") or "", email=author.get("email") or "",
+                                  login=(c.get("author") or {}).get("login")))
+            for name, email in CO_AUTHOR.findall(body.get("message") or ""):
+                credits.append(Credit(commit=sha, name=name, email=email, co_author=True))
         return PullRequest(repo=repo, number=int(number), head_sha=raw["head"]["sha"], head_ref=head_ref,
                            base_ref=raw["base"]["ref"], author_bot=author_bot, author_login=raw["user"]["login"],
                            files=files, labels=[l["name"] for l in raw.get("labels", [])],
-                           draft=bool(raw.get("draft")), merged=bool(raw.get("merged")))
+                           draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits)
 
     def _checks(self, repo: str, sha: str) -> list[CheckRun]:
         runs = self.gh.get_all("bramble", repo, f"/repos/{repo}/commits/{sha}/check-runs?filter=all", key="check_runs")
@@ -396,7 +411,7 @@ class GitService:
             raise Refused("a comment says something")
         issue_raw = self.gh.get("workers", repo, f"/repos/{repo}/issues/{number}")
         if issue_raw.get("pull_request"):
-            self._check(self.rules.edit_pr(bot, self._pr(repo, number)))
+            self._check(self.rules.comment_pr(bot, self._pr(repo, number)))
         else:
             issue = self._issue(repo, number)
             if self.rules._hands_off_issue(issue):

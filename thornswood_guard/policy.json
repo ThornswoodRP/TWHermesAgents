@@ -112,7 +112,15 @@
     "robot_authors": [
       "dependabot[bot]",
       "thornswood-pin-robot[bot]"
-    ]
+    ],
+    "auto_merge_people": [
+      "EvilPatrick06",
+      "WiccanDjinn"
+    ],
+    "workflow_authors": [
+      "github-actions[bot]"
+    ],
+    "outside_label": "outside work"
   },
   "runs": {
     "main_without_patrick": true,

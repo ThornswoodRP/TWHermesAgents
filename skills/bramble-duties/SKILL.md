@@ -1,12 +1,12 @@
 ---
 name: bramble-duties
-description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, and run the Ops run notes and the Desk's list. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.3.0
+description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, and run the Ops run notes and the Desk's list. Use on every GitHub wake and whenever asked to work the queue.
+version: 1.4.0
 author: Thornswood-Hermes (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
   hermes:
-    tags: [Thornswood, Bramble, merge, queue, run notes]
+    tags: [Thornswood, Bramble, merge, queue, run notes, outside pull requests]
     related_skills: [thornswood-ops, thornswood-guide]
 ---
 
@@ -35,7 +35,8 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
 2. Only a Bot's pull request (its branch is `<bot>/<issue>-<what>`) and a
    robot's (Dependabot's, the pin robot's: the policy's `robot_authors`) are
    yours. A person's or a thread's is its owner's, who puts it on
-   auto-merge; leave it alone, green or not.
+   auto-merge; leave it alone, green or not. One from outside the team gets
+   the review in section 3, and never auto-merge.
 3. For each of those pull requests that is not a draft and has no auto-merge on
    (`auto_merge` is null), review its exact head. Once your review stands,
    `tw_git merge` on that head turns GitHub's auto-merge on. Do not wait for
@@ -83,7 +84,91 @@ CI_TIMEOUT.
    pull request that is you, through step 1, once your review of the new
    head stands.
 
-## 3. The run notes and the Desk's list
+## 3. Pull requests from outside the team
+
+Patrick, 8 Nov 2026, 1:29 PM: "I want Bramble to look at PRs from outside
+the team when they come in and to check if they are safe and benifitial to
+us and than fix if needed, if not deemed benfitial make it as a decison to
+me before just deleting it entirely". Then, 1:30 PM: "don't ever let them
+auto merge tho unless I saw that even if the PR is good unless I
+specficallyt say that I want that person to automerge", and 1:31 PM:
+"currently that list is only me and my team".
+
+A pull request is from outside the team when its author is not a Bot, a
+robot or one of the people on the policy's `merge.auto_merge_people`
+(Patrick and Djinn today), or when its head is in a fork. Djinn's and the
+lanes' work is hands off, as always, and is never this. In
+ThornswoodRP/Thornswood and ThornswoodRP/skymp, on every sweep of step 1,
+each open one that has no answer from you on its current head gets this
+review, once per head.
+
+What holds whatever you decide (tw_git refuses the rest):
+
+- Outside code never runs on our machines until it is reviewed. You read
+  it only: `tw_git read` on `/pulls/<n>`, `/pulls/<n>/files` (each file's
+  `patch`) and `/pulls/<n>/commits`. Never check it out, run it, build it
+  or fetch its branch. GitHub's own runners may build a fork's pull request
+  in Thornswood; that is GitHub's, not ours.
+- An outside pull request never merges and never goes on auto-merge.
+  `tw_git merge` refuses any pull request that is not a Bot's or a robot's.
+- Work by anyone not on `merge.auto_merge_people` never merges, even inside
+  a Bot's own pull request: tw_git reads every commit's author and every
+  Co-authored-by line and refuses. Only a Thornswood-Hermes pull request,
+  on Patrick's word for that one person, adds a name to the list.
+- You never close, edit or label an outside pull request. The one thing
+  tw_git lets you do on it is comment. Closing one is Patrick's decision.
+
+The review, of the exact head:
+
+1. Safe: what every changed line does. Anything that runs (a workflow,
+   `scripts/`, a build or install step, a package or action version, a
+   test harness), touches secrets, keys, sign-ins or permissions, reaches
+   the network, hides what it does (encoded text, a binary, a minified
+   file), changes who can do what, or adds content Thornswood may not
+   redistribute (`scripts/release/Ship-Rules.ps1`, the asset records) is
+   named with its file and line. One of these that cannot be explained by
+   the change's own purpose makes it unsafe.
+2. Of benefit: it fixes something real or adds something the settled
+   design wants (Developer-Guide.md, `docs/DECIDED.md`), fixes the cause
+   (rule zero; a band-aid is not of benefit), and does not undo a decision
+   Patrick made.
+3. Then exactly one of:
+   - **Safe and of benefit.** Take it into our own work. Find or file its
+     issue on the board and `tw_decide assign_task` it to the owning Bot
+     with this brief: rewrite the change in its own branch
+     (`<bot>/<issue>-<what>`) from the reviewed diff, with what the review
+     found fixed on top; every commit that carries the author's work ends
+     with `Co-authored-by: <their name> <<their id>+<their login>@users.noreply.github.com>`
+     (the id is the author's `id` in the pull request's `user`); the pull
+     request body says whose work it is and links theirs; it wears the
+     label `outside work` (the policy's `merge.outside_label`). Review that
+     pull request as any Bot's (step 1). It does not merge while the author
+     is not on Patrick's list, so open the card below as soon as it is up.
+     Comment once on theirs: thanks, what was kept and what was fixed, and
+     the link to ours.
+   - **Unsafe, or of no benefit.** Do not close it and do not carry it.
+     Open the card below, and comment once on theirs that it is waiting
+     for a decision. Nothing more happens to it until Patrick answers.
+4. The card: one `tw_decide open_card` per outside pull request, kind
+   `outside_pr`, with what the review measured (each finding with its file
+   and line), whose it is, a recommendation and the exact scope of a yes.
+   Its options, by case:
+   - Carried: **A** let `<login>` merge (their name goes on
+     `merge.auto_merge_people` by a Thornswood-Hermes pull request; then
+     the carried pull request merges like any Bot's), **B** keep the carried
+     pull request open without merging, **C** drop the carried pull request
+     and ask the author for changes.
+   - Not carried: **A** close it (say why), **B** carry it after all (what
+     would need fixing), **C** leave it open.
+   One card only; a new head on theirs is a new revision of the same card
+   (`revise_card`), never a second card. Ask nothing he has already
+   answered for that pull request.
+5. When he answers, `tw_decide get_card`, do what the answer names and
+   nothing more, `report_work_done`, and say it in the Workbench room. A
+   step only Patrick or his Hermes can take (the Thornswood-Hermes change
+   that adds a name) is said in the room with the card's id.
+
+## 4. The run notes and the Desk's list
 
 Notes are in ThornswoodRP/Thornswood-Ops at `ops/claude-queue/` on main
 (`ops/README.md` has their template). The Desk's handover list is

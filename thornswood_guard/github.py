@@ -20,6 +20,19 @@ SHA = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass
+class Credit:
+    """Someone whose work is in a commit: its author, or a Co-authored-by line."""
+    commit: str
+    name: str
+    email: str
+    login: str | None = None     # the GitHub account GitHub links the commit's author to
+    co_author: bool = False
+
+    def who(self) -> str:
+        return self.login or self.email or self.name or self.commit[:12]
+
+
+@dataclass
 class PullRequest:
     repo: str
     number: int
@@ -32,6 +45,7 @@ class PullRequest:
     labels: list[str] = field(default_factory=list)
     draft: bool = False
     merged: bool = False
+    credits: list[Credit] = field(default_factory=list)   # every commit's author and co-authors
 
 
 @dataclass
@@ -121,6 +135,41 @@ class GitHubRules:
             return Verdict.yes("Bramble reviews and comments on any Bot's PR")
         return Verdict.no(f"{self.policy.bot_name(bot)} edits only its own pull requests")
 
+    def outside_pr(self, pr: PullRequest) -> bool:
+        """A pull request from outside the team: not a Bot's, not a robot's,
+        not by anyone on Patrick's list, and not hands-off work."""
+        return (pr.author_bot is None and not self.policy.trusted_login(pr.author_login)
+                and not self._hands_off_pr(pr))
+
+    def comment_pr(self, bot: str, pr: PullRequest) -> Verdict:
+        """A comment on a pull request: as edit_pr, and Bramble may also answer
+        a pull request from outside the team (what its review found, where the
+        work went). Nothing else of an outside pull request is a Bot's to
+        change: no edit, label, close or merge."""
+        v = self.edit_pr(bot, pr)
+        if v.allowed:
+            return v
+        if self.policy.is_router(bot) and self.outside_pr(pr):
+            return Verdict.yes("Bramble answers a pull request from outside the team")
+        return v
+
+    def outside_work(self, pr: PullRequest) -> Verdict:
+        """Patrick, 8 Nov 2026: outside work never merges "unless I specficallyt
+        say that I want that person to automerge". Every commit's author and
+        every Co-authored-by line must be on his list, a Bot, a robot or one of
+        our own workflows."""
+        p = self.policy
+        outside = sorted({c.who() for c in pr.credits if not p.trusted_credit(c.login, c.email)})
+        if outside:
+            return Verdict.no(f"PR {pr.number} carries work by {', '.join(outside)}, who is not on Patrick's list of "
+                              "people whose work may merge (policy merge.auto_merge_people); it waits for his card, "
+                              "and a person goes on the list only on his word for that person")
+        label = p.data["merge"].get("outside_label")
+        if label and label in pr.labels and not any(c.co_author for c in pr.credits):
+            return Verdict.no(f"PR {pr.number} is labelled '{label}' and no commit credits its author with a "
+                              "Co-authored-by line, so whose work it is cannot be read; credit them, then ask again")
+        return Verdict.yes()
+
     def merge(self, bot: str, pr: PullRequest, sha: str, method: str,
               checks: list[CheckRun], *, branch_checks: set[str] | None = None) -> Verdict:
         """Bramble's merge. Where the policy has GitHub's auto-merge do it
@@ -151,6 +200,9 @@ class GitHubRules:
         want_method = p.data["merge"]["method"].get(pr.repo)
         if method != want_method:
             return Verdict.no(f"{pr.repo} merges with {want_method}, not {method}")
+        verdict = self.outside_work(pr)
+        if not verdict.allowed:
+            return verdict
         if p.auto_merge(pr.repo):
             return self._auto_merge(pr, sha, checks, branch_checks)
         verdict = self.check_green(pr, checks)

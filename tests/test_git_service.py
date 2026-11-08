@@ -396,6 +396,72 @@ class MergeQueue(unittest.TestCase):
         self.assertEqual(w.fake.queued, [])
 
 
+class OutsideWork(unittest.TestCase):
+    """Patrick, 8 Nov 2026: outside work never merges unless he names that
+    person. tw-git reads every commit of the pull request from GitHub itself."""
+
+    RAHUL = "Rahul <12345+rahul05ranjan@users.noreply.github.com>"
+
+    def carried(self, w: World, message: str, repo: str = APP, labels=("outside work",)) -> str:
+        sha = w.green_pr(repo=repo, checks=repo != APP)
+        w.fake.prs[(repo, 42)]["labels"] = [{"name": l} for l in labels]
+        w.fake.pr_commits[(repo, 42)] = [{"sha": sha, "author": None, "commit": {
+            "author": {"name": "Sprocket (Thornswood Bot)", "email": "sprocket@bots.thornswood.invalid"},
+            "message": message}}]
+        return sha
+
+    def test_a_bots_pr_carrying_outside_work_is_never_put_on_auto_merge(self):
+        w = World()
+        sha = self.carried(w, f"Fix the path fence\n\nCo-authored-by: {self.RAHUL}\n")
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("rahul05ranjan", str(e.exception))
+        self.assertEqual(w.fake.auto_merged, [])
+
+    def test_ops_never_merges_it_directly_either(self):
+        w = World()
+        sha = self.carried(w, f"x\n\nco-authored-by:   {self.RAHUL}  \n", repo=OPS)
+        with self.assertRaises(Refused):
+            w.merge(sha=sha)
+        self.assertEqual(w.fake.writes("PUT"), [])
+
+    def test_the_label_without_a_credit_is_refused(self):
+        w = World()
+        sha = self.carried(w, "Fix the path fence")
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("Co-authored-by", str(e.exception))
+
+    def test_a_team_credit_still_goes_on_auto_merge(self):
+        w = World()
+        sha = self.carried(w, "x\n\nCo-authored-by: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>",
+                           labels=())
+        out = w.merge(sha=sha, repo=APP)
+        self.assertTrue(out["auto_merge"])
+
+    def test_commits_github_did_not_list_merge_nothing(self):
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.fake.prs[(APP, 42)]["commits"] = 3
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("nothing merges unseen", str(e.exception))
+
+    def test_bramble_answers_a_fork_pr_and_nothing_else_does(self):
+        w = World()
+        w.fake.add_pr(APP, 5517, head_ref="patch-1", head_sha="e" * 40, files=["a"], author="rahul05ranjan")
+        w.fake.prs[(APP, 5517)]["head"]["repo"] = {"full_name": "rahul05ranjan/Thornswood"}
+        out = w.git.comment("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": 5517,
+                                       "body": "Thanks. This is moving into our own pull request with your credit."})
+        self.assertTrue(out["done"], out)
+        with self.assertRaises(Refused):
+            w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 5517, "body": "x"})
+        with self.assertRaises(Refused):
+            w.git.edit_pr("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": 5517, "title": "x"})
+        with self.assertRaises(Refused):
+            w.merge(number=5517, sha="e" * 40, repo=APP)
+
+
 class AutoMerge(unittest.TestCase):
     """Patrick, 2 Nov 2026: "He shouldn't have to be merging to begin with".
     In Thornswood and the fork tw-git turns GitHub's auto-merge on for a Bot's

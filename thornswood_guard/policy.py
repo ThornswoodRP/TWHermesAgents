@@ -20,6 +20,11 @@ POLICY_FILE = Path(__file__).with_name("policy.json")
 EXECUTORS = ("patrick-hermes", "bramble")
 
 
+# A GitHub noreply address, with or without the account id in front:
+# 187923600+evilpatrick06@users.noreply.github.com.
+NOREPLY = re.compile(r"(?:\d+\+)?([a-z0-9][a-z0-9-]*(?:\[bot\])?)@users\.noreply\.github\.com")
+
+
 class PolicyError(Exception):
     """The policy file itself is wrong. Nothing is allowed until it is fixed."""
 
@@ -141,6 +146,31 @@ class Policy:
         """A robot's pull request (Dependabot, the pin robot): no person or
         thread owns it, so Bramble puts it on auto-merge like a Bot's."""
         return login in (self.data["merge"].get("robot_authors") or [])
+
+    def _trusted_logins(self) -> set[str]:
+        m = self.data["merge"]
+        names = (m.get("auto_merge_people") or []) + (m.get("robot_authors") or []) + (m.get("workflow_authors") or [])
+        return {n.lower() for n in names}
+
+    def trusted_login(self, login: str | None) -> bool:
+        """One of Patrick's list of people whose work may merge, a robot or
+        one of our own workflows (merge.auto_merge_people, robot_authors,
+        workflow_authors). GitHub logins ignore case."""
+        return bool(login) and login.lower() in self._trusted_logins()
+
+    def trusted_credit(self, login: str | None, email: str) -> bool:
+        """Whether a commit's author or a Co-authored-by line names someone
+        whose work may merge: by the GitHub account the commit is linked to,
+        a Bot's own commit address, or a GitHub noreply address of a trusted
+        login. Anything else is outside work (Patrick, 8 Nov 2026)."""
+        if self.trusted_login(login):
+            return True
+        email = (email or "").strip().lower()
+        pattern = self.data["brokers"]["files"]["commit_email"]
+        if email in {pattern.format(bot=b).lower() for b in self.bots}:
+            return True
+        m = NOREPLY.fullmatch(email)
+        return bool(m) and self.trusted_login(m.group(1))
 
     def rule_checks(self, repo: str) -> list[str]:
         """The checks GitHub's rules on the base branch must require before
