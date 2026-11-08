@@ -124,6 +124,36 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         return handler(caller, args)
 
 
+class Servers:
+    """Two or more Servers run as one by serve.run_until_stopped: the first
+    serves on the caller's thread, the others each on a thread of their own,
+    and a stop stops them all (tw-decide-bots and its tw-git socket, #132)."""
+
+    def __init__(self, *servers: Server):
+        self.servers = servers
+        self._threads: list[threading.Thread] = []
+
+    def serve_forever(self) -> None:
+        for extra in self.servers[1:]:
+            t = threading.Thread(target=extra.serve_forever, name=f"serve-{extra.path.name}", daemon=True)
+            t.start()
+            self._threads.append(t)
+        self.servers[0].serve_forever()
+
+    def shutdown(self) -> None:
+        for s in self.servers:
+            s.shutdown()
+
+    def drain(self, timeout: float) -> int:
+        return sum(s.drain(timeout) for s in self.servers)
+
+    def server_close(self) -> None:
+        for s in self.servers:
+            s.server_close()
+        for t in self._threads:
+            t.join(5)
+
+
 def call(path: str | Path, op: str, args: dict | None = None, *, timeout: float = 120.0):
     """Ask a broker. Returns the result, or raises Refused with its reason."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
