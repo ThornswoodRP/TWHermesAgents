@@ -69,6 +69,10 @@ AUTO_MERGE = """mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMerg
 WORKFLOW_DIR = ".github/workflows/"
 # A Co-authored-by line in a commit message: the credit for someone else's work.
 CO_AUTHOR = re.compile(r"^co-authored-by:[ \t]*(.*?)[ \t]*<([^>\n]+)>[ \t]*$", re.IGNORECASE | re.MULTILINE)
+# A Carried-from line: the outside pull request whose work a commit carries
+# (bramble-duties section 3), what a "merge this one" answer is bound to.
+CARRIED_FROM = re.compile(r"^carried-from:[ \t]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)[ \t]*$",
+                          re.IGNORECASE | re.MULTILINE)
 
 
 class RemoteDecisions:
@@ -213,7 +217,7 @@ class GitService:
         commits = self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls/{int(number)}/commits")
         if raw.get("commits", 0) > len(commits):
             raise Refused(f"PR {number} has {raw['commits']} commits and GitHub listed {len(commits)}; nothing merges unseen")
-        credits = []
+        credits, carried_from = [], []
         for c in commits:
             sha, body = c.get("sha", ""), c.get("commit") or {}
             author = body.get("author") or {}
@@ -221,10 +225,14 @@ class GitService:
                                   login=(c.get("author") or {}).get("login")))
             for name, email in CO_AUTHOR.findall(body.get("message") or ""):
                 credits.append(Credit(commit=sha, name=name, email=email, co_author=True))
+            for r, n in CARRIED_FROM.findall(body.get("message") or ""):
+                if (r, int(n)) not in carried_from:
+                    carried_from.append((r, int(n)))
         return PullRequest(repo=repo, number=int(number), head_sha=raw["head"]["sha"], head_ref=head_ref,
                            base_ref=raw["base"]["ref"], author_bot=author_bot, author_login=raw["user"]["login"],
                            files=files, labels=[l["name"] for l in raw.get("labels", [])],
-                           draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits)
+                           draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits,
+                           carried_from=carried_from)
 
     def _checks(self, repo: str, sha: str) -> list[CheckRun]:
         runs = self.gh.get_all("bramble", repo, f"/repos/{repo}/commits/{sha}/check-runs?filter=all", key="check_runs")
@@ -560,7 +568,7 @@ class GitService:
         branch_checks = self._branch_checks(repo, pr.base_ref) if auto else None
         # Work by someone off Patrick's list merges only once he answered
         # "let them merge" for that person (#132); read only when it is needed.
-        allowed = self._allowed_people() if self.rules.outside_credits(pr) else None
+        allowed = self._allowed_people(pr) if self.rules.outside_credits(pr) else None
         self._check(self.rules.merge(bot, pr, sha, method, checks, branch_checks=branch_checks,
                                      allowed_people=allowed))
 
@@ -615,12 +623,22 @@ class GitService:
             out.append(a)
         return out
 
-    def _allowed_people(self) -> set[str]:
-        """Each person Patrick let merge on an outside pull request card, once
-        GitHub says they opened the pull request that card names."""
+    def _allowed_people(self, pr: PullRequest) -> set[str]:
+        """Whose work may merge in this pull request on Patrick's word, once
+        GitHub says they opened the outside pull request the card names: each
+        person he answered "Auto-Merge" for, and the author of an
+        outside pull request he answered "merge this one" for, when this pull
+        request carries it (a carried link on the card, or a Carried-from line
+        in its commits) and theirs is still open, so that yes merges it once."""
         people = set()
+        here = (pr.repo, pr.number)
         for a in self._outside_answers():
-            if a["option"] != "allow":
+            if a["option"] == "merge":
+                carries = here in [(c["repo"], c["number"]) for c in a.get("carried") or []] or (
+                    (a["repo"], a["number"]) in pr.carried_from)
+                if not carries:
+                    continue
+            elif a["option"] != "allow":
                 continue
             try:
                 raw = self.gh.get("bramble", a["repo"], f"/repos/{a['repo']}/pulls/{int(a['number'])}")
@@ -628,6 +646,8 @@ class GitService:
                 if e.status == 404:
                     continue  # the pull request the card names is gone, so whose it was cannot be read: not allowed
                 raise Refused(f"{a['repo']}#{a['number']}, which card {a['decision_id']} names, cannot be read ({e})") from e
+            if a["option"] == "merge" and raw.get("state") != "open":
+                continue  # its yes was for the one pull request carrying it, which already went
             if ((raw.get("user") or {}).get("login") or "").lower() == a["author"].lower():
                 people.add(a["author"].lower())
         return people
@@ -643,7 +663,7 @@ class GitService:
         # merged, which is what replaces it.
         merged = {}
         for a in answers:
-            if (a["repo"], a["number"]) != (repo, number) or a["option"] != "allow":
+            if (a["repo"], a["number"]) != (repo, number) or a["option"] not in ("allow", "merge"):
                 continue
             for c in a.get("carried") or []:
                 key = (c["repo"], int(c["number"]))
@@ -654,7 +674,17 @@ class GitService:
                 except GitHubError as e:
                     raise Refused(f"the carried {c['repo']}#{c['number']} cannot be read ({e}); nothing is closed") from e
                 merged[key] = bool(got.get("merged"))
-        self._check(self.rules.close_pr(bot, pr, answers, merged, raw.get("state") == "open"))
+        # A merged pull request named as what replaced it counts only when its
+        # own commits say, in a Carried-from line, that they carry this one.
+        replaced = False
+        if args.get("replaced_by") is not None:
+            other = self._pr(repo, int(args["replaced_by"]))
+            if not other.merged:
+                raise Refused(f"#{other.number} has not merged, so it has not replaced PR {number}")
+            if (repo, number) not in other.carried_from:
+                raise Refused(f"#{other.number} has no Carried-from line naming {repo}#{number}")
+            replaced = True
+        self._check(self.rules.close_pr(bot, pr, answers, merged, raw.get("state") == "open", replaced))
 
         def write():
             r = self.gh.call("bramble", repo, WRITE["pulls"], "PATCH", f"/repos/{repo}/pulls/{number}",

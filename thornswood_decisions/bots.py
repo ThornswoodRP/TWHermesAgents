@@ -49,9 +49,17 @@ GIT_CALLERS = {"tw-git", "root"}
 #   carried:ThornswoodRP/Thornswood#5550
 OUTSIDE_LINK = re.compile(r"outside:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)@([A-Za-z0-9][A-Za-z0-9-]*)")
 CARRIED_LINK = re.compile(r"carried:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)")
-# The two answers tw-git carries out, and the words their labels must start
-# with, so the key Patrick picks is the thing the label he reads says.
-OUTSIDE_ACTIONS = {"close": "Close", "allow": "Let {author} merge"}
+# The three lines an outside pull request card's body opens with answers to.
+OUTSIDE_QUESTIONS = ("Safe:", "Can we make it safe:", "Of benefit:")
+# The three answers tw-git carries out (Patrick, 8 Nov 2026, 1:59 PM: "I
+# shou;ld be able to let them automerge, close it, and to merge it without
+# allowinfg for automerge"), and the words their labels must start with, so
+# the key Patrick picks is the thing the label he reads says.
+# Patrick, 8 Nov 2026, 3:05 PM: "the wording should be Auto-Merge, Merge, and
+# Close so we dont have a bunch of clutter with all the etxra unnesaccery
+# words". The card offers these three and nothing else; the consequence line
+# under each says who and which pull request.
+OUTSIDE_ACTIONS = {"allow": "Auto-Merge", "merge": "Merge", "close": "Close"}
 
 
 class BotRoute:
@@ -91,7 +99,7 @@ class BotRoute:
         if not isinstance(links, list) or not all(isinstance(x, dict) and isinstance(x.get("kind"), str)
                                                   and isinstance(x.get("ref"), str) for x in links):
             raise CoreError(400, "links", "links is a list of {kind, ref}")
-        self._check_outside(p, [x["ref"] for x in links if x["kind"] == "pr"], _options(args))
+        self._check_outside(p, [x["ref"] for x in links if x["kind"] == "pr"], _options(args), _text(args, "body"))
         return self.core.open_card(
             p, kind=_text(args, "kind"), title=_text(args, "title"), body=_text(args, "body"),
             options=_options(args), recommendation=_text(args, "recommendation"),
@@ -103,7 +111,7 @@ class BotRoute:
     def revise_card(self, p: Principal, args: dict) -> dict:
         refs = [r["ref"] for r in self.store.db.execute(
             "SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'pr'", (_text(args, "decision_id"),))]
-        self._check_outside(p, refs, _options(args))
+        self._check_outside(p, refs, _options(args), _text(args, "body"))
         return self.core.revise_card(
             p, _text(args, "decision_id"), expected_revision=_int(args, "expected_revision"),
             title=_text(args, "title"), body=_text(args, "body"), options=_options(args),
@@ -142,10 +150,15 @@ class BotRoute:
     # ── outside pull request cards (#132) ─────────────────────────────────
 
     @staticmethod
-    def _check_outside(p: Principal, refs: list[str], options: list[dict]) -> None:
+    def _check_outside(p: Principal, refs: list[str], options: list[dict], body: str) -> None:
         """An outside pull request card names exactly one outside pull request,
-        only Bramble opens one, and the options tw-git carries out say so in
-        their labels: "close" starts "Close", "allow" starts "Let <author> merge"."""
+        only Bramble opens one, and its options are exactly "allow" labelled
+        "Auto-Merge", "merge" labelled "Merge" and "close" labelled "Close"
+        (Patrick, 8 Nov 2026, 3:05 PM: no extra words). Its body answers, each on
+        a line of its own, Patrick's three questions (8 Nov 2026, 2:00 PM: "the
+        card also needs to tell me if its safe, if we can make it safe, and if
+        its benifitial to us"): "Safe:", "Can we make it safe:" and "Of
+        benefit:"."""
         outside = [m for m in (OUTSIDE_LINK.fullmatch(r) for r in refs) if m]
         if not outside:
             if any(r.startswith("outside:") for r in refs):
@@ -158,13 +171,17 @@ class BotRoute:
         bad = [r for r in refs if r.startswith("carried:") and not CARRIED_LINK.fullmatch(r)]
         if bad:
             raise CoreError(400, "carried_link", "a carried link is carried:<owner>/<repo>#<number>")
-        author = outside[0].group(3)
-        for o in options:
-            want = OUTSIDE_ACTIONS.get(o["key"])
-            if want and not o["label"].startswith(want.format(author=author)):
-                raise CoreError(400, "outside_label",
-                                f"option {o['key']!r} is carried out by tw-git, so its label starts "
-                                f"{want.format(author=author)!r}")
+        lines = [ln.strip().lstrip("*_ ").lower() for ln in body.splitlines()]
+        missing = [q for q in OUTSIDE_QUESTIONS if not any(ln.startswith(q.lower()) for ln in lines)]
+        if missing:
+            raise CoreError(400, "outside_questions",
+                            f"an outside pull request card answers each of {', '.join(OUTSIDE_QUESTIONS)} on a line "
+                            f"of its own; it lacks {', '.join(missing)}")
+        got = {o["key"]: o["label"] for o in options}
+        if len(options) != len(OUTSIDE_ACTIONS) or got != OUTSIDE_ACTIONS:
+            want = ", ".join(f"{k} labelled {v!r}" for k, v in OUTSIDE_ACTIONS.items())
+            raise CoreError(400, "outside_label",
+                            f"an outside pull request card offers exactly {want}")
 
     def outside_answers(self) -> list[dict]:
         """Patrick's answers on Bramble's outside pull request cards, newest

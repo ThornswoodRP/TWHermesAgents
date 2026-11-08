@@ -487,14 +487,57 @@ class OutsideAnswers(unittest.TestCase):
                               "answered_at": "2026-11-08T21:00:00Z"})
         return w
 
-    def carried(self, w: World, number: int = 51) -> str:
-        sha = w.push("sprocket", "sprocket/5513-fix", {"launcher/PathFence.cs": "fence\n"}, repo=APP)["sha"]
-        w.fake.add_pr(APP, number, head_ref="sprocket/5513-fix", head_sha=sha, files=["launcher/PathFence.cs"])
+    def carried(self, w: World, number: int = 51, carried_from: str = "") -> str:
+        branch = f"sprocket/5513-fix-{number}"
+        sha = w.push("sprocket", branch, {"launcher/PathFence.cs": "fence\n"}, repo=APP)["sha"]
+        w.fake.add_pr(APP, number, head_ref=branch, head_sha=sha, files=["launcher/PathFence.cs"])
         w.fake.prs[(APP, number)]["labels"] = [{"name": "outside work"}]
+        line = f"Carried-from: {carried_from}\n" if carried_from else ""
         w.fake.pr_commits[(APP, number)] = [{"sha": sha, "author": None, "commit": {
             "author": {"name": "Sprocket (Thornswood Bot)", "email": "sprocket@bots.thornswood.invalid"},
-            "message": f"Fix the path fence\n\nCo-authored-by: {self.RAHUL}\n"}}]
+            "message": f"Fix the path fence\n\nCo-authored-by: {self.RAHUL}\n{line}"}}]
         return sha
+
+    def test_merge_this_one_merges_the_carried_pull_request_once(self):
+        # Patrick, 8 Nov 2026, 1:59 PM: "merge it without allowinfg for automerge".
+        w = self.world("merge")
+        sha = self.carried(w)
+        self.assertTrue(w.merge(number=51, sha=sha, repo=APP)["auto_merge"])
+        # Another pull request of theirs is not covered.
+        other = self.carried(w, number=52)
+        with self.assertRaises(Refused):
+            w.merge(number=52, sha=other, repo=APP)
+
+    def test_merge_this_one_binds_by_the_carried_from_line_when_the_card_had_none(self):
+        w = self.world("merge", carried=())
+        sha = self.carried(w, number=53, carried_from=f"{APP}#5517")
+        self.assertTrue(w.merge(number=53, sha=sha, repo=APP)["auto_merge"])
+        wrong = self.carried(w, number=54, carried_from=f"{APP}#5523")
+        with self.assertRaises(Refused):
+            w.merge(number=54, sha=wrong, repo=APP)
+
+    def test_merge_this_one_ends_once_their_pull_request_is_closed(self):
+        w = self.world("merge", carried=())
+        w.fake.prs[(APP, 5517)]["state"] = "closed"
+        sha = self.carried(w, number=53, carried_from=f"{APP}#5517")
+        with self.assertRaises(Refused):
+            w.merge(number=53, sha=sha, repo=APP)
+
+    def test_theirs_closes_as_replaced_by_a_merged_pull_request_that_carries_it(self):
+        w = self.world("merge", carried=())
+        self.carried(w, number=53, carried_from=f"{APP}#5517")
+        self.carried(w, number=54)
+        w.fake.prs[(APP, 54)]["merged"] = True
+        with self.assertRaises(Refused) as e:
+            w.git.close_pr("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": 5517, "replaced_by": 53})
+        self.assertIn("not merged", str(e.exception))
+        with self.assertRaises(Refused) as e:
+            w.git.close_pr("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": 5517, "replaced_by": 54})
+        self.assertIn("Carried-from", str(e.exception))
+        w.fake.prs[(APP, 53)]["merged"] = True
+        out = w.git.close_pr("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": 5517, "replaced_by": 53})
+        self.assertTrue(out["done"])
+        self.assertEqual(w.fake.prs[(APP, 5517)]["state"], "closed")
 
     def close(self, w, number=5517, bot="bramble"):
         return w.git.close_pr("hermes", {"bot": bot, "repo": APP, "task": "5513", "number": number})
