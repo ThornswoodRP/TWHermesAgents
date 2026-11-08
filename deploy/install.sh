@@ -313,6 +313,21 @@ if quotas_on; then
     setquota -g "tw-work-$b" 0 "$((gb * 1024 * 1024))" 0 0 "$srv_mnt"
   done
   ok "each Bot's work group has its disk cap on $srv_mnt"
+  # Those are the only group caps there are. A cap is kept by gid, so one left on a deleted group
+  # passes to the next group given that gid: the canary deleted tw-work-canary with its 32 MB cap
+  # on, tw-decide-voice got the gid, and the Whisper model's download was refused (2 Nov). So every
+  # other cap is taken off here, and each one is named.
+  keep=""
+  for b in $bots; do keep+=" $(getent group "tw-work-$b" | cut -d: -f3)"; done
+  report="$(repquota -g -n "$srv_mnt")" || stop "repquota could not read the group quotas on $srv_mnt."
+  # shellcheck disable=SC2086  # the gids are words on purpose
+  left="$(printf '%s\n' "$report" | python3 -I "$here/thornswood_brokers/disk_caps.py" $keep)" \
+    || stop "the group quotas on $srv_mnt could not be read; what it printed is above."
+  for gid in $left; do
+    name="$(getent group "$gid" | cut -d: -f1 || true)"
+    setquota -g "$gid" 0 0 0 0 "$srv_mnt" || stop "setquota could not take the cap off gid $gid on $srv_mnt."
+    ok "took the cap off gid $gid (${name:-no group has it now}): only the Bots' work groups are capped"
+  done
 else
   echo "SKIP disk caps: group quotas are not on for $srv_mnt; run this again with --quotas"
 fi

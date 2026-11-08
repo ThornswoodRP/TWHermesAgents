@@ -334,7 +334,7 @@ class Canary:
             return
         group = "tw-work-canary"
         self.run(["groupadd", "--system", group])
-        self.cleanup.append(lambda: self.run(["groupdel", group]))
+        self.cleanup.append(lambda: self.drop_quota_group(group, mount))
         d = Path(state["work"]) / "canary-quota"
         d.mkdir(exist_ok=True)
         shutil.chown(d, "tw-rift", group)
@@ -346,6 +346,17 @@ class Canary:
         self.check("3: writing past the disk quota is refused",
                    None if r.returncode != 0 and "quota" in r.stderr.lower()
                    else f"a 64 MB write under a 32 MB quota was not refused ({r.stderr.strip()[-160:]})")
+
+    def drop_quota_group(self, group: str, mount: str) -> None:
+        """Takes the canary's 32 MB cap off its group, then deletes the group. A quota belongs to the
+        gid, not the name: until 3 Nov the group was deleted with its cap still on, groupadd gave that
+        gid to the next system group made, and tw-decide-voice got a 32 MB cap that refused the Whisper
+        model's download. So the group is deleted only once its cap is gone."""
+        r = self.run(["setquota", "-g", group, "0", "0", "0", "0", mount])
+        if r.returncode != 0:
+            raise RuntimeError(f"the cap on {group} was not taken off ({(r.stderr or '').strip()[-160:]}); "
+                               f"{group} is kept so its gid is not handed on with a cap")
+        self.run(["groupdel", group])
 
     # Tier A (attack 5)
 
@@ -440,12 +451,13 @@ class Canary:
         self.check("3: the gateway and the brokers are still up", [f"{u} is down" for u in down])
 
     def finish(self) -> int:
+        failed = 0
         for undo in reversed(self.cleanup):
             try:
                 undo()
-            except Exception as e:  # report, keep cleaning
+            except Exception as e:  # report, keep cleaning; what is left behind fails the run
                 print(f"FAIL cleaning up: {e}")
-        failed = 0
+                failed += 1
         for name, ok, detail in self.results:
             print(f"{'PASS' if ok else 'FAIL'} {name}" + ("" if ok else f": {detail}"))
             failed += not ok
