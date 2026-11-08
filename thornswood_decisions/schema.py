@@ -713,6 +713,17 @@ CREATE TABLE own_attachments (
 CREATE INDEX own_attachments_by_message ON own_attachments(message_id);
 CREATE INDEX own_attachments_by_owner ON own_attachments(workspace_id, principal_id, message_id, created_at);
 """,
+    # 15: which app made each passkey (the AAGUID its authenticator reports), and which key is a phone's
+    # own fingerprint key. On 8 Nov the phone's fingerprint button opened Bitwarden: the key added on
+    # 2 Nov had been saved in Bitwarden, and the core never looked at which app made a key. A phone key
+    # is now taken only from the phone's own authenticator. Every phone key the app made before this
+    # was labelled "Fingerprint on this phone"; those are marked as phone keys with no known maker, so
+    # their next sign-in says the fingerprint must be added again.
+    """
+ALTER TABLE passkeys ADD COLUMN aaguid TEXT;
+ALTER TABLE passkeys ADD COLUMN phone_key INTEGER NOT NULL DEFAULT 0 CHECK (phone_key IN (0, 1));
+UPDATE passkeys SET phone_key = 1 WHERE label = 'Fingerprint on this phone';
+""",
 ]
 
 
@@ -850,5 +861,11 @@ INSERT INTO own_messages_13 SELECT id, workspace_id, gateway, session_id, made_s
 DROP TABLE own_messages;
 ALTER TABLE own_messages_13 RENAME TO own_messages;
 CREATE INDEX own_messages_by_gateway ON own_messages(workspace_id, gateway, status, created_at);
+""", ""),
+    # Which app made a key would be lost. The older release names a phone key by the id the phone
+    # keeps, and would again take one saved in a passkey app.
+    15: ([("SELECT count(*) FROM passkeys WHERE aaguid IS NOT NULL", "passkeys that record which app made them")], """
+ALTER TABLE passkeys DROP COLUMN phone_key;
+ALTER TABLE passkeys DROP COLUMN aaguid;
 """, ""),
 }
