@@ -163,8 +163,9 @@ ok "venv at $venv, requirements $want"
 
 # 4. The launchers and units, from this copy.
 install -d -m 0755 "$opt/bin"
+# Each is a link to its file in current, like deploy/install.sh's own (step 6 there).
 for f in tw-decide tw-decide-feed tw-decide-live tw-decide-voice tw-decide-connector tw-decide-push tw-decide-own; do
-  install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
+  ln -sfnT "$opt/current/deploy/decisions/$f" "$opt/bin/$f.new" && mv -T "$opt/bin/$f.new" "$opt/bin/$f"
 done
 for u in tw-decide.service tw-decide-bots.service tw-decide-feed.service tw-decide-feed.timer tw-decide-live.service \
          tw-decide-voice.service \
@@ -172,6 +173,16 @@ for u in tw-decide.service tw-decide-bots.service tw-decide-feed.service tw-deci
          tw-decide-push.service tw-decide-own.service tw-decide-peers.service tw-decide-peers.timer; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
+# Patrick's own Hermes loads the plugin through $opt/plugins, which deploy/install.sh
+# points at this release's plugins folder. A link install-plugin.sh made into a folder
+# inside current is moved to it once, as its owner, in the owner's folder.
+plugin_home="$(getent passwd patrick-hermes | cut -d: -f6 || true)"
+plugin_link="$plugin_home/.hermes/plugins/thornswood-decisions"
+if [[ -n "$plugin_home" && -L "$plugin_link" && "$(readlink "$plugin_link")" == "$opt/current/plugins/thornswood-decisions" ]]; then
+  runuser -u patrick-hermes -- ln -sfnT "$opt/plugins/thornswood-decisions" "$plugin_link.new"
+  runuser -u patrick-hermes -- mv -T "$plugin_link.new" "$plugin_link"
+  ok "$plugin_link -> $opt/plugins/thornswood-decisions"
+fi
 # The connector finds the gateway's control socket where the gateway's own unit puts it.
 install -d -m 0755 /etc/systemd/system/tw-decide-connector.service.d
 printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u hermes)" \
@@ -407,7 +418,7 @@ start_voice() {
 # Asked as the core asks: Voice().check (which Whisper) or Voice().prepare (load its model).
 voice_ask() {
   runuser -u tw-decide -g tw-decide -G tw-decide-voice -- /usr/bin/python3 -I -c \
-    "import sys; sys.path.insert(0, '/opt/thornswood-hermes/current'); from thornswood_decisions.voice import Voice; print(Voice().$1() or '')"
+    "import sys; sys.path.insert(0, sys.argv[1]); from thornswood_decisions.voice import Voice; print(Voice().$1() or '')" "$here"
 }
 start_voice
 ok "dictation listens on /run/tw/decide-voice/voice.sock (660, tw-decide-voice)"

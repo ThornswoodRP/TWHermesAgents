@@ -65,7 +65,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 LOCAL_CORE = "http://127.0.0.1:9135/api/v1"
 GATEWAYS = {"me": "my-hermes", "one": "One's Hermes"}
@@ -884,6 +884,27 @@ class Updater:
         return self.run([self.git_bin, "-c", "credential.interactive=never", "-C", str(self.clone), *args],
                         capture_output=True, timeout=120, check=False, stdin=subprocess.DEVNULL, env=env, **quiet())
 
+    def _folder(self, release: str) -> str | None:
+        """The folder of the release that holds this package, from that release's own
+        deploy/layout.json (a release made before the file existed keeps it at its root);
+        None when git cannot read it, or it does not name a folder inside the release."""
+        listed = self._git("ls-tree", "--name-only", release, "deploy/layout.json")
+        if listed.returncode != 0:
+            return None
+        if not listed.stdout.strip():
+            return "thornswood_decisions"
+        got = self._git("show", f"{release}:deploy/layout.json")
+        if got.returncode != 0:
+            return None
+        try:
+            packages = json.loads(got.stdout)["packages"]
+        except (ValueError, KeyError, TypeError):
+            return None
+        rel = PurePosixPath(packages) if isinstance(packages, str) else None
+        if rel is None or rel.is_absolute() or ".." in rel.parts:
+            return None
+        return str(rel / "thornswood_decisions")
+
     def to(self, release: str) -> tuple[bool, str]:
         """(done, why not)."""
         if not RELEASE.match(release):
@@ -894,9 +915,12 @@ class Updater:
                 return False, f"git fetch in {self.clone.name} failed (exit {got.returncode})"
             if self._git("merge-base", "--is-ancestor", release, "origin/main").returncode != 0:
                 return False, f"{release[:12]} is not on main"
+            folder = self._folder(release)
+            if folder is None:
+                return False, f"could not read where {release[:12]} keeps its packages (deploy/layout.json)"
             files = {}
             for name in UPDATE_FILES:
-                got = self._git("show", f"{release}:thornswood_decisions/{name}")
+                got = self._git("show", f"{release}:{folder}/{name}")
                 if got.returncode != 0:
                     return False, f"{name} is not in {release[:12]}"
                 compile(got.stdout, name, "exec")

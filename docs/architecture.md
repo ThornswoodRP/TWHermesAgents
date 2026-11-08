@@ -88,6 +88,8 @@ When a Bot needs Patrick, it opens a card in the decision core (`thornswood_deci
 
 [operations.md](operations.md) says how to watch it, pause it and roll back by hand.
 
+The copy of the follower that runs is the one already installed, and it calls each new release's own `deploy/install.sh`, `deploy/decisions/install.sh`, `scripts/apply.py` and `tests/`, so those paths stay put. Where a release keeps its Python packages is in its own `deploy/layout.json`; the follower reads it before it runs another release's code (to count its store migrations, or to have it put the store back), and so does One's connector before it takes its two files from a release. A release made before that file keeps its packages at its root.
+
 ## Limits and slices
 
 The host's caps are in `policy.yaml` `slices`, rendered into `deploy/systemd/*.slice` by `scripts/render_units.py`, so a cap changes only by pull request.

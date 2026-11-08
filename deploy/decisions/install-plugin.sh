@@ -5,7 +5,8 @@
 #   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install-plugin.sh <commit>
 #
 # It links that user's plugins/thornswood-decisions to the root-owned release
-# (/opt/thornswood-hermes/current/plugins/thornswood-decisions), the way the
+# (/opt/thornswood-hermes/plugins/thornswood-decisions, which each install
+# points at that release's plugins folder), the way the
 # Hermes docs link a plugin from a checkout, so the code that carries Desktop's
 # session to the core is never a copy anyone but root can change, and each
 # install moves it with the release. It never touches the Bots' Hermes (the
@@ -27,7 +28,7 @@ ok() { echo "PASS $*"; }
 [[ "$(stat -c %U "$here")" == root ]] || stop "$here is not root's."
 [[ "$(git -C "$here" rev-parse HEAD)" == "$commit" ]] || stop "$here is not at $commit."
 [[ "$(readlink -f "$opt/current")" == "$here" ]] || stop "$opt/current is not this commit; the VM puts main in place by itself (tw-follow-main), so wait for it to reach $commit, or see /var/lib/thornswood/follow-main.json for why it has not."
-target="$opt/current/plugins/thornswood-decisions"
+target="$opt/plugins/thornswood-decisions"
 [[ -f "$target/dashboard/plugin_api.py" ]] || stop "$target has no plugin in it."
 
 id "$owner" >/dev/null 2>&1 || stop "the $owner user does not exist; Patrick's Hermes runs as it."

@@ -192,8 +192,13 @@ if ($LASTEXITCODE -ne 0) { Fail "git fetch origin main failed in $here (exit $LA
 $main = (& git -C $here rev-parse origin/main).Trim()
 if ($commit -ne $main) { Fail "this clone is at $commit, not main's $main; git -C $here checkout --detach origin/main first" }
 New-Item -ItemType Directory -Force -Path $Folder | Out-Null
+# Where this clone keeps the package, as its deploy/layout.json says (the connector's own update reads it the same way).
+$packages = (Get-Content -Raw -Path (Join-Path $here 'deploy\layout.json') | ConvertFrom-Json).packages
+if (-not ($packages -is [string]) -or [IO.Path]::IsPathRooted($packages) -or ($packages -split '[\\/]') -contains '..') {
+    Fail "deploy\layout.json in $here does not name a folder inside the clone"
+}
 foreach ($f in 'own_connector.py', 'room_send.py') {
-    Copy-Item (Join-Path $here "thornswood_decisions\$f") (Join-Path $Folder $f) -Force
+    Copy-Item (Join-Path (Join-Path $here $packages) "thornswood_decisions\$f") (Join-Path $Folder $f) -Force
 }
 Set-Content -Path (Join-Path $Folder 'COMMIT') -Value $commit -Encoding ascii
 Pass "own_connector.py and room_send.py from $commit are in $Folder"
