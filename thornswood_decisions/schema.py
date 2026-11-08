@@ -41,10 +41,10 @@ BEGIN SELECT RAISE(ABORT, '{table} rows are history and are never deleted'); END
 
 
 # Patrick's answers that reached the Bot that asked and could not be acted on, sent to it once more
-# (migration 15). Each card's newest "Bot told" message goes in the queue again as a new message with the
+# (migration 16). Each card's newest "Bot told" message goes in the queue again as a new message with the
 # same answer; the one already sent, and its receipts, stay as history. Only a card still answered, and
 # only when none of its messages is already waiting or on its way.
-REPLAY_15 = (
+REPLAY_16 = (
     # Bramble could not file the issue each one's DECIDED.md line needs: tw_git had no open_issue op.
     "dec_fWitODbwp3NuQ7dNhxaRTw",   # the #5327 merge, 1 Nov
     "dec_W3dhMXQ8h7PPfh-ReZ_lmw",   # the #5327 merge, 2 Nov
@@ -745,12 +745,23 @@ CREATE TABLE own_attachments (
 CREATE INDEX own_attachments_by_message ON own_attachments(message_id);
 CREATE INDEX own_attachments_by_owner ON own_attachments(workspace_id, principal_id, message_id, created_at);
 """,
-    # 15: six of Patrick's answers go to Bramble once more (REPLAY_15). Five reached it while tw_git had
+    # 15: which app made each passkey (the AAGUID its authenticator reports), and which key is a phone's
+    # own fingerprint key. On 8 Nov the phone's fingerprint button opened Bitwarden: the key added on
+    # 2 Nov had been saved in Bitwarden, and the core never looked at which app made a key. A phone key
+    # is now taken only from the phone's own authenticator. Every phone key the app made before this
+    # was labelled "Fingerprint on this phone"; those are marked as phone keys with no known maker, so
+    # their next sign-in says the fingerprint must be added again.
+    """
+ALTER TABLE passkeys ADD COLUMN aaguid TEXT;
+ALTER TABLE passkeys ADD COLUMN phone_key INTEGER NOT NULL DEFAULT 0 CHECK (phone_key IN (0, 1));
+UPDATE passkeys SET phone_key = 1 WHERE label = 'Fingerprint on this phone';
+""",
+    # 16: six of Patrick's answers go to Bramble once more (REPLAY_16). Five reached it while tw_git had
     # no way to open the issue each one's DECIDED.md line needs; one reached it while the fleet queue was
     # turning its turns away, so nothing ran. This release adds tw_git's open_issue, and a turn the queue
     # turns away now leaves its message in the queue. The VM's follower starts the connector only after
     # every Bot runs this release (follow_main.py start_connector), so these reach Bramble with the op.
-    _replay(REPLAY_15),
+    _replay(REPLAY_16),
 ]
 
 
@@ -889,7 +900,13 @@ DROP TABLE own_messages;
 ALTER TABLE own_messages_13 RENAME TO own_messages;
 CREATE INDEX own_messages_by_gateway ON own_messages(workspace_id, gateway, status, created_at);
 """, ""),
+    # Which app made a key would be lost. The older release names a phone key by the id the phone
+    # keeps, and would again take one saved in a passkey app.
+    15: ([("SELECT count(*) FROM passkeys WHERE aaguid IS NOT NULL", "passkeys that record which app made them")], """
+ALTER TABLE passkeys DROP COLUMN phone_key;
+ALTER TABLE passkeys DROP COLUMN aaguid;
+""", ""),
     # A data step: no table changed. An answer it put back in the queue is one the older release sends
     # the same way. Nothing to undo.
-    15: ([], "", ""),
+    16: ([], "", ""),
 }

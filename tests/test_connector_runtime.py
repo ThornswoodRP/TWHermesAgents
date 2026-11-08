@@ -26,6 +26,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -443,6 +444,48 @@ class CanaryChecksTheHelper(unittest.TestCase):
         self.assertIsNone(self.canary.connector_problem(0, '{"ready": true}\n', ""))
         self.assertIsNotNone(self.canary.connector_problem(0, '{"ready": false}\n', ""))
         self.assertIn("Traceback", self.canary.connector_problem(1, "", "Traceback ..."))
+
+
+class ChecksNeverFinishAnUpdate(unittest.TestCase):
+    """The helper's quick ops run with Hermes's own HERMES_DISABLE_LAZY_INSTALLS (2 Nov, One's bar at 5:06 PM:
+    "the readiness check did not answer in a minute"). Hermes's bootstrap finishes an owed source update at
+    every start unless that switch is set (hermes_cli/venv_sync.py:343 prepare_launch), which takes minutes,
+    so a check started then ran out its minute. Here a stand-in bootstrap takes that long when the switch is
+    not set; the real room_send.py answers behind it from stand-in Hermes modules."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        root = stub_hermes(self.dir / "hermes-agent")
+        boot = (f"import os, sys, runpy, time\nsys.path.insert(0, {str(root)!r})\n"
+                "if os.environ.get('HERMES_DISABLE_LAZY_INSTALLS') != '1':\n"
+                "    sys.stderr.write('hermes: finishing the source update\\n'); sys.stderr.flush(); time.sleep(30)\n"
+                f"runpy.run_path({str(HELPER)!r}, run_name='__main__')\n")
+        self.cmd = [sys.executable, "-I", "-c", boot]
+        for mod in (own_connector, connector):
+            patch = unittest.mock.patch.object(mod, "CHECK_SECONDS", 5)
+            patch.start()
+            self.addCleanup(patch.stop)
+        env = unittest.mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+        os.environ.pop("TW_STUB_STATE", None)
+
+    def test_ones_readiness_check_answers_while_an_update_is_owed(self):
+        h = own_connector.Hermes(["hermes"], self.cmd, self.dir, "One's Hermes")
+        self.assertEqual(h.ready(), ("ready", ""))
+        self.assertNotIn("HERMES_DISABLE_LAZY_INSTALLS", os.environ)  # the connector's own environment is left as it is
+
+    def test_the_bots_check_answers_too(self):
+        self.assertEqual(connector.Hermes(["hermes"], self.cmd, self.dir).check("bramble"), ("ready", ""))
+
+    def test_a_check_that_runs_out_its_time_says_what_it_printed(self):
+        with unittest.mock.patch.object(own_connector, "PROBE_ENV", {}):
+            state, why = own_connector.Hermes(["hermes"], self.cmd, self.dir, "One's Hermes").ready()
+        self.assertEqual(state, "check_failed")
+        self.assertEqual(why, "the readiness check did not answer in a minute; it printed: "
+                              "hermes: finishing the source update")
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from thornswood_guard.brokers import OWED_FILE, BrokerRefused
 
 
 def wakes(output: str) -> bool:
-    """Hermes 0.22.5's wake gate (cron/scheduler_prompt.py _parse_wake_gate):
+    """Hermes 0.23.0's wake gate (cron/scheduler_prompt.py _parse_wake_gate):
     the agent is skipped only when the last non-empty line is the JSON
     {"wakeAgent": false}."""
     lines = [line for line in output.splitlines() if line.strip()]

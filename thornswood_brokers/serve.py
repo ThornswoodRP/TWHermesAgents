@@ -111,7 +111,9 @@ def main(argv: list[str]) -> None:
         for app in policy.data["brokers"]["apps"].values():
             if not os.access(app["key_file"], os.R_OK):
                 raise SystemExit(f"tw-git cannot read {app['key_file']}; the install script says where the App keys go")
-        svc = GitService(policy, gh, _asker(policy), mirrors=Path(state["git_mirrors"]), spool=Path(state["spool"]))
+        decide = policy.data["brokers"]["sockets"]["decide_git"]["path"]
+        svc = GitService(policy, gh, _asker(policy), mirrors=Path(state["git_mirrors"]), spool=Path(state["spool"]),
+                         ask_decide=lambda op, args: wire.call(decide, op, args, timeout=30))
         _serve(policy, "git", svc.ops())
     elif role == "files":
         from .files_service import FilesService

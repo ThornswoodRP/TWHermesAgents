@@ -117,6 +117,10 @@ getent group tw-decide-bots >/dev/null || stop "there is no tw-decide-bots group
 members="$(getent group tw-decide-bots | cut -d: -f4)"
 [[ "$members" == hermes ]] || stop "the tw-decide-bots group's members are '$members'; it must be hermes alone."
 ok "group tw-decide-bots: hermes alone"
+getent group tw-decide-git >/dev/null || stop "there is no tw-decide-git group; deploy/install.sh makes it, run that first."
+members="$(getent group tw-decide-git | cut -d: -f4)"
+[[ "$members" == tw-git ]] || stop "the tw-decide-git group's members are '$members'; it must be tw-git alone."
+ok "group tw-decide-git: tw-git alone"
 
 # 2. The store's folder: tw-decide's only. The settings file: root's, no secrets.
 install -d -m 0755 -o root -g root /srv/tw /etc/thornswood
@@ -276,6 +280,10 @@ for _ in $(seq 1 20); do [[ -S /run/tw/decide-bots/bots.sock ]] && break; sleep 
 [[ "$(stat -c '%a %G' /run/tw/decide-bots/bots.sock)" == "660 tw-decide-bots" ]] \
   || stop "the Bots' route's socket is $(stat -c '%a %G' /run/tw/decide-bots/bots.sock), not 660 tw-decide-bots"
 ok "the Bots' route listens on /run/tw/decide-bots/bots.sock (660, tw-decide-bots)"
+[[ -S /run/tw/decide-git/git.sock ]] || stop "the Bots' route did not open tw-git's socket: journalctl -u tw-decide-bots -n 50"
+[[ "$(stat -c '%a %G' /run/tw/decide-git/git.sock)" == "660 tw-decide-git" ]] \
+  || stop "tw-git's socket is $(stat -c '%a %G' /run/tw/decide-git/git.sock), not 660 tw-decide-git"
+ok "tw-git's answers socket listens on /run/tw/decide-git/git.sock (660, tw-decide-git)"
 
 # 9. The feeds, once now and then once a minute, when the room is known.
 if [[ -n "$room" ]]; then

@@ -27,7 +27,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from thornswood_guard.github import SHA, CheckRun, GitHubRules, Issue, PullRequest
+from thornswood_guard.github import SHA, CheckRun, Credit, GitHubRules, Issue, PullRequest
 from thornswood_guard.policy import Policy, Verdict
 
 from .github_api import GitHub, GitHubError, quote
@@ -70,6 +70,12 @@ AUTO_MERGE = """mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMerg
   }
 }"""
 WORKFLOW_DIR = ".github/workflows/"
+# A Co-authored-by line in a commit message: the credit for someone else's work.
+CO_AUTHOR = re.compile(r"^co-authored-by:[ \t]*(.*?)[ \t]*<([^>\n]+)>[ \t]*$", re.IGNORECASE | re.MULTILINE)
+# A Carried-from line: the outside pull request whose work a commit carries
+# (bramble-duties section 3), what a "merge this one" answer is bound to.
+CARRIED_FROM = re.compile(r"^carried-from:[ \t]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)[ \t]*$",
+                          re.IGNORECASE | re.MULTILINE)
 
 
 class RemoteDecisions:
@@ -87,10 +93,14 @@ class RemoteDecisions:
 class GitService:
     def __init__(self, policy: Policy, github: GitHub, ask_policy: Callable[[str, dict], dict], *,
                  mirrors: Path, spool: Path, git_base: str = "https://github.com/",
-                 git_env: dict | None = None, allow_file_protocol: bool = False):
+                 git_env: dict | None = None, allow_file_protocol: bool = False,
+                 ask_decide: Callable[[str, dict], object] | None = None):
         self.policy = policy
         self.gh = github
         self.ask = ask_policy
+        # tw-git's read of Patrick's answers on outside pull request cards
+        # (#132): tw-decide-bots' socket for tw-git alone.
+        self.ask_decide = ask_decide
         self.rules = GitHubRules(policy, RemoteDecisions(ask_policy))
         self.mirrors = Path(mirrors)
         self.spool = Path(spool)
@@ -205,10 +215,27 @@ class GitService:
                 files.append(f["previous_filename"])
         if raw.get("changed_files", 0) > len({f for f in files}):
             raise Refused(f"PR {number} changes {raw['changed_files']} files and GitHub listed {len(files)}; nothing merges unseen")
+        # Whose work it holds: every commit's author and each Co-authored-by
+        # line (Patrick, 8 Nov 2026: outside work merges only on his word).
+        commits = self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls/{int(number)}/commits")
+        if raw.get("commits", 0) > len(commits):
+            raise Refused(f"PR {number} has {raw['commits']} commits and GitHub listed {len(commits)}; nothing merges unseen")
+        credits, carried_from = [], []
+        for c in commits:
+            sha, body = c.get("sha", ""), c.get("commit") or {}
+            author = body.get("author") or {}
+            credits.append(Credit(commit=sha, name=author.get("name") or "", email=author.get("email") or "",
+                                  login=(c.get("author") or {}).get("login")))
+            for name, email in CO_AUTHOR.findall(body.get("message") or ""):
+                credits.append(Credit(commit=sha, name=name, email=email, co_author=True))
+            for r, n in CARRIED_FROM.findall(body.get("message") or ""):
+                if (r, int(n)) not in carried_from:
+                    carried_from.append((r, int(n)))
         return PullRequest(repo=repo, number=int(number), head_sha=raw["head"]["sha"], head_ref=head_ref,
                            base_ref=raw["base"]["ref"], author_bot=author_bot, author_login=raw["user"]["login"],
                            files=files, labels=[l["name"] for l in raw.get("labels", [])],
-                           draft=bool(raw.get("draft")), merged=bool(raw.get("merged")))
+                           draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits,
+                           carried_from=carried_from)
 
     def _checks(self, repo: str, sha: str) -> list[CheckRun]:
         runs = self.gh.get_all("bramble", repo, f"/repos/{repo}/commits/{sha}/check-runs?filter=all", key="check_runs")
@@ -399,7 +426,7 @@ class GitService:
             raise Refused("a comment says something")
         issue_raw = self.gh.get("workers", repo, f"/repos/{repo}/issues/{number}")
         if issue_raw.get("pull_request"):
-            self._check(self.rules.edit_pr(bot, self._pr(repo, number)))
+            self._check(self.rules.comment_pr(bot, self._pr(repo, number)))
         else:
             issue = self._issue(repo, number)
             if self.rules._hands_off_issue(issue):
@@ -574,7 +601,11 @@ class GitService:
             raise Refused(f"PR {number} is already merged")
         checks = self._checks(repo, pr.head_sha)
         branch_checks = self._branch_checks(repo, pr.base_ref) if auto else None
-        self._check(self.rules.merge(bot, pr, sha, method, checks, branch_checks=branch_checks))
+        # Work by someone off Patrick's list merges only once he answered
+        # "let them merge" for that person (#132); read only when it is needed.
+        allowed = self._allowed_people(pr) if self.rules.outside_credits(pr) else None
+        self._check(self.rules.merge(bot, pr, sha, method, checks, branch_checks=branch_checks,
+                                     allowed_people=allowed))
 
         # Where GitHub's auto-merge merges (policy merge.auto_merge), this turns
         # it on at this exact head, and GitHub merges once the checks the
@@ -608,6 +639,101 @@ class GitService:
         if receipt.get("auto_merge"):
             out["auto_merge"] = True
         return out
+
+    # Patrick's answers on outside pull request cards (#132)
+
+    def _outside_answers(self) -> list[dict]:
+        if self.ask_decide is None:
+            raise Refused("tw-git has no route to Patrick's answers on outside pull request cards; "
+                          "nothing waits on one until it has")
+        got = self.ask_decide("outside_answers", {})
+        if not isinstance(got, list):
+            raise Refused("the decision core's outside answers are not a list; nothing is done on them")
+        known = set(self.policy.data["merge"]["base"])
+        out = []
+        for a in got:
+            if not (isinstance(a, dict) and a.get("repo") in known and isinstance(a.get("number"), int)
+                    and isinstance(a.get("author"), str) and isinstance(a.get("option"), str)):
+                raise Refused(f"an outside answer from the decision core is not one tw-git reads: {a!r:.200}")
+            out.append(a)
+        return out
+
+    def _allowed_people(self, pr: PullRequest) -> set[str]:
+        """Whose work may merge in this pull request on Patrick's word, once
+        GitHub says they opened the outside pull request the card names: each
+        person he answered "Auto-Merge" for, and the author of an
+        outside pull request he answered "merge this one" for, when this pull
+        request carries it (a carried link on the card, or a Carried-from line
+        in its commits) and theirs is still open, so that yes merges it once."""
+        people = set()
+        here = (pr.repo, pr.number)
+        for a in self._outside_answers():
+            if a["option"] == "merge":
+                carries = here in [(c["repo"], c["number"]) for c in a.get("carried") or []] or (
+                    (a["repo"], a["number"]) in pr.carried_from)
+                if not carries:
+                    continue
+            elif a["option"] != "allow":
+                continue
+            try:
+                raw = self.gh.get("bramble", a["repo"], f"/repos/{a['repo']}/pulls/{int(a['number'])}")
+            except GitHubError as e:
+                if e.status == 404:
+                    continue  # the pull request the card names is gone, so whose it was cannot be read: not allowed
+                raise Refused(f"{a['repo']}#{a['number']}, which card {a['decision_id']} names, cannot be read ({e})") from e
+            if a["option"] == "merge" and raw.get("state") != "open":
+                continue  # its yes was for the one pull request carrying it, which already went
+            if ((raw.get("user") or {}).get("login") or "").lower() == a["author"].lower():
+                people.add(a["author"].lower())
+        return people
+
+    def close_pr(self, caller: str, args: dict) -> dict:
+        """Close a pull request on Patrick's answer on its outside card (#132)."""
+        bot, repo, task = self._bot(args), self._repo(args), self._task(args)
+        number = int(args.get("number"))
+        pr = self._pr(repo, number)
+        raw = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{number}")
+        answers = self._outside_answers()
+        # Whether the work an "allow" answer for this pull request carried has
+        # merged, which is what replaces it.
+        merged = {}
+        for a in answers:
+            if (a["repo"], a["number"]) != (repo, number) or a["option"] not in ("allow", "merge"):
+                continue
+            for c in a.get("carried") or []:
+                key = (c["repo"], int(c["number"]))
+                if key in merged or c["repo"] not in self.policy.data["merge"]["base"]:
+                    continue
+                try:
+                    got = self.gh.get("bramble", c["repo"], f"/repos/{c['repo']}/pulls/{int(c['number'])}")
+                except GitHubError as e:
+                    raise Refused(f"the carried {c['repo']}#{c['number']} cannot be read ({e}); nothing is closed") from e
+                merged[key] = bool(got.get("merged"))
+        # A merged pull request named as what replaced it counts only when its
+        # own commits say, in a Carried-from line, that they carry this one.
+        replaced = False
+        if args.get("replaced_by") is not None:
+            other = self._pr(repo, int(args["replaced_by"]))
+            if not other.merged:
+                raise Refused(f"#{other.number} has not merged, so it has not replaced PR {number}")
+            if (repo, number) not in other.carried_from:
+                raise Refused(f"#{other.number} has no Carried-from line naming {repo}#{number}")
+            replaced = True
+        self._check(self.rules.close_pr(bot, pr, answers, merged, raw.get("state") == "open", replaced))
+
+        def write():
+            r = self.gh.call("bramble", repo, WRITE["pulls"], "PATCH", f"/repos/{repo}/pulls/{number}",
+                             {"state": "closed"})
+            if r.status != 200:
+                raise GitHubError(r.status, str(r.body))
+            return {"closed": True}
+
+        def read_back():
+            now = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{number}")
+            return {"closed": True} if now.get("state") == "closed" else None
+
+        return self._guarded_write(bot, task, "close_pr", repo, f"pr/{number}", pr.head_sha,
+                                   write=write, read_back=read_back)
 
     def start_run(self, caller: str, args: dict) -> dict:
         bot, task = self._bot(args), self._task(args)
@@ -685,7 +811,7 @@ class GitService:
         return self.ask("ledger_event", {k: args.get(k) for k in ("repo", "issue", "event", "release", "note")})
 
     # Every op that changes something on GitHub.
-    WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "start_run")
+    WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr", "start_run")
 
     def _executor_only(self, name: str, op: Callable[[str, dict], dict]) -> Callable[[str, dict], dict]:
         """One executor at a time (plan phases 4 and 5): until the cutover the
@@ -701,6 +827,6 @@ class GitService:
 
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
-        names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "start_run",
-                 "read", "refused", "ledger_event")
+        names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
+                 "start_run", "read", "refused", "ledger_event")
         return {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}

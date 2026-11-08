@@ -28,7 +28,7 @@ from test_decisions_api import ORIGIN, Served, answer_body
 from thornswood_decisions import backup, connector, feed_reader, store as store_mod
 from thornswood_decisions.chat import Chat, room_event_id
 from thornswood_decisions.feeds import Feeds
-from thornswood_decisions.schema import MIGRATIONS, REPLAY_15, _replay
+from thornswood_decisions.schema import MIGRATIONS, REPLAY_16, _replay
 from thornswood_decisions.store import CoreError, Store, migrate
 
 ROOM = "54b3ad46-3419-4adb-b60d-c79cb347fcee"
@@ -112,8 +112,11 @@ class ChatSend(unittest.TestCase):
 class ConnectorSide(unittest.TestCase):
     def at_schema(self, n):
         """The store as an older release left it at schema n: the stored version, and no column a later
-        migration adds (13: own_messages.reply_to; 14: own_attachments), so this release's migrations run on
-        it as they would."""
+        migration adds (13: own_messages.reply_to; 14: own_attachments; 15: passkeys.aaguid and phone_key),
+        so this release's migrations run on it as they would."""
+        if n < 15:
+            self.w.store.db.execute("ALTER TABLE passkeys DROP COLUMN phone_key")
+            self.w.store.db.execute("ALTER TABLE passkeys DROP COLUMN aaguid")
         if n < 14:
             self.w.store.db.execute("DROP TABLE own_attachments")
         if n < 13:
@@ -295,10 +298,10 @@ class ConnectorSide(unittest.TestCase):
         self.assertEqual(self.chat.view(self.w.patrick(), "rift")["mine"][0]["waits"],
                          "the fleet queue has no room for a turn of rift's: x")
 
-    def test_migration_15_sends_each_named_answer_once_more_and_nothing_else(self):
-        self.assertEqual(MIGRATIONS[14], _replay(REPLAY_15))
-        self.assertEqual(len(REPLAY_15), 6)
-        self.assertIn("dec_2XL-fP9HNMMtGBXp_5KW1A", REPLAY_15)
+    def test_migration_16_sends_each_named_answer_once_more_and_nothing_else(self):
+        self.assertEqual(MIGRATIONS[15], _replay(REPLAY_16))
+        self.assertEqual(len(REPLAY_16), 6)
+        self.assertIn("dec_2XL-fP9HNMMtGBXp_5KW1A", REPLAY_16)
         flags(self.w, "connector_effects")
         told = self.answered(key="key-00000150", title="Told")
         cx = self.chat.claim(self.w.ws, self.tok)["items"][0]["id"]
