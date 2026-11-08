@@ -34,7 +34,7 @@ This comes before every other line here. It is word for word the rule every Clau
 
 ## Where the rest of this skill is
 
-Thornswood-Hermes is public, so the private operations are not here. They are
+TWHermesAgents is public, so the private operations are not here. They are
 in the private repository, Thornswood-Ops, at `docs/hermes/thornswood-ops.md`:
 the four repositories and who writes where, Dev and Main, the box, One,
 releases and signing, the deploy gate and its verbs, run notes and status,
@@ -54,7 +54,7 @@ Developer-Guide.md binds you first, every rule in it. That file adds what only
 matters to the Bots and to private operations. When it and the machine
 disagree, the machine is right: say so to Patrick. A change to it is an Ops
 pull request. This skill is installed by `scripts/apply.py` from
-Thornswood-Hermes, which no Bot writes to.
+TWHermesAgents, which no Bot writes to.
 
 Nothing private goes into a public repository: no run command with a secret's
 path, no evidence dump, no address, no user name in a path, nothing quoted from

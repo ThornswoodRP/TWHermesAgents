@@ -840,7 +840,7 @@ class Updater:
     """Moves One's copy to the release the VM runs, the way the VM follows main by itself (#2862).
 
     The VM names the commit; the code comes from GitHub, never from the VM: Patrick's own clone of
-    Thornswood-Hermes on One fetches main, the commit has to be on main, and its two files are taken
+    TWHermesAgents on One fetches main, the commit has to be on main, and its two files are taken
     from that commit with `git show`, each checked to compile before either is put in place, then
     COMMIT. The connector then finishes the turns it is running, takes no new one, and stops with
     UPDATE_EXIT, which --supervise answers by starting the new copy at once. A failed update changes
@@ -1301,7 +1301,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--token", help="this connector's token file")
     ap.add_argument("--core", default=LOCAL_CORE, help="the core's API: loopback on the VM, the VM's ts.net on One")
     ap.add_argument("--once", action="store_true", help="one round, then stop")
-    ap.add_argument("--clone", help="One: Patrick's clone of Thornswood-Hermes, which this copy updates itself from")
+    ap.add_argument("--clone", help="One: Patrick's clone of TWHermesAgents, which this copy updates itself from")
     ap.add_argument("--git", default="git", help="the git command for --clone")
     ap.add_argument("--supervise", action="store_true",
                     help="One's task: run the connector in its own process and start it again after an update")

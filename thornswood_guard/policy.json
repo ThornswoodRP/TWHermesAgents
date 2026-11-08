@@ -5,7 +5,7 @@
     "app": "ThornswoodRP/Thornswood",
     "fork": "ThornswoodRP/skymp",
     "ops": "ThornswoodRP/Thornswood-Ops",
-    "hermes": "ThornswoodRP/Thornswood-Hermes"
+    "hermes": "ThornswoodRP/TWHermesAgents"
   },
   "bots": {
     "bramble": {
@@ -676,7 +676,7 @@
     }
   },
   "follow_main": {
-    "url": "git@github.com:ThornswoodRP/Thornswood-Hermes.git",
+    "url": "git@github.com:ThornswoodRP/TWHermesAgents.git",
     "read_key": "/etc/thornswood/hermes-read-key",
     "known_hosts": "/etc/thornswood/github_known_hosts",
     "mirror": "/srv/tw/follow/thornswood-hermes.git",

@@ -10,7 +10,7 @@ Hermes on One where the plugin is linked) no tools, hooks or commands. It adds
 one system prompt section: rule zero, Patrick's "Fix the cause, no band-aids,
 ever", word for word from rule_zero.md, the same text the guard gives the six
 Bots. Hermes freezes it into every new session's prompt, so a reload or a
-SOUL.md edit cannot drop it; only a Thornswood-Hermes PR changes it, and a test
+SOUL.md edit cannot drop it; only a TWHermesAgents PR changes it, and a test
 there fails if this copy and the guard's ever differ.
 """
 

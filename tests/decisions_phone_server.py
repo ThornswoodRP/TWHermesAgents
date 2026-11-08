@@ -70,7 +70,7 @@ own.claim(w.ws, "one", to, 0, True)
 # A long paste as Hermes keeps it: the @file: reference where it was typed, the file's text below
 # "--- Attached Context ---" (agent/context_references.py), here holding a command too long for a phone.
 PASTE_REF = "@file:AppData/Local/hermes/composer-pastes/pasted_content_2026-11-02_03-17-07-762_54a0c5.txt"
-PASTE_CMD = ("gh pr merge 55 -R ThornswoodRP/Thornswood-Hermes --squash --match-head-commit "
+PASTE_CMD = ("gh pr merge 55 -R ThornswoodRP/TWHermesAgents --squash --match-head-commit "
              "750aa15ef81f69c5b0be509a6ea44a9d50b0d494")
 PASTE_MSG = (f"Here is the plan {PASTE_REF}\n\n--- Attached Context ---\n\n\U0001F4C4 {PASTE_REF} (40 tokens)\n"
              f"```\nStep 1. {PASTE_CMD}\n```")
@@ -127,7 +127,7 @@ con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('
 # Links of each kind, a mention and a phone number (Patrick, 2 Nov 3:18 PM and 3:21 PM); and a chat Hermes has
 # not titled that began with a /skill, kept with the skill's whole text ahead of what he typed.
 LINKS = ("Ask @Rift. The [plan thread](https://claude.ai/code/project/chan_1?thread=cmsg_9), "
-         "https://claude.ai/artifact/AbC123, https://github.com/ThornswoodRP/Thornswood-Hermes/pull/96, "
+         "https://claude.ai/artifact/AbC123, https://github.com/ThornswoodRP/TWHermesAgents/pull/96, "
          "www.example.com and call 720-555-0199.")
 con.execute("INSERT INTO sessions VALUES('s_links', 'cli', 'Links check', ?, ?, NULL, NULL, NULL, 0, 0)",
             (epoch("2026-10-31T10:00:00+00:00"), epoch("2026-10-31T10:30:00+00:00")))

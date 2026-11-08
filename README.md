@@ -1,4 +1,4 @@
-# Thornswood-Hermes
+# TWHermesAgents
 
 The guard rails for Thornswood's six Hermes Bots: Bramble, Rift, Sprocket, Echo, Magpie and Wisp. No Bot can write here. Every change is Patrick's: written with Claude Code, and merged once its guard rail tests pass ("Merge rule here" below).
 
@@ -46,7 +46,7 @@ The VM follows main by itself (Patrick's answer A on q-retire-hermes-one, 31 Oct
 
 What it did is in `/var/lib/thornswood/follow-main.json` and `journalctl -u tw-follow-main`.
 
-**Once, for the read key:** the install prints `the VM's read key for Thornswood-Hermes: ssh-ed25519 ... thornswood-bots-reads-hermes`. Patrick adds that line on GitHub: Thornswood-Hermes, **Settings**, **Deploy keys**, **Add deploy key**, title `thornswood-bots`, the line as the key, **Allow write access** left off, **Add key**. Until then each run says `GitHub refused the VM's read key` with the line.
+**Once, for the read key:** the install prints `the VM's read key for TWHermesAgents: ssh-ed25519 ... thornswood-bots-reads-hermes`. Patrick adds that line on GitHub: TWHermesAgents, **Settings**, **Deploy keys**, **Add deploy key**, title `thornswood-bots`, the line as the key, **Allow write access** left off, **Add key**. Until then each run says `GitHub refused the VM's read key` with the line.
 
 **The first install** that brings `tw-follow-main` still comes from a machine on the tailnet, the way every install did before: `scripts/install-on-oracle.sh <commit>`, then `scripts/send-to-oracle.sh <commit>`. After it, nothing is sent.
 

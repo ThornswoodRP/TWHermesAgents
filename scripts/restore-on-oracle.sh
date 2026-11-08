@@ -2,7 +2,7 @@
 # Restore the Oracle VM's Hermes state from one of the encrypted backups One
 # pulled (02 section 7; attack test 21).
 #
-# Runs on One, from a clone of Thornswood-Hermes:
+# Runs on One, from a clone of TWHermesAgents:
 #
 #   scripts/restore-on-oracle.sh <path to hermes-YYYYMMDD-HHMMSS.tar.gz.age>
 #

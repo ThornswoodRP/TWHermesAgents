@@ -101,7 +101,7 @@ class GitService:
         repo = args.get("repo")
         repos = self.policy.data["repos"]
         if repo == repos["hermes"]:
-            raise Refused("no Bot writes to Thornswood-Hermes; every change there is Patrick's")
+            raise Refused("no Bot writes to TWHermesAgents; every change there is Patrick's")
         if repo not in (repos["app"], repos["fork"], repos["ops"]):
             raise Refused(f"{repo} is not a repo the Bots work in")
         return repo

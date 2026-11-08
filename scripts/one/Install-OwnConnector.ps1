@@ -5,7 +5,7 @@ Puts the connector for Patrick's chat from the phone into his Hermes on One
 in place, and starts it at every sign-in.
 
 .DESCRIPTION
-Runs on One, as Patrick, from a clone of Thornswood-Hermes at main. Patrick
+Runs on One, as Patrick, from a clone of TWHermesAgents at main. Patrick
 chose a small connector on One that reaches out to the decision core on the
 VM (1 Nov, answer A): nothing listens on One, and the VM never reaches in.
 
@@ -167,7 +167,7 @@ Pass "$TokenFile is readable by its owner only"
 
 # 3. The connector's two files, from this clone.
 $commit = (& git -C $here rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) { Fail "$here is not a clone of Thornswood-Hermes" }
+if ($LASTEXITCODE -ne 0) { Fail "$here is not a clone of TWHermesAgents" }
 # Nobody is there to answer a sign-in prompt, here or when the connector updates itself from this
 # clone under Task Scheduler. One's git asks its credential helper selector by default, a window that
 # waits for a click, so a fetch would hang (2 Nov). This clone signs in to GitHub with gh instead, set
