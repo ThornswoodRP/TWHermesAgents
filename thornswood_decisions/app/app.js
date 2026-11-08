@@ -160,12 +160,14 @@ const SAID = {
   no_origin: 'The core does not know its address yet, so passkeys cannot work.',
   offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.',
   voice_off: 'Dictation is not running on the VM.',
-  voice_slow: 'Whisper on the VM took too long with that. Try a shorter recording.'
+  voice_slow: 'Whisper on the VM took too long with that. Try a shorter recording.',
+  saved_in_app: b => `That fingerprint key was saved in ${(b.detail && b.detail.maker) || 'a passkey app'}, so it would open there. ` +
+    'Nothing was added. Tap Use my fingerprint again and pick Google Password Manager when Android asks where to save it.'
 }
 
 function said(body) {
   const w = body && SAID[body.error]
-  return (typeof w === 'function' ? w() : w) || (body && body.message) || 'Something went wrong.'
+  return (typeof w === 'function' ? w(body) : w) || (body && body.message) || 'Something went wrong.'
 }
 
 async function call(method, path, body) {
@@ -280,10 +282,14 @@ function forgetPhoneKey() {
 // The core no longer lists this phone's key: forgotten here, said once on the Decisions list, and the
 // fingerprint offered there again even if he had put it off.
 const LOST_KEY = "This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add the fingerprint again below."
-function lostPhoneKey() {
+// The core has the key but it was not made by the phone itself (8 Nov: it was saved in Bitwarden, so
+// the fingerprint button opened Bitwarden). Same way on, with the reason.
+const KEY_IN_APP = "This phone's fingerprint key was saved in your passkey app, so it opened that app. Your passkey signs in now. " +
+  'Add the fingerprint again below and pick Google Password Manager when Android asks where to save it.'
+function lostPhoneKey(why = LOST_KEY) {
   forgetPhoneKey()
   try { localStorage.removeItem(FINGERPRINT_LATER) } catch (e) {}
-  flash = LOST_KEY
+  flash = why
 }
 
 // The word for what signs in on this device.
@@ -326,7 +332,8 @@ async function addFingerprint() {
       ? 'This phone already holds a key for Hermes. Nothing changed.'
       : 'The fingerprint was not added. Nothing changed.' }
   }
-  const done = await call('POST', '/passkeys/register', { credential: credentialJSON(cred), label: 'Fingerprint on this phone' })
+  const done = await call('POST', '/passkeys/register',
+    { credential: credentialJSON(cred), label: 'Fingerprint on this phone', on_phone: true })
   if (done.status !== 200) return { ok: false, message: said(done.body) }
   if (!keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })) {
     return { ok: false, message: 'This browser would not keep the fingerprint\'s name, so the app cannot ask for it. Remove it in Settings.' }
@@ -337,10 +344,11 @@ async function addFingerprint() {
 async function passkeySignIn() {
   const key = phoneKey()
   let o = await call('POST', '/passkeys/sign-in/options', key ? { phone_key: key.credential_id } : {})
-  if (key && o.status === 404 && o.body.error === 'no_phone_key') {
-    // The core no longer has this phone's key (it or the phone was removed): the passkey is the way in,
-    // and he is told so, with the fingerprint offered again, never switched to the passkey unsaid.
-    lostPhoneKey()
+  if (key && ((o.status === 404 && o.body.error === 'no_phone_key') || (o.status === 409 && o.body.error === 'phone_key_in_app'))) {
+    // The core no longer has this phone's key (it or the phone was removed), or the key was saved in a
+    // passkey app: the passkey is the way in, and he is told so, with the fingerprint offered again,
+    // never switched to the passkey unsaid.
+    lostPhoneKey(o.status === 409 ? KEY_IN_APP : LOST_KEY)
     o = await call('POST', '/passkeys/sign-in/options', {})
   }
   if (o.status !== 200) return o
