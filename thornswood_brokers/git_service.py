@@ -834,4 +834,9 @@ class GitService:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
                  "start_run", "read", "refused", "ledger_event")
-        return {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
+        ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
+        # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
+        # root's follower alone, never a Bot.
+        from .vm_report import VmReport
+        ops["vm_install"] = (VmReport(self.policy, self.gh).install, {"root"})
+        return ops

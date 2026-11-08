@@ -39,6 +39,18 @@ everything each step printed, whether it passed or not, is in
 LOGS_KEPT stay). 2 Nov, #68: the install passed, the follower kept only its
 summary line, and the card asking for three of the install's PASS lines
 could not be answered from the VM.
+
+Each result also goes to GitHub (ThornswoodRP/Thornswood#5564: a failed
+install went unseen from 4 Nov to 8 Nov, because the file above is root's
+alone). The follower hands it to tw-git, the VM's one GitHub writer, as
+vm_install (vm_report.py), which writes it on the ops repository's ledger
+issue and keeps a board issue open while the VM is not installing main. A
+result is held in follow-main.json's report_pending until tw-git has taken
+it, and goes first at the next run when tw-git did not answer: the result
+is a message that has to arrive, so it waits in an outbox the way a letter
+does, and tw-git finds each write before it makes it, so a result sent again
+after a lost answer is written once. Only a new result is sent: a commit
+that already failed, or a fetch that fails the same way again, sends nothing.
 """
 
 from __future__ import annotations
@@ -56,6 +68,8 @@ from typing import Callable
 
 from thornswood_guard.policy import Policy
 
+from . import wire
+
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
 CONNECTOR = "tw-decide-connector.service"
@@ -72,11 +86,20 @@ class Stop(Exception):
         super().__init__(why)
         self.step = step
 
+    @property
+    def reason(self) -> str:
+        """The sentence without the output a command printed (everything after
+        its first ": "), which is what may leave the VM."""
+        return str(self).split(": ", 1)[0]
+
 
 class Follower:
     def __init__(self, policy: Policy, *, run: Run = subprocess.run, root: Path = Path("/"),
-                 say: Callable[[str], None] = print):
+                 say: Callable[[str], None] = print, report: Callable[[dict], object] | None = None):
         self.p = policy
+        # tw-git's vm_install, or a test's stand-in.
+        self.report_ = report or (lambda args: wire.call(policy.data["brokers"]["sockets"]["git"]["path"],
+                                                         "vm_install", args))
         self.r = policy.data["follow_main"]
         self.run_ = run
         self.root = root
@@ -141,6 +164,29 @@ class Follower:
         tmp = self.state_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, self.state_file)
+
+    # -- the result, on GitHub
+    def report(self, result: str, *, commit: str | None, step: str | None = None, reason: str | None = None,
+               put_back: str | None = None, before: str | None = None) -> None:
+        """Hands one new result to tw-git, or holds it for the next run."""
+        self.record(report_pending={
+            "result": result, "commit": commit, "step": step, "reason": reason, "put_back": put_back,
+            "installed": self.installed(), "before": before,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        self.send_report()
+
+    def send_report(self) -> None:
+        pending = self.state().get("report_pending")
+        if not pending:
+            return
+        try:
+            self.report_(pending)
+        except (wire.Refused, OSError, ValueError) as e:
+            self.say(f"REPORT NOT SENT: tw-git did not take the {pending['result']} result of "
+                     f"{(pending.get('commit') or 'main')[:12]} ({e}); it is held and goes first at the next run")
+            return
+        self.record(report_pending=None, reported=pending)
+        self.say(f"reported: {pending['result']} for {(pending.get('commit') or 'main')[:12]} is on GitHub")
 
     def installed(self) -> str | None:
         cur = self.opt / "current"
@@ -358,12 +404,20 @@ class Follower:
             # a hand install turned the stopped timer back on).
             self.say(f"paused: {self.r['pause_file']} is there, so nothing is fetched or installed")
             return 0
+        # A result tw-git did not take last time goes before anything new.
+        self.send_report()
+        st = self.state()
         try:
             tip = self.fetch()
         except Stop as e:
             self.say(f"STOP {e}")
             self.record(result="fetch failed", why=str(e))
+            if not (st.get("result") == "fetch failed" and st.get("why") == str(e)):
+                self.report("fetch failed", commit=None, step="fetch", reason=e.reason)
             return 1
+        if st.get("result") == "fetch failed":
+            self.record(result="fetched", why=None)
+            self.report("fetched", commit=tip)
         before = self.installed()
         if tip == before:
             return 0
@@ -381,6 +435,7 @@ class Follower:
             self.say(f"STOP {tip[:12]} is not installed: {e}")
             self.record(result="not installed", failed=tip, step=e.step, why=str(e), installed=before, put_back=None,
                         log=str(self.log))
+            self.report("not installed", commit=tip, step=e.step, reason=e.reason, before=before)
             return 1
         try:
             self.install(dest, tip)
@@ -393,10 +448,12 @@ class Follower:
             back = self.put_back(before, dest)
             self.record(result="failed", failed=tip, step=e.step, why=str(e), installed=self.installed(), put_back=back,
                         log=str(self.log))
+            self.report("failed", commit=tip, step=e.step, reason=e.reason, put_back=back.split(": ", 1)[0], before=before)
             return 1
         self.say(f"PASS {tip[:12]} is installed, applied, every Bot process reloaded and the canary passed")
         self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None,
                     log=str(self.log))
+        self.report("installed", commit=tip, before=before)
         return 0
 
     def put_back(self, before: str | None, failed: Path) -> str:

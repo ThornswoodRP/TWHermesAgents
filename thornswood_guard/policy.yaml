@@ -740,3 +740,19 @@ follow_main:
   # While this file exists the follower fetches and installs nothing. An install
   # starts the timer again, so pausing is this file, never stopping the timer.
   pause_file: /etc/thornswood/follow-main.paused
+  # Where each install's result goes (ThornswoodRP/Thornswood#5564): until
+  # 8 Nov it was only in state_file, root's alone, so a failed install went
+  # unseen from 4 Nov to 8 Nov. The follower hands every result to tw-git
+  # (op vm_install, root's alone), which writes it as the workers' App: one
+  # comment per install on the ledger issue in the ops repository, and on the
+  # board an issue while the VM is not installing main, closed by the next
+  # good install. Only the commit, the result, the step and a one-line reason
+  # go out, with any address taken out; every step's output stays here.
+  report:
+    app: workers
+    # That App's account on GitHub: the board issue is looked for among the
+    # open issues it opened, so a lost answer never opens a second one.
+    app_login: thornswood-workers[bot]
+    ledger_repo: ops
+    ledger_issue: 249
+    board_repo: app
