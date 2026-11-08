@@ -186,26 +186,24 @@ for f in "$hermes_home/.env" "$hermes_home/.hermes/.env" "$hermes_home"/.hermes/
   fi
 done
 
+# Each Bot's proxy token is made whether or not a route is ready yet: it is no
+# real key, and the proxy admits a route only once policy.yaml says it is
+# ready, so a PR can turn a route on after the tokens are there.
 tokens_file="$(pol admission_proxy.tokens_file)"
-if [[ "$(pol admission_proxy.ready)" == "true" ]]; then
-  tmp="$(mktemp)"; echo "{" > "$tmp"; first=1
-  for b in $bots; do
-    penv="$hermes_home/.hermes/profiles/$b/.env"
-    [[ -d "$(dirname "$penv")" ]] || stop "the $b profile does not exist."
-    if ! grep -q '^TW_PROXY_TOKEN=' "$penv" 2>/dev/null; then
-      runuser -u hermes -- sh -c "umask 077; printf 'TW_PROXY_TOKEN=%s\n' \"\$(openssl rand -hex 32)\" >> '$penv'"
-    fi
-    digest="$(grep '^TW_PROXY_TOKEN=' "$penv" | tail -1 | cut -d= -f2- | tr -d '\n' | sha256sum | cut -d' ' -f1)"
-    [[ $first -eq 1 ]] || echo "," >> "$tmp"; first=0
-    printf '  "%s": "%s"' "$b" "$digest" >> "$tmp"
-  done
-  printf '\n}\n' >> "$tmp"
-  install -m 0440 -o root -g tw-proxy "$tmp" "$tokens_file"; rm -f "$tmp"
-  ok "each Bot's proxy token is in its own profile; $tokens_file holds their SHA-256 only"
-else
-  [[ -f "$tokens_file" ]] || { echo "{}" > "$tokens_file"; chown root:tw-proxy "$tokens_file"; chmod 0440 "$tokens_file"; }
-  echo "SKIP proxy tokens: admission_proxy.ready is false, so routes 2 and 4 stay out of every chain"
-fi
+tmp="$(mktemp)"; echo "{" > "$tmp"; first=1
+for b in $bots; do
+  penv="$hermes_home/.hermes/profiles/$b/.env"
+  [[ -d "$(dirname "$penv")" ]] || stop "the $b profile does not exist."
+  if ! grep -q '^TW_PROXY_TOKEN=' "$penv" 2>/dev/null; then
+    runuser -u hermes -- sh -c "umask 077; printf 'TW_PROXY_TOKEN=%s\n' \"\$(openssl rand -hex 32)\" >> '$penv'"
+  fi
+  digest="$(grep '^TW_PROXY_TOKEN=' "$penv" | tail -1 | cut -d= -f2- | tr -d '\n' | sha256sum | cut -d' ' -f1)"
+  [[ $first -eq 1 ]] || echo "," >> "$tmp"; first=0
+  printf '  "%s": "%s"' "$b" "$digest" >> "$tmp"
+done
+printf '\n}\n' >> "$tmp"
+install -m 0440 -o root -g tw-proxy "$tmp" "$tokens_file"; rm -f "$tmp"
+ok "each Bot's proxy token is in its own profile; $tokens_file holds their SHA-256 only"
 
 # 5. Backups: Patrick's age public key, and One's key for the SFTP pull.
 recipient="$(pol backups.age_recipient_file)"

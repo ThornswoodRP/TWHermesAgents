@@ -16,6 +16,9 @@ It checks three things against thornswood_decisions/contracts.json:
 
 The room store is opened read-only. Each finding prints as PASS or STOP; any
 STOP exits 1. `--json` prints the same as one JSON object.
+
+With `--room <id>` it checks only the third, against that room id: the
+decision core's install runs it so at each release, as the hermes user.
 """
 
 from __future__ import annotations
@@ -137,13 +140,46 @@ def run(home: Path, hermes_cmd: list[str], contract: dict | None = None) -> dict
     return report
 
 
+def run_room(home: Path, room_id: str, contract: dict | None = None) -> dict:
+    """Only the room part, for the decision core's install at each release: the
+    room the core is bound to is the one live Workbench and seats exactly the
+    Bots the policy seats in it. Hermes keeps who sits in a room in its own room
+    store (set when the room is made, from Desktop); the policy is the list it
+    must match, so a room that drifted stops the install with the reason."""
+    contract = contract or contracts.load()
+    report: dict = {"pass": [], "stop": [], "facts": {}}
+    room = contract["room"]
+    db = home / "shared-state.db"
+    try:
+        rooms = workbench_rooms(db, room["name"]) if db.is_file() else None
+    except sqlite3.Error as exc:
+        report["stop"].append(f"could not read the room store {db} read-only: {exc}")
+        return report
+    if rooms is None:
+        report["stop"].append(f"no room store at {db}")
+        return report
+    report["facts"]["rooms"] = rooms
+    want = sorted(room["members"])
+    if len(rooms) != 1:
+        report["stop"].append(f"{len(rooms)} live rooms are named {room['name']!r}; the core binds to exactly one")
+    elif rooms[0]["room_id"] != room_id:
+        report["stop"].append(f"the core is bound to room {room_id}, but the live {room['name']!r} is {rooms[0]['room_id']}")
+    elif rooms[0]["profiles"] != want:
+        report["stop"].append(f"{room['name']!r} seats {rooms[0]['profiles']}, but the policy seats {want}; "
+                              "seat the room as policy.yaml lists it, or change the list by a PR")
+    else:
+        report["pass"].append(f"{room['name']!r} ({room_id}) seats the Bots the policy lists: {', '.join(want)}")
+    return report
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--home", default=str(Path.home() / ".hermes"), help="Hermes home (default ~/.hermes)")
     ap.add_argument("--hermes", default="hermes", help="the hermes command (default: hermes on PATH)")
     ap.add_argument("--json", action="store_true", help="print one JSON object")
+    ap.add_argument("--room", help="check only that this room id is the Workbench and seats the policy's Bots")
     args = ap.parse_args(argv)
-    report = run(Path(args.home), [args.hermes])
+    report = run_room(Path(args.home), args.room) if args.room else run(Path(args.home), [args.hermes])
     if args.json:
         print(json.dumps(report, indent=2))
     else:

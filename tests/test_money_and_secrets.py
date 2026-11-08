@@ -1,5 +1,6 @@
 """The model order with no extra spend, what may sit on the Oracle box, the
-decision records, and the push gate."""
+decision records. The phone push's rules are the decision core's
+(thornswood_decisions/push.py, tests/test_decisions_push.py)."""
 
 import tempfile
 import unittest
@@ -8,7 +9,6 @@ from pathlib import Path
 from helpers import APP, HEAD, decide, policy, store
 
 from thornswood_guard.decisions import new_decision
-from thornswood_guard.notify import Card, PushGate
 from thornswood_guard.profile_config import build, merge_into
 from thornswood_guard.routes import chain_for, check_config, credits_open, next_route
 from thornswood_guard.secrets_check import check_env, check_files, env_names
@@ -154,7 +154,7 @@ class Routes(unittest.TestCase):
         import copy
         from thornswood_guard.policy import Policy
         data = copy.deepcopy(self.p.data)
-        data["admission_proxy"]["ready"] = True
+        data["admission_proxy"]["ready"] = {"credits": True, "qwen": True}
         return Policy(data)
 
     def test_proxy_routes_point_at_the_loopback_proxy_with_the_bots_token(self):
@@ -227,11 +227,11 @@ class Secrets(unittest.TestCase):
         for where in ("root", "bramble", "rift"):
             self.assertTrue(check_env(self.p, {"TW_GAMEDATA_NEXUS_KEY"}, where), where)
 
-    def test_no_real_tokens_before_their_route(self):
-        self.assertTrue(check_env(self.p, {"TW_PROXY_TOKEN"}, "bramble"))
-        self.assertEqual(check_env(self.p, {"TW_PROXY_TOKEN"}, "bramble", later_allowed=True), [])
-        self.assertEqual(check_env(self.p, {"TW_PROXY_TOKEN"}, "wisp", later_allowed=True), [])
-        self.assertTrue(check_env(self.p, {"TW_PROXY_TOKEN"}, "root", later_allowed=True))
+    def test_the_proxy_token_sits_only_in_each_bots_own_profile(self):
+        # No real key: it reaches only the loopback proxy, which admits a route once it is ready.
+        self.assertEqual(check_env(self.p, {"TW_PROXY_TOKEN"}, "bramble"), [])
+        self.assertEqual(check_env(self.p, {"TW_PROXY_TOKEN"}, "wisp"), [])
+        self.assertTrue(check_env(self.p, {"TW_PROXY_TOKEN"}, "root"))
 
     def test_the_routes_real_keys_never_sit_in_hermes_files(self):
         # Only the admission proxy's own user holds them (proxy.env).
@@ -240,7 +240,7 @@ class Secrets(unittest.TestCase):
         self.assertEqual(holders["QWEN_API_KEY"], "tw-proxy")
         for name in ("TW_CLAUDE_CREDITS_KEY", "QWEN_API_KEY", "TW_QWEN_TOKEN"):
             for where in ("root", "bramble", "rift"):
-                self.assertTrue(check_env(self.p, {name}, where, later_allowed=True), (name, where))
+                self.assertTrue(check_env(self.p, {name}, where), (name, where))
 
     def test_unknown_secret_shaped_names_are_refused(self):
         for name in ("SOME_NEW_KEY", "BOX_PASSWORD", "X_API_TOKEN", "MY_SECRET", "AWS_SESSION_TOKEN"):
@@ -295,34 +295,6 @@ class Decisions(unittest.TestCase):
         from thornswood_guard.decisions import DecisionStore
         again = DecisionStore(self.s.path, self.p)
         self.assertFalse(again.check("m", kind="main", repo=APP, commit=HEAD).allowed)
-
-
-class Pushes(unittest.TestCase):
-    def setUp(self):
-        self.gate = PushGate(policy(), Path(tempfile.mkdtemp()) / "sent.json")
-
-    def test_only_real_decisions_push(self):
-        self.assertTrue(self.gate.decide(Card("c1", "decision", 1, "x")).allowed)
-        for kind in ("report", "progress", "merged", "weekly-review"):
-            self.assertFalse(self.gate.decide(Card("c2", kind, 1, "x")).allowed, kind)
-
-    def test_answered_cards_do_not_push(self):
-        self.assertFalse(self.gate.decide(Card("c1", "decision", 1, "x", answered=True)).allowed)
-
-    def test_deduplicated_per_revision(self):
-        card = Card("c1", "main-approval", 3, "Ship Main 1.2.11?")
-        self.gate.mark_sent(card)
-        self.assertFalse(self.gate.decide(card).allowed)
-        self.assertTrue(self.gate.decide(Card("c1", "main-approval", 4, "x")).allowed)
-        again = PushGate(policy(), self.gate.sent_file)
-        self.assertFalse(again.decide(card).allowed)
-
-    def test_plain_lock_screen_and_deep_link(self):
-        payload = self.gate.payload(Card("c9", "decision", 2, "Ship Main 1.2.11 with the new installer?"))
-        self.assertEqual(payload["title"], "Thornswood needs you")
-        self.assertEqual(payload["body"], "")
-        self.assertEqual(payload["url"], "/cards/c9?rev=2")
-        self.assertNotIn("1.2.11", str(payload))
 
 
 if __name__ == "__main__":
