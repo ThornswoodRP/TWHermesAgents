@@ -60,7 +60,10 @@ Every half minute, whatever connector_effects says, it also tells the core each
 Bot's gateway state for the phone's online dots (`POST /api/v1/connector/live`):
 Hermes's own runtime state, from `room_send.py` op `states`, which finds each
 gateway the way the readiness check does and never starts one. The core names
-the Bots to check in its answer.
+the Bots to check in its answer. Those reports and the phone's pages run on a
+thread of their own, apart from the claims: a Bot's turn holds its round for
+as long as it runs, up to 15 minutes, and the core calls a Bot "not heard from"
+after two minutes without a report.
 """
 
 from __future__ import annotations
@@ -80,7 +83,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .own_connector import follow_turn
+from .own_connector import follow_turn, probe_env
 
 CORE = "http://127.0.0.1:9135/api/v1"
 POLL_SECONDS = 5
@@ -178,8 +181,11 @@ class Hermes:
         """The helper's one JSON answer; None when it did not answer in time. A helper that could not start,
         or did not answer in JSON, answers {"helper_failed": True, "reason": ...} with its stderr's tail."""
         try:
+            # Read only, so with Hermes's own switch that keeps a start from finishing an update first
+            # (own_connector.PROBE_ENV).
             out = subprocess.run(self.helper_cmd, input=json.dumps(req).encode("utf-8"),
-                                 capture_output=True, timeout=timeout, cwd=str(self.home), check=False)
+                                 capture_output=True, timeout=timeout, cwd=str(self.home), check=False,
+                                 env=probe_env())
         except subprocess.TimeoutExpired:
             return None
         except OSError as exc:
@@ -508,13 +514,25 @@ class Connector:
                 self.say(f"FAIL page: the core answered {status}")
         return sent
 
-    def forever(self) -> None:
-        # Pages every few seconds, whatever connector_effects says; the claim every few seconds, or every
-        # half minute while the core says connector_effects is off.
-        claim_at = 0.0
+    def reads(self, sleep=time.sleep) -> None:
+        """The phone's pages and each Bot's state, every few seconds, whatever connector_effects says. Reading
+        only, so it never waits on a claim round: a round waits for its turns, and on 8 Nov a three-minute turn
+        to Bramble left all six Bots "not heard from" on the phone while it ran."""
         while True:
             self.pages()
             self.live()
+            sleep(POLL_SECONDS)
+
+    def forever(self) -> None:
+        # The reads on their own thread; the claim every few seconds, or every half minute while the core says
+        # connector_effects is off. A reads thread that raised stops the connector, as it did when both shared
+        # this loop, with its traceback in the journal.
+        reader = threading.Thread(target=self.reads, name="reads", daemon=True)
+        reader.start()
+        claim_at = 0.0
+        while True:
+            if not reader.is_alive():
+                raise SystemExit("STOP: the thread for pages and Bot states stopped")
             if time.monotonic() >= claim_at:
                 n = self.once()
                 claim_at = time.monotonic() + (POLL_SECONDS * 6 if n < 0 else 0)

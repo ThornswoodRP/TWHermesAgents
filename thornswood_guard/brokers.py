@@ -255,7 +255,7 @@ class TurnGate:
                 pass
 
 
-GIT_OPS = ["base", "push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "start_run", "read", "ledger_event"]
+GIT_OPS = ["base", "push", "open_pr", "edit_pr", "comment", "label", "claim_labels", "merge", "close_pr", "start_run", "read", "ledger_event"]
 FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
              "remove", "run_check"]
 
@@ -268,7 +268,8 @@ TW_GIT_SCHEMA = {
         "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only: "
         "in Thornswood and the fork it turns GitHub's auto-merge on for a Bot's pull request at its exact head, and "
         "GitHub merges once the required checks pass; in Ops, where GitHub has no auto-merge, it merges a green one), "
-        "start_run (Bramble only), read (a GET inside one repo), ledger_event (Bramble only). Every write names "
+        "close_pr (Bramble only: closes a pull request only on Patrick's answer on the outside pull request card "
+        "that names it; replaced_by names the merged pull request that carried it), start_run (Bramble only), read (a GET inside one repo), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
         "type": "object",
@@ -278,7 +279,7 @@ TW_GIT_SCHEMA = {
             "task": {"type": "string", "description": "The task this write is for, e.g. the issue number"},
             "branch": {"type": "string"}, "bundle": {"type": "string"},
             "head": {"type": "string"}, "base": {"type": "string"},
-            "number": {"type": "integer"}, "sha": {"type": "string"},
+            "number": {"type": "integer"}, "sha": {"type": "string"}, "replaced_by": {"type": "integer"},
             "title": {"type": "string"}, "body": {"type": "string"}, "draft": {"type": "boolean"},
             "label": {"type": "string"}, "action": {"type": "string", "enum": ["add", "remove"]},
             "decision_id": {"type": "string"},

@@ -22,6 +22,10 @@ from decisions_helpers import World
 from thornswood_decisions.api import Api, make_server
 from thornswood_decisions.feeds import Feeds
 port = int(sys.argv[1])
+# Chrome's virtual authenticator, which the browser check uses as the phone's own, says this AAGUID.
+from thornswood_decisions import passkey as _passkey
+_passkey.PHONE_AUTHENTICATORS["01020304-0506-0708-0102-030405060708"] = "Chrome's test authenticator"
+
 w = World()  # a test workspace with writes on, in a temp folder
 w.store.set_flag(w.ws, "mobile_read", True, by="t")
 w.store.set_flag(w.ws, "mobile_chat_write", True, by="t")

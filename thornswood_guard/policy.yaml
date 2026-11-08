@@ -121,6 +121,27 @@ merge:
   # version bumps and the pin robot's engine pin (engine-pin.yml, where
   # Bramble already merged them under the merge rule).
   robot_authors: ["dependabot[bot]", "thornswood-pin-robot[bot]"]
+  # Whose work may merge (Patrick, 8 Nov 2026, 1:30 PM: "don't ever let them
+  # auto merge tho unless I saw that even if the PR is good unless I
+  # specficallyt say that I want that person to automerge", and 1:31 PM:
+  # "currently that list is only me and my team"). Before any merge tw-git
+  # reads every commit of the pull request: its author, and each person a
+  # Co-authored-by line credits, must be one of these people, a Bot (the
+  # files broker's commit_email), a robot above or one of our own workflows
+  # (workflow_authors). Work by anyone else, carried into a Bot's pull request
+  # with credit, merges only once Patrick answered "let them merge" for that
+  # person on their outside pull request card, which tw-git reads from the
+  # decision core itself (#132), or once he puts them on this list, quoted
+  # here with the date.
+  auto_merge_people: ["EvilPatrick06", "WiccanDjinn"]
+  # The commits our own workflows make (engine-pin.yml commits as GitHub
+  # Actions for the pin robot's pull request).
+  workflow_authors: ["github-actions[bot]"]
+  # The label a pull request carrying outside work wears. Thornswood's
+  # Auto-Merge.js leaves such a pull request alone whoever opened it
+  # (Thornswood #5544). tw-git refuses to merge one that credits nobody with a
+  # Co-authored-by line, because then the work's author cannot be read.
+  outside_label: "outside work"
 
 # What Bramble's release tooling may start. Nothing else, on main only.
 runs:
@@ -469,6 +490,13 @@ brokers:
       path: /run/tw/decide-bots/bots.sock
       group: tw-decide-bots
       clients: [hermes, root]
+    # tw-git's own socket on tw-decide-bots (#132): Patrick's answers on
+    # Bramble's outside pull request cards, read only, so tw-git closes the
+    # pull request or lets the author's work merge only on his answer.
+    decide_git:
+      path: /run/tw/decide-git/git.sock
+      group: tw-decide-git
+      clients: [tw-git, root]
   state:
     policy_db: /srv/tw/policy/policy.db
     git_mirrors: /srv/tw/git

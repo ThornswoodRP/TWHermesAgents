@@ -20,6 +20,19 @@ SHA = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass
+class Credit:
+    """Someone whose work is in a commit: its author, or a Co-authored-by line."""
+    commit: str
+    name: str
+    email: str
+    login: str | None = None     # the GitHub account GitHub links the commit's author to
+    co_author: bool = False
+
+    def who(self) -> str:
+        return self.login or self.email or self.name or self.commit[:12]
+
+
+@dataclass
 class PullRequest:
     repo: str
     number: int
@@ -32,6 +45,8 @@ class PullRequest:
     labels: list[str] = field(default_factory=list)
     draft: bool = False
     merged: bool = False
+    credits: list[Credit] = field(default_factory=list)   # every commit's author and co-authors
+    carried_from: list[tuple[str, int]] = field(default_factory=list)  # Carried-from lines: the outside PRs it carries
 
 
 @dataclass
@@ -121,8 +136,55 @@ class GitHubRules:
             return Verdict.yes("Bramble reviews and comments on any Bot's PR")
         return Verdict.no(f"{self.policy.bot_name(bot)} edits only its own pull requests")
 
+    def outside_pr(self, pr: PullRequest) -> bool:
+        """A pull request from outside the team: not a Bot's, not a robot's,
+        not by anyone on Patrick's list, and not hands-off work."""
+        return (pr.author_bot is None and not self.policy.trusted_login(pr.author_login)
+                and not self._hands_off_pr(pr))
+
+    def comment_pr(self, bot: str, pr: PullRequest) -> Verdict:
+        """A comment on a pull request: as edit_pr, and Bramble may also answer
+        a pull request from outside the team (what its review found, where the
+        work went). Nothing else of an outside pull request is a Bot's to
+        change: no edit, label, close or merge."""
+        v = self.edit_pr(bot, pr)
+        if v.allowed:
+            return v
+        if self.policy.is_router(bot) and self.outside_pr(pr):
+            return Verdict.yes("Bramble answers a pull request from outside the team")
+        return v
+
+    def outside_credits(self, pr: PullRequest) -> list[Credit]:
+        """The credits on a pull request that are not on Patrick's list, a Bot,
+        a robot or one of our own workflows."""
+        return [c for c in pr.credits if not self.policy.trusted_credit(c.login, c.email)]
+
+    def outside_work(self, pr: PullRequest, allowed: set[str] | None = None) -> Verdict:
+        """Patrick, 8 Nov 2026: outside work never merges "unless I specficallyt
+        say that I want that person to automerge". Every commit's author and
+        every Co-authored-by line must be on his list, a Bot, a robot or one of
+        our own workflows, or be a person he answered "Auto-Merge" for,
+        or "merge this one" for on the card of the outside pull request this one
+        carries (allowed: their logins, read by tw-git from the decision core,
+        #132)."""
+        p = self.policy
+        allowed = {a.lower() for a in (allowed or set())}
+        outside = sorted({c.who() for c in self.outside_credits(pr)
+                          if p.credit_login(c.login, c.email) not in allowed})
+        if outside:
+            return Verdict.no(f"PR {pr.number} carries work by {', '.join(outside)}, who is not on Patrick's list of "
+                              "people whose work may merge (policy merge.auto_merge_people), and Patrick has not "
+                              "answered \"let them auto-merge\" for them, or \"merge this one\" for this pull "
+                              "request, on an outside pull request card; it waits for that card")
+        label = p.data["merge"].get("outside_label")
+        if label and label in pr.labels and not any(c.co_author for c in pr.credits):
+            return Verdict.no(f"PR {pr.number} is labelled '{label}' and no commit credits its author with a "
+                              "Co-authored-by line, so whose work it is cannot be read; credit them, then ask again")
+        return Verdict.yes()
+
     def merge(self, bot: str, pr: PullRequest, sha: str, method: str,
-              checks: list[CheckRun], *, branch_checks: set[str] | None = None) -> Verdict:
+              checks: list[CheckRun], *, branch_checks: set[str] | None = None,
+              allowed_people: set[str] | None = None) -> Verdict:
         """Bramble's merge. Where the policy has GitHub's auto-merge do it
         (merge.auto_merge), a yes here turns auto-merge on at this head and
         GitHub merges once the checks its branch rules require pass:
@@ -151,6 +213,9 @@ class GitHubRules:
         want_method = p.data["merge"]["method"].get(pr.repo)
         if method != want_method:
             return Verdict.no(f"{pr.repo} merges with {want_method}, not {method}")
+        verdict = self.outside_work(pr, allowed_people)
+        if not verdict.allowed:
+            return verdict
         if p.auto_merge(pr.repo):
             return self._auto_merge(pr, sha, checks, branch_checks)
         verdict = self.check_green(pr, checks)
@@ -175,6 +240,55 @@ class GitHubRules:
                 return Verdict.no(f"'{name}' is {runs[-1].conclusion} on {pr.head_sha[:12]}; red goes back to "
                                   "its owner and is fixed at its cause, never put on auto-merge")
         return Verdict.yes(f"auto-merge on at {sha[:12]}: GitHub merges once {', '.join(rule)} pass there")
+
+    def close_pr(self, bot: str, pr: PullRequest, answers: list[dict], merged: dict[tuple[str, int], bool],
+                 open_now: bool, replaced: bool = False) -> Verdict:
+        """Bramble closes a pull request only on Patrick's answer (#132): his
+        "close" on the outside pull request card that names it, as the outside
+        pull request or as a Bot's pull request carrying its work; or his
+        "allow" or "merge" on that card once the work carried from it merged,
+        which replaced it. answers: the decision core's outside answers, read
+        by tw-git; merged: whether each carried pull request merged; replaced:
+        tw-git read a merged pull request whose Carried-from line names it."""
+        p = self.policy
+        if not p.is_router(bot):
+            return Verdict.no(f"only Bramble closes a pull request, and only on Patrick's answer; "
+                              f"{p.bot_name(bot) if p.is_bot(bot) else bot} never does")
+        if pr.repo == p.data["repos"]["hermes"]:
+            return Verdict.no("Bramble never closes anything in TWHermesAgents")
+        if self._hands_off_pr(pr):
+            return Verdict.no(self._hands_off_reason(pr.author_login, pr.head_ref))
+        if pr.merged or not open_now:
+            return Verdict.no(f"PR {pr.number} is not open")
+        here = (pr.repo, pr.number)
+        for a in reversed(answers):
+            carried = [(c["repo"], c["number"]) for c in a.get("carried") or []]
+            names_it = here == (a["repo"], a["number"])
+            if not (names_it or here in carried):
+                continue
+            if a["option"] == "close":
+                if names_it and not self.outside_pr(pr):
+                    return Verdict.no(f"card {a['decision_id']} names PR {pr.number} as outside work, but it is "
+                                      "not from outside the team")
+                if not names_it and pr.author_bot is None:
+                    return Verdict.no(f"card {a['decision_id']} names PR {pr.number} as carried work, but it is "
+                                      "not a Bot's")
+                return Verdict.yes(f"Patrick answered close on card {a['decision_id']}")
+            if a["option"] in ("allow", "merge") and names_it:
+                if replaced:
+                    return Verdict.yes(f"replaced by merged work carried from it, which Patrick let merge on card "
+                                       f"{a['decision_id']}")
+                if not carried:
+                    return Verdict.no(f"Patrick let {a['author']}'s work merge on card {a['decision_id']}, and no "
+                                      "merged pull request carrying it was named; their pull request stays open")
+                left = [f"#{n}" for (r, n) in carried if not merged.get((r, n))]
+                if left:
+                    return Verdict.no(f"the carried {', '.join(left)} has not merged yet, so PR {pr.number} is not "
+                                      "replaced")
+                return Verdict.yes(f"replaced by the carried work Patrick let merge on card {a['decision_id']}")
+            return Verdict.no(f"Patrick answered {a['option']!r} on card {a['decision_id']}, which closes nothing")
+        return Verdict.no(f"no answer from Patrick on an outside pull request card names PR {pr.number}; "
+                          "a pull request is closed only on his answer")
 
     def check_green(self, pr: PullRequest, checks: list[CheckRun]) -> Verdict:
         """Every required check of the repo is a success on the exact head."""

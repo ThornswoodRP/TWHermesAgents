@@ -38,8 +38,8 @@ class Pinned(unittest.TestCase):
 
     def test_pinned_version_and_commit(self):
         h = self.c["hermes"]
-        self.assertEqual(h["version"], "0.22.5")
-        self.assertEqual(h["tag"], "v0.22.5")
+        self.assertEqual(h["version"], "0.23.0")
+        self.assertEqual(h["tag"], "v0.23.0")
         self.assertRegex(h["commit"], r"^[0-9a-f]{40}$")
 
     def test_profile_ids_are_ones_hermes_accepts(self):
@@ -87,7 +87,7 @@ class VmCheck(unittest.TestCase):
         self.fake.write_text(textwrap.dedent(f"""\
             import sys
             if sys.argv[1:] == ["--version"]:
-                print("Hermes Agent v0.22.5 (2026.10.22) · stable")
+                print("Hermes Agent v0.23.0 (2026.11.5) · stable")
                 print("Install directory: {self.install.as_posix()}")
                 print("Python: 3.12.3")
             """), encoding="utf-8")

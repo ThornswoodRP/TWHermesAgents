@@ -98,6 +98,33 @@ CREATE_NO_WINDOW = 0x08000000
 def quiet() -> dict:
     """What every child process of the connector is started with: on Windows, no console window."""
     return {"creationflags": CREATE_NO_WINDOW} if WINDOWS else {}
+
+
+# The helper's quick ops (readiness, reactions, chats) only read Hermes's state, so they run with Hermes's own
+# switch that keeps a start of Hermes from installing anything or finishing a source update first
+# (HERMES_DISABLE_LAZY_INSTALLS: hermes_cli/venv_sync.py:343 prepare_launch, :374; pm/install.py
+# lazy_installs_allowed), the way Hermes's own probes run (doctor_platform.py:541, "so the probe never mutates
+# the environment it is diagnosing"; cron's scripts; PM's worker). The bootstrap the helper runs in
+# (hermes_bootstrap.py, `hermes --print-runtime-command`) otherwise finishes an owed source update before
+# anything else: its dependency sync, launchers and product builds, which take minutes (venv_sync.py:371,
+# why Hermes's own `gateway status` is spared it). A check started then would be stopped at its minute,
+# every minute, mid-update, and say "the readiness check did not answer in a minute" (One's bar, 2 Nov
+# 5:06 PM). The update is finished by Hermes's own next start or `hermes update`, never by a check. A turn
+# (`hermes chat`) is not a check and starts as Hermes does.
+PROBE_ENV = {"HERMES_DISABLE_LAZY_INSTALLS": "1"}
+CHECK_SECONDS = 60  # how long a quick op of the helper may take
+
+
+def probe_env() -> dict:
+    return {**os.environ, **PROBE_ENV}
+
+
+def printed(data: bytes | None, n: int = 120) -> str:
+    """The tail of what a child printed, on one line."""
+    text = " ".join((data or b"").decode("utf-8", "replace").split())
+    return text[-n:] if text else "nothing"
+
+
 # The core's own rule for a chat id (own.py), checked again before it goes after --resume.
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -679,9 +706,9 @@ class Hermes:
         req = json.dumps({"op": "ready", "profile": "", "name": self.name}).encode("utf-8")
         try:
             out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
-                                 timeout=60, cwd=str(self.home_dir), check=False)
-        except subprocess.TimeoutExpired:
-            return "check_failed", "the readiness check did not answer in a minute"
+                                 timeout=CHECK_SECONDS, cwd=str(self.home_dir), check=False, env=probe_env())
+        except subprocess.TimeoutExpired as exc:
+            return "check_failed", f"the readiness check did not answer in a minute; it printed: {printed(exc.stderr)}"[:200]
         except OSError:
             return "check_failed", "could not run the readiness check with Hermes's Python"
         try:
@@ -690,8 +717,7 @@ class Hermes:
             got = None
         if not isinstance(got, dict):
             # The helper itself failed (a shell for a Python, Hermes not on its path): never "gateway down".
-            said = " ".join(out.stderr.decode("utf-8", "replace").split())[-160:] or "nothing"
-            return "check_failed", f"the readiness helper failed (exit {out.returncode}): {said}"[:200]
+            return "check_failed", f"the readiness helper failed (exit {out.returncode}): {printed(out.stderr, 160)}"[:200]
         if got.get("ready") is True:
             return "ready", ""
         return "gateway_down", str(got.get("reason") or f"{self.name} is not ready")[:200]
@@ -703,7 +729,7 @@ class Hermes:
                           "emoji": emoji}).encode("utf-8")
         try:
             out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
-                                 timeout=60, cwd=str(self.home_dir), check=False)
+                                 timeout=CHECK_SECONDS, cwd=str(self.home_dir), check=False, env=probe_env())
             got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
             return "failed", "Hermes's store did not answer in a minute"
@@ -721,7 +747,7 @@ class Hermes:
                           "title": title}).encode("utf-8")
         try:
             out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
-                                 timeout=60, cwd=str(self.home_dir), check=False)
+                                 timeout=CHECK_SECONDS, cwd=str(self.home_dir), check=False, env=probe_env())
             got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
         except subprocess.TimeoutExpired:
             return "failed", "Hermes's store did not answer in a minute"
