@@ -3,9 +3,20 @@
 Ten causes found on 1 and 2 Nov 2026 are in Hermes, not in this repository, so
 they are fixed where they come from: as pull requests to Hermes
 (NousResearch/hermes-agent), made against v0.22.5
-(`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's Desktop run.
-Nothing here is applied to the VM's Hermes by hand: the VM takes them in a
-Hermes release.
+(`bf0203a794a07aac3ff764972ab9087baa4e4f4e`), the version the VM and One's
+Desktop ran until 8 Nov. Nothing here is applied to the VM's Hermes by hand:
+the VM takes them in a Hermes release.
+
+Since 8 Nov the VM and One run v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`,
+ThornswoodRP/Thornswood#5520), which `thornswood_decisions/contracts.json`
+pins. On that commit, read 8 Nov with `git am --3way` one after another, these
+apply as they are: `on-main/0001`, 0002, 0003, 0004, 0005,
+`0006-desktop-scheduled-jobs-every-gateway-upstream-main.patch`, 0008, `on-main/0007` and `on-main/0010`. The v0.22.5
+copies of 0001 and 0006 do not (v0.23.0 has the upstream code their `on-main`
+and `-upstream-main` copies were made for), and neither does 0009, which is
+made on One's v0.22.5 build: v0.23.0 has upstream's 1 Nov rewrite of that
+flow (0009's own section). No patch here is in v0.23.0 already, so none of
+the pull requests below is done by the move.
 
 Apply them in order on a checkout of that commit:
 
@@ -346,7 +357,7 @@ and turn budget tests failed 4 of 433 with the patch, and they fail the same
 4 ways on main without it: two checkpoint path tests that fail only when
 run after the storage tests, and two opencode routing tests that need the
 anthropic extra. The files here at the top stay as they are for v0.22.5,
-the version the VM runs.
+the version they were made and tested on.
 
 ## Upstream's lint on the five open pull requests
 
