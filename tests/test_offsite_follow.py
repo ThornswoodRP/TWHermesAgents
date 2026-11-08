@@ -698,7 +698,6 @@ class FollowMain(unittest.TestCase):
         # The install starts the timer again; the pause is the file, which it leaves alone.
         self.assertNotIn(f.r["pause_file"], (REPO / "deploy" / "install.sh").read_text())
 
-@unittest.skipUnless(os.geteuid() == 0 and shutil.which("runuser"), "needs root, to hand the release to another user as the VM does")
 class Reports(unittest.TestCase):
     """Each new result goes to tw-git (ThornswoodRP/Thornswood#5564)."""
 
@@ -783,6 +782,7 @@ class Reports(unittest.TestCase):
         self.assertEqual([r["result"] for r in self.reports], ["fetch failed", "fetched"])
 
 
+@unittest.skipUnless(os.geteuid() == 0 and shutil.which("runuser"), "needs root, to hand the release to another user as the VM does")
 class ApplyAsAnotherUser(unittest.TestCase):
     """The real git, a release root owns and a hermes that is not root: the
     apply, then the put-back's apply of the earlier release."""
