@@ -37,7 +37,12 @@ const base = `http://localhost:${port}`
   const errors = []
   page.on('pageerror', e => errors.push(String(e)))
   // A 401 is the signed-out app asking; a 404 is said below only when it is not one of the two that are answers.
-  page.on('console', m => { if (m.type() === 'error' && !/status of (401|404)/.test(m.text())) errors.push(m.text()) })
+  // A 409 from the sign-in options is an answer too: this phone's fingerprint key was saved in a passkey app.
+  page.on('console', m => {
+    if (m.type() !== 'error' || /status of (401|404)/.test(m.text())) return
+    if (/status of 409/.test(m.text()) && /\/api\/v1\/passkeys\/sign-in\/options$/.test((m.location() || {}).url || '')) return
+    errors.push(m.text())
+  })
   page.on('response', r => {
     // Two 404s are answers, not missing routes: a chat a gateway never listed, and a fingerprint key the core no longer has.
     if (r.status() === 404 && !/\/api\/v1\/(own\/(me|one)\/chats\/[^/]+\/messages|passkeys\/sign-in\/options)$/.test(new URL(r.url()).pathname)) {
@@ -1027,6 +1032,25 @@ const base = `http://localhost:${port}`
     await page.evaluate(() => route())
     await page.getByText("This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add the fingerprint again below.").waitFor({ timeout: 8000 })
     await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 5000 })
+  })
+  // 8 Nov: the fingerprint key made on 2 Nov was saved in Bitwarden, so the button opened Bitwarden. The core
+  // now refuses to ask for a phone key the phone did not make; the app says why and the passkey signs in.
+  await step('a fingerprint key saved in a passkey app is forgotten, said, and the passkey signs in', async () => {
+    await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_app' })))
+    let refused = 0
+    await page.route('**/api/v1/passkeys/sign-in/options', async (r) => {
+      if (JSON.parse(r.request().postData() || '{}').phone_key && !refused++) {
+        return r.fulfill({ status: 409, contentType: 'application/json',
+          body: JSON.stringify({ error: 'phone_key_in_app', message: 'x', detail: {} }) })
+      }
+      return r.fallback()
+    })
+    const res = await page.evaluate(() => passkeySignIn())
+    await page.unroute('**/api/v1/passkeys/sign-in/options')
+    if (res.status !== 200 || refused !== 1) throw new Error(JSON.stringify([res.status, refused]))
+    if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('the key in the app is still kept')
+    const said = await page.evaluate(() => flash)
+    if (!/saved in your passkey app, so it opened that app.*pick Google Password Manager/.test(said)) throw new Error(said)
   })
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
