@@ -3,6 +3,8 @@
 # root-owned copy, with the core's own venv (its cryptography). -I: only this
 # copy's code is imported.
 import sys
-sys.path.insert(0, "/opt/thornswood-hermes/current")
+from pathlib import Path
+# The release this file is in: /opt/thornswood-hermes/bin links here through current.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from thornswood_decisions.push_worker import main  # noqa: E402
 sys.exit(main(sys.argv[1:]))

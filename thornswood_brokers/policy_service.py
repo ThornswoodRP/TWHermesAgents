@@ -32,7 +32,7 @@ from typing import Callable
 
 from thornswood_guard.decisions import Decision
 from thornswood_guard.policy import Policy, Verdict
-from thornswood_guard.routes import credits_open, route_allowed
+from thornswood_guard.routes import credits_open, proxy_ready_in, route_allowed
 
 from . import host as hostmod
 from .wire import Refused
@@ -365,6 +365,17 @@ class PolicyService:
         return {"owed": True, "due": not why_not, "why_not": why_not, "since": row[0], "last_at": row[1],
                 "refused": row[2], "reason": row[3]}
 
+    def turn_room(self, caller: str, args: dict) -> dict:
+        """Whether a new turn would be admitted at once, and why not. Asks nothing of the queue and
+        spends nothing: the decision core's connector asks it before it hands a Bot a message, so a
+        message waits in its own queue while the fleet has no room instead of becoming a turn that is
+        turned away."""
+        _bot(self.policy, args)
+        with self._tx():
+            self._expire_silent()
+            why_not = self._queue_full() or self._why_not_now("turn", None)
+        return {"room": not why_not, "why_not": why_not}
+
     def wake_paid(self, caller: str, args: dict) -> dict:
         """A sweep that ran to its end pays what was owed when it started. A
         wake owed after that (one turned away because this sweep was running)
@@ -646,6 +657,9 @@ class PolicyService:
         route = args.get("route")
         if route not in ("credits", "qwen"):
             raise Refused(f"the proxy carries routes 2 and 4 only, not {route}")
+        if route not in proxy_ready_in(self.policy):
+            raise Refused(f"route {route} is not ready (policy.yaml admission_proxy.ready); a PR sets it once "
+                          "its key is in the proxy's file and the proxy's tests passed on the VM")
         turn = self.active(bot)
         if turn is None:
             raise Refused(f"{bot} has no admitted turn; a turn with no ticket never reaches a route")
@@ -753,6 +767,7 @@ class PolicyService:
             "owe_wake": (self.owe_wake, {gw}),
             "wake_due": (self.wake_due, {gw}),
             "wake_paid": (self.wake_paid, {gw}),
+            "turn_room": (self.turn_room, {gw}),
         }
         return {name: (self._one_at_a_time(handler), users) for name, (handler, users) in table.items()}
 

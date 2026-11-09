@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
-# Read-only test: can a GitHub App read the Projects board owned by Patrick's
-# personal account? Runs on the VM as tw-git, the only user that can read the
-# Apps' keys:
+# Read-only test: can a GitHub App read Thornswood's board, the Projects board
+# the ThornswoodRP organization owns (https://github.com/orgs/ThornswoodRP/projects/1)?
+# Runs on the VM as tw-git, the only user that can read the Apps' keys:
 #
 #   sudo -u tw-git bash scripts/check-board-access.sh <app id> <installation id> <key file>
 #
-# for example, the workers' App:
+# for example, the workers' App (organization projects: read, since 2 Nov):
 #
-#   sudo -u tw-git bash scripts/check-board-access.sh 5547094 177393064 /home/tw-git/apps/workers.pem
+#   sudo -u tw-git bash scripts/check-board-access.sh 5547094 177393064 /etc/thornswood/apps/thornswood-workers.pem
+#
+# On 8 Nov 2026 it read the board's title, "Thornswood To Do", and its 1,356
+# items with their Status. The board moved from Patrick's personal account to
+# the organization with the repositories, so the old question (can an App read
+# a user-owned board) no longer applies.
 #
 # It signs a ten-minute App token with the key (the key never leaves this
 # process and nothing is printed from it), trades it for an installation
-# token, asks GitHub for Patrick's Projects boards, prints their numbers and
-# titles or GitHub's refusal, and revokes the installation token. It writes
-# nothing to any repo or board.
+# token, asks GitHub for the board's title, item count and the first items'
+# Status, prints them or GitHub's refusal, and revokes the installation token.
+# It writes nothing to any repo or board.
 set -euo pipefail
 
 app_id="${1:?usage: check-board-access.sh <app id> <installation id> <key file>}"
 installation="${2:?usage: check-board-access.sh <app id> <installation id> <key file>}"
 key="${3:?usage: check-board-access.sh <app id> <installation id> <key file>}"
-owner="EvilPatrick06"
+org="ThornswoodRP"
+number=1
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 now=$(date +%s)
@@ -39,19 +45,17 @@ revoke() {
 }
 trap revoke EXIT
 
-query='query($login:String!){ user(login:$login){ projectsV2(first:20){ totalCount nodes{ number title } } } }'
-answer=$(jq -n --arg q "$query" --arg login "$owner" '{query:$q, variables:{login:$login}}' |
+query='query($login:String!, $number:Int!){ organization(login:$login){ projectV2(number:$number){ title items(first:5){ totalCount nodes{ fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } } } } } } }'
+answer=$(jq -n --arg q "$query" --arg login "$org" --argjson number "$number" '{query:$q, variables:{login:$login, number:$number}}' |
   curl -sS -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
     --data-binary @- https://api.github.com/graphql)
 
 if jq -e '.errors' >/dev/null <<<"$answer"; then
-  echo "RESULT: the App cannot read $owner's boards. GitHub said:"
+  echo "RESULT: the App cannot read $org's board $number. GitHub said:"
   jq -r '.errors[].message' <<<"$answer"
   exit 2
 fi
-count=$(jq -r '.data.user.projectsV2.totalCount' <<<"$answer")
-echo "RESULT: the App reads $count of $owner's boards:"
-jq -r '.data.user.projectsV2.nodes[] | "  #\(.number) \(.title)"' <<<"$answer"
-if [[ "$count" == "0" ]]; then
-  echo "(0 can also mean GitHub hides user-owned boards from Apps rather than refusing; treat it as no access.)"
-fi
+title=$(jq -r '.data.organization.projectV2.title' <<<"$answer")
+count=$(jq -r '.data.organization.projectV2.items.totalCount' <<<"$answer")
+echo "RESULT: the App reads $org's board $number, \"$title\", with $count items. The first items' Status:"
+jq -r '.data.organization.projectV2.items.nodes[] | "  \(.fieldValueByName.name // "no Status")"' <<<"$answer"

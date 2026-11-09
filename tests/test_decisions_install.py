@@ -53,7 +53,7 @@ class Unit(unittest.TestCase):
                 ("tw-decide-feed", "#!/usr/bin/python3 -I", "feed_reader")):
             lines = (DEPLOY / name).read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0], shebang, name)
-            self.assertIn('sys.path.insert(0, "/opt/thornswood-hermes/current")', lines)
+            self.assertIn('sys.path.insert(0, str(Path(__file__).resolve().parents[2]))', lines)
             self.assertIn(f"from thornswood_decisions.{module} import main  # noqa: E402", lines)
 
     def test_the_feed_runs_as_hermes_on_loopback_only(self):
@@ -180,6 +180,12 @@ class Scripts(unittest.TestCase):
             self.assertNotIn(theirs, src.split("PHONE_FLAGS=", 1)[1].split("\n", 1)[0])
         self.assertNotIn(" pair ", src)
         self.assertIn("readlink -f \"$opt/current\"", src)
+
+    def test_the_core_install_checks_the_room_seats_the_policys_bots(self):
+        src = (DEPLOY / "install.sh").read_text(encoding="utf-8")
+        self.assertIn('runuser -u hermes -- python3 -I "$here/scripts/check-hermes-contract.py"', src)
+        self.assertIn('--room "$room"', src)
+        self.assertIn('|| stop "the Workbench room does not match the policy', src)
 
     def test_the_core_install_puts_python3_venv_in_itself(self):
         src = (DEPLOY / "install.sh").read_text(encoding="utf-8")

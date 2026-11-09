@@ -16,7 +16,8 @@ from .passkey import b64url, unb64url
 
 
 class SoftKey:
-    def __init__(self, origin: str, rp_id: str, *, verified: bool = True, counter: int = 0):
+    def __init__(self, origin: str, rp_id: str, *, verified: bool = True, counter: int = 0,
+                 aaguid: str = "00000000-0000-0000-0000-000000000000"):
         import cbor2
         from cryptography.hazmat.primitives.asymmetric import ec
         self._cbor = cbor2
@@ -28,6 +29,8 @@ class SoftKey:
         self.key = ec.generate_private_key(ec.SECP256R1())
         self.credential_id = secrets.token_bytes(16)
         self.user_handle = b""
+        # Which app it says made it, as a phone's authenticator or a passkey app says.
+        self.aaguid = bytes.fromhex(aaguid.replace("-", ""))
 
     def _flags(self, attested: bool) -> int:
         return 0x01 | (0x04 if self.verified else 0) | (0x40 if attested else 0)
@@ -43,7 +46,7 @@ class SoftKey:
     def create(self, options: dict, *, origin: str | None = None) -> dict:
         self.user_handle = unb64url(options["user"]["id"])
         rp_hash = hashlib.sha256((options["rp"]["id"] or self.rp_id).encode()).digest()
-        cred = b"\0" * 16 + len(self.credential_id).to_bytes(2, "big") + self.credential_id + self._cose()
+        cred = self.aaguid + len(self.credential_id).to_bytes(2, "big") + self.credential_id + self._cose()
         auth_data = rp_hash + bytes([self._flags(True)]) + self.counter.to_bytes(4, "big") + cred
         att = self._cbor.dumps({"fmt": "none", "attStmt": {}, "authData": auth_data})
         client = self._client("webauthn.create", options["challenge"], origin)

@@ -90,8 +90,11 @@ class Running:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(10)
             s.connect(self.path)
-            s.sendall(data)
-            s.shutdown(socket.SHUT_WR)
+            try:
+                s.sendall(data)
+                s.shutdown(socket.SHUT_WR)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the worker answers a stranger before reading a byte and closes; its answer is still there to read
             out = b""
             while not out.endswith(b"\n"):
                 chunk = s.recv(65536)

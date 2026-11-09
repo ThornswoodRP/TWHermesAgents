@@ -37,21 +37,35 @@ class Workflow(unittest.TestCase):
             self.assertRegex(u, r"^actions/[a-z-]+@[0-9a-f]{40}$")
 
     def test_the_vms_python_and_ones(self):
-        runs = {(m["runner"], m["python"]) for m in self.wf["jobs"]["tests"]["strategy"]["matrix"]["include"]}
-        self.assertEqual(runs, {("tw-hermes-vm", "3.12"), ("tw-hermes-box", "3.13")})
+        runs = {(m["os"], m["python"]) for m in self.wf["jobs"]["tests"]["strategy"]["matrix"]["include"]}
+        self.assertEqual(runs, {("ubuntu-24.04", "3.12"), ("windows-latest", "3.13")})
 
-    def test_every_job_runs_on_our_own_runners(self):
-        """3 Nov 2026: the included minutes ran out with the limit at $0, and
-        Patrick will not pay (A on q-hermes-ci-free-runners)."""
-        import json
-        self.assertEqual(self.wf["jobs"]["tests"]["runs-on"], "${{ matrix.runner }}")
-        merge = yaml.safe_load((REPO / ".github" / "workflows" / "merge-green.yml").read_text(encoding="utf-8"))
-        self.assertEqual(merge["jobs"]["merge"]["runs-on"], "tw-hermes-vm")
-        pin = json.loads((REPO / "deploy" / "runner" / "runner.json").read_text(encoding="utf-8"))
-        self.assertEqual(pin["labels"], ["tw-hermes-vm"])
+    def test_every_job_runs_on_githubs_own_runners(self):
+        """The repository is public: a pull request from anyone can name any
+        runner label, so a runner of ours (the VM, the box) would run a
+        stranger's code. Every job takes one of GitHub's standard images."""
+        hosted = re.compile(r"^(ubuntu|windows|macos)-[0-9a-z.]+$")
         for wf in (REPO / ".github" / "workflows").glob("*.yml"):
             for name, job in yaml.safe_load(wf.read_text(encoding="utf-8"))["jobs"].items():
-                self.assertIn(job["runs-on"], ("${{ matrix.runner }}", "tw-hermes-vm"), f"{wf.name} {name}")
+                runs_on = job["runs-on"]
+                labels = ([m["os"] for m in job["strategy"]["matrix"]["include"]]
+                          if runs_on == "${{ matrix.os }}" else [runs_on])
+                for label in labels:
+                    self.assertRegex(label, hosted, f"{wf.name} {name}")
+
+    def test_windows_has_gits_bash_before_any_bash_step(self):
+        """8 Nov 2026: tw-hermes-box's first jobs stopped at "bash: command
+        not found", since a service's PATH holds Git's cmd folder only."""
+        steps = self.wf["jobs"]["tests"]["steps"]
+        names = [s.get("name", "") for s in steps]
+        i = names.index("Git's bash on Windows, as on One")
+        step = steps[i]
+        self.assertEqual(step["if"], "runner.os == 'Windows'")
+        self.assertEqual(step["shell"], "pwsh")
+        self.assertIn("Join-Path $env:ProgramFiles 'Git\\bin'", step["run"])
+        self.assertIn("$env:GITHUB_PATH", step["run"])
+        first_bash = min(n for n, s in enumerate(steps) if s.get("shell") == "bash")
+        self.assertLess(i, first_bash)
 
     def test_only_hashed_wheels(self):
         installs = [ln for ln in self.text.splitlines() if "pip install" in ln]

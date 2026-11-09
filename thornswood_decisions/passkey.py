@@ -16,9 +16,14 @@ held by the phone's own authenticator instead of a password manager. A sign-in
 that asks for any passkey lets Android hand the request to the chosen passkey
 provider (Bitwarden), which opens its own app and then asks for the finger; a
 request that names this phone's key (`allowCredentials`, hint `client-device`)
-is answered by the phone itself, with its fingerprint sheet over the app. The
-core checks the signed challenge, the counter and user verification exactly as
-for any passkey, so it is no weaker. The passkey stays the way in on a Desktop.
+is answered by whichever app holds that key. So the key itself must be the
+phone's own: Android still lets a passkey app save it, and on 2 Nov Bitwarden
+did, so the fingerprint button opened Bitwarden (8 Nov). The core now reads
+which app made each key (its AAGUID) and takes a phone key only from Google
+Password Manager, the Pixel's own, whose sign-in is the fingerprint sheet over
+the app. The core checks the signed challenge, the counter and user
+verification exactly as for any passkey, so it is no weaker. The passkey stays
+the way in on a Desktop.
 
 The relying party is the app's exact origin (`https://<name>.ts.net`) and its
 host name. Without the library installed every route here answers 503
@@ -39,6 +44,26 @@ from .store import CoreError, Store, new_id, parse, sha256_hex
 CHALLENGE_LIFETIME = timedelta(minutes=5)
 RP_NAME = "Thornswood"
 MAX_PASSKEYS = 5
+
+# Which app made a key, by the AAGUID it reports with a "none" attestation (the community list,
+# github.com/passkeydeveloper/passkey-authenticator-aaguids). A phone key comes only from the phone's
+# own authenticator; the others are named so a refusal says where the key went.
+PHONE_AUTHENTICATORS = {"ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4": "Google Password Manager"}
+PASSKEY_APPS = {
+    "d548826e-79b4-db40-a3d8-11116f7e8349": "Bitwarden",
+    "bada5566-a7aa-401f-bd96-45619a55120d": "1Password",
+    "531126d6-e717-415c-9320-3d9aa6981239": "Dashlane",
+    "50726f74-6f6e-5061-7373-50726f746f6e": "Proton Pass",
+    "53414d53-554e-4700-0000-000000000000": "Samsung Pass",
+}
+NO_AAGUID = "00000000-0000-0000-0000-000000000000"
+
+
+def maker(aaguid: str | None) -> str:
+    """The app's name for an AAGUID, or what is known about it."""
+    if not aaguid or aaguid == NO_AAGUID:
+        return "an app that did not say its name"
+    return PHONE_AUTHENTICATORS.get(aaguid) or PASSKEY_APPS.get(aaguid) or "a passkey app"
 
 
 def b64url(data: bytes) -> str:
@@ -161,11 +186,16 @@ class Passkeys:
             authenticator_selection=selection, hints=hints, exclude_credentials=exclude)
         return json.loads(options_to_json(opts))
 
-    def register(self, p: Principal, credential: dict, label: str) -> dict:
+    def register(self, p: Principal, credential: dict, label: str, *, on_phone: bool = False) -> dict:
+        """on_phone: the answer to register_options(on_phone=True). It is kept as this phone's own key
+        only when the phone's own authenticator made it, and it then takes the place of any phone key
+        this phone had before."""
         self._ready()
         self.auth._need_patrick(p, fresh=True)
         if not p.device_id:
             raise CoreError(403, "no_device", "a passkey is added from a paired device")
+        if on_phone and p.device_kind != "phone":
+            raise CoreError(403, "not_a_phone", "the fingerprint sign-in is for a paired phone; a Desktop keeps its passkey")
         webauthn = _lib()[0]
         client_data = _field(credential, "response", "clientDataJSON")
         with self.s.tx() as db:
@@ -176,15 +206,33 @@ class Passkeys:
                 expected_origin=self.origin, require_user_verification=True)
         except Exception as exc:  # the library's InvalidRegistrationResponse and parse errors
             raise CoreError(400, "passkey_refused", f"the passkey was not accepted: {type(exc).__name__}") from None
+        aaguid = str(v.aaguid or "").lower() or None
+        if on_phone and aaguid not in PHONE_AUTHENTICATORS:
+            # Nothing is kept: a phone key in a passkey app opens that app at every sign-in.
+            where = maker(aaguid)
+            raise CoreError(409, "saved_in_app",
+                            f"the fingerprint key was saved in {where}, so signing in with it would open {where}; "
+                            "nothing was added. Add it again and pick Google Password Manager when Android asks "
+                            "where to save it", maker=where)
         pk = new_id("pk")
         with self.s.tx() as db:
             if db.execute("SELECT 1 FROM passkeys WHERE credential_id = ?", (b64url(v.credential_id),)).fetchone():
                 raise CoreError(409, "passkey_exists", "that passkey is already added")
+            replaced = []
+            if on_phone:
+                replaced = [r["id"] for r in db.execute(
+                    "SELECT id FROM passkeys WHERE device_id = ? AND phone_key = 1 AND revoked_at IS NULL",
+                    (p.device_id,))]
+                for old in replaced:
+                    db.execute("UPDATE passkeys SET revoked_at = ? WHERE id = ?", (self.s.now(), old))
+                    self.s.event(db, p.workspace_id, "passkey.revoked", old, "patrick",
+                                 {"device": p.device_id, "replaced_by": pk})
             db.execute("INSERT INTO passkeys(id, workspace_id, principal_id, device_id, credential_id, public_key, "
-                       "sign_count, label, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                       "sign_count, label, created_at, aaguid, phone_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                        (pk, p.workspace_id, p.id, p.device_id, b64url(v.credential_id), v.credential_public_key,
-                        v.sign_count, (label or "passkey")[:80], self.s.now()))
-            self.s.event(db, p.workspace_id, "passkey.added", pk, "patrick", {"device": p.device_id})
+                        v.sign_count, (label or "passkey")[:80], self.s.now(), aaguid, 1 if on_phone else 0))
+            self.s.event(db, p.workspace_id, "passkey.added", pk, "patrick",
+                         {"device": p.device_id, "maker": maker(aaguid), **({"phone_key": True} if on_phone else {})})
         # The credential id goes back to the phone that made it, so its sign-in can name it.
         return {"passkey_id": pk, "credential_id": b64url(v.credential_id)}
 
@@ -202,11 +250,16 @@ class Passkeys:
         if phone_key is not None:
             cred_id = b64url(unb64url(phone_key))
             row = self.s.db.execute(
-                "SELECT 1 FROM passkeys k JOIN devices d ON d.id = k.device_id WHERE k.credential_id = ? "
-                "AND k.workspace_id = ? AND k.revoked_at IS NULL AND d.revoked_at IS NULL AND d.kind = 'phone'",
-                (cred_id, workspace_id)).fetchone()
+                "SELECT k.aaguid FROM passkeys k JOIN devices d ON d.id = k.device_id WHERE k.credential_id = ? "
+                "AND k.workspace_id = ? AND k.phone_key = 1 AND k.revoked_at IS NULL AND d.revoked_at IS NULL "
+                "AND d.kind = 'phone'", (cred_id, workspace_id)).fetchone()
             if not row:
                 raise CoreError(404, "no_phone_key", "this phone's fingerprint sign-in was removed; use the passkey")
+            if row["aaguid"] not in PHONE_AUTHENTICATORS:
+                # A phone key from before 8 Nov, which a passkey app may hold: asking for it would open that app.
+                raise CoreError(409, "phone_key_in_app",
+                                "this phone's fingerprint key was not made by the phone itself, so it opens a "
+                                "passkey app; use the passkey and add the fingerprint again")
             _, Transport, _ = _phone_structs()
             allow = [Descriptor(id=unb64url(cred_id), transports=[Transport.INTERNAL])]
         challenge = self._challenge(workspace_id, "sign_in", None)
@@ -254,9 +307,16 @@ class Passkeys:
 
     def list(self, p: Principal) -> list[dict]:
         self.auth._need_patrick(p)
-        rows = self.s.db.execute("SELECT id, label, device_id, created_at, last_used_at FROM passkeys "
+        rows = self.s.db.execute("SELECT id, label, device_id, created_at, last_used_at, aaguid, phone_key FROM passkeys "
                                  "WHERE principal_id = ? AND revoked_at IS NULL ORDER BY created_at", (p.id,))
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            aaguid = d.pop("aaguid")
+            d["maker"] = maker(aaguid) if aaguid else None
+            d["phone_key"] = bool(d["phone_key"])
+            out.append(d)
+        return out
 
     def revoke(self, p: Principal, passkey_id: str) -> None:
         self.auth._need_patrick(p, fresh=True)

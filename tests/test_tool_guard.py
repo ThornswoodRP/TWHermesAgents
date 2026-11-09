@@ -200,7 +200,7 @@ class Plugin(unittest.TestCase):
     def test_the_policy_has_the_brokers_on(self):
         self.assertTrue(policy().data["brokers"]["ready"])
         self.assertFalse(policy().data["brokers"]["tier_b"])
-        self.assertFalse(policy().data["admission_proxy"]["ready"])
+        self.assertEqual(policy().data["admission_proxy"]["ready"], {"credits": False, "qwen": False})
 
     def test_fails_closed_when_the_policy_cannot_be_read(self):
         tmp = self.guard_copy()

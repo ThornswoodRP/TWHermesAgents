@@ -38,7 +38,12 @@ const base = `http://localhost:${port}`
   const errors = []
   page.on('pageerror', e => errors.push(String(e)))
   // A 401 is the signed-out app asking; a 404 is said below only when it is not one of the two that are answers.
-  page.on('console', m => { if (m.type() === 'error' && !/status of (401|404)/.test(m.text())) errors.push(m.text()) })
+  // A 409 from the sign-in options is an answer too: this phone's fingerprint key was saved in a passkey app.
+  page.on('console', m => {
+    if (m.type() !== 'error' || /status of (401|404)/.test(m.text())) return
+    if (/status of 409/.test(m.text()) && /\/api\/v1\/passkeys\/sign-in\/options$/.test((m.location() || {}).url || '')) return
+    errors.push(m.text())
+  })
   page.on('response', r => {
     // Two 404s are answers, not missing routes: a chat a gateway never listed, and a fingerprint key the core no longer has.
     if (r.status() === 404 && !/\/api\/v1\/(own\/(me|one)\/chats\/[^/]+\/messages|passkeys\/sign-in\/options)$/.test(new URL(r.url()).pathname)) {
@@ -357,6 +362,51 @@ const base = `http://localhost:${port}`
     await page.locator('#view .msg.mine .att', { hasText: 'build notes.txt' }).waitFor({ timeout: 5000 })
     if (await page.locator('.files').count()) throw new Error('the picked file stayed above the box after sending')
   })
+  await step('on a computer, Enter sends and Shift+Enter is a new line, as in Hermes Desktop', async () => {
+    const box = page.getByLabel('Message to One')
+    await box.fill('First line')
+    await box.press('Shift+Enter')
+    await box.type('second line')
+    if (await box.inputValue() !== 'First line\nsecond line') throw new Error('Shift+Enter gave ' + JSON.stringify(await box.inputValue()))
+    const sent = page.waitForRequest(q => q.method() === 'POST' && /\/own\/one\/send$/.test(q.url()))
+    await box.press('Enter')
+    const body = JSON.parse((await sent).postData())
+    if (body.text !== 'First line\nsecond line') throw new Error('Enter sent ' + JSON.stringify(body.text))
+    await page.getByText('second line').waitFor({ timeout: 5000 })
+  })
+  await step('a paste of more than 3,000 characters goes as a Pasted content file, and the typed words stay', async () => {
+    const box = page.getByLabel('Message to One')
+    await box.fill('Read this:')
+    const long = 'The 4:47 PM run stopped at the model load. '.repeat(250)
+    await box.evaluate((b, text) => {
+      const dt = new DataTransfer()
+      dt.setData('text/plain', text)
+      b.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }))
+    }, long)
+    await page.locator('.files .file.ok', { hasText: /Pasted content \(1\d KB\)/ }).waitFor({ timeout: 5000 })
+    if (await page.getByLabel('Message to One').inputValue() !== 'Read this:') throw new Error('the paste went into the box')
+    const sent = page.waitForRequest(q => q.method() === 'POST' && /\/own\/one\/send$/.test(q.url()))
+    await page.getByLabel('Message to One').press('Enter')
+    const body = JSON.parse((await sent).postData())
+    if (body.text !== 'Read this:' || body.attachments.length !== 1) throw new Error('send body ' + JSON.stringify(body))
+    await page.locator('#view .msg.mine').filter({ hasText: 'Read this:' }).waitFor({ timeout: 5000 })
+  })
+  await step('a box over 8,000 characters says so, and says it again on a second try', async () => {
+    const box = page.getByLabel('Message to One')
+    await box.fill('x'.repeat(8100))
+    const posts = []
+    const seen = q => { if (q.method() === 'POST' && /\/own\/one\/send$/.test(q.url())) posts.push(q.url()) }
+    page.on('request', seen)
+    await box.press('Enter')
+    const status = page.locator('#view p.again', { hasText: '8,100 characters' })
+    await status.waitFor({ timeout: 3000 })
+    await status.evaluate(s => s.classList.remove('again'))
+    await page.getByRole('button', { name: 'Send to One' }).click()
+    await status.waitFor({ timeout: 3000 })
+    page.off('request', seen)
+    if (posts.length) throw new Error('a box over the limit was sent')
+    await box.fill('')
+  })
   await step("Hermes's own reaction shows on the message it is on", () =>
     page.locator('#view .msg[data-mid="1"] .react[aria-label="Hermes\'s reaction \u{1F440}"]').waitFor({ timeout: 5000 }))
   const reactBody = []
@@ -579,7 +629,7 @@ const base = `http://localhost:${port}`
     await linked.waitFor({ timeout: 15000 })
     const chips = await linked.locator('a.chip-link').evaluateAll(ns => ns.map(a => [a.textContent, a.getAttribute('href'), !!a.querySelector('svg')]))
     const want = [['plan thread', 'https://claude.ai/code/project/chan_1?thread=cmsg_9', true],
-      ['Artifact', 'https://claude.ai/artifact/AbC123', true], ['Thornswood-Hermes #96', 'https://github.com/ThornswoodRP/Thornswood-Hermes/pull/96', true],
+      ['Artifact', 'https://claude.ai/artifact/AbC123', true], ['TWHermesAgents #96', 'https://github.com/ThornswoodRP/TWHermesAgents/pull/96', true],
       ['720-555-0199', 'tel:7205550199', true]]
     if (JSON.stringify(chips) !== JSON.stringify(want)) throw new Error(JSON.stringify(chips))
     const www = linked.locator('a', { hasText: 'www.example.com' })
@@ -620,6 +670,12 @@ const base = `http://localhost:${port}`
         return [before, ...during, list.style.transform]
       })
       if (JSON.stringify(moved) !== JSON.stringify([false, 'translateX(-72px)', true, ''])) throw new Error(JSON.stringify(moved))
+      // On a phone Enter is a new line; the button sends.
+      const tbox = tp.getByLabel('Message to One')
+      await tbox.fill('one')
+      await tbox.press('Enter')
+      if (await tbox.inputValue() !== 'one\n') throw new Error('Enter on a phone gave ' + JSON.stringify(await tbox.inputValue()))
+      await tbox.fill('')
       const wide = await tp.evaluate(() => document.documentElement.scrollWidth - innerWidth)
       if (wide > 0) throw new Error('the times push the page sideways by ' + wide)
     } finally { await touch.close() }
@@ -1013,10 +1069,29 @@ const base = `http://localhost:${port}`
     await page.getByText("This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add the fingerprint again below.").waitFor({ timeout: 8000 })
     await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 5000 })
   })
+  // 8 Nov: the fingerprint key made on 2 Nov was saved in Bitwarden, so the button opened Bitwarden. The core
+  // now refuses to ask for a phone key the phone did not make; the app says why and the passkey signs in.
+  await step('a fingerprint key saved in a passkey app is forgotten, said, and the passkey signs in', async () => {
+    await page.evaluate(() => localStorage.setItem('hermes.phoneKey.v1', JSON.stringify({ credential_id: 'AQEBAQEBAQEBAQEBAQEBAQ', passkey_id: 'pk_app' })))
+    let refused = 0
+    await page.route('**/api/v1/passkeys/sign-in/options', async (r) => {
+      if (JSON.parse(r.request().postData() || '{}').phone_key && !refused++) {
+        return r.fulfill({ status: 409, contentType: 'application/json',
+          body: JSON.stringify({ error: 'phone_key_in_app', message: 'x', detail: {} }) })
+      }
+      return r.fallback()
+    })
+    const res = await page.evaluate(() => passkeySignIn())
+    await page.unroute('**/api/v1/passkeys/sign-in/options')
+    if (res.status !== 200 || refused !== 1) throw new Error(JSON.stringify([res.status, refused]))
+    if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('the key in the app is still kept')
+    const said = await page.evaluate(() => flash)
+    if (!/saved in your passkey app, so it opened that app.*pick Google Password Manager/.test(said)) throw new Error(said)
+  })
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
   // Each signed-in view gets one in every kind of text it shows, at Pixel widths and with larger text.
-  const LONG = 'https://github.com/ThornswoodRP/Thornswood-Hermes/pull/44/commits/2e308db923bf40880adae89d38fedb307c18aa46'
+  const LONG = 'https://github.com/ThornswoodRP/TWHermesAgents/pull/44/commits/2e308db923bf40880adae89d38fedb307c18aa46'
   for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3], [1440, 1]]) {
     await page.setViewportSize({ width, height: 860 })
     for (const view of ['/m/bots', '/m/rooms', '/m/tasks', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',

@@ -390,7 +390,8 @@ class Api:
             return 200, self._passkeys(core).register_options(p, on_phone=data.get("on_phone") is True)
         if method == "POST" and route == ["passkeys", "register"]:
             self._exact_origin(headers)
-            return 200, self._passkeys(core).register(p, data.get("credential"), str(data.get("label", ""))[:80])
+            return 200, self._passkeys(core).register(p, data.get("credential"), str(data.get("label", ""))[:80],
+                                                      on_phone=data.get("on_phone") is True)
         if method == "POST" and len(route) == 3 and route[0] == "passkeys" and route[2] == "revoke":
             self._passkeys(core).revoke(p, route[1])
             return 200, {"revoked": route[1]}

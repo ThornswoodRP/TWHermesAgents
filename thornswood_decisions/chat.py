@@ -76,6 +76,9 @@ WAITS = "waiting for the Bots' gateway: "  # the reason a message put back by no
 # ...unless what it waits for is the connector's own Hermes helper, which failed (connector.py
 # HELPER_FAILED): then the reason is the helper's failure as the connector said it, never the gateway.
 HELPER_FAILED = "the connector's Hermes helper"
+# ...or the fleet queue (connector.py FLEET): a Bot Chat message waits while the queue has no room for its
+# turn, or goes back when its turn was turned away all the same; the reason is the connector's, as said.
+FLEET = "the fleet queue"
 MINE = 50
 MAX_CLAIM = 7  # the six Bots and the rooms, at most this many at once
 ROOM_PAGE = 50
@@ -312,7 +315,7 @@ class Chat:
         mine = [dict(r) for r in reversed(rows)]
         now = self.s.clock()
         for m in mine:
-            if m["status"] == "queued" and (m["reason"] or "").startswith((WAITS, HELPER_FAILED)):
+            if m["status"] == "queued" and (m["reason"] or "").startswith((WAITS, HELPER_FAILED, FLEET)):
                 m["waits"] = m["reason"]
             if m["status"] == "leased" and (doing := TURNS.get(workspace_id, m["id"], now)):
                 m["doing"] = doing  # the live line under a message being answered
@@ -642,7 +645,7 @@ class Chat:
     def _not_ready(self, workspace_id: str, item_id: str, reason: str) -> dict:
         """The gateway was not ready, so nothing was sent: back in the queue as it was, with no effect
         receipt (there was no effect) and that attempt not counted. It goes once the gateway is ready."""
-        why = (reason if reason.startswith(HELPER_FAILED) else WAITS + (reason or "it is not ready"))[:200]
+        why = (reason if reason.startswith((HELPER_FAILED, FLEET)) else WAITS + (reason or "it is not ready"))[:200]
         with self.s.tx() as db:
             for table, kind in (("chat_messages", "chat.not_ready"), ("connector_outbox", "connector.not_ready")):
                 row = db.execute(f"SELECT status FROM {table} WHERE id = ? AND workspace_id = ?",

@@ -432,3 +432,7 @@ a.mention { text-decoration: none; }
 /* A task's state can be a few words ("Next Wed 3:00 AM", "Failed (exit 127)"): on a narrow screen or with
    larger text it wraps inside its pill instead of pushing the page wider. */
 .row[data-task] .w .rec { white-space: normal; text-align: right; }
+/* A status line said again (sayAgain): a short pulse, so a second refusal is seen. */
+@keyframes again { from { opacity: .25; } to { opacity: 1; } }
+.again { animation: again .35s ease-out; }
+@media (prefers-reduced-motion: reduce) { .again { animation: none; } }
