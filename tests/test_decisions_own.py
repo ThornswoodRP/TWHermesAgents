@@ -679,7 +679,8 @@ class TheConnector(unittest.TestCase):
         (turn,) = self.turns()
         self.assertEqual(turn["text"], "check the build")
         args = turn["args"]
-        for flag in ("chat", "-Q"):
+        # room_send.py's attended turn: `hermes chat -Q` that Hermes can ask and Patrick can stop (own_turns.py).
+        for flag in ("attended-chat", "-Q"):
             self.assertIn(flag, args)
         self.assertEqual(args[args.index("--format") + 1], "stream-json")
         self.assertEqual(args[args.index("--resume") + 1], "s_plan")

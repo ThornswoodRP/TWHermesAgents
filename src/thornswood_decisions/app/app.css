@@ -445,3 +445,15 @@ a.mention { text-decoration: none; }
 @keyframes again { from { opacity: .25; } to { opacity: 1; } }
 .again { animation: again .35s ease-out; }
 @media (prefers-reduced-motion: reduce) { .again { animation: none; } }
+
+/* A running turn of his own Hermes: its questions and approvals, and Stop (own_turns.py). */
+.turn-part { margin: 4px 0 8px; }
+.turn-part .card.ask { margin: 8px 0; }
+.turn-part .card.ask > p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.turn-part .opts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.turn-part .opts button { flex: 1 1 auto; min-height: 44px; }
+.turn-part .opts button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.turn-part .ask-own { display: flex; gap: 8px; margin-top: 10px; }
+.turn-part .ask-own input { flex: 1; min-width: 0; min-height: 44px; }
+.turn-part .turn-stop { display: flex; justify-content: flex-end; }
+.turn-part .turn-stop button { min-height: 44px; min-width: 88px; }

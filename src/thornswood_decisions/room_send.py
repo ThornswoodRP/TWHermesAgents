@@ -51,6 +51,30 @@ contracts.json "busy"):
 - a steer or redirect the gateway answers "rejected" (the turn ended meanwhile) is queued, the wire
   contract's "not corrected, queue it as the next prompt", as Desktop does, so nothing is lost.
 
+`attended-chat` in place of `chat` runs the same turn as one Patrick is there to answer (9 Nov: the switch
+from Desktop to the app). `hermes chat -Q` marks its turn finite, and Hermes takes a finite turn as one
+nobody can answer: its question tool (clarify) answers itself "no user available, make the most
+reasonable assumption", and an approval follows approvals.single_query_mode, so a flagged command is
+refused (gateway/session_finite.py finite_clarify_reply; tools/approval_context.py
+_is_single_query_approval_context). Desktop's turns are not finite: Hermes asks, and Desktop shows the
+question or the approval for him to answer. So an attended turn:
+
+- goes in without `finite` on prompt.submit (the view still waits for its own turn's end and exits, as a
+  one-shot does);
+- keeps waiting while a question or an approval is open, where a one-shot would detach ("Input
+  required");
+- says each one Hermes opens, and each one settled, as a line: {"type": "ask", "prompt_id", "kind",
+  "question" or "description" and "command", "choices", "multi_select"} and {"type": "ask_settled",
+  "prompt_id"}, the fields Hermes's own prompt events carry (gateway/session_pending_controls.py);
+- reads orders from its stdin, one JSON object a line, and carries each out on its own gateway connection
+  with the calls `hermes chat`'s own /stop, /approve and /answer make (hermes_cli/gateway_chat_view.py
+  command): {"op": "stop"} is session.interrupt; {"op": "answer", "prompt_id", "value"} is
+  approval.respond with that choice, or clarify.respond with that answer. It says how each went:
+  {"type": "order", "op", "prompt_id"?, "status": "sent" | "gone" | "refused", "reason"?}. Hermes itself
+  refuses an answer to a prompt that is no longer open, or a choice it did not offer.
+
+Hermes's own fd 0 is the null device in an attended turn, so nothing in Hermes ever reads an order.
+
 A steered or redirected message has no turn of its own: the running turn answers it, so this follows
 that turn to its end and reports its result, as `hermes chat` reports its own. Besides Hermes's
 stream-json lines it prints how Hermes took the message, once it has, and again when a queued one starts:
@@ -540,22 +564,148 @@ def main() -> int:
     return 0
 
 
+def say(line) -> None:
+    if line:
+        sys.stdout.write(json.dumps(line) + "\n")
+        sys.stdout.flush()
+
+
 def announce(status: str) -> None:
-    sys.stdout.write(json.dumps({"type": "admission", "status": status}) + "\n")
-    sys.stdout.flush()
+    say({"type": "admission", "status": status})
 
 
 def steerable(text, has_file: bool) -> bool:
     return isinstance(text, str) and bool(text.strip()) and not has_file and not text.lstrip().startswith("/")
 
 
-def follow_busy_setting(has_file: bool) -> None:
-    """Hermes's chat view, with the hand-over of a one-shot message changed as this file's words say."""
+ASK_FIELDS = {"prompt_id": 128, "kind": 16, "question": 4000, "description": 4000, "command": 4000}
+
+
+def ask_line(prompt) -> dict | None:
+    """One open question or approval, as the connector reads it: Hermes's own fields, nothing more."""
+    if not isinstance(prompt, dict) or prompt.get("kind") not in ("approval", "clarify"):
+        return None
+    out = {"type": "ask"}
+    for k, n in ASK_FIELDS.items():
+        if isinstance(prompt.get(k), str):
+            out[k] = prompt[k][:n]
+    if not out.get("prompt_id"):
+        return None
+    choices = prompt.get("choices")
+    out["choices"] = [c[:300] for c in choices if isinstance(c, str)][:12] if isinstance(choices, list) else []
+    out["multi_select"] = prompt.get("multi_select") is True
+    return out
+
+
+class _Attended:
+    """The view's gateway client, submitting its turn without `finite`: a turn Patrick is there to answer."""
+
+    def __init__(self, client):
+        self._client = client
+
+    async def rpc(self, method, **params):
+        if method == "prompt.submit":
+            params.pop("finite", None)
+            params.pop("unattended", None)
+        return await self._client.rpc(method, **params)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def follow_busy_setting(has_file: bool, orders=None) -> None:
+    """Hermes's chat view, with the hand-over of a one-shot message changed as this file's words say.
+    With `orders` (a file of order lines), the turn is attended, as this file's words say."""
     from hermes_cli import gateway_chat_view
 
     base = gateway_chat_view.GatewayChatView
 
-    class BusyAware(base):
+    class Attended(base):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            self.client = _Attended(self.client)
+
+        # The open prompts. The view sets them whole from each snapshot (at the start and after a replay
+        # gap) and changes them one at a time from the prompt events; each way, the change is said.
+        @property
+        def prompts(self):
+            return self.__dict__.get("_tw_prompts", {})
+
+        @prompts.setter
+        def prompts(self, now):
+            was = self.__dict__.get("_tw_prompts", {})
+            self.__dict__["_tw_prompts"] = now
+            for pid in [k for k in now if k not in was]:
+                say(ask_line(now[pid]))
+            for pid in [k for k in was if k not in now]:
+                say({"type": "ask_settled", "prompt_id": str(pid)[:128]})
+
+        def _finite_block(self, admission):
+            # An open question or approval waits for Patrick: only Hermes's other reasons to stop count.
+            held = self.__dict__.get("_tw_prompts", {})
+            self.__dict__["_tw_prompts"] = {}
+            try:
+                return super()._finite_block(admission)
+            finally:
+                self.__dict__["_tw_prompts"] = held
+
+        def show_prompt(self, prompt):
+            pass  # said once already, when the prompts were set
+
+        def _request(self, admission, payload):
+            super()._request(admission, payload)
+            say(ask_line(payload))
+
+        def _settled(self, admission, payload):
+            super()._settled(admission, payload)
+            if isinstance(payload, dict) and isinstance(payload.get("prompt_id"), str):
+                say({"type": "ask_settled", "prompt_id": payload["prompt_id"][:128]})
+
+        async def run(self, query=None, *, oneshot=False):
+            loop = asyncio.get_running_loop()
+            import threading
+
+            def read():
+                for line in orders:
+                    try:
+                        order = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(order, dict):
+                        try:
+                            asyncio.run_coroutine_threadsafe(self._order(order), loop)
+                        except RuntimeError:  # the turn is over and its loop closed
+                            return
+
+            threading.Thread(target=read, daemon=True).start()
+            return await super().run(query, oneshot=oneshot)
+
+        async def _order(self, order):
+            op, pid = order.get("op"), order.get("prompt_id")
+            told = {"type": "order", "op": op if op in ("stop", "answer") else "?"}
+            try:
+                if op == "stop":
+                    await self.client.rpc("session.interrupt", session_id=self.session_id,
+                                          execution_generation=self.generation)
+                    return say(told | {"status": "sent"})
+                prompt = self.prompts.get(pid) if isinstance(pid, str) else None
+                value = order.get("value")
+                if op != "answer" or not isinstance(value, str):
+                    return say(told | {"status": "refused", "reason": "not an order this turn takes"})
+                told["prompt_id"] = pid[:128]
+                if prompt is None:
+                    return say(told | {"status": "gone", "reason": "that question is no longer open"})
+                kind = prompt["kind"]
+                got = await self.client.rpc(kind + ".respond", session_id=self.session_id,
+                                            execution_generation=prompt["execution_generation"], prompt_id=pid,
+                                            **({"choice": value} if kind == "approval" else {"answer": value}))
+                if isinstance(got, dict) and got.get("status") == "already_resolved":
+                    return say(told | {"status": "gone", "reason": "that question was already answered"})
+                return say(told | {"status": "sent"})
+            except Exception as exc:  # Hermes refused it (a choice it did not offer, a stale turn): say so
+                return say(told | {"status": "refused", "reason": f"Hermes refused it ({type(exc).__name__})"})
+
+    class BusyAware(Attended if orders is not None else base):
         def _running(self):
             # The admission running now, from the chat's snapshot (the resume this view was made from).
             return next((r["admission_id"] for r in self.pending
@@ -593,9 +743,18 @@ def follow_busy_setting(has_file: bool) -> None:
     gateway_chat_view.GatewayChatView = BusyAware
 
 
-def turn(args: list[str]) -> None:
-    """`hermes chat <args>` in this runtime, with the busy-input hand-over above. Exits as Hermes exits."""
-    follow_busy_setting("--image" in args)
+def turn(args: list[str], attended: bool = False) -> None:
+    """`hermes chat <args>` in this runtime, with the busy-input hand-over above. Exits as Hermes exits.
+    Attended: the orders come on this process's stdin, and Hermes's own fd 0 becomes the null device."""
+    orders = None
+    if attended:
+        import os
+        orders = os.fdopen(os.dup(0), "r", encoding="utf-8", errors="replace")
+        null = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(null, 0)
+        os.close(null)
+        sys.stdin = open(os.devnull, encoding="utf-8")
+    follow_busy_setting("--image" in args, orders)
     sys.argv = ["hermes", *args]
     import runpy
     runpy.run_module("hermes_cli.main", run_name="__main__", alter_sys=True)
@@ -628,4 +787,6 @@ if __name__ == "__main__":
     rest = sys.argv[3:] if sys.argv[1:2] == ["--hermes-root"] else sys.argv[1:]
     if rest[:1] == ["chat"]:
         turn(rest)
+    if rest[:1] == ["attended-chat"]:
+        turn(["chat", *rest[1:]], attended=True)
     sys.exit(main())

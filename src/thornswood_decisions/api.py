@@ -374,6 +374,8 @@ class Api:
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "react":
             return 200, OwnChat(core.s).react(p, route[1], data.get("session_id"), data.get("message_id"),
                                               data.get("emoji"))
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "turn":
+            return 200, OwnChat(core.s).turn_order(p, route[1], data)
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
             return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
                                              data.get("text"), data.get("idempotency_key"),
