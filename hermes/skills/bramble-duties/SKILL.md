@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.8.0
+version: 1.9.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -46,7 +46,11 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    auto-merge; leave it alone, green or not. One from outside the team gets
    the review in section 3, and never auto-merge.
 3. For each of those pull requests that is not a draft and has no auto-merge on
-   (`auto_merge` is null), review its exact head. Once your review stands,
+   (`auto_merge` is null), read it (`GET /repos/<repo>/pulls/<number>`). If
+   its `mergeable` is false, it conflicts with its base: it goes back to its
+   owner as one comment per head, like a red check below, and you do not
+   call merge on it (by 9 Nov 2026 GitHub had refused 61 of Bramble's merges
+   for conflicts). Otherwise review its exact head. Once your review stands,
    `tw_git merge` on that head turns GitHub's auto-merge on. Do not wait for
    the checks: GitHub merges once the checks main's (or the fork branch's)
    rules require pass, through the merge queue in Thornswood. tw_git refuses
@@ -268,6 +272,26 @@ to work the queue.
    the done ones off with the rest, so the list holds only what is left
    (2 Nov 2026: Ops merges others had landed stayed on it for a day,
    because only Bramble's own runs counted as done).
+
+### Issues filed in Thornswood-Ops
+
+Codex audits every ThornswoodRP repository from 9 Nov 2026 (Patrick), and a
+finding about Thornswood-Ops, or the private detail of a security finding,
+goes in Thornswood-Ops's own issues, never in a public repo. Thornswood-Ops
+is yours: the workers' App is not installed there. On every sweep from 6 AM
+to 11 PM Mountain, after the run notes:
+
+1. `tw_git read`
+   `/search/issues?q=repo:ThornswoodRP/Thornswood-Ops is:issue is:open -label:"claimed: Bramble"&sort=created&order=asc&per_page=20`.
+2. Read each one whole. Take the oldest that is actionable, claim it with
+   `claimed: Bramble`, and fix it as an Ops pull request, which merges in
+   section 1. Work one at a time, as section 6 says for the workers.
+3. When its pull request has merged, `tw_git close_issue` with reason
+   `completed` and `done_by_pr`. A duplicate is closed as in section 5.
+4. One that needs a public change (Thornswood or the fork) gets a public
+   issue that says what and where, without the private detail, and names
+   the Ops issue by number only. That public issue is picked from the board
+   like any other.
 
 ## 5. Duplicates
 
