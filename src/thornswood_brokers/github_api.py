@@ -13,6 +13,7 @@ standard library on the VM.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import subprocess
@@ -21,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from typing import Callable
 
@@ -46,16 +48,65 @@ class Response:
 Transport = Callable[[str, str, dict, bytes | None], Response]
 
 
+class _NoTokenOffHost(urllib.request.HTTPRedirectHandler):
+    """A redirect to another host goes without the App's token.
+
+    GitHub answers a job's log (actions/jobs/<id>/logs) and an artifact's zip
+    (actions/artifacts/<id>/zip) with a 302 to a signed storage address on
+    another host. urllib's own handler copies every header to the new request,
+    so the installation token went to that host too, which refuses a request
+    carrying an Authorization it does not know: every log and gate report read
+    a Bot asked for came back 403 (Thornswood #5580 and #5585, 9 Nov 2026), and
+    the token left GitHub. The signed address is its own permission."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).hostname != urllib.parse.urlsplit(req.full_url).hostname:
+            new.remove_header("Authorization")
+        return new
+
+
+_OPENER = urllib.request.build_opener(_NoTokenOffHost)
+
+
+def _unzip(raw: bytes) -> dict:
+    """An artifact, as its files: text as text, anything else by its size."""
+    files = {}
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            data = z.read(info)
+            try:
+                files[info.filename] = data.decode("utf-8")
+            except UnicodeDecodeError:
+                files[info.filename] = f"(binary, {len(data)} bytes)"
+    return {"files": files}
+
+
+def decode_body(raw: bytes, content_type: str):
+    """JSON when GitHub says JSON; a zip as its files; anything else as text.
+    A job's log is plain text, so reading it as JSON failed even once the
+    storage host answered."""
+    if not raw:
+        return None
+    kind = (content_type or "").split(";", 1)[0].strip().lower()
+    if kind.endswith("json"):
+        return json.loads(raw)
+    if raw[:4] == b"PK\x03\x04":
+        return _unzip(raw)
+    return raw.decode("utf-8", "replace")
+
+
 def urllib_transport(method: str, url: str, headers: dict, data: bytes | None) -> Response:
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            raw = r.read()
-            return Response(r.status, json.loads(raw) if raw else None, dict(r.headers))
+        with _OPENER.open(req, timeout=60) as r:
+            return Response(r.status, decode_body(r.read(), r.headers.get("Content-Type", "")), dict(r.headers))
     except urllib.error.HTTPError as e:
         raw = e.read()
         try:
-            body = json.loads(raw) if raw else None
+            body = decode_body(raw, (e.headers or {}).get("Content-Type", ""))
         except ValueError:
             body = raw.decode("utf-8", "replace")
         return Response(e.code, body, dict(e.headers or {}))
