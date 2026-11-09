@@ -81,3 +81,7 @@ python -m unittest discover -s tests
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the rest.
+
+## License
+
+MIT, the same as Thornswood. See [LICENSE](LICENSE).
