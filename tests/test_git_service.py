@@ -713,6 +713,11 @@ class PullRequestsAndIssues(unittest.TestCase):
             w.git.open_pr("hermes", args)
         self.assertEqual(len(w.fake.writes("POST", "/pulls")), 1)
 
+    def test_the_tool_names_every_ledger_event_tw_policy_takes(self):
+        from thornswood_brokers.policy_service import LEDGER_EVENTS
+        from thornswood_guard.brokers import TW_GIT_SCHEMA
+        self.assertEqual(tuple(TW_GIT_SCHEMA["parameters"]["properties"]["event"]["enum"]), LEDGER_EVENTS)
+
     def test_a_second_pr_for_the_same_issue_is_refused_while_the_first_is_open(self):
         """8 Nov 2026: Bramble opened #5502 and #5503 for #5495 fifteen
         seconds apart, from two branches, and both merged."""

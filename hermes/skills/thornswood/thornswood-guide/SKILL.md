@@ -103,6 +103,7 @@ GitHub's auto-merge merges in Thornswood and the fork (Patrick, 2 Nov 2026: "He 
 ## 7. Dev releases and the ledger (Bramble)
 
 - **The count:** a Dev release runs automatically after **three distinct issues** whose release-affecting work has merged since the last Dev release. Count issues, not PRs, commits or closes. An issue with three PRs counts once, when its last one merges. A docs-only or admin-only change counts zero. A fork merge counts only when the app's pin to it merges.
+- **The ledger** is `tw_git ledger_event` with the repo, the issue, and one of these events: `eligible` (its release-affecting work merged), `reserved_for_candidate` and `candidate_failed` (a release being built, and one that failed), `Dev_verified` and `Main_verified` (checked on that channel, with `release`), `counter_consumed` (counted by a verified Dev release), `reverted`, `superseded`. Nothing else is an event.
 - **Baseline:** the last Dev tag (`release/dev/<stamp>-dev`). Every merge is recorded against it.
 - **Before the release:** the source is clean `origin/main`; every dependent PR is merged; content permissions are complete; the collection is coherent; the Dev server's people count is read (0 is best; never mid-session without warning); the release notes pass `Note-Rules.ps1`.
 - **Bramble runs every step**, by starting runs on `main` on the box's and GitHub's runners. Keys and signing stay there. Patrick runs none of it.

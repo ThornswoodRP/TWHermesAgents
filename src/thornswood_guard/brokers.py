@@ -321,7 +321,13 @@ TW_GIT_SCHEMA = {
             "label": {"type": "string"}, "action": {"type": "string", "enum": ["add", "remove"]},
             "decision_id": {"type": "string"},
             "workflow": {"type": "string"}, "inputs": {"type": "object"}, "channel": {"type": "string"},
-            "path": {"type": "string"}, "event": {"type": "string"}, "issue": {"type": "integer"},
+            "path": {"type": "string"}, "issue": {"type": "integer"},
+            # ledger_event's events (tw-policy LEDGER_EVENTS). 11 refusals by
+            # 9 Nov 2026 were "merged", "merge" and "merge_release": the tool
+            # never named them.
+            "event": {"type": "string", "enum": ["eligible", "reserved_for_candidate", "Dev_verified",
+                                                 "Main_verified", "reverted", "superseded", "counter_consumed",
+                                                 "candidate_failed"]},
             "release": {"type": "string"}, "note": {"type": "string"},
             "eligible": {"type": "boolean"}, "limit": {"type": "integer"},
         },
