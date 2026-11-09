@@ -450,6 +450,26 @@ class BotsAndRooms(unittest.TestCase):
         self.connector().pages()
         self.assertEqual(self.chat.page(self.w.patrick(), "bramble")["gone"], True)
 
+    def test_one_session_of_a_bot_reads_only_that_session(self):
+        # The Board's row opens the session the Bot is working in, not its Bot Chat (Patrick, 9 Nov).
+        p, conn = self.w.patrick(), self.connector()
+        self.assertEqual(self.chat.page(p, "rift", session="s_other"), {"pending": True})
+        self.assertEqual(conn.pages(), 1)
+        page = self.chat.page(p, "rift", session="s_other")
+        self.assertEqual([m["text"] for m in page["messages"]], ["not here"])
+        self.assertFalse(page.get("gone"))
+        # A session id that is not one of that Bot's own reads as gone, never another Bot's session.
+        self.chat.page(p, "rift", session="s_nobody")
+        conn.pages()
+        self.assertTrue(self.chat.page(p, "rift", session="s_nobody")["gone"])
+        for bad in ("../x", "", "a b"):
+            with self.assertRaises(CoreError) as e:
+                self.chat.page(p, "rift", session=bad)
+            self.assertEqual(e.exception.reason, "bad_session")
+        with self.assertRaises(CoreError) as e:
+            self.chat.page(p, ROOM_ID, session="s_other")
+        self.assertEqual(e.exception.reason, "bad_session")
+
     def test_a_page_of_another_bot_than_the_one_asked_for_is_refused(self):
         self.chat.page(self.w.patrick(), "rift")
         [req] = self.chat.page_requests(self.w.ws, self.tok)["pages"]
@@ -485,5 +505,10 @@ class BotsAndRooms(unittest.TestCase):
         sess = s.w.core.auth.issue_session(s.w.ws, method="passkey", device_id=dev)
         status, _, body = s.call("GET", "/chat/rift/messages?before=12", headers={"Cookie": f"tw_session={sess.token}"})
         self.assertEqual((status, body), (200, {"pending": True}))
+        status, _, body = s.call("GET", "/chat/rift/messages?session=s_x", headers={"Cookie": f"tw_session={sess.token}"})
+        self.assertEqual((status, body), (200, {"pending": True}))
+        status, _, _ = s.api.handle("GET", "/m/bots/rift/s/s_x", {}, b"")
+        self.assertEqual(status, 200, "the session's own link opens the app")
+        self.assertEqual(s.api.handle("GET", "/m/bots/rift/s/..%2Fx", {}, b"")[0], 404)
         status, _, body = s.call("GET", "/chat/nobody/messages", headers={"Cookie": f"tw_session={sess.token}"})
         self.assertEqual(status, 404)

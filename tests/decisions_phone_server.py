@@ -46,7 +46,7 @@ f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"
 # two turns at once. When the test makes the file BOARD_NEXT, Rift's command has ended and it is thinking.
 BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:00"},
          {"bot": "rift", "title": "Rebuild the <b>load order</b>", "state": "tool", "tool": "terminal",
-          "since": "2026-11-01T17:40:00+00:00"},
+          "since": "2026-11-01T17:40:00+00:00", "session_id": "s_rift_lo"},
          {"bot": "sprocket", "title": "Installer log", "state": "tool", "tool": "read_file",
           "since": "2026-11-01T17:50:00+00:00"},
          {"bot": "sprocket", "title": "Launcher news", "state": "tool", "tool": "browser_navigate",
@@ -303,6 +303,17 @@ con.execute("INSERT INTO messages(session_id, role, content, timestamp, display_
                 {"reactions": [{"emoji": "\U0001F440", "author": "agent", "at": 1, "seen": True}]})))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'assistant', 'All green <i>tonight</i>.', ?)",
             (epoch("2026-11-01T17:01:00+00:00"),))
+con.commit()
+con.close()
+# Rift's session the Board shows it working in, which a Board row opens.
+(bhome / "profiles" / "rift").mkdir(parents=True)
+con = sqlite3.connect(bhome / "profiles" / "rift" / "state.db")
+con.executescript(STATE_SQL)
+con.execute("INSERT INTO sessions VALUES('s_rift_lo', 'webhook', 'Rebuild the load order', 1, 900, NULL, NULL, NULL, 0, 0)")
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_rift_lo', 'user', "
+            "'Rebuild the load order for #5367', ?)", (epoch("2026-11-01T17:40:00+00:00"),))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_rift_lo', 'assistant', "
+            "'Running the sort now.', ?)", (epoch("2026-11-01T17:41:00+00:00"),))
 con.commit()
 con.close()
 con = sqlite3.connect(bhome / "shared-state.db")

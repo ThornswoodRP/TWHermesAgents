@@ -56,7 +56,7 @@ from zoneinfo import ZoneInfo
 from .auth import Principal
 from .core import DecisionCore
 from .feeds import Feeds, room_events
-from .own import DOING_STATES, PAGE_TEXT, PAGES, TOOL_NAME, _page_mid, clean_page, fetch_page, page_kind
+from .own import DOING_STATES, PAGE_TEXT, PAGES, TOOL_NAME, _page_mid, clean_page, fetch_page, page_kind, SESSION_ID
 from .reactions import Reactions
 from .reactions import emoji as _emoji
 from .tasks import Tasks
@@ -439,12 +439,19 @@ class Chat:
 
     # ── full history: pages (step 2, plan Part 4) ─────────────────────────
 
-    def page(self, p: Principal, target: str, before=None, wait=0) -> dict:
+    def page(self, p: Principal, target: str, before=None, wait=0, session=None) -> dict:
         """One page of a Bot's Bot Chat (`before` Hermes's own message id) or of a room (`before` the room's
-        sequence number), read by the Bots' connector and held in the core's memory only."""
+        sequence number), read by the Bots' connector and held in the core's memory only. With `session`, a
+        page of that one session of the Bot instead: the one the Board shows it working in (Patrick, 9 Nov:
+        "clicking a working agent should open that exact session")."""
         self._patrick(p)
         target = self._target(p.workspace_id, target)
         kind = "room" if target in {r["room_id"] for r in self.rooms(p.workspace_id)} else "bot"
+        if session is not None:
+            if kind != "bot" or not isinstance(session, str) or not SESSION_ID.match(session):
+                raise CoreError(400, "bad_session", "a session is one of a Bot's own session ids")
+            return fetch_page((p.workspace_id, PAGES_GW, "bot_session", target, _page_mid(before), session), wait,
+                              self.s.clock())
         return fetch_page((p.workspace_id, PAGES_GW, kind, target, _page_mid(before), ""), wait, self.s.clock())
 
     def page_requests(self, workspace_id: str, token: str | None) -> dict:
