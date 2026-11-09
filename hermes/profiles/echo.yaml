@@ -1,6 +1,6 @@
 # Echo's Hermes config, as scripts/apply.py sets it in the existing
 # profile /home/hermes/.hermes/profiles/echo/config.yaml. Generated from
-# thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
+# src/thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
 # Every key not listed here stays as Hermes has it. `model` and
 # `fallback_providers` are replaced whole.
 #

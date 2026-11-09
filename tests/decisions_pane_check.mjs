@@ -1,6 +1,6 @@
 // Runs the Desktop pane's logic under node with stand-ins for the Hermes SDK
 // and a scripted backend, so no Hermes and no core are needed.
-//   node tests/decisions_pane_check.mjs plugins/thornswood-decisions/desktop/plugin.js
+//   node tests/decisions_pane_check.mjs hermes/plugins/thornswood-decisions/desktop/plugin.js
 // Prints a PASS or FAIL line per check and ALL PASS at the end; exits 1 on a FAIL.
 
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'

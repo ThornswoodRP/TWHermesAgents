@@ -33,7 +33,7 @@ from thornswood_decisions.own import REACTIONS, clean_page
 from thornswood_decisions.store import CoreError
 
 THUMBS, HEART = REACTIONS[0], REACTIONS[1]
-HELPER = Path(__file__).resolve().parent.parent / "thornswood_decisions" / "room_send.py"
+HELPER = Path(__file__).resolve().parent.parent / "src" / "thornswood_decisions" / "room_send.py"
 
 
 class Wishes(unittest.TestCase):

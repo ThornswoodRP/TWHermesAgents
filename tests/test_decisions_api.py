@@ -363,7 +363,7 @@ class Operator(unittest.TestCase):
             port = probe.getsockname()[1]
         proc = subprocess.Popen([sys.executable, "-m", "thornswood_decisions.cli", "--db", self.db, "serve",
                                  "--workspace", "thornswood", "--port", str(port)],
-                                cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                cwd=str(REPO / "src"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             self.assertIn("listening on 127.0.0.1", proc.stdout.readline())
             proc.send_signal(signal.SIGTERM)

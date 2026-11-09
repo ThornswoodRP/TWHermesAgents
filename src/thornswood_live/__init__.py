@@ -7,7 +7,7 @@ its name (pre_tool_call), thinks again after it (post_tool_call), and is gone wh
 which Hermes calls at the end of every turn, finished, failed or interrupted). Each change rewrites one small
 file, `thornswood-live/<pid>.json` in the home of the profile whose turn it is (the gateway serves several
 profiles from one process, so the home is read per turn, never at load), atomically. It holds this process's
-id and start time, so the reader (thornswood_decisions/live_reader.py, the same `hermes` user) can tell a file
+id and start time, so the reader (src/thornswood_decisions/live_reader.py, the same `hermes` user) can tell a file
 whose process has ended, and each running turn's session id, where it came from, its state, its tool (the
 newest, when it runs several at once) and since when. Never a tool's arguments, its output or any words of
 the turn.

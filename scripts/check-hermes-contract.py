@@ -6,7 +6,7 @@ release folder:
 
     sudo -u hermes python3 -I scripts/check-hermes-contract.py
 
-It checks three things against thornswood_decisions/contracts.json:
+It checks three things against src/thornswood_decisions/contracts.json:
 
 1. the installed Hermes is the pinned commit (from `hermes --version` and the
    install's own git checkout or install stamp);
@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "src"))
 
 from thornswood_decisions import contracts  # noqa: E402
 

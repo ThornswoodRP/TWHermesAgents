@@ -7,6 +7,6 @@
 | [Setting up a VM](setup.md) | What a VM needs, the first install, the read key, the Drive sign-in, the decision core and the phone app |
 | [Running it](operations.md) | Updates and the follower, pausing, reloading, rolling back, the canary, backups and restores |
 | [The decision app](decision-app.md) | Cards and answers, signing in, chat, the Board, alerts, voice, the feature switches and the store |
-| [Fixes for Hermes](../upstream/hermes/README.md) | Patches for Hermes itself, each with its cause, sent upstream |
+| [Fixes for Hermes](../hermes/patches/README.md) | Patches for Hermes itself, each with its cause, sent upstream |
 
 New here? Start with the [README](../README.md), then [Architecture](architecture.md). To make a change, read [CONTRIBUTING.md](../CONTRIBUTING.md).

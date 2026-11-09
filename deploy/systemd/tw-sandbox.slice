@@ -1,5 +1,5 @@
 # every Tier B check, as tw-<bot>.
-# Generated from thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
+# Generated from src/thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
 # A limit changes only by a PR to the policy, never on the box.
 [Unit]
 Description=Thornswood: every Tier B check, as tw-<bot>

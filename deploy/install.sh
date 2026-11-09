@@ -74,7 +74,7 @@ stale_procs() {
 
 pol() { python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d
 for k in sys.argv[2].split("."): v=v[k]
-print(json.dumps(v) if isinstance(v,(dict,list,bool)) else v)' "$here/thornswood_guard/policy.json" "$1"; }
+print(json.dumps(v) if isinstance(v,(dict,list,bool)) else v)' "$here/src/thornswood_guard/policy.json" "$1"; }
 
 bots="bramble rift sprocket echo magpie wisp"
 workers="rift sprocket echo magpie wisp"
@@ -278,7 +278,7 @@ link_in() { ln -sfnT "$1" "$2.new" && mv -T "$2.new" "$2"; }
 install -d -m 0755 "$opt/bin"
 for f in "$here"/deploy/bin/*; do link_in "$opt/current/deploy/bin/${f##*/}" "$opt/bin/${f##*/}"; done
 link_in "$here" "$opt/current"
-link_in "$here/plugins" "$opt/plugins"
+link_in "$here/hermes/plugins" "$opt/plugins"
 ok "$opt/current is $commit"
 
 # 7. Checks start through tw-checks.socket (step 8), never sudo: the sudoers
@@ -316,7 +316,7 @@ fi
 if quotas_on; then
   for b in $bots; do
     gb="$(python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1]))["brokers"]["files"]["disk_quota_gb"]; print(c.get(sys.argv[2], c["default"]))' \
-      "$here/thornswood_guard/policy.json" "$b")"
+      "$here/src/thornswood_guard/policy.json" "$b")"
     setquota -g "tw-work-$b" 0 "$((gb * 1024 * 1024))" 0 0 "$srv_mnt"
   done
   ok "each Bot's work group has its disk cap on $srv_mnt"
@@ -328,7 +328,7 @@ if quotas_on; then
   for b in $bots; do keep+=" $(getent group "tw-work-$b" | cut -d: -f3)"; done
   report="$(repquota -g -n "$srv_mnt")" || stop "repquota could not read the group quotas on $srv_mnt."
   # shellcheck disable=SC2086  # the gids are words on purpose
-  left="$(printf '%s\n' "$report" | python3 -I "$here/thornswood_brokers/disk_caps.py" $keep)" \
+  left="$(printf '%s\n' "$report" | python3 -I "$here/src/thornswood_brokers/disk_caps.py" $keep)" \
     || stop "the group quotas on $srv_mnt could not be read; what it printed is above."
   for gid in $left; do
     name="$(getent group "$gid" | cut -d: -f1 || true)"
@@ -376,7 +376,7 @@ hermes_gid="$(id -g hermes)"
 gateway_was=""
 for b in $bots; do
   gb="$(python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1]))["brokers"]["files"]["disk_quota_gb"]; print(c.get(sys.argv[2], c["default"]))' \
-    "$here/thornswood_guard/policy.json" "$b")"
+    "$here/src/thornswood_guard/policy.json" "$b")"
   want=$((gb * 1024 * 1024 * 1024))
   img="$images/$b.img"
   dir="$work_root/$b"
@@ -483,7 +483,7 @@ ok "units in place and started"
 # the events, on its settings page) and the tailnet's funnel and https node
 # attributes for this machine. Until both are there this step says which is
 # missing, changes nothing and waits on nothing, and the install goes on.
-hook_py() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from thornswood_brokers.app_hook import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"; }
+hook_py() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from thornswood_brokers.app_hook import main; sys.exit(main(sys.argv[2:]))' "$here/src" "$@"; }
 wake_path="/p/$(pol wake.app)/webhooks/$(pol wake.route)"
 wake_target="http://127.0.0.1:$(pol wake.port)$wake_path"
 wake_port="$(pol wake.funnel_port)"

@@ -110,7 +110,7 @@ HELPER = Path(__file__).with_name("room_send.py")
 HELPER_FAILED = "the connector's Hermes helper"  # how a helper failure's reason begins (chat.py HELPER_FAILED)
 # How the reason begins when a Bot Chat message waits for the fleet queue (tw-policy) instead of the
 # gateway (chat.py FLEET). The Bots' turn gate turns away a turn the queue has no room for, and that turn
-# runs nothing (thornswood_guard/brokers.py TURNED_AWAY_DIR). 2 Nov 2026: Patrick's answer on the #5327
+# runs nothing (src/thornswood_guard/brokers.py TURNED_AWAY_DIR). 2 Nov 2026: Patrick's answer on the #5327
 # ad18c2c card went to Bramble while the queue was turning turns away, the turn ended saying it had not
 # started, and the connector called it sent. Now a message goes only when the queue would admit its turn,
 # and one whose turn was turned away all the same goes back in the queue, unspent, like a gateway that

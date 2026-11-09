@@ -61,7 +61,7 @@ Then reload the Bots as above. The lasting fix is a new pull request here.
 
 For each of the six profiles under `/home/hermes/.hermes/profiles/`, and for the gateway's own profile, `apply.py`:
 
-- checks the profile, its `SOUL.md` and its two Thornswood skills are there, and installs the skills this repository owns from `skills/`;
+- checks the profile, its `SOUL.md` and its two Thornswood skills are there, and installs the skills this repository owns from `hermes/skills/`;
 - builds the Bot's config from the policy and sets those keys in `config.yaml`, leaving every other key as Hermes has it (`model` and `fallback_providers` are replaced whole);
 - checks the result can reach no route the Bot may not use;
 - reads the names, never the values, in every `.env`, and looks for key and signing files by name;

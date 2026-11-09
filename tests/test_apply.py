@@ -134,7 +134,7 @@ class Apply(unittest.TestCase):
         home = self.home()
         r = self.run_apply(home)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        want = (REPO / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
+        want = (REPO / "hermes" / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
         got = home / "profiles" / "bramble" / "skills" / "thornswood" / "bramble-duties" / "SKILL.md"
         self.assertEqual(got.read_text(encoding="utf-8"), want)
         for bot in policy().bots:
@@ -211,7 +211,7 @@ class Apply(unittest.TestCase):
         self.assertEqual([json.loads(line) for line in log], [["-p", "bramble", "cron", "list", "--all"]])
 
     def test_the_duties_skill_says_what_bramble_does(self):
-        text = (REPO / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
+        text = (REPO / "hermes" / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\nname: bramble-duties\n"))
         for must in ("ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp", "dequeued", "gh-readonly-queue/main/pr-",
                      "There is no timer and no retry", "ops/claude-queue/", "ops/bramble-list.md", "ops/status.md",
@@ -326,7 +326,7 @@ class Apply(unittest.TestCase):
         for bot in policy().bots:
             for skill in ("thornswood-ops", "thornswood-guide"):
                 got = (home / "profiles" / bot / "skills" / "thornswood" / skill / "SKILL.md").read_bytes()
-                self.assertEqual(got, (REPO / "skills" / "thornswood" / skill / "SKILL.md").read_bytes(), (bot, skill))
+                self.assertEqual(got, (REPO / "hermes" / "skills" / "thornswood" / skill / "SKILL.md").read_bytes(), (bot, skill))
         again = self.run_apply(home)
         self.assertIn("skills written: none, already current", again.stdout)
 
@@ -343,7 +343,7 @@ class Apply(unittest.TestCase):
         spec.loader.exec_module(mod)
         self.assertEqual(mod.check_skills(), [])
         for skill in ("thornswood-ops", "thornswood-guide"):
-            raw = (REPO / "skills" / "thornswood" / skill / "SKILL.md").read_bytes()
+            raw = (REPO / "hermes" / "skills" / "thornswood" / skill / "SKILL.md").read_bytes()
             self.assertNotIn(b"\r", raw, f"{skill}: LF line endings, as .gitattributes keeps them")
             text = raw.decode("utf-8")
             self.assertNotIn("EvilPatrick06/", text, skill)
@@ -397,12 +397,12 @@ class Apply(unittest.TestCase):
 
 class Rendered(unittest.TestCase):
     def test_policy_json_matches_policy_yaml(self):
-        on_disk = (REPO / "thornswood_guard" / "policy.json").read_text(encoding="utf-8")
+        on_disk = (REPO / "src" / "thornswood_guard" / "policy.json").read_text(encoding="utf-8")
         self.assertEqual(on_disk, rendered_policy_json(), "policy.json is stale: run python scripts/render_profiles.py")
 
     def test_profile_files_match_the_policy(self):
         for bot, text in rendered().items():
-            on_disk = (REPO / "profiles" / f"{bot}.yaml").read_text(encoding="utf-8")
+            on_disk = (REPO / "hermes" / "profiles" / f"{bot}.yaml").read_text(encoding="utf-8")
             self.assertEqual(on_disk, text, f"profiles/{bot}.yaml is stale: run python scripts/render_profiles.py")
 
 

@@ -63,10 +63,10 @@ class Reading(unittest.TestCase):
             disk_caps.capped("#963 -- 3M 0 32M 41 0 0\n")
 
     def test_the_command_refuses_what_is_not_repquota_output(self):
-        r = subprocess.run([sys.executable, "-I", str(REPO / "thornswood_brokers" / "disk_caps.py"), "2001"],
+        r = subprocess.run([sys.executable, "-I", str(REPO / "src" / "thornswood_brokers" / "disk_caps.py"), "2001"],
                            input="nothing here\n", capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout), (2, ""))
-        r = subprocess.run([sys.executable, "-I", str(REPO / "thornswood_brokers" / "disk_caps.py"), "2001", "2002"],
+        r = subprocess.run([sys.executable, "-I", str(REPO / "src" / "thornswood_brokers" / "disk_caps.py"), "2001", "2002"],
                            input=REPORT, capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout.split()), (0, ["962", "963", "2003"]), r.stderr)
 
@@ -99,7 +99,7 @@ class TheInstall(unittest.TestCase):
     def test_every_cap_but_the_bots_is_taken_off_and_named(self):
         r, calls = self._run_step(REPORT)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        gb = json.loads((REPO / "thornswood_guard" / "policy.json").read_text())["brokers"]["files"]["disk_quota_gb"]
+        gb = json.loads((REPO / "src" / "thornswood_guard" / "policy.json").read_text())["brokers"]["files"]["disk_quota_gb"]
         self.assertEqual(calls[:2], [f"-g tw-work-{b} 0 {gb.get(b, gb['default']) * 1024 * 1024} 0 0 /"
                                      for b in ("rift", "wisp")])
         self.assertEqual(calls[2:], ["-g 962 0 0 0 0 /", "-g 963 0 0 0 0 /", "-g 2003 0 0 0 0 /"])

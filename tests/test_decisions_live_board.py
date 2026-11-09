@@ -1,7 +1,7 @@
 """The live Board (Patrick, 2 Nov: "only what each is currently doing ... it's supposed to be live").
 
 The thornswood_live plugin, in each Bot's profile, writes what that process's running turns are doing; the
-reader on the VM (thornswood_decisions/live_reader.py) keeps only the files whose process still runs and
+reader on the VM (src/thornswood_decisions/live_reader.py) keeps only the files whose process still runs and
 sends the core one row per running turn. Here: the hooks, the files, the reader and the feed end to end.
 """
 

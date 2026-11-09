@@ -1,5 +1,5 @@
 # tw-policy, tw-files, tw-git and tw-proxy, each as its own user.
-# Generated from thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
+# Generated from src/thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
 # A limit changes only by a PR to the policy, never on the box.
 [Unit]
 Description=Thornswood: tw-policy, tw-files, tw-git and tw-proxy, each as its own user

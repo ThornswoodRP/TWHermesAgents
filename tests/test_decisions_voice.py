@@ -427,7 +427,7 @@ class TheApp(unittest.TestCase):
     """What the phone does, read from the app's source: the browser check drives it (decisions_phone_check.js)."""
 
     def setUp(self):
-        self.js = (REPO / "thornswood_decisions" / "app" / "app.js").read_text()
+        self.js = (REPO / "src" / "thornswood_decisions" / "app" / "app.js").read_text()
 
     def test_hey_hermes_is_off_until_turned_on_and_only_in_front(self):
         self.assertIn("const WAKE_KEY = 'hermes.wake.v1'", self.js)
