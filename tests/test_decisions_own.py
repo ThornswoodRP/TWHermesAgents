@@ -647,8 +647,9 @@ class TheConnector(unittest.TestCase):
         self.assertIn("s_bot2", [o["id"] for o in snap["open"]])
         page = own_connector.chats_page(self.db, None, "")
         self.assertEqual(page["chats"][0]["id"], "s_bot2")
-        self.assertEqual(own_connector.chats_page(self.db, None, "bot")["chats"][0]["id"], "s_bot2")
-        self.assertNotIn("s_bot2", [c["id"] for c in own_connector.chats_page(self.db, None, "plan")["chats"]])
+        self.assertEqual(own_connector.chats_page(self.db, None, "bot", found=[])["chats"][0]["id"], "s_bot2")
+        self.assertNotIn("s_bot2", [c["id"] for c in own_connector.chats_page(
+            self.db, None, "plan", found=[{"id": "s_plan", "snippet": ""}])["chats"]])
         later = own_connector.chats_page(self.db, page["chats"][-1]["last_at"], "")
         self.assertNotIn("s_bot2", [c["id"] for c in later["chats"]])
         con = sqlite3.connect(self.db)

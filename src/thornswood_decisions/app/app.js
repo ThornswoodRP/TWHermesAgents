@@ -2175,9 +2175,10 @@ async function gatewayView(gw, into = 'view') {
       m.made_session_id ? el('button', { class: 'secondary', type: 'button',
         onclick: () => go(`/m/hermes/${gw}/${m.made_session_id}`) }, 'Open it') : null)))
   }
-  // The picker: every chat Hermes's own pickers list, newest first, paged, with a title search.
-  const search = el('input', { type: 'search', autocomplete: 'off', placeholder: 'Search chat titles',
-    'aria-label': 'Search chat titles' })
+  // The picker: every chat Hermes's own pickers list, newest first, paged. Its search finds chats by the
+  // words of their messages and their titles, with Hermes's own search, as Desktop's does.
+  const search = el('input', { type: 'search', autocomplete: 'off', placeholder: 'Search chats',
+    'aria-label': 'Search chats' })
   search.value = pick.q
   search.addEventListener('input', () => { pick.q = search.value })
   const note = el('p', { class: 'quiet', role: 'status' })
@@ -2191,12 +2192,13 @@ async function gatewayView(gw, into = 'view') {
     if (before) pick.extra = pick.extra.concat(p.body.chats)
     else { pick.results = p.body.chats; pick.extra = [] }
     pick.more = p.body.more
+    pick.why = p.body.why || ''
     route()
   }
   const searching = pick.results !== null
   const shown = (searching ? pick.results : v.chats).concat(pick.extra)
   const hasMore = (searching || pick.extra.length) ? pick.more : v.chats.length >= 50
-  parts.push(el('h2', { class: 'section' }, searching ? `Chats with "${pick.q.trim()}" in the title` : 'Chats'),
+  parts.push(el('h2', { class: 'section' }, searching ? `Chats that say "${pick.q.trim()}"` : 'Chats'),
     el('div', { class: 'search' }, search,
       el('button', { class: 'secondary', type: 'button', onclick: () => {
         if (!pick.q.trim()) { pick.results = null; pick.extra = []; return route() }
@@ -2206,7 +2208,7 @@ async function gatewayView(gw, into = 'view') {
     searching ? el('button', { class: 'secondary', type: 'button', onclick: () => {
       pick.q = ''; pick.results = null; pick.extra = []; route()
     } }, 'Show every chat') : null,
-    shown.length ? shown.map(c => chatRow(gw, c, v.ops)) : el('p', { class: 'quiet' }, searching ? 'No chat has that in its title.' : 'No chats yet.'),
+    shown.length ? shown.map(c => chatRow(gw, c, v.ops)) : (searching && pick.why ? el('p', { class: 'warn' }, pick.why) : el('p', { class: 'quiet' }, searching ? 'No chat says that.' : 'No chats yet.')),
     hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(shown[shown.length - 1].last_at) }, 'Older chats') : null,
     note,
     el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats'))

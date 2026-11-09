@@ -513,7 +513,9 @@ def clean_page(kind: str, body) -> dict:
             out.append(row)
         if len({c["id"] for c in out}) != len(out):
             raise CoreError(400, "bad_page", "the page names a chat twice")
-        return {"chats": out, "more": more}
+        # Why a search found nothing it could show: Hermes's own search did not answer (own_connector.py pages).
+        why = _text(body.get("why"), 200)
+        return {"chats": out, "more": more} | ({"why": why} if why and not out else {})
     msgs = body.get("messages")
     if not isinstance(msgs, list) or len(msgs) > PAGE_MESSAGES:
         raise CoreError(400, "bad_page", f"a page of messages has at most {PAGE_MESSAGES}")

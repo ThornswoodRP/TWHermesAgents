@@ -75,7 +75,7 @@ class Pages(unittest.TestCase):
         self.assertEqual(mids, sorted(set(mids)))
         self.assertEqual(clean_page("messages", page)["messages"][0]["text"], "message 0")
 
-    def test_the_chat_list_pages_back_and_searches_titles(self):
+    def test_the_chat_list_pages_back_and_shows_what_hermes_search_found(self):
         db = long_chat(self.dir)
         first = own_connector.chats_page(db, None, "")
         self.assertEqual((len(first["chats"]), first["more"]), (50, True))
@@ -86,10 +86,14 @@ class Pages(unittest.TestCase):
             before = page["chats"][-1]["last_at"] if page["more"] else None
         self.assertEqual(len(seen), 121)
         self.assertEqual(len({c["id"] for c in seen}), 121)
-        found = own_connector.chats_page(db, None, "BACKUP")
+        # What Hermes's own search found, in its order: shown newest first, with the words it matched.
+        hits = [{"id": f"s_{i:03d}", "snippet": "" if i else "the >backup< plan"} for i in range(0, 120, 10)]
+        found = own_connector.chats_page(db, None, "backup", found=hits)
         self.assertEqual([c["title"] for c in found["chats"]][:2], ["Chat 110 backup", "Chat 100 backup"])
-        self.assertEqual(len(found["chats"]), 12)
-        self.assertEqual(own_connector.chats_page(db, None, "100%")["chats"], [])
+        self.assertEqual((len(found["chats"]), found["more"]), (12, False))
+        self.assertEqual(found["chats"][-1]["preview"], "the >backup< plan")
+        self.assertEqual(own_connector.chats_page(db, None, "backup", found=[])["chats"], [])
+        self.assertEqual(own_connector.chats_page(db, None, "backup")["chats"], [], "no search, nothing found")
 
     def test_a_compressed_chat_reads_across_its_lineage_and_says_what_it_goes_on_as(self):
         db = state_db(self.dir)
@@ -306,6 +310,8 @@ class ConnectorRound(unittest.TestCase):
         hermes = own_connector.Hermes([sys.executable, "-c", "pass"], [sys.executable, "-I", "-c", "pass"], folder,
                                       "One's Hermes")
         hermes.ready = lambda: ("ready", "")
+        asked = []
+        hermes.search = lambda q: (asked.append(q), ([{"id": f"s_{i:03d}", "snippet": ""} for i in range(0, 120, 10)], ""))[1]
         conn = own_connector.OwnConnector(FakeCore(g.own, w.ws, "one", g.tok["one"]), hermes, db, say=lambda _: None)
         conn.once()  # its first round sends the chat list, which lists s_long
         p = passkey(w)
@@ -315,6 +321,7 @@ class ConnectorRound(unittest.TestCase):
         got = g.own.page(p, "one", "messages", chat="s_long")
         self.assertEqual((got["messages"][-1]["text"], len(got["messages"]), got["more"]), ("message 499", 50, True))
         self.assertEqual(len(g.own.page(p, "one", "chats", q="backup")["chats"]), 12)
+        self.assertEqual(asked, ["backup"], "a search goes to Hermes's own search")
 
 
 class Routes(unittest.TestCase):
