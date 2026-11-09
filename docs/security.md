@@ -64,10 +64,11 @@ All six Bots and their containers still belong to the one `hermes` user, so a co
 | Rule | Held by | Where |
 |---|---|---|
 | systemd supervises everything, in three slices with hard caps | Code | Each broker runs as its own user in `tw-brokers.slice`, the gateway in `tw-hermes.slice`, checks in `tw-sandbox.slice`, and the Bots' containers under the `hermes` user slice's caps. Rendered from `policy.yaml`, so a cap changes only by pull request (`deploy/systemd/`, `scripts/render_units.py`) |
-| The limits are checked at every boot | Code | `limits_check.py` (`tw-limits-check.service`): every slice's caps, one job of each tier, the swapfile, the disk quotas and the free-space floors. A failure is recorded in `tw-policy`, which then admits no sandbox job |
+| The limits are checked at every boot | Code | `limits_check.py` (`tw-limits-check.service`): every slice's caps, one job of each tier, the swapfile, the disk quotas, each Bot's own Tier A filesystem and the free-space floors. A failure is recorded in `tw-policy`, which then admits no sandbox job |
 | A Bot reads and writes only its own tree | Guard; Broker | The guard refuses file tools and shell commands on Hermes's home, `.env`, `auth.json`, process environments and the brokers' sockets, and each Bot's container sees only its own folder. `tw-files` keeps each worker's trees in their own group, refuses another tree, `..`, an absolute path, a link and a hard link, and runs checks as the Bot's own user with no network |
 | Git hooks, filters and `file://` submodules do nothing | Guard; Broker | The guard refuses `git config` of hooks, filters, credentials and protocols, and `git submodule update`. `tw-files` keeps only the git settings in `brokers.files.git_config_keys` |
 | Disk caps for the Bots' trees | Code | A hard group quota per Bot's work group: 10 GB, and 25 GB for Wisp. `install.sh --quotas` turns quotas on |
+| A disk cap inside each Bot's container | Code | `policy.yaml tier_a_disk`. The container's system files are read-only, it keeps nothing between sessions (so `/root`, `/home`, `/tmp`, `/var/tmp` and `/run` are tmpfs that Hermes sizes and the container's 2 GB memory cap holds), and `/workspace` is the Bot's folder, a filesystem of its own of the same size as its quota, which `install.sh` step 7d makes and mounts. A quota could not hold this: every container runs as the one `hermes` user and could hand a file to a group with no cap |
 | One fleet admission queue | Broker | Every model turn and check asks `tw-policy` first, against the host's free memory, swap, memory pressure, load and disk. The gateway's turn gate stops a turn that was not admitted at its first tool call. A wake of Bramble's that the queue turns away is owed, not dropped, and `owed_wake.py` wakes Bramble once a ticket would be admitted |
 | Every GitHub write happens exactly once | Broker | `tw-git` writes a receipt before each write and reads GitHub back before any retry |
 | Nightly encrypted backups, kept off the VM; a restore kills old decision records | Code | `backup.py`, `offsite.py`, `deploy/sshd/51-tw-boxdrop.conf`, `scripts/restore-on-oracle.sh`. The age key that opens them never goes on the VM |
@@ -92,6 +93,7 @@ Each attack below has a test in `tests/`, and the ones marked live also run on t
 | 3 | Forking, memory, CPU and disk past the caps | Live: forks, allocates and spins in a check and writes past a canary group's quota, then checks the gateway and brokers are still up |
 | 4 | A planted git hook, filter or `file://` submodule | `test_tool_guard.Shell.test_git_settings_that_run_code`, `test_files_service.Attack4Git` |
 | 5 | Container escapes | Live: starts a container with Hermes's own flags and tries to mount, see Hermes's home and find a network |
+| 5b | A container writes past its disk caps | `test_tier_a_disk`; live: with Hermes's flags and the Bots' own, writes to its system files, past a 32 MB `/workspace` filesystem and past `/tmp` |
 | 6 | A worker pushes `main`, a tag or another Bot's branch, or merges its own pull request | `test_github.Pushes`, `test_github.Merges.test_06_*` |
 | 7 | A worker asks for a box, Nexus or release run | `test_github.Runs.test_07_workers_start_no_runs` |
 | 8 | Bramble asks for a bad workflow, ref, verb, parameter or reason | `test_github.Runs.test_08_*` |
@@ -124,5 +126,4 @@ These stay in each Bot's `SOUL.md` and the `thornswood-ops` and `thornswood-guid
 
 What the code above does not hold yet, each with what is missing:
 
-- **No disk cap inside a container.** The VM's ext4 store cannot enforce one in podman (Hermes needs XFS with project quotas). The Bots' broker trees have theirs.
 - **The game box's backup drop.** The install sets up the box's SFTP jail only once the box's public key is in `deploy/keys/box-drop.pub`, which is not in the repository yet.

@@ -100,9 +100,14 @@ def build(policy: Policy, bot: str) -> dict:
         # PATH). Only the Bot's working folder is mounted, at /workspace; no
         # network; one core and 2 GB, which Hermes applies when the cpu,
         # memory and pids controllers are delegated (they are on the VM).
-        # The image is named in full: podman refuses a short name. No disk
-        # cap here: the VM's ext4 store can't enforce one (Hermes needs XFS
-        # with pquota), so the disk cap comes with the per-Bot users' quotas.
+        # The image is named in full: podman refuses a short name. The disk
+        # cap (policy.yaml tier_a_disk): the system files are read-only, the
+        # container keeps nothing between sessions (so /root and /home are
+        # Hermes's sized tmpfs, held by the memory cap, not folders under
+        # ~/.hermes/sandboxes that nothing caps), and /workspace is the Bot's
+        # own fixed-size filesystem, which deploy/install.sh mounts.
+        # container_disk stays 0: podman's size option needs XFS with
+        # project quotas, which the VM's ext4 does not have.
         "terminal": {
             "backend": "docker",
             "cwd": f"{WORK_ROOT}/{bot}",
@@ -112,12 +117,12 @@ def build(policy: Policy, bot: str) -> dict:
             "docker_volumes": [],
             "docker_forward_env": [],
             "docker_env": {},
-            "docker_extra_args": [],
+            "docker_extra_args": ["--read-only"],
             "docker_shared_container_key": "",
             "container_cpu": 1,
             "container_memory": 2048,
             "container_disk": 0,
-            "container_persistent": True,
+            "container_persistent": False,
         },
         # The helper models. Text helpers ("auto") already take the Bot's own
         # main route, and Hermes refuses to guess another login once a main

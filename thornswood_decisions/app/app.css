@@ -432,6 +432,15 @@ a.mention { text-decoration: none; }
 /* A task's state can be a few words ("Next Wed 3:00 AM", "Failed (exit 127)"): on a narrow screen or with
    larger text it wraps inside its pill instead of pushing the page wider. */
 .row[data-task] .w .rec { white-space: normal; text-align: right; }
+
+/* A chat's details: its model and thinking, beside the chat on a wide screen or in a sheet on a phone. */
+.bar-tools { display: flex; gap: 2px; flex: 0 0 auto; }
+.details { display: grid; gap: 10px; padding: 4px 0 12px; }
+.details p { margin: 0; }
+.detail { display: grid; gap: 4px; }
+.detail span { font-size: 12.5px; color: var(--muted); }
+.detail select { width: 100%; min-width: 0; min-height: 44px; padding: 8px 10px; border-radius: 12px;
+  border: 1px solid var(--line2); background: var(--raised); color: var(--fg); font: inherit; }
 /* A status line said again (sayAgain): a short pulse, so a second refusal is seen. */
 @keyframes again { from { opacity: .25; } to { opacity: 1; } }
 .again { animation: again .35s ease-out; }

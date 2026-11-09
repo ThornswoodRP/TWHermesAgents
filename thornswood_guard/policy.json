@@ -693,6 +693,10 @@
       "box_key_file": "deploy/keys/box-drop.pub"
     }
   },
+  "tier_a_disk": {
+    "images": "/var/lib/thornswood/tier-a",
+    "work_root": "/home/hermes/tw-work"
+  },
   "follow_main": {
     "url": "git@github.com:ThornswoodRP/TWHermesAgents.git",
     "read_key": "/etc/thornswood/hermes-read-key",
