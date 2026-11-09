@@ -355,8 +355,9 @@ class Api:
             return 200, Chat(core.s).react(p, route[1], data.get("message_id"), data.get("emoji"))
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
-                return 200, Chat(core.s).view(p, route[1])
-            return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"), data.get("answer"))
+                return 200, Chat(core.s).view(p, route[1], session=query.get("session"))
+            return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"), data.get("answer"),
+                                          session=data.get("session"))
         if method == "GET" and route == ["own"]:
             return 200, OwnChat(core.s).summary(p)
         if method == "GET" and len(route) == 2 and route[0] == "own":

@@ -784,6 +784,12 @@ ALTER TABLE task_links_17 RENAME TO task_links;
 ALTER TABLE passkeys ADD COLUMN fingerprint_try INTEGER NOT NULL DEFAULT 0 CHECK (fingerprint_try IN (0, 1));
 UPDATE passkeys SET fingerprint_try = 1 WHERE phone_key = 0 AND label LIKE 'Passkey in %';
 """,
+    # 19: a message Patrick sends into one session of a Bot, the one a Board row opens (Patrick, 9 Nov:
+    # "it should bring up that session like it would if I had went their myself with the normal view with
+    # the option to message and all the voice features"). NULL is the Bot's Bot Chat, as before.
+    """
+ALTER TABLE chat_messages ADD COLUMN session_id TEXT CHECK (session_id IS NULL OR length(session_id) BETWEEN 1 AND 128);
+""",
 ]
 
 
@@ -947,5 +953,10 @@ ALTER TABLE task_links_16 RENAME TO task_links;
     # fingerprint again on a phone whose passkey app took it.
     18: ([("SELECT count(*) FROM passkeys WHERE fingerprint_try = 1", "passkeys kept from a fingerprint try")], """
 ALTER TABLE passkeys DROP COLUMN fingerprint_try;
+""", ""),
+    # A message still on its way into a Bot's session would go to its Bot Chat instead.
+    19: ([("SELECT count(*) FROM chat_messages WHERE session_id IS NOT NULL AND status IN ('queued', 'leased')",
+           "messages on their way into a Bot's session")], """
+ALTER TABLE chat_messages DROP COLUMN session_id;
 """, ""),
 }

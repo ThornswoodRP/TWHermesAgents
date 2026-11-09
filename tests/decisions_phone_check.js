@@ -903,7 +903,24 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.getByText('Rebuild the load order for #5367').waitFor({ timeout: 3000 })
     if (await page.getByText('bramble 3', { exact: true }).count()) throw new Error("another chat's messages")
     await page.locator('#view .msg.working').waitFor({ timeout: 3000 })
-    if (await page.locator('#view .dock textarea').count()) throw new Error('a composer in a session')
+  })
+  await step('a Bot\'s session is a chat like any other: its box sends into that session, not its Bot Chat', async () => {
+    // Patrick, 9 Nov: "it shouldn't be like a separate read only version".
+    const box = page.getByLabel('Message to Rift')
+    await box.waitFor({ timeout: 5000 })
+    if (!(await page.locator('#view .dock .composer .mic').count())) throw new Error('no microphone in the session')
+    const sent = page.waitForRequest(r => r.method() === 'POST' && /\/api\/v1\/chat\/rift$/.test(r.url()))
+    await box.fill('Use the cached sort, it is faster.')
+    await page.getByRole('button', { name: 'Send to Rift' }).click()
+    const body = JSON.parse((await sent).postData())
+    if (body.session !== 's_rift_lo') throw new Error('sent to ' + JSON.stringify(body.session))
+    await page.getByText('Use the cached sort, it is faster.').waitFor({ timeout: 5000 })
+    await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
+  })
+  await step("a message into a session stays out of the Bot Chat", async () => {
+    await page.goto(base + '/m/bots/rift')
+    await page.getByLabel('Message to Rift').waitFor({ timeout: 5000 })
+    if (await page.getByText('Use the cached sort, it is faster.').count()) throw new Error('in the Bot Chat')
   })
   await step('a session that is not the Bot\'s says so', async () => {
     await page.goto(base + '/m/bots/rift/s/s_nope')

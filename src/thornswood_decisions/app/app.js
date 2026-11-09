@@ -821,49 +821,13 @@ function sessionPath(d) {
   return d.session_id ? `/m/bots/${d.bot}/s/${encodeURIComponent(d.session_id)}` : '/m/bots/' + d.bot
 }
 
-// One session of a Bot, the one a Board row names: its messages from Hermes's own store, read only (a Bot
-// takes Patrick's messages in its Bot Chat), with what the turn is doing now under them while it runs.
-async function botSessionView(bot, sid) {
-  setTab('board')
-  const seqNow = ++viewSeq
-  const name = NAMES[bot] || bot
-  const key = `session:${bot}:${sid}`
-  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false })
-  const base = `/chat/${encodeURIComponent(bot)}/messages?session=${encodeURIComponent(sid)}`
-  const [w, p] = await Promise.all([call('GET', '/work'), ownPage(base)])
-  if (seqNow !== viewSeq) return
-  if (refused(p)) return
-  if (p.status === 200 && !p.body.pending) t.newest = p.body
-  const live = w.status === 200 && w.body.live && w.body.work && Array.isArray(w.body.work.doing)
-    ? w.body.work.doing.find(d => d.bot === bot && d.session_id === sid) : null
-  const title = live && live.title ? live.title : 'Session'
-  const top = [chatBar(() => go('/m/board'), 'Board', name, title, bot, name)]
-  const seen = new Set()
-  const raw = t.newest ? t.older.concat(t.newest.messages).filter(m => !seen.has(m.mid) && seen.add(m.mid)) : []
-  if (t.newest && (t.older.length ? t.olderMore : t.newest.more) && raw.length) {
-    const olderNote = el('p', { class: 'warn', role: 'status' })
-    top.push(el('button', { class: 'secondary older', type: 'button', onclick: async () => {
-      olderNote.textContent = 'Asking for older messages...'
-      const o = await ownPage(`${base}&before=${raw[0].mid}`)
-      if (o.status !== 200 || o.body.pending) {
-        olderNote.textContent = o.status === 200 ? 'No answer yet. Try again in a moment.' : said(o.body)
-        return
-      }
-      t.older = o.body.messages.concat(t.older)
-      t.olderMore = o.body.more
-      chatPlace.keep = String(raw[0].mid)
-      route()
-    } }, 'Older messages'), olderNote)
-  }
-  if (!t.newest) top.push(el('p', { class: 'quiet', role: 'status' },
-    p.status === 200 ? 'Reading this session from Hermes...' : said(p.body)))
-  else if (t.newest.gone) top.push(el('p', { class: 'quiet' }, `This session is not one of ${name}'s.`))
-  else if (!raw.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
-  const items = raw.map(m => ({ mine: m.role === 'user', who: name, agent: name, at: m.at,
-    text: m.text, mid: m.mid, noReact: `A reaction goes on ${name}'s Bot Chat only.` }))
-  const list = [bubbles(items), live ? workingItem(name, bot, live) : null]
-  const dock = [el('p', { class: 'quiet' }, live ? `${name} is working in this session now.` : `${name} is not working in this session now.`)]
-  showChat(key, top, list, dock, items)
+// One session of a Bot, the one a Board row names, as a chat like any other (Patrick, 9 Nov: "it should
+// bring up that session like it would if I had went their myself with the normal view with the option to
+// message and all the voice features, it shouldn't be like a separate read only version"): its messages
+// from Hermes's own store, the Bot's turn there while it runs, and the box, with voice. What he sends goes
+// into that session through the Bot's gateway (connector.py to_session).
+function botSessionView(bot, sid) {
+  return chatView(bot, 'board', sid)
 }
 
 // ── Tasks: subagents, background commands and scheduled jobs (Patrick, 3 Nov) ──
@@ -2885,19 +2849,31 @@ async function roomsView(into = 'view') {
 
 // A Bot's Bot Chat or a room: what the feed last sent shows at once, then the
 // newest page from Hermes itself takes its place, with older pages behind it.
-async function chatView(target, tab) {
+// With `sid`, one session of the Bot instead (the one a Board row opens): the
+// feed has no copy of it, so it shows as Hermes's first page comes.
+async function chatView(target, tab, sid) {
   setTab(tab)
   const seqNow = ++viewSeq
-  const r = await call('GET', '/chat/' + encodeURIComponent(target))
+  const inSession = sid ? '?session=' + encodeURIComponent(sid) : ''
+  const [r, w] = await Promise.all([call('GET', '/chat/' + encodeURIComponent(target) + inSession),
+    sid ? call('GET', '/work') : null])
   if (refused(r)) return
   const v = r.body
   const room = v.kind === 'room'
   const name = room ? v.name : (NAMES[target] || target)
-  const key = 'chat:' + v.target
+  const key = sid ? `session:${v.target}:${sid}` : 'chat:' + v.target
+  // The Bot's own turn in this session, from the Board, while it runs.
+  const work = sid && w && w.status === 200 && w.body.live && w.body.work && Array.isArray(w.body.work.doing)
+    ? w.body.work.doing.find(d => d.bot === v.target && d.session_id === sid) : null
+  const pages = `/chat/${encodeURIComponent(v.target)}/messages` + inSession
+  const more = pages + (sid ? '&' : '?')
   const t = threads[key] || (threads[key] = kept(key) || { newest: null, older: [], olderMore: false, note: '', error: null })
   const idOf = m => room ? m.seq : m.mid
   const status = el('p', { class: 'warn', role: 'status' })
   function history() {
+    if (sid && t.newest && t.newest.gone) {
+      return { notes: [el('p', { class: 'quiet' }, `This session is not one of ${name}'s.`)], items: [], keyed: false }
+    }
     if (!t.newest || t.newest.gone) {
       // Before the first page, or a Bot with no Bot Chat yet: what the feed last sent.
       return { notes: [], items: v.history.map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at, text: m.text, mid: 'feed' + k,
@@ -2911,7 +2887,7 @@ async function chatView(target, tab) {
       const olderNote = el('p', { class: 'warn', role: 'status' })
       notes.push(el('button', { class: 'secondary older', type: 'button', onclick: async () => {
         olderNote.textContent = 'Asking for older messages...'
-        const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages?before=${idOf(raw[0])}`)
+        const p = await ownPage(`${more}before=${idOf(raw[0])}`)
         if (p.status !== 200 || p.body.pending) {
           olderNote.textContent = p.status === 200 ? 'No answer yet. Try again in a moment.' : said(p.body)
           return
@@ -2924,10 +2900,12 @@ async function chatView(target, tab) {
       } }, 'Older messages'), olderNote)
     }
     const noRoom = 'A room has no reactions in Hermes, so a message here takes none.'
+    const noSession = `A reaction goes on ${name}'s Bot Chat only.`
     const items = raw.map(m => room
       ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom }
-      : { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, reactions: m.reactions })
-    if (!room) {
+      : sid ? { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, noReact: noSession }
+        : { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, reactions: m.reactions })
+    if (!room && !sid) {
       withReactions(items, v.reactions, t.newest.handed_at ? new Date(t.newest.handed_at) : null, v.can_send
         ? (mid, emoji) => reactTo(`/chat/${encodeURIComponent(v.target)}/react`, {}, mid, emoji, status) : null,
         said({ error: 'chat_write_off' }))
@@ -2939,28 +2917,33 @@ async function chatView(target, tab) {
     const h = history()
     const items = h.items.concat(pendingItems(v.mine, readAt))
     const top = [
-      chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, undefined,
-        room ? null : v.target, name, null, room ? null : botLive(v.live)),
+      sid ? chatBar(() => go('/m/board'), 'Board', name, work && work.title ? work.title : 'Session', v.target, name,
+        null, botLive(v.live))
+        : chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, undefined,
+          room ? null : v.target, name, null, room ? null : botLive(v.live)),
       h.notes
     ]
-    if (!items.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
+    if (sid && !t.newest) top.push(el('p', { class: 'quiet', role: 'status' }, 'Reading this session from Hermes...'))
+    else if (!items.length && !(sid && t.newest && t.newest.gone)) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
     const dock = v.can_send
-      ? [chatComposer(target, 'Message to ' + name, 'Send to ' + name,
+      ? [chatComposer(sid ? key : target, 'Message to ' + name, 'Send to ' + name,
           (text, k, reply, files, answer) => call('POST', '/chat/' + encodeURIComponent(target),
-            { text, idempotency_key: k, ...(answer ? { answer } : {}) }), status, null, null, v.cards), status]
+            { text, idempotency_key: k, ...(answer ? { answer } : {}), ...(sid ? { session: sid } : {}) }),
+          status, null, null, v.cards), status]
       : [el('p', { class: 'quiet' }, said({ error: 'chat_write_off' }))]
-    // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs.
+    // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs. In a
+    // session, the Bot's own turn there shows the same way while it runs, as on the Board.
     const turn = room ? null : v.mine.find(m => m.status === 'leased')
-    const list = [bubbles(items), turn ? workingItem(name, v.target, turn.doing) : null,
+    const list = [bubbles(items), turn ? workingItem(name, v.target, turn.doing) : work ? workingItem(name, v.target, work) : null,
       room ? null : chatCards(v.cards, location.pathname)]
     if (seqNow === viewSeq) {
       showChat(key, top, list, dock, items)
       const waits = room ? null : turn || v.mine.find(m => m.status === 'queued')
-      if (waits) watchTurn('/chat/' + encodeURIComponent(v.target), seqNow, waits.id, name, waits.status)
+      if (waits) watchTurn('/chat/' + encodeURIComponent(v.target) + inSession, seqNow, waits.id, name, waits.status)
     }
   }
   render()
-  const p = await ownPage(`/chat/${encodeURIComponent(v.target)}/messages`)
+  const p = await ownPage(pages)
   if (seqNow !== viewSeq || p.status !== 200 || p.body.pending) return
   t.newest = p.body
   keepThread(key, t)

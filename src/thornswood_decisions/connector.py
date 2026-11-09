@@ -17,6 +17,10 @@ way Hermes itself does:
   Bot Chat, the same one Desktop shows. The text goes in a 0600 file in a 0700
   folder, never on a command line, and the file is gone when the turn ends.
   Before it, a readiness check finds the Bot's gateway without starting one.
+- one session of a Bot, the one a Board row opens (Patrick, 9 Nov, #77): `room_send.py chat -p <bot> -Q
+  --format stream-json --query-file <file> --resume <session>` with Hermes's own Python and that Bot's own
+  HERMES_HOME, through the Bot's running gateway, so a turn running there takes it by the session's busy
+  setting (to_session). Only a session in that Bot's own store.
 - the room: `room_send.py` with Hermes's own Python, which calls `groups.send`
   on the running gateway with the core's key as the event id.
 
@@ -216,10 +220,11 @@ class Hermes:
         # (fleet_room). None where the Bots have no queue (brokers.ready off): every turn runs.
         self.fleet = fleet
 
-    def turned_away(self, bot: str, since: float) -> str | None:
-        """Why the queue turned away the Bot Chat turn that started at `since` (time.time()), from the
-        note the Bots' turn gate left for that session; None when it ran. The note is taken once read."""
-        sid = bot_chat_id(self.home / ".hermes", bot)
+    def turned_away(self, bot: str, since: float, sid: str | None = None) -> str | None:
+        """Why the queue turned away the turn that started at `since` (time.time()) in the Bot's Bot Chat,
+        or in session `sid`, from the note the Bots' turn gate left for that session; None when it ran. The
+        note is taken once read."""
+        sid = sid or bot_chat_id(self.home / ".hermes", bot)
         if sid is None:
             return None
         note = self.home.joinpath(".hermes", "profiles", bot, *TURNED_AWAY_DIR, f"{sid}.json")
@@ -371,6 +376,89 @@ class Hermes:
             return "confirmed", "turn finished", ""
         return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
 
+    def to_session(self, bot: str, sid: str, text: str, doing=None) -> tuple[str, str, str]:
+        """(outcome, ref, reason) for one message into one session of a Bot: the one a Board row opens,
+        where the Bot may be working right now (Patrick, 9 Nov). It goes the way Desktop's message box
+        sends into an open chat: room_send.py `chat --resume`, through the Bot's running gateway, which
+        holds the session's turn. So a message into a session whose turn is running is steered into it,
+        interrupts it, or waits behind it, as that session's busy setting says, and never runs beside it.
+        The turn is the Bot's own, unattended, under its own guard rails, as a Bot Chat turn is.
+
+        A steered or redirected message has no turn of its own: Hermes has it once it says so, which is
+        the end of this message (the Board's live line follows the Bot's turn). Anything else is followed
+        to its turn's end, as a Bot Chat turn is."""
+        if not SESSION_ID.match(sid):
+            return "failed", "", "that is not a session id Hermes gives"
+        state, why = self.check(bot)
+        if state != "ready":
+            return "not_ready", "", why
+        try:
+            mine = bot_session(self.home / ".hermes", bot, sid)
+        except (sqlite3.Error, OSError) as exc:
+            return "not_ready", "", f"could not read {bot}'s store ({type(exc).__name__})"
+        if not mine:
+            return "failed", "", f"that session is not one of {bot}'s"
+        with tempfile.TemporaryDirectory(prefix="tw-chat-") as folder:
+            os.chmod(folder, 0o700)
+            path = Path(folder) / "message.txt"
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            argv = [*self.helper_cmd, "chat", "-p", bot, "-Q", "--format", "stream-json", "--query-file", str(path),
+                    "--resume", sid]
+            # The Bot's own home, named before any of Hermes is imported (room_send.py loads Hermes's chat
+            # view before Hermes reads -p), so every part of the turn is that profile's.
+            env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
+            started = time.time()
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, cwd=str(self.home), text=True,
+                                        encoding="utf-8", errors="replace", env=env)
+            except OSError:
+                return "failed", "", "could not start the hermes command"
+            seen: dict = {}
+            taken = threading.Event()
+
+            def heard(st, tool):
+                if seen.get("taken"):
+                    taken.set()
+                (doing or (lambda s, t: None))(st, tool)
+
+            reader = threading.Thread(target=follow_turn, args=(proc.stdout, seen, heard), daemon=True)
+            reader.start()
+            ends = time.monotonic() + TURN_SECONDS
+            code = None
+            while code is None and not taken.is_set() and time.monotonic() < ends:
+                try:
+                    code = proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            if code is None and taken.is_set():
+                # Hermes has the message in the running turn. What is left is only watching that turn, so the
+                # view is let go of, as Desktop's /detach does, and ends without touching the turn.
+                proc.kill()
+                proc.wait()
+                reader.join(30)
+                proc.stdout.close()
+                return "confirmed", f"{seen['taken']} into the running turn", ""
+            if code is None:
+                proc.kill()
+                proc.wait()
+                reader.join(30)
+                proc.stdout.close()
+                return "uncertain", "", "no end to the Bot's turn in 15 minutes; it may have the message"
+            reader.join(30)
+            proc.stdout.close()
+        if seen.get("taken"):
+            return "confirmed", f"{seen['taken']} into the running turn", ""
+        if code == 0:
+            if self.fleet is not None:
+                why = self.turned_away(bot, started, sid)
+                if why is not None:
+                    return "not_ready", "", f"{FLEET} turned the turn away: {why}"
+            return "confirmed", "turn finished", ""
+        return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
+
 
 def fleet_room(policy_file: Path | None = None):
     """fleet(bot) for Hermes: tw-policy's turn_room, asked over its socket as the Bots' own user, or None
@@ -440,7 +528,10 @@ class Connector:
                 with self._lock:
                     self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool}
             try:
-                outcome, ref, reason = self.hermes.to_bot(item["target"], item["text"], doing)
+                if item.get("session"):
+                    outcome, ref, reason = self.hermes.to_session(item["target"], item["session"], item["text"], doing)
+                else:
+                    outcome, ref, reason = self.hermes.to_bot(item["target"], item["text"], doing)
             finally:
                 with self._lock:
                     self.doing.pop(item["id"], None)
