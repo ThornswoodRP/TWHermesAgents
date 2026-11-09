@@ -770,6 +770,55 @@ class GitService:
         return self._guarded_write(bot, task, "close_pr", repo, f"pr/{number}", pr.head_sha,
                                    write=write, read_back=read_back)
 
+    def close_issue(self, caller: str, args: dict) -> dict:
+        """Bramble closes an issue as a duplicate (duplicate_of) or as done
+        (done_by_pr, or done_by_run in run_repo), with one plain comment saying
+        why. GitHub reads "Duplicate of #N" in that comment and links the two."""
+        bot, repo, task = self._bot(args), self._repo(args), self._task(args)
+        number, reason = int(args.get("number")), str(args.get("reason") or "")
+        body = str(args.get("body") or "")
+        if (no := self.rules._outside_app(bot, repo)) is not None:
+            raise Refused(no.reason)
+        issue = self._issue(repo, number)
+        duplicate = done_pr = done_run = None
+        if args.get("duplicate_of") is not None:
+            duplicate = self._issue(repo, int(args["duplicate_of"]))
+        if args.get("done_by_pr") is not None:
+            done_pr = self._pr(repo, int(args["done_by_pr"]))
+        if args.get("done_by_run") is not None:
+            run_repo = str(args.get("run_repo") or repo)
+            if self.policy.data["merge"]["base"].get(run_repo) is None:
+                raise Refused(f"{run_repo} is not a repo the Bots work in")
+            done_run = self.gh.get(self.policy.reader_for(run_repo), run_repo,
+                                   f"/repos/{run_repo}/actions/runs/{int(args['done_by_run'])}")
+        self._check(self.rules.close_issue(bot, issue, reason, body, duplicate=duplicate,
+                                           done_pr=done_pr, done_run=done_run))
+        app = "bramble"
+        text = f"Duplicate of #{duplicate.number}.\n\n{body}" if reason == "duplicate" else body
+        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        marker = f"<!-- tw:{digest} -->"
+
+        def write():
+            said = any(marker in (c.get("body") or "")
+                       for c in self.gh.get_all(app, repo, f"/repos/{repo}/issues/{number}/comments"))
+            if not said:
+                r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues/{number}/comments",
+                                 {"body": f"{text}\n\n{marker}"})
+                if r.status != 201:
+                    raise GitHubError(r.status, str(r.body))
+            r = self.gh.call(app, repo, WRITE["issues"], "PATCH", f"/repos/{repo}/issues/{number}",
+                             {"state": "closed", "state_reason": reason})
+            if r.status != 200:
+                raise GitHubError(r.status, str(r.body))
+            return {"closed": True}
+
+        def read_back():
+            now = self.gh.get(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{number}")
+            return {"closed": True, "state_reason": now.get("state_reason")} if now.get("state") == "closed" else None
+
+        return self._guarded_write(bot, task, "close_issue", repo, f"issue/{number}/close", "",
+                                   write=write, read_back=read_back)
+
     def start_run(self, caller: str, args: dict) -> dict:
         bot, task = self._bot(args), self._task(args)
         repo = self.policy.data["runs"]["repo"]
@@ -847,7 +896,8 @@ class GitService:
         return self.ask("ledger_event", {k: args.get(k) for k in ("repo", "issue", "event", "release", "note")})
 
     # Every op that changes something on GitHub.
-    WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr", "start_run")
+    WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
+              "close_issue", "start_run")
 
     def _executor_only(self, name: str, op: Callable[[str, dict], dict]) -> Callable[[str, dict], dict]:
         """One executor at a time (plan phases 4 and 5): until the cutover the
@@ -864,7 +914,7 @@ class GitService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-                 "start_run", "read", "refused", "ledger_event")
+                 "close_issue", "start_run", "read", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
         # root's follower alone, never a Bot.
