@@ -50,7 +50,7 @@ STUB_RUNTIME = textwrap.dedent('''
     def discover_gateway_endpoint(home, timeout=2.0):
         down = os.environ.get("TW_STUB_DOWN", "").split(",")
         state = "absent" if home.name in down else "ready"
-        return SimpleNamespace(state=state, endpoint=str(home) if state == "ready" else None)
+        return SimpleNamespace(state=state, endpoint=home.as_posix() if state == "ready" else None)
     def attachable(found):
         return found.endpoint is not None
 ''')
