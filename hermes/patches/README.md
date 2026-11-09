@@ -7,6 +7,7 @@ Some problems the Bots hit are caused in [Hermes Agent](https://github.com/NousR
 | Folder | What it holds |
 |---|---|
 | `v0.22.5/` | The patches made against Hermes v0.22.5 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). They apply in number order |
+| `v0.23.0/` | The patches made against Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`). 0011 also applies to upstream `main` (`466591fe`, 8 Nov 2026) as it is |
 | `main/` | The patches remade on upstream `main`, where upstream had changed the same lines. 0002, 0003 and 0004 apply to upstream `main` as they are, so they have no copy here |
 | `followups/` | Commits for the upstream pull request branches that answer upstream's code health check, each at its cause |
 
@@ -21,7 +22,7 @@ git am v0.22.5/*.patch
 The VM and Patrick's Desktop run Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`), the version `src/thornswood_decisions/contracts.json` pins. None of these fixes is in v0.23.0 yet. Applied one after another with `git am --3way`, these apply on it as they are:
 
 ```bash
-git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-headers-logged.patch v0.22.5/0003-spill-fallback-posix-path.patch v0.22.5/0004-aux-codex-pick-by-model.patch v0.22.5/0005-desktop-relay-local-source-once-it-signals.patch main/0006-desktop-scheduled-jobs-every-gateway.patch v0.22.5/0008-desktop-ready-wait-on-remote.patch main/0007-webhook-coalesce-survives-restart.patch main/0010-display-watch-profile-scope.patch
+git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-headers-logged.patch v0.22.5/0003-spill-fallback-posix-path.patch v0.22.5/0004-aux-codex-pick-by-model.patch v0.22.5/0005-desktop-relay-local-source-once-it-signals.patch main/0006-desktop-scheduled-jobs-every-gateway.patch v0.22.5/0008-desktop-ready-wait-on-remote.patch main/0007-webhook-coalesce-survives-restart.patch main/0010-display-watch-profile-scope.patch v0.23.0/0011-cron-gated-fire-ends-session.patch
 ```
 
 The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already has the upstream code their `main/` copies were made for. Neither does 0009: v0.23.0 has upstream's rewrite of that flow.
@@ -40,6 +41,7 @@ The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already 
 | 0008 | A remote dashboard's READY wait runs on the remote, not as one ssh login a second | not opened yet | `c305aedf` |
 | 0009 | A source switch resolves the target's address in its dial, not in its commit | not opened yet | not remade |
 | 0010 | The Bot Screen watcher reads each home under its own terminal policy | not opened yet | `013bde47` (only on `main`; the file is the same in v0.22.5) |
+| 0011 | A cron fire a gate stopped ends the session its owner admitted | not opened yet | made on v0.23.0; applies to `main` as is |
 
 GitHub allows an account without write access five open pull requests in a repository, so the later patches open as the earlier ones merge or close.
 
@@ -133,6 +135,18 @@ HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/gateway/test_webhook_c
 git am main/0010-display-watch-profile-scope.patch
 python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
 HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/tui_gateway/test_display_watch.py tests/tui_gateway/test_display_methods.py -q -rfE
+```
+
+## 0011: a cron fire a gate stopped ends the session its owner admitted
+
+**Cause.** On the canonical cron path the gateway admits each fire's session row (`gateway/session_cron._create`) before `run_job` runs its gates. Only `_finalize_cron_session` ends a cron row, and it runs after an agent turn. A fire that a gate stopped (the job's script said `{"wakeAgent": false}`, a monitor gate, an empty payload) runs no agent, so its row stayed open with no messages until the next gateway start reaped it as `startup_orphan_reap`. Bramble's `tw-owed-wake` runs every five minutes and sleeps on almost every run, so each run left one empty session (TWHermesAgents #63).
+
+**Fix.** When a gate returns, `run_job` ends the row through the owner's store, which is already open, so nothing new is opened (`test_wake_gate_false_never_opens_session_db` still holds). A gated run is a completed run, so it is booked as `cron_complete`, as a silent run is. A fire with no owner (a `no_agent` job) had no row admitted and ends nothing.
+
+```bash
+git am v0.23.0/0011-cron-gated-fire-ends-session.patch
+python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
+HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/cron/test_sessiondb_init_hang.py -q -rfE
 ```
 
 ## The follow-up commits
