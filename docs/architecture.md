@@ -71,6 +71,10 @@ Their ids and key paths are in `policy.yaml` `brokers.apps`.
 
 When a Bot needs Patrick, it opens a card in the decision core (`src/thornswood_decisions/`, the `tw-decide` service). He answers from the installable phone app or the Hermes Desktop pane, signed in with a passkey, and the core tells the Bot the answer. The core also carries his chats with the Bots and with his own Hermes, the live Board, push alerts and voice. [decision-app.md](decision-app.md) covers it in full.
 
+## Patrick's own Hermes
+
+His own Hermes on the VM (my-hermes, the `patrick-hermes` user) is not a Bot and is not set by `apply.py`. Each release's `deploy/decisions/install.sh` gives it two things, as that user: the `thornswood-decisions` plugin link, which adds rule zero to its prompt, and a copy of the `thornswood-coordinator` skill (`hermes/skills/thornswood-coordinator`). The skill holds Patrick's rules for talking to him and the steps for taking any ask he drops in one chat: file it on the board for the Bot that owns its field, follow it, and report status. Its status report comes from `scripts/coordinator_report.py`, which reads the board and the open pull requests with that user's own `gh` sign-in and changes nothing.
+
 ## The live Board
 
 `thornswood_live` is a small Hermes plugin in each Bot's profile. It watches four of Hermes's own hooks and blocks nothing: when a turn thinks, which tool it runs by name, and when it ends. It writes one small file per process. `live_reader.py` (`tw-decide-live.service`) reads those files every 2 seconds and sends the core one row per running turn, so the app's Board shows what each Bot is doing right now. No words of a turn, tool arguments or output ever leave it.

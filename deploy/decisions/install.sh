@@ -183,6 +183,20 @@ if [[ -n "$plugin_home" && -L "$plugin_link" && "$(readlink "$plugin_link")" == 
   runuser -u patrick-hermes -- mv -T "$plugin_link.new" "$plugin_link"
   ok "$plugin_link -> $opt/plugins/thornswood-decisions"
 fi
+# The coordinator's rules and steps for Patrick's own Hermes (TWHermesAgents #85):
+# this release's thornswood-coordinator skill, copied whole over his Hermes's copy,
+# as its owner, in one rename. A copy and not a link, because Hermes 0.23.0 finds a
+# skill by name with Path.rglob (tools/skills_tool.py), which does not go into a
+# linked folder. Only when his Hermes is there; the Bots' user never gets it.
+coord_src="$here/hermes/skills/thornswood-coordinator/SKILL.md"
+[[ -f "$coord_src" ]] || stop "this release has no hermes/skills/thornswood-coordinator/SKILL.md"
+if [[ -n "$plugin_home" && -d "$plugin_home/.hermes" ]]; then
+  coord_dir="$plugin_home/.hermes/skills/thornswood/thornswood-coordinator"
+  runuser -u patrick-hermes -- sh -c 'umask 022; mkdir -p "$1" && cat > "$1/.SKILL.md.new" && mv -f "$1/.SKILL.md.new" "$1/SKILL.md"' \
+    _ "$coord_dir" < "$coord_src" || stop "could not put the coordinator skill in $coord_dir"
+  cmp -s "$coord_src" "$coord_dir/SKILL.md" || stop "$coord_dir/SKILL.md is not this release's copy"
+  ok "coordinator skill in $coord_dir"
+fi
 # The connector finds the gateway's control socket where the gateway's own unit puts it.
 install -d -m 0755 /etc/systemd/system/tw-decide-connector.service.d
 printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u hermes)" \
