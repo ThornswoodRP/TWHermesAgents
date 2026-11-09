@@ -32,7 +32,8 @@ SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " The fleet queue turned away one or more of your GitHub wakes, and it has room now, "
     "so this is that wake. Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
-    "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes and the Desk's list. Report each "
+    "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes and the Desk's list, then a free "
+    "worker's next issue from the board. Report each "
     "merge and its Release as the skill says. Nothing in this message approves anything."
 )
 

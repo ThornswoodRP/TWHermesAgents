@@ -207,6 +207,50 @@ class ConnectorSide(unittest.TestCase):
         self.assertEqual(self.w.store.db.execute("SELECT status FROM chat_messages WHERE id = ?", (m,)).fetchone()[0],
                          "sent")
 
+    def test_a_task_with_a_brief_reaches_the_specialist_once(self):
+        # 9 Nov 2026: an assignment reached nobody, so no worker ever took up a picked issue.
+        flags(self.w, "connector_effects")
+        out = self.w.core.assign_task(self.w.bramble, "5547", "magpie",
+                                      "Claimed for you: Thornswood #5547. Name the failing check from the log.")
+        self.assertEqual(out, {"task": "5547", "bot": "magpie", "queued": True})
+        again = self.w.core.assign_task(self.w.bramble, "5547", "magpie",
+                                        "Claimed for you: Thornswood #5547. Name the failing check from the log.")
+        self.assertFalse(again["queued"])
+        # Without a brief nothing is told, as before.
+        self.assertFalse(self.w.core.assign_task(self.w.bramble, "5548", "echo")["queued"])
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([(i["kind"], i["target"]) for i in items], [("task.assigned", "magpie")])
+        self.assertTrue(items[0]["send_key"].startswith("tw-task."))
+        self.assertIn("assigned you task 5547", items[0]["text"])
+        self.assertIn("Name the failing check from the log.", items[0]["text"])
+        self.assertIn("approves nothing by itself", items[0]["text"])
+        self.chat.result(self.w.ws, self.tok, items[0]["id"], "confirmed", "turn finished")
+        self.assertEqual(self.w.store.db.execute("SELECT status FROM connector_outbox WHERE id = ?",
+                                                 (items[0]["id"],)).fetchone()[0], "sent")
+        self.assertEqual(self.chat.claim(self.w.ws, self.tok)["items"], [])
+        for bad in ("", " ", "x" * 8001):
+            with self.subTest(brief=len(bad)), self.assertRaises(CoreError):
+                self.w.core.assign_task(self.w.bramble, "5549", "wisp", bad)
+
+    def test_no_new_work_is_handed_out_from_11_pm_to_6_am_mountain(self):
+        # Patrick, 9 Nov 2026: the Bots auto work 6 AM to 11 PM; at night the Grok lanes audit.
+        flags(self.w, "connector_effects")
+        cases = [(datetime(2026, 11, 9, 12, 59, tzinfo=timezone.utc), False),  # 5:59 AM MST
+                 (datetime(2026, 11, 9, 13, 0, tzinfo=timezone.utc), True),    # 6:00 AM
+                 (datetime(2026, 11, 10, 5, 59, tzinfo=timezone.utc), True),   # 10:59 PM
+                 (datetime(2026, 11, 10, 6, 0, tzinfo=timezone.utc), False)]   # 11:00 PM
+        for n, (t, ok) in enumerate(cases):
+            self.w.clock.t = t
+            with self.subTest(t=t.isoformat()):
+                if ok:
+                    self.assertTrue(self.w.core.assign_task(self.w.bramble, f"6{n}", "echo", "Do it.")["queued"])
+                else:
+                    with self.assertRaises(CoreError) as e:
+                        self.w.core.assign_task(self.w.bramble, f"6{n}", "echo", "Do it.")
+                    self.assertEqual(e.exception.reason, "after_hours")
+        # An assignment with no brief tells nobody and is not held.
+        self.assertFalse(self.w.core.assign_task(self.w.bramble, "70", "echo")["queued"])
+
     def test_the_bot_that_asked_is_told_and_that_is_bot_told(self):
         flags(self.w, "connector_effects")
         card = self.w.card()

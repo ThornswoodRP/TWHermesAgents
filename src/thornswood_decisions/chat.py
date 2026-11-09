@@ -491,7 +491,7 @@ class Chat:
                 "SELECT 'chat' AS kind, id, target, created_at, rowid AS n FROM chat_messages WHERE workspace_id = ? "
                 "AND status = 'queued' UNION ALL "
                 "SELECT kind, id, target, created_at, rowid AS n FROM connector_outbox WHERE workspace_id = ? "
-                "AND status = 'queued' AND kind = 'decision.answered' ORDER BY created_at, n",
+                "AND status = 'queued' AND kind IN ('decision.answered', 'task.assigned') ORDER BY created_at, n",
                 (workspace_id, workspace_id)).fetchall()
             until = (self.s.clock() + LEASE).isoformat()
             now = self.s.now()
@@ -508,8 +508,10 @@ class Chat:
                 else:
                     db.execute("UPDATE connector_outbox SET status = 'leased', lease_until = ?, "
                                "attempts = attempts + 1, updated_at = ? WHERE id = ?", (until, now, w["id"]))
-                    item = {"id": w["id"], "kind": "decision.answered", "target": w["target"],
-                            "text": self._told_text(db, w["id"]), "send_key": f"tw-told.{w['id']}"}
+                    told = w["kind"] == "decision.answered"
+                    item = {"id": w["id"], "kind": w["kind"], "target": w["target"],
+                            "text": self._told_text(db, w["id"]) if told else self._task_text(db, w["id"]),
+                            "send_key": f"tw-{'told' if told else 'task'}.{w['id']}"}
                 # The connector sends to a room by its id; to it every room is "room".
                 if item["target"] == ROOM:
                     item["room_id"] = first
@@ -551,6 +553,14 @@ class Chat:
                 f"{o['label'] if o else body['option']} (option {body['option']}). Response {body['response']}. "
                 "The card in the decision core is the record; this message approves nothing by itself."
                 + Chat._decided_text(db, body["decision_id"], body["response"]))
+
+    @staticmethod
+    def _task_text(db, outbox_id: str) -> str:
+        body = json.loads(db.execute("SELECT body_json FROM connector_outbox WHERE id = ?",
+                                     (outbox_id,)).fetchone()["body_json"])
+        return (f"{body['by']} assigned you task {body['task']}. The brief:\n\n{body['brief']}\n\n"
+                "Work it as the thornswood-guide skill says (sections 2 and 4), and hand back to Bramble. "
+                "This message approves nothing by itself.")
 
     @staticmethod
     def _decided_text(db, decision_id: str, response_id: str) -> str:
