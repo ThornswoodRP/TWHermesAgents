@@ -67,6 +67,46 @@ class TheCore(unittest.TestCase):
         self.chat.result(self.w.ws, self.tok, item["id"], "confirmed", "turn finished")
         self.assertEqual(PAGES.hand(self.w.ws, PAGES_GW, self.w.store.clock()), [])
 
+    def test_a_finished_bot_chat_turn_puts_the_answer_on_the_bots_list_at_once(self):
+        """Patrick, 9 Nov: Wisp answered him in 8 seconds, yet the Bots list kept Wisp's older line until the
+        feed's next run, up to a minute on. The core now asks for the Bot Chat's newest page when the turn
+        ends, and the list takes the last line of it."""
+        from thornswood_decisions import chat as chat_mod
+        from thornswood_decisions.own import PAGES
+
+        def clear():
+            with PAGES.cond:
+                PAGES.held.clear()
+                PAGES.asked.clear()
+            chat_mod._SAID.clear()
+        clear()
+        self.addCleanup(clear)
+        flags(self.w, "mobile_read")
+        p = self.w.patrick()
+
+        def last():
+            return next(b for b in self.chat.summary(p)["bots"] if b["bot"] == "wisp")["last"]
+
+        self.chat.send(p, "wisp", "Hello.", "key-botchat-said")
+        [item] = self.chat.claim(self.w.ws, self.tok, 3)["items"]
+        self.assertEqual((last()["role"], last()["text"]), ("user", "Hello."), "his message, before any answer")
+        self.chat.result(self.w.ws, self.tok, item["id"], "confirmed", "turn finished")
+        [ask] = self.chat.page_requests(self.w.ws, self.tok)["pages"]
+        self.assertEqual((ask["kind"], ask["chat"], ask["before"]), ("bot", "wisp", None))
+        self.w.clock.advance(seconds=8)
+        answer = {"mid": 12, "role": "assistant", "text": "Hey Patrick. #4155 is open.", "at": self.w.store.now()}
+        self.chat.page_post(self.w.ws, self.tok, {"id": ask["id"], "target": "wisp", "page": {
+            "messages": [{"mid": 11, "role": "user", "text": "Hello.", "at": self.w.store.now()}, answer],
+            "more": False}})
+        self.assertEqual(last(), {k: answer[k] for k in ("role", "text", "at")})
+
+    def test_a_finished_turn_in_a_session_asks_for_no_bot_chat_page(self):
+        flags(self.w, "mobile_read")
+        self.chat.send(self.w.patrick(), "rift", "In the session.", "key-session-noask", session="s_rift_lo")
+        [item] = self.chat.claim(self.w.ws, self.tok, 3)["items"]
+        self.chat.result(self.w.ws, self.tok, item["id"], "confirmed", "turn finished")
+        self.assertEqual(self.chat.page_requests(self.w.ws, self.tok)["pages"], [])
+
     def test_a_bot_chat_message_carries_no_session(self):
         self.chat.send(self.w.patrick(), "rift", "Hello.", "key-botchat-3")
         [item] = self.chat.claim(self.w.ws, self.tok, 3)["items"]

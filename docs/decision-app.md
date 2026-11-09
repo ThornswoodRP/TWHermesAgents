@@ -54,6 +54,7 @@ For every chat:
 - **Delivery** is honest: only Hermes saying so is "sent", only nothing sent is "not sent", and everything else is "uncertain", never sent again by itself. A gateway that is not ready, or a Bot whose turn the fleet queue would not admit, leaves the message queued, and it goes the moment the gateway answers ready and the queue has room. A turn the queue turns away after all counts the same way, never as sent.
 - **A running turn** follows the chat's busy setting, as Desktop does: the message steers the turn, interrupts it or waits in Hermes's queue, and the app says which.
 - **A live line** under the message being answered says what the turn is doing ("Thinking", "Writing", "Running a command"), read from Hermes's own event stream. Never the words, a tool's input or its output.
+- **The Bots list** puts the one last written in first, and its line is the last thing said there, his own message included, even one the Bot has not taken yet. When a turn in a Bot Chat ends, the core reads that chat's newest page from Hermes at once, so the Bot's answer is on the list within seconds, not at the feeds' next run. The list reads itself again every 15 seconds while open.
 - **History** pages back to a chat's first message, across Hermes's compression, held in the core's memory only, never in its store or a log.
 - **Markdown** is drawn node by node as text: nothing in a message is read as HTML, and only `http` and `https` links are links.
 - **Reactions** are Hermes's own, one per person on a message, set through Hermes's own session store.
