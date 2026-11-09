@@ -281,7 +281,8 @@ nobody. On every sweep, after the sections above:
    Security, and Operations work on runners or the gate to Magpie; Mods and
    Legal on mods to Rift. Release, and Operations on the box itself, are
    yours, not a worker's. `area: triage` or Accessibility: read the issue
-   and pick by the part it names, and put the right `area:` label on it.
+   and pick by the part it names (tw_git puts on claim labels only, so
+   the area label stays as it is).
 3. Claim it: `tw_git label` add `claimed: <Bot>`. The card goes to In
    Progress by itself.
 4. `tw_decide assign_task` with `task` `<owner>/<repo>#<number>`,
