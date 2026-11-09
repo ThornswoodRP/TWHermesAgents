@@ -664,9 +664,9 @@ class Chat:
                 return {"id": item_id, "status": state, "replayed": True}
             if row["status"] != "leased":
                 raise CoreError(409, "not_leased", f"that message is {row['status']}, not leased")
-            # The turn is over and the Bot's answer is in its Bot Chat (or the message in the room): that
-            # chat's newest page is read again, not shown from memory for up to PAGE_FRESH without it.
-            PAGES.forget(workspace_id, PAGES_GW, ("bot", "room"), row["target"])
+            # The turn is over and the Bot's answer is in its Bot Chat or the session (or the message in the
+            # room): that chat's newest page is read again, not shown from memory for up to PAGE_FRESH without it.
+            PAGES.forget(workspace_id, PAGES_GW, ("bot", "bot_session", "room"), row["target"])
             with self.s.tx() as db:
                 db.execute("UPDATE chat_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ? "
                            "WHERE id = ?", (state, reason or None, self.s.now(), item_id))

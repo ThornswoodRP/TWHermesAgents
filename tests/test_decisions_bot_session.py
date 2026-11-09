@@ -57,6 +57,16 @@ class TheCore(unittest.TestCase):
         self.chat.send(self.w.patrick(), "rift", "And the Bot Chat.", "key-botchat-2")
         self.assertEqual(self.chat.claim(self.w.ws, self.tok, 3)["items"], [])
 
+    def test_a_finished_turn_reads_the_sessions_newest_page_again(self):
+        from thornswood_decisions.chat import PAGES_GW
+        from thornswood_decisions.own import PAGES
+        p = self.w.patrick()
+        self.assertEqual(self.chat.page(p, "rift", session="s_rift_lo"), {"pending": True})
+        self.chat.send(p, "rift", "Use the cached sort.", "key-session-3", session="s_rift_lo")
+        [item] = self.chat.claim(self.w.ws, self.tok, 3)["items"]
+        self.chat.result(self.w.ws, self.tok, item["id"], "confirmed", "turn finished")
+        self.assertEqual(PAGES.hand(self.w.ws, PAGES_GW, self.w.store.clock()), [])
+
     def test_a_bot_chat_message_carries_no_session(self):
         self.chat.send(self.w.patrick(), "rift", "Hello.", "key-botchat-3")
         [item] = self.chat.claim(self.w.ws, self.tok, 3)["items"]
