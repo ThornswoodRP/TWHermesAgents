@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS owed_wakes (
 
 TICKET_SEEN_TIMEOUT = timedelta(minutes=10)
 WAITING_TIMEOUT = timedelta(hours=24)
+# The longest tw-reload-bots may hold new turns while running ones end
+# (hold_turns). It ends sooner when the reload says so; a reload that died
+# holding leaves nothing held past this.
+HOLD_MAX = timedelta(minutes=40)
 RISKS = ("low", "high")
 OUTCOMES = ("confirmed", "failed", "unknown")
 LEDGER_EVENTS = ("eligible", "reserved_for_candidate", "Dev_verified", "Main_verified",
@@ -270,6 +274,9 @@ class PolicyService:
                 return "the last limits check at boot did not pass; no sandbox job runs until one does"
         else:
             limit = self._stage_limit("model_turns")
+            held = self._held()
+            if held:
+                return f"{held}; a new turn starts once the running ones have ended and the Bots are back"
         # Only tickets still asking hold the line: one whose turn went away
         # without a word (no ask for ten minutes) keeps its place in the count
         # but lets the next one by, so a lost turn never stalls the fleet.
@@ -324,6 +331,48 @@ class PolicyService:
                                 (iso(self.clock()), str(args.get("why") or "the Bots were reloaded"))).rowcount
             self._audit(caller, "release_turns", {"released": n})
         return {"released": n}
+
+    # Holding new turns for a reload (TWHermesAgents #52). From 1 Nov to 9 Nov
+    # 2026 the gateway was stopped 64 times, mostly by follow-main's reload
+    # after an install, and 14 of its drains timed out with turns cut off
+    # mid-work. tw-reload-bots now holds new turns, waits for the running
+    # ones to end, and only then stops the gateway.
+
+    def _held(self) -> str:
+        until = self._meta("hold_until")
+        if until and parse(until) > self.clock():
+            return self._meta("hold_why") or "the Bots are being reloaded"
+        return ""
+
+    def _turns_running(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='admitted' AND kind='turn'").fetchone()[0]
+
+    def hold_turns(self, caller: str, args: dict) -> dict:
+        """tw-reload-bots, as root: no new model turn is admitted (it waits in
+        line) until end_hold, or for `seconds` at most (HOLD_MAX). Returns how
+        many turns are running now."""
+        seconds = int(args.get("seconds") or HOLD_MAX.total_seconds())
+        seconds = max(60, min(seconds, int(HOLD_MAX.total_seconds())))
+        why = str(args.get("why") or "the Bots are being reloaded")[:200]
+        with self._tx():
+            self._expire_silent()
+            until = iso(self.clock() + timedelta(seconds=seconds))
+            self._set_meta("hold_until", until)
+            self._set_meta("hold_why", why)
+            self._audit(caller, "hold_turns", {"until": until, "why": why})
+            return {"running": self._turns_running(), "until": until}
+
+    def turns_running(self, caller: str, args: dict) -> dict:
+        with self._tx():
+            self._expire_silent()
+            return {"running": self._turns_running(), "held": bool(self._held())}
+
+    def end_hold(self, caller: str, args: dict) -> dict:
+        with self._tx():
+            n = self.db.execute("DELETE FROM meta WHERE key IN ('hold_until', 'hold_why')").rowcount
+            if n:
+                self._audit(caller, "end_hold", {})
+        return {"ended": bool(n)}
 
     # Owed wakes. A wake is GitHub telling Bramble that something finished;
     # its work is a sweep of every repository's state, so any later sweep does
@@ -795,6 +844,9 @@ class PolicyService:
             "touch": (self.touch, {gw, files}),
             "finish": (self.finish, {gw, files}),
             "release_turns": (self.release_turns, {"root"}),
+            "hold_turns": (self.hold_turns, {"root"}),
+            "turns_running": (self.turns_running, {"root"}),
+            "end_hold": (self.end_hold, {"root"}),
             "set_task_risk": (self.set_task_risk, {gw}),
             "status": (self.status, {gw, git, files, proxy, "root"}),
             "op_begin": (self.op_begin, {git}),

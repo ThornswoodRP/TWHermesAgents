@@ -63,16 +63,61 @@ class FakeHost:
         raise AssertionError(argv)
 
 
+class Queue:
+    """tw-policy's hold, as the reload asks it: running is how many turns
+    each ask after the hold still sees."""
+
+    def __init__(self, running=(0,), down=False):
+        self.running, self.down, self.asked = list(running), down, []
+
+    def __call__(self, op, args):
+        self.asked.append(op)
+        if self.down:
+            raise OSError("the broker at /run/tw/policy/policy.sock is not answering")
+        if op in ("hold_turns", "turns_running"):
+            n = self.running.pop(0) if len(self.running) > 1 else self.running[0]
+            return {"running": n}
+        return {"ended": True}
+
+
 class Reload(unittest.TestCase):
-    def run_it(self, host, release=None):
+    def run_it(self, host, release=None, ask=None):
         said = []
         self.released = []
 
         def gave_back(why):
             self.released.append((why, [c[:2] + c[2:] for c in host.calls]))
             return {"released": 2}
-        code = reload_bots(run=host, sleep=lambda s: None, say=said.append, release=release or gave_back)
+        self.queue = ask or Queue()
+        code = reload_bots(run=host, sleep=lambda s: None, say=said.append, release=release or gave_back,
+                           ask=self.queue)
         return code, said
+
+    def test_running_turns_end_before_the_gateway_stops(self):
+        """#52: 14 of 64 gateway stops from 1 to 9 Nov 2026 cut a running turn off."""
+        host = FakeHost()
+        code, said = self.run_it(host, ask=Queue(running=(2, 1, 0)))
+        self.assertEqual(code, 0, said)
+        self.assertEqual(self.queue.asked, ["hold_turns", "turns_running", "turns_running", "end_hold"])
+        self.assertTrue(any("waiting for 2 running turns" in l for l in said), said)
+        self.assertTrue(any("no turn running after 20 seconds" in l for l in said), said)
+
+    def test_a_turn_still_running_after_the_wait_is_named_and_the_hold_still_ends(self):
+        code, said = self.run_it(FakeHost(), ask=Queue(running=(1,)))
+        self.assertEqual(code, 0, said)
+        self.assertTrue(any("1 turn still running after 20 minutes; cut off now" in l for l in said), said)
+        self.assertEqual(self.queue.asked[-1], "end_hold")
+
+    def test_the_hold_ends_when_the_gateway_does_not_come_back(self):
+        code, said = self.run_it(FakeHost(gateway_after="failed"))
+        self.assertEqual(code, 1, said)
+        self.assertEqual(self.queue.asked[-1], "end_hold")
+
+    def test_tw_policy_down_still_reloads(self):
+        code, said = self.run_it(FakeHost(), ask=Queue(down=True))
+        self.assertEqual(code, 0, said)
+        self.assertTrue(any("did not hold new turns" in l for l in said), said)
+        self.assertEqual(self.queue.asked, ["hold_turns"])
 
     def test_only_the_hermes_users_sessions(self):
         self.assertEqual(sessions(FakeHost()), ["3", "7"])
@@ -86,7 +131,7 @@ class Reload(unittest.TestCase):
                                  ["loginctl", "terminate-session", "3"], ["loginctl", "terminate-session", "7"],
                                  ["systemctl", "reset-failed", GATEWAY],
                                  ["systemctl", "start", GATEWAY], ["systemctl", "is-active", GATEWAY]])
-        self.assertIn("ended 2 hermes login sessions", said[0])
+        self.assertIn("ended 2 hermes login sessions", said[1])
 
     def test_the_ended_turns_tickets_go_back_while_nothing_runs(self):
         # 1 Nov, 3:42 PM: a reload mid-turn left Bramble's ticket holding the
@@ -135,7 +180,8 @@ class Reload(unittest.TestCase):
     def test_a_session_still_there_after_sigterm_is_named_then_ended_with_sigkill(self):
         host = FakeHost(stuck=["7"])
         said = []
-        code = reload_bots(run=host, sleep=lambda s: None, say=said.append, release=lambda why: {"released": 0})
+        code = reload_bots(run=host, sleep=lambda s: None, say=said.append, release=lambda why: {"released": 0},
+                           ask=Queue())
         self.assertEqual(code, 0, said)
         self.assertIn(["loginctl", "kill-session", "7", "--signal=SIGKILL"], host.calls)
         self.assertNotIn(["loginctl", "kill-session", "3", "--signal=SIGKILL"], host.calls)

@@ -256,7 +256,11 @@ class FollowMain(unittest.TestCase):
                 raise follow_main.wire.Refused("the broker at /run/tw/git/git.sock is not answering")
             self.reports.append(json.loads(json.dumps(args)))
             return {"ledger": 1, "board": None}
-        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append, report=report)
+        self.drained = 0
+
+        def drain():
+            self.drained += 1
+        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append, report=report, drain=drain)
         if installed:
             (f.opt / "releases" / installed).mkdir(parents=True)
             (f.opt / "current").symlink_to(f.opt / "releases" / installed)
@@ -286,6 +290,8 @@ class FollowMain(unittest.TestCase):
         self.assertIn("User=tw-ci", tests)
         self.assertIn("PrivateNetwork=yes", tests)
         self.assertEqual(json.loads(f.state_file.read_text())["installed"], NEW)
+        # #52: running turns end before the install restarts the brokers and the gateway.
+        self.assertEqual(self.drained, 1)
 
     # 2 Nov, #68: the install passed and only the follower's summary line was
     # kept, so a card asking for the install's own lines could not be answered.
@@ -386,6 +392,7 @@ class FollowMain(unittest.TestCase):
         f = self.follower(vm)
         self.assertEqual(f.follow(), 1)
         self.assertEqual(vm.ran("install.sh"), [])
+        self.assertEqual(self.drained, 0, "a release that is not installed holds no turn")
         self.assertEqual(json.loads(f.state_file.read_text())["failed"], NEW)
         vm.calls.clear()
         self.assertEqual(f.follow(), 1)
