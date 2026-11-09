@@ -63,7 +63,7 @@ For every chat:
 
 ## The Board
 
-One row for each Bot turn running right now: the Bot, the session's title, what the turn is doing, and for how long. A row opens that very session, read only from the Bot's own store, with what the turn is doing under it while it runs. With nothing running it says "No Bot is working right now", and when the reader goes quiet for 90 seconds it says when it last heard from the Bots, instead of showing what may have ended.
+One row for each Bot turn running right now: the Bot, the session's title, what the turn is doing, and for how long. A row opens that very session as a chat like any other: its messages from the Bot's own store, what the turn is doing under them while it runs, and the box with dictation and voice chat. A message sent there goes into that session through the Bot's own gateway, the way Desktop sends into an open chat: while the Bot's turn runs, the session's busy setting steers it into the turn, interrupts it, or queues it behind, and it never runs beside it. It is the Bot's own unattended turn under its guard rails, as a Bot Chat message is. Reactions stay in the Bot Chat. With nothing running it says "No Bot is working right now", and when the reader goes quiet for 90 seconds it says when it last heard from the Bots, instead of showing what may have ended.
 
 ## Alerts
 

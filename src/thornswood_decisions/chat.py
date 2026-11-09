@@ -221,15 +221,27 @@ class Chat:
 
     # ── Patrick's side ────────────────────────────────────────────────────
 
-    def send(self, p: Principal, target: str, text, idempotency_key, answer=None) -> dict:
+    def _session(self, workspace_id: str, target: str, session) -> str | None:
+        """A session of a Bot named in a request: None for its Bot Chat, else the id, checked as Hermes's.
+        Whether it is really one of that Bot's own is the connector's to check, in that Bot's store."""
+        if session is None:
+            return None
+        if target not in self.bots(workspace_id) or not isinstance(session, str) or not SESSION_ID.match(session):
+            raise CoreError(400, "bad_session", "a session is one of a Bot's own session ids")
+        return session
+
+    def send(self, p: Principal, target: str, text, idempotency_key, answer=None, session=None) -> dict:
         """One message to a Bot or a room. With `answer` (a card this Bot asked, the option, and the
         revision, attention revision and artifact SHA-256 the phone showed), the message is also
         Patrick's answer to that card: it is taken first, by DecisionCore.answer with all its checks, and
-        nothing is sent when it is refused."""
+        nothing is sent when it is refused. With `session`, the message goes into that one session of the
+        Bot (the one a Board row opens) instead of its Bot Chat, and Hermes hands it to the session as its
+        busy setting says when a turn runs there (connector.py to_session)."""
         self._patrick(p)
         if not self.s.flag(p.workspace_id, "mobile_chat_write"):
             raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
         target = self._target(p.workspace_id, target)
+        session = self._session(p.workspace_id, target, session)
         if not isinstance(text, str) or not text.strip():
             raise CoreError(400, "bad_text", "a message has some text")
         text = text.strip()
@@ -243,7 +255,8 @@ class Chat:
                 raise CoreError(400, "bad_key", "a message that answers a card carries a key of at most 192 characters")
             receipt = self._answer(p, target, text, idempotency_key, answer)
         body_sha = sha256_hex(canonical({"target": target, "text": text}
-                                        | ({"answer": receipt["response_id"]} if receipt else {})))
+                                        | ({"answer": receipt["response_id"]} if receipt else {})
+                                        | ({"session": session} if session else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -255,10 +268,12 @@ class Chat:
             now = self.s.now()
             mid = new_id("msg")
             db.execute("INSERT INTO chat_messages(id, workspace_id, target, text, send_key, principal_id, device_id, "
-                       "status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,'queued',?,?)",
-                       (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now))
-            self.s.event(db, p.workspace_id, "chat.queued", mid, "patrick", {"target": target, "device": p.device_id})
-            out = {"message_id": mid, "target": target, "status": "queued", "created_at": now}
+                       "status, created_at, updated_at, session_id) VALUES(?,?,?,?,?,?,?,'queued',?,?,?)",
+                       (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now, session))
+            self.s.event(db, p.workspace_id, "chat.queued", mid, "patrick", {"target": target, "device": p.device_id}
+                         | ({"session": session} if session else {}))
+            out = {"message_id": mid, "target": target, "status": "queued", "created_at": now} \
+                | ({"session": session} if session else {})
             if receipt:
                 out["answered"] = receipt
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
@@ -306,12 +321,13 @@ class Chat:
             return room_targets(self.s.db, workspace_id, target)
         return (target,)
 
-    def _mine(self, workspace_id: str, target: str) -> list[dict]:
+    def _mine(self, workspace_id: str, target: str, session: str | None = None) -> list[dict]:
+        """His newest messages in one chat: a Bot's Bot Chat (session None), one session of the Bot, or a room."""
         targets = self._targets(workspace_id, target)
         rows = self.s.db.execute("SELECT id, text, status, reason, created_at, updated_at FROM chat_messages "
                                  f"WHERE workspace_id = ? AND target IN ({','.join('?' * len(targets))}) "
-                                 "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                                 (workspace_id, *targets, MINE)).fetchall()
+                                 "AND session_id IS ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                                 (workspace_id, *targets, session, MINE)).fetchall()
         mine = [dict(r) for r in reversed(rows)]
         now = self.s.clock()
         for m in mine:
@@ -333,9 +349,13 @@ class Chat:
         return [{"who": e["actor"] or "someone", "role": "user" if e["kind"] == "message.user" else "member",
                  "text": e["text"], "at": e["at"]} for e in events]
 
-    def view(self, p: Principal, target: str) -> dict:
+    def view(self, p: Principal, target: str, session=None) -> dict:
+        """A chat as the phone opens it. With `session`, that one session of a Bot (the one a Board row
+        opens): his messages into it, the Bot's cards and its state, and no copy from the feed, which carries
+        the Bot Chat only; the session's own messages come as pages from Hermes (page)."""
         self._patrick(p)
         target = self._target(p.workspace_id, target)
+        session = self._session(p.workspace_id, target, session)
         feeds = Feeds(self.s)
         rooms = {r["room_id"]: r["name"] for r in self.rooms(p.workspace_id)}
         if target in rooms:
@@ -345,14 +365,19 @@ class Chat:
         else:
             snap = feeds.get(p.workspace_id, "bots")
             chat = next((b for b in (snap["bots"] or {}).get("bots", []) if b["bot"] == target), None)
-            history = [{"who": "Patrick" if m["role"] == "user" else target.capitalize(), "role": m["role"],
-                        "text": m["text"], "at": m["at"]} for m in (chat or {}).get("messages", [])]
+            history = [] if session else [
+                {"who": "Patrick" if m["role"] == "user" else target.capitalize(), "role": m["role"],
+                 "text": m["text"], "at": m["at"]} for m in (chat or {}).get("messages", [])]
             kind, name = "bot", target.capitalize()
-        return {"target": target, "kind": kind, "name": name, "as_of": snap["as_of"], "history": history,
+        return ({"target": target, "kind": kind, "name": name, "as_of": snap["as_of"], "history": history,
                 "cards": DecisionCore(self.s).asked_by(p, target) if kind == "bot" else [],
-                "mine": self._mine(p.workspace_id, target), "can_send": self.s.flag(p.workspace_id, "mobile_chat_write"),
-                "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target) if kind == "bot" else [],
+                "mine": self._mine(p.workspace_id, target, session),
+                "can_send": self.s.flag(p.workspace_id, "mobile_chat_write"),
+                # Reactions are set in the Bot Chat only (connector.py react), so a session shows none.
+                "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target)
+                if kind == "bot" and not session else [],
                 "live": self.live_states(p.workspace_id).get(target) if kind == "bot" else None}
+                | ({"session": session} if session else {}))
 
     def summary(self, p: Principal) -> dict:
         self._patrick(p)
@@ -507,11 +532,14 @@ class Chat:
                     continue
                 busy.add(w["target"])
                 if w["kind"] == "chat":
-                    row = db.execute("SELECT text, send_key FROM chat_messages WHERE id = ?", (w["id"],)).fetchone()
+                    row = db.execute("SELECT text, send_key, session_id FROM chat_messages WHERE id = ?",
+                                     (w["id"],)).fetchone()
                     db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ?, attempts = attempts + 1, "
                                "updated_at = ? WHERE id = ?", (until, now, w["id"]))
                     item = {"id": w["id"], "kind": "chat", "target": w["target"], "text": row["text"],
                             "send_key": row["send_key"]}
+                    if row["session_id"]:
+                        item["session"] = row["session_id"]  # into that session of the Bot, not its Bot Chat
                 else:
                     db.execute("UPDATE connector_outbox SET status = 'leased', lease_until = ?, "
                                "attempts = attempts + 1, updated_at = ? WHERE id = ?", (until, now, w["id"]))
