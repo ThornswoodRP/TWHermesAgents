@@ -68,7 +68,7 @@ from typing import Callable
 
 from thornswood_guard.policy import Policy
 
-from . import wire
+from . import reload, wire
 
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
@@ -111,8 +111,13 @@ def packages_in(release: Path) -> Path:
 
 class Follower:
     def __init__(self, policy: Policy, *, run: Run = subprocess.run, root: Path = Path("/"),
-                 say: Callable[[str], None] = print, report: Callable[[dict], object] | None = None):
+                 say: Callable[[str], None] = print, report: Callable[[dict], object] | None = None,
+                 drain: Callable[[], object] | None = None):
         self.p = policy
+        # Before the install restarts the brokers and the reload the gateway,
+        # new turns are held and running ones end (#52; tw-reload-bots ends
+        # the hold). A test's stand-in, or tw-policy as root.
+        self.drain_ = drain or (lambda: reload.drain(reload._policy, time.sleep, self.say))
         # tw-git's vm_install, or a test's stand-in.
         self.report_ = report or (lambda args: wire.call(policy.data["brokers"]["sockets"]["git"]["path"],
                                                          "vm_install", args))
@@ -455,6 +460,7 @@ class Follower:
             self.report("not installed", commit=tip, step=e.step, reason=e.reason, before=before)
             return 1
         try:
+            self.drain_()
             self.install(dest, tip)
             self.apply(dest, tip)
             self.restart()

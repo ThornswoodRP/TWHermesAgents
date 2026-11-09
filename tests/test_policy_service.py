@@ -79,6 +79,39 @@ class Release(unittest.TestCase):
         self.assertEqual(s.admit("hermes", {"bot": "echo", "task": "t4"})["state"], "admitted")
 
 
+class Hold(unittest.TestCase):
+    """#52: a reload holds new turns until the running ones end, instead of
+    stopping the gateway on them."""
+
+    def test_a_hold_keeps_new_turns_waiting_and_counts_the_running_ones(self):
+        clock = Clock()
+        s = service(clock=clock)
+        a = s.admit("hermes", {"bot": "rift", "task": "t1"})
+        hold, callers = s.ops()["hold_turns"]
+        self.assertEqual(callers, {"root"})
+        self.assertEqual(hold("root", {"why": "reload", "seconds": 900})["running"], 1)
+        s.finish("hermes", {"bot": "rift", "ticket": a["ticket"]})
+        b = s.admit("hermes", {"bot": "wisp", "task": "t2"})
+        self.assertEqual(b["state"], "waiting")
+        self.assertIn("reload", b["reason"])
+        self.assertFalse(s.turn_room("hermes", {"bot": "echo"})["room"])
+        self.assertEqual(s.ops()["turns_running"][0]("root", {}), {"running": 0, "held": True})
+        self.assertEqual(s.ops()["end_hold"][0]("root", {}), {"ended": True})
+        self.assertEqual(s.admit("hermes", {"bot": "wisp", "ticket": b["ticket"]})["state"], "admitted")
+
+    def test_a_hold_a_dead_reload_left_ends_by_itself(self):
+        clock = Clock()
+        s = service(clock=clock)
+        s.hold_turns("root", {"seconds": 10 ** 6})
+        clock.advance(minutes=41)
+        self.assertEqual(s.admit("hermes", {"bot": "rift", "task": "t1"})["state"], "admitted")
+
+    def test_only_root_holds(self):
+        s = service()
+        for op in ("hold_turns", "turns_running", "end_hold"):
+            self.assertEqual(s.ops()[op][1], {"root"})
+
+
 class Queue(unittest.TestCase):
     def test_one_model_turn_at_a_time_in_the_pilot(self):
         s = service()
