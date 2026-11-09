@@ -100,6 +100,13 @@ class Policy:
                 raise PolicyError(f"github_apps.{app}.repos lists the repos the App is installed on, each one the merge rule names")
         if set((apps.get("bramble") or {}).get("repos") or []) != set(self.data.get("merge", {}).get("base", {})):
             raise PolicyError("Bramble's App is installed on every repo the Bots work in")
+        report = (self.data.get("follow_main") or {}).get("report")
+        if report is not None:
+            reach = set((apps.get(report.get("app")) or {}).get("repos") or [])
+            where = {self.data["repos"].get(report.get(k)) for k in ("ledger_repo", "board_repo")}
+            if None in where or not where <= reach:
+                raise PolicyError("follow_main.report.app is an App installed on both the ledger's and the board's "
+                                  "repository (github_apps.<app>.repos): GitHub refuses a token for any other")
         auto = self.data.get("merge", {}).get("auto_merge")
         if (not isinstance(auto, dict) or set(auto) != set(self.data.get("merge", {}).get("base", {}))
                 or not all(isinstance(v, list) and all(isinstance(n, str) and n for n in v) for v in auto.values())):
