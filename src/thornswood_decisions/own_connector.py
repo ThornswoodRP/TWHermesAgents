@@ -576,9 +576,13 @@ def turn_held(state_db: Path, session_id: str, since: float) -> bool:
         con.close()
 
 
-def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, archived: bool = False) -> dict:
-    """Chats Hermes's own pickers list, newest first, older than `before`, with `q` in the title; with
-    `archived`, the ones Hermes hides instead (to bring one back)."""
+def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, archived: bool = False,
+               found: list[dict] | None = None) -> dict:
+    """Chats Hermes's own pickers list, newest first, older than `before`; with `archived`, the ones Hermes
+    hides instead (to bring one back). A search for `q` is `found`, what Hermes's own search found for it
+    (Hermes.search): found_page."""
+    if q:
+        return found_page(state_db, found or [], q, n)
     sql = LIST_SQL.replace("ORDER BY last_at DESC LIMIT ?", "")
     if archived:
         sql = sql.replace("WHERE s.archived = 0", "WHERE s.archived = 1")
@@ -586,21 +590,50 @@ def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, 
     if before:
         where.append("coalesce(s.last_activity_at, s.started_at) < ?")
         args.append(datetime.fromisoformat(before).timestamp())
-    if q:
-        where.append("lower(coalesce(s.title, '')) LIKE ? ESCAPE '\\'")
-        args.append("%" + q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
     sql = sql.rstrip() + "".join(f"\n  AND {w}" for w in where) + "\nORDER BY last_at DESC, s.id LIMIT ?"
     con = _ro(state_db)
     try:
-        # It heads the first page of the chat list, and a search for its name finds it. It is never
-        # archived (BOT_CHAT_SQL takes only the unarchived one), so a page of hidden chats never lists it.
+        # It heads the first page of the chat list. It is never archived (BOT_CHAT_SQL takes only the
+        # unarchived one), so a page of hidden chats never lists it.
         bot = None if archived else bot_chat(con)
         rows = [r for r in con.execute(sql, (*args, n + 1)).fetchall() if not bot or r["id"] != bot["id"]]
-        chats = [bot] if bot and not before and q.lower() in BOT_CHAT.lower() else []
+        chats = [bot] if bot and not before else []
         chats += [_row(con, r) for r in rows[:n - len(chats)]]
     finally:
         con.close()
     return {"chats": chats, "more": len(rows) > n - (1 if chats and chats[0].get("bot_chat") else 0)}
+
+
+def found_page(state_db: Path, found: list[dict], q: str, n: int = PAGE_CHATS) -> dict:
+    """The chats Hermes's search found for `q` that its pickers list (as LIST_SQL lists them), newest first,
+    at most `n`. His Bot Chat is listed when the search found it or any chat it was compressed from, or `q`
+    is in its name. A chat's line is the words the search matched, else its newest line."""
+    snippets = {f["id"]: str(f.get("snippet") or "") for f in found
+                if isinstance(f, dict) and isinstance(f.get("id"), str)}
+    sql = LIST_SQL.replace("ORDER BY last_at DESC LIMIT ?", "").rstrip()
+    con = _ro(state_db)
+    try:
+        bot = bot_chat(con)
+        lineage = set()
+        if bot:
+            lineage = {r["id"] for r in con.execute(LINEAGE_SQL + "SELECT id FROM ancestors UNION SELECT id FROM "
+                                                    "descendants", (bot["id"], bot["id"])).fetchall()}
+        ids = [i for i in snippets if i not in lineage][:PAGE_CHATS]
+        rows = con.execute(sql + f"\n  AND s.id IN ({','.join('?' * len(ids))})", (*NOT_LISTED, *ids)).fetchall()
+        chats = []
+        hit = next((snippets[i] for i in snippets if i in lineage), "" if q.lower() in BOT_CHAT.lower() else None)
+        if bot and hit is not None:
+            chats.append(bot | ({"preview": hit} if hit else {}))
+        for r in rows:
+            row = _row(con, r)
+            if snippets[r["id"]]:
+                row["preview"] = snippets[r["id"]]
+            chats.append(row)
+    finally:
+        con.close()
+    # Newest first, his Bot Chat among the rest: a search pins nothing.
+    chats.sort(key=lambda c: (c["last_at"], c["id"]), reverse=True)
+    return {"chats": chats[:n], "more": False}
 
 
 def messages_page(state_db: Path, session_id: str, before: int | None, n: int = PAGE_MESSAGES) -> dict:
@@ -651,13 +684,14 @@ def reactions(raw) -> list[dict]:
     return out[:8]
 
 
-def fitted_page(state_db: Path, req: dict) -> bytes:
+def fitted_page(state_db: Path, req: dict, found: list[dict] | None = None) -> bytes:
     """A page as the core takes it: under its size, with fewer rows if need be. The cursor is the oldest row
     sent, so a shorter page leaves no gap."""
     n = PAGE_CHATS if req["kind"] in ("chats", "archived") else PAGE_MESSAGES
     while True:
         if req["kind"] in ("chats", "archived"):
-            page = chats_page(state_db, req.get("before"), req.get("q") or "", n, archived=req["kind"] == "archived")
+            page = chats_page(state_db, req.get("before"), req.get("q") or "", n, archived=req["kind"] == "archived",
+                              found=found)
         else:
             page = messages_page(state_db, req["chat"], req.get("before"), n)
         body = json.dumps({"id": req["id"], "page": page}, ensure_ascii=False).encode("utf-8")
@@ -778,6 +812,24 @@ class Hermes:
         if got.get("ready") is True:
             return "ready", ""
         return "gateway_down", str(got.get("reason") or f"{self.name} is not ready")[:200]
+
+    def search(self, q: str) -> tuple[list[dict] | None, str]:
+        """(found, reason): the chats Hermes's own full-text search finds for `q` (room_send.py op `search`),
+        through the same helper and Python as the readiness check; None with the reason when it could not."""
+        req = json.dumps({"op": "search", "profile": "", "q": q, "limit": PAGE_CHATS,
+                          "exclude": list(NOT_LISTED)}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
+                                 timeout=CHECK_SECONDS, cwd=str(self.home_dir), check=False, env=probe_env())
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            return None, "Hermes's search did not answer in a minute"
+        except (OSError, IndexError, json.JSONDecodeError):
+            return None, "could not run Hermes's search with Hermes's Python"
+        if isinstance(got, dict) and isinstance(got.get("found"), list):
+            return got["found"], ""
+        reason = got.get("reason") if isinstance(got, dict) else None
+        return None, str(reason or "Hermes's search did not answer")[:200]
 
     def react(self, session_id: str, message_id: int, emoji: str | None) -> tuple[str, str]:
         """(outcome, reason): set Patrick's reaction on one message to exactly `emoji` (None takes it off),
@@ -1416,8 +1468,18 @@ class OwnConnector:
                 continue
             if req["kind"] == "messages" and not (isinstance(req.get("chat"), str) and SESSION_ID.match(req["chat"])):
                 continue
+            found = None
+            if req["kind"] == "chats" and str(req.get("q") or "").strip():
+                # A search finds chats by the words of their messages, with Hermes's own search, as Desktop's does.
+                found, why = self.hermes.search(str(req["q"]).strip())
+                if found is None:
+                    self.say(f"FAIL page: {why}")
+                    status, _ = self.core.post("page", json.dumps(
+                        {"id": req["id"], "page": {"chats": [], "more": False, "why": why}}).encode("utf-8"))
+                    sent += status == 200
+                    continue
             try:
-                body = fitted_page(self.state_db, req)
+                body = fitted_page(self.state_db, req, found)
             except (sqlite3.Error, OSError, ValueError) as exc:
                 self.say(f"FAIL page: could not read Hermes's chats ({type(exc).__name__})")
                 continue

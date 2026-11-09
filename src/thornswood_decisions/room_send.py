@@ -129,6 +129,21 @@ It prints {"tasks": {"<profile>": {"state", "subagents", "processes", "jobs", ..
 A part it could not read is null, with its reason beside it, never an empty list.
 Commands and errors are the ones Hermes already redacts for Desktop, cut short.
 
+`search` finds his own Hermes's chats by the words in their messages, with
+Hermes's own full-text search, the way Hermes Desktop's chat search does
+(hermes_cli/web_routers/sessions.py search_sessions):
+
+    <hermes python> -I room_send.py < {"op": "search", "q": "<words>", "limit": <1..50>,
+                                       "exclude": ["<source>", ...]}
+
+A chat id first (`search_sessions_by_id`), then the words of every message
+(`search_messages`, each word also as the start of a longer one: "nimb" finds
+"nimbus"), then titles (`list_sessions_rich` search_query). A chat Hermes
+compressed is named by the chat it goes on as. It prints {"found": [{"id",
+"snippet"}]}, at most `limit`, the snippet the matched words in their message,
+or {"found": null, "reason": "..."} when Hermes's store could not answer. It
+reads only, and needs no gateway.
+
 `states` asks the same question of each Bot at once, for the phone's online
 dots: Hermes's own runtime state of each one's gateway (absent, starting,
 ready, draining, incompatible, inaccessible or conflict, gateway/runtime_contract.py),
@@ -504,6 +519,54 @@ def _session(req: dict) -> dict:
         release_or_close(db)
 
 
+SEARCH_WORDS = 200  # the longest search the app sends
+SEARCH_MAX = 50  # one page of the chat list (own_connector.PAGE_CHATS)
+
+
+def _snippet(text) -> str:
+    """Hermes's snippet of the matched message, without the >>> <<< marks its index puts round each match."""
+    return re.sub(r"\s+", " ", str(text or "").replace(">>>", "").replace("<<<", "")).strip()[:200]
+
+
+def _search(req: dict) -> dict:
+    from hermes_state_registry import acquire, release_or_close
+
+    q, limit, exclude = req.get("q"), req.get("limit"), req.get("exclude", [])
+    if (not isinstance(q, str) or not q.strip() or len(q) > SEARCH_WORDS or "\n" in q or "\r" in q
+            or type(limit) is not int or not 0 < limit <= SEARCH_MAX
+            or not (isinstance(exclude, list) and len(exclude) <= 16
+                    and all(isinstance(x, str) and PROFILE.match(x) for x in exclude))):
+        return {"found": None, "reason": "bad request"}
+    q = q.strip()
+    db = acquire(None)
+    try:
+        found: dict = {}
+
+        def add(sid, snippet: str) -> None:
+            if not isinstance(sid, str) or not sid or len(found) >= limit:
+                return
+            tip = db.get_compression_tip(sid) or sid
+            if tip not in found:
+                found[tip] = snippet
+
+        for row in db.search_sessions_by_id(q, limit=limit, include_archived=False, exclude_sources=exclude or None):
+            add(row.get("id"), "")
+        # Each word as typed and as the start of a longer one; a quoted phrase and a word ending in * stay as
+        # they are (Desktop's own prefix_query). Over-fetched, as Desktop does, since hits in one chat collapse.
+        words = " ".join(t if t.startswith('"') or t.endswith("*") else t + "*"
+                         for t in re.findall(r'"[^"]*"|\S+', q))
+        for m in db.search_messages(query=words, exclude_sources=exclude or None, limit=max(limit * 5, 50),
+                                    fields=("session_id", "snippet")):
+            add(m.get("session_id"), _snippet(m.get("snippet")))
+        if len(found) < limit:
+            for row in db.list_sessions_rich(search_query=q, include_archived=False, order_by_last_active=True,
+                                             exclude_sources=exclude or None, limit=limit):
+                add(row.get("id"), "")
+        return {"found": [{"id": k, "snippet": v} for k, v in found.items()]}
+    finally:
+        release_or_close(db)
+
+
 def main() -> int:
     req = json.loads(sys.stdin.read() or "{}")
     op = req.get("op")
@@ -533,6 +596,16 @@ def main() -> int:
         # His own Hermes only: a Bot's chat settings are not changed from the app.
         print(json.dumps(_control_op(req) if not profile else
                          {"state": None, "applied": False, "reason": "a Bot's chat settings are not changed from here"}))
+        return 0
+    if op == "search":
+        # His own Hermes's chats only: a Bot's chats are not searched from the app.
+        if profile:
+            print(json.dumps({"found": None, "reason": "a Bot's chats are not searched from here"}))
+            return 0
+        try:
+            print(json.dumps(_search(req)))
+        except Exception as exc:  # Hermes's store refused or was busy: say so; nothing was changed
+            print(json.dumps({"found": None, "reason": f"Hermes's search did not answer ({type(exc).__name__})"}))
         return 0
     if op not in ("send", "ready", "react", "session") or not isinstance(profile, str):
         print(json.dumps({"sent": False, "reason": "bad request"}))

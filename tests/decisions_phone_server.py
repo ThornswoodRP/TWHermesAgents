@@ -260,6 +260,27 @@ def one_control(o, r):
     if want.get("reasoning"):
         CTL["reasoning"] = want["reasoning"]
     o.control_post(w.ws, "one", to, {"id": r["id"], "state": dict(CTL), "applied": bool(want), "reason": ""})
+def hermes_search(req):
+    """A stand-in for Hermes's own search (room_send.py op `search`): chats whose messages or title hold the
+    words, the matched message as the snippet. None for any page that is not a search."""
+    q = str(req.get("q") or "").strip().lower()
+    if req["kind"] != "chats" or not q:
+        return None
+    c = sqlite3.connect(sdb)
+    try:
+        hits = c.execute("SELECT session_id, content FROM messages WHERE lower(content) LIKE ? ORDER BY id DESC",
+                         (f"%{q}%",)).fetchall()
+        titles = c.execute("SELECT id FROM sessions WHERE lower(coalesce(title, '')) LIKE ?", (f"%{q}%",)).fetchall()
+    finally:
+        c.close()
+    found = {}
+    for sid, text in hits:
+        found.setdefault(sid, text)
+    for (sid,) in titles:
+        found.setdefault(sid, "")
+    return [{"id": k, "snippet": v} for k, v in found.items()]
+
+
 def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
@@ -279,7 +300,7 @@ def one_pages():
                 o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],
                                             "version": r["version"], "outcome": set_reaction(r)})
             for req in got["pages"]:
-                o.page_post(w.ws, "one", to, json.loads(own_connector.fitted_page(sdb, req)))
+                o.page_post(w.ws, "one", to, json.loads(own_connector.fitted_page(sdb, req, hermes_search(req))))
         except CoreError:
             pass
         time.sleep(0.3)

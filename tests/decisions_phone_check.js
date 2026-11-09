@@ -455,10 +455,18 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-own-chat.png', fullPage: true })
   await page.goto(base + '/m/hermes/one')
-  await page.getByLabel('Search chat titles').fill('long')
+  await page.getByLabel('Search chats').fill('message 11')
   await page.getByRole('button', { name: 'Search', exact: true }).click()
-  await step("the picker searches One's chat titles", async () => {
-    await page.getByRole('heading', { name: 'Chats with "long" in the title' }).waitFor({ timeout: 15000 })
+  await step("the picker finds One's chats by the words in their messages, with the words it matched", async () => {
+    await page.getByRole('heading', { name: 'Chats that say "message 11"' }).waitFor({ timeout: 15000 })
+    const rows = await page.locator('#view button.row[data-chat] strong').allTextContents()
+    if (JSON.stringify(rows) !== JSON.stringify(['A long chat'])) throw new Error(JSON.stringify(rows))
+    await page.locator('#view button.row[data-chat="s_long"]').getByText('message 119').waitFor({ timeout: 1000 })
+  })
+  await page.getByLabel('Search chats').fill('long chat')
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
+  await step('and by their titles', async () => {
+    await page.getByRole('heading', { name: 'Chats that say "long chat"' }).waitFor({ timeout: 15000 })
     const rows = await page.locator('#view button.row[data-chat] strong').allTextContents()
     if (JSON.stringify(rows) !== JSON.stringify(['A long chat'])) throw new Error(JSON.stringify(rows))
   })
