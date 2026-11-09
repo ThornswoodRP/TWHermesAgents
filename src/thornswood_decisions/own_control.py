@@ -16,10 +16,12 @@ Only models one of his sign-ins (his Claude login, ChatGPT), a free model or a l
 read did not offer; and the connector checks the pick again against Hermes's own list just before switching,
 so a hand-made request cannot move a chat to a billed model.
 
-Approvals and the busy setting are shown, not changed, here. Nothing here is kept on disk: a read lives 30
-seconds and a change at most 2 minutes, in memory. A core restart drops a change in flight, and the pane then
-shows what Hermes really holds; a change is never shown as made until the connector read it back. A change
-needs a passkey sign-in from the last 30 minutes, as a message to his own Hermes does.
+How full the chat's context is and the tokens it used are shown too, read as Desktop's context meter reads
+them (session.context_breakdown and session.usage). Approvals and the busy setting are shown, not changed,
+here. Nothing here is kept on disk: a read lives 30 seconds and a change at most 2 minutes, in memory. A core
+restart drops a change in flight, and the pane then shows what Hermes really holds; a change is never shown
+as made until the connector read it back. A change needs a passkey sign-in from the last 30 minutes, as a
+message to his own Hermes does.
 """
 
 from __future__ import annotations
@@ -65,7 +67,37 @@ def clean_state(raw) -> dict:
             "provider": provider if isinstance(provider, str) and PROVIDER.match(provider) else None,
             "reasoning": raw.get("reasoning") if raw.get("reasoning") in LEVELS else None,
             "levels": levels, "yolo": raw.get("yolo") is True,
-            "busy": raw.get("busy") if raw.get("busy") in BUSY else None, "offered": offered}
+            "busy": raw.get("busy") if raw.get("busy") in BUSY else None, "offered": offered,
+            **_use(raw)}
+
+
+def _count(v) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 12 else None
+
+
+def _use(raw: dict) -> dict:
+    """How full the chat's context is and the tokens it used, as Desktop's context meter shows them
+    (room_send.py _usage_read): each part null, with Hermes's reason when it gave one, if it is not known."""
+    out = {}
+    c = raw.get("context")
+    used, most = (_count(c.get("context_used")), _count(c.get("context_max"))) if isinstance(c, dict) else (None, None)
+    if used is not None and most:
+        pct = _count(c.get("context_percent"))
+        out["context"] = {"used": used, "max": most, "percent": min(pct, 100) if pct is not None
+                          else min(round(used * 100 / most), 100), "estimated": c.get("context_estimated") is True}
+    else:
+        out["context"] = None
+    u = raw.get("usage")
+    counts = {k: _count(u.get(k)) for k in ("input", "output", "total", "calls")} if isinstance(u, dict) else {}
+    if counts and None not in counts.values():
+        out["usage"] = counts | {"compressions": _count(u.get("compressions"))}
+    else:
+        out["usage"] = None
+    for part in ("context", "usage"):
+        why = _text(raw.get(part + "_why"), 160)
+        if out[part] is None and why:
+            out[part + "_why"] = why
+    return out
 
 
 def wanted(state: dict | None, body) -> dict:

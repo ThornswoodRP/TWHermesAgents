@@ -1309,12 +1309,14 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   await page.goto(base + '/m/hermes/one/s_plan')
   await page.getByRole('button', { name: 'Chat details' }).click()
   const details = page.getByRole('dialog', { name: 'Chat details' })
-  await step("a chat's details open in a sheet with what One holds for it, offering only models that cost nothing per message", async () => {
+  await step("a chat's details open in a sheet with what One holds for it, offering only models that cost nothing per message, with its context and tokens", async () => {
     const model = details.locator('select[data-detail="model"]')
     await model.waitFor({ timeout: 25000 })
     const groups = await model.locator('optgroup').evaluateAll(gs => gs.map(g => g.label + ': ' + [...g.children].map(o => o.textContent).join(', ')))
     if (groups.join(' | ') !== 'Covered by your sign-ins: gpt-5.5 (OpenAI Codex), gpt-5.5-mini (OpenAI Codex) | On this machine: qwen3-8b.gguf (Local)') throw new Error(groups.join(' | '))
     if ((await details.locator('select[data-detail="reasoning"]').inputValue()) !== 'medium') throw new Error('thinking is not medium')
+    const use = [await details.locator('[data-detail="context"]').textContent(), await details.locator('[data-detail="tokens"]').textContent()]
+    if (use.join(' | ') !== 'Context: about 41% full, 82K of 200K tokens. | Tokens used: 12K in, 4.1K out, over 3 calls, compressed 1 time.') throw new Error(use.join(' | '))
     const wide = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
     if (wide) throw new Error('the sheet is wider than the phone')
   })

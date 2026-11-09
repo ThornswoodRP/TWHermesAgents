@@ -252,7 +252,9 @@ CTL = {"model": "gpt-5.5", "provider": "openai-codex", "reasoning": "medium", "l
        "yolo": False, "busy": "steer",
        "offered": [{"provider": "openai-codex", "model": "gpt-5.5", "name": "OpenAI Codex", "why": "subscription"},
                    {"provider": "openai-codex", "model": "gpt-5.5-mini", "name": "OpenAI Codex", "why": "subscription"},
-                   {"provider": "llamacpp", "model": "qwen3-8b.gguf", "name": "Local", "why": "local"}]}
+                   {"provider": "llamacpp", "model": "qwen3-8b.gguf", "name": "Local", "why": "local"}],
+       "context": {"context_used": 82000, "context_max": 200000, "context_percent": 41, "context_estimated": True},
+       "usage": {"input": 12345, "output": 4100, "total": 16445, "calls": 3, "compressions": 1}}
 def one_control(o, r):
     want = r.get("set") or {}
     if want.get("model"):

@@ -104,6 +104,17 @@ STUB_CLIENT = textwrap.dedent('''
                         "yolo": {"key": "yolo", "value": "0", "scope": "session"}}[params["key"]]
             if method == "model.options":
                 return OPTIONS
+            if method == "session.usage":
+                # tui_gateway/methods_session.py session.usage: no agent built yet means no context figures.
+                return {"model": STATE["model"], "input": 12345, "output": 4100, "total": 16445, "calls": 3,
+                        "compressions": 1}
+            if method == "session.context_breakdown":
+                if os.environ.get("TW_STUB_NOCTX"):
+                    raise GatewayRPCError("Could not compute context breakdown: no prompt")
+                return {"categories": [{"id": "system", "label": "System", "color": "x", "tokens": 9000}],
+                        "context_max": 200000, "context_percent": 41, "context_used": 82000,
+                        "estimated_total": 82000, "context_estimated": True, "context_source": "estimate",
+                        "model": STATE["model"]}
             if method == "session.mutate":
                 if (params["expected_revision"], params.get("expected_generation")) != (STATE["revision"], STATE["generation"]):
                     raise GatewayRPCError("revision_conflict")
@@ -169,6 +180,20 @@ STUB_EFFORT = textwrap.dedent('''
 ''')
 
 
+class ContextAndTokens(unittest.TestCase):
+    """What the core keeps of a read's context and token use (own_control._use)."""
+
+    def test_only_whole_counts_reach_the_app(self):
+        st = own_control.clean_state({"context": {"context_used": 150, "context_max": 100, "context_estimated": "yes"},
+                                      "usage": {"input": 1, "output": 2, "total": 3, "calls": True}})
+        self.assertEqual(st["context"], {"used": 150, "max": 100, "percent": 100, "estimated": False})
+        self.assertIsNone(st["usage"], "a count that is not a whole number is not shown")
+        for bad in ({"context_used": -1, "context_max": 100}, {"context_used": 5, "context_max": 0}, "full"):
+            self.assertIsNone(own_control.clean_state({"context": bad})["context"], bad)
+        self.assertNotIn("context_why", own_control.clean_state({"context_why": "Hermes said no"} | {
+            "context": {"context_used": 1, "context_max": 10}}))
+
+
 class Helper(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -206,7 +231,27 @@ class Helper(unittest.TestCase):
         self.assertEqual(st["levels"], ["low", "medium", "high", "xhigh"])
         # Opened as Desktop opens a chat, then only reads.
         self.assertEqual([r["method"] for r in self.rpcs()],
-                         ["session.resume", "session.info", "config.get", "config.get", "config.get", "model.options"])
+                         ["session.resume", "session.info", "config.get", "config.get", "config.get", "model.options",
+                          "session.usage", "session.context_breakdown"])
+
+    def test_the_read_says_how_full_the_context_is_and_the_tokens_used(self):
+        _, out = self.run_helper({"session_id": SID})
+        st = out["state"]
+        self.assertEqual(st["context"], {"context_used": 82000, "context_max": 200000, "context_percent": 41,
+                                         "context_estimated": True})
+        self.assertEqual(st["usage"], {"input": 12345, "output": 4100, "total": 16445, "calls": 3, "compressions": 1})
+        self.assertEqual(own_control.clean_state(st)["context"], {"used": 82000, "max": 200000, "percent": 41, "estimated": True})
+
+    def test_a_context_hermes_would_not_give_leaves_the_rest_of_the_read(self):
+        _, out = self.run_helper({"session_id": SID}, TW_STUB_NOCTX="1")
+        st = out["state"]
+        self.assertEqual((st["model"], st["context"]), ("gpt-5.5", None))
+        self.assertEqual(st["context_why"],
+                         "Hermes did not say (Could not compute context breakdown: no prompt)")
+        self.assertEqual(st["usage"]["calls"], 3)
+        clean = own_control.clean_state(st)
+        self.assertEqual((clean["context"], clean["context_why"]),
+                         (None, "Hermes did not say (Could not compute context breakdown: no prompt)"))
 
     def test_only_models_that_cost_nothing_per_message_are_offered(self):
         _, out = self.run_helper({"session_id": SID})
