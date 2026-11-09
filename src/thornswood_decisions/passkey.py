@@ -285,9 +285,16 @@ class Passkeys:
         row = self.s.db.execute(
             "SELECT k.*, d.revoked_at AS device_revoked FROM passkeys k LEFT JOIN devices d ON d.id = k.device_id "
             "WHERE k.credential_id = ? AND k.workspace_id = ?", (b64url(unb64url(cred_id)), workspace_id)).fetchone()
-        if not row or row["revoked_at"] or row["device_revoked"]:
+        if not row:
             self.auth._failed(workspace_id, "passkey")
             raise CoreError(401, "unknown_passkey", "that passkey is not one of Patrick's here")
+        if row["revoked_at"] or row["device_revoked"]:
+            # Removed here, but still in his passkey app, which offers it with the live ones (9 Nov: the
+            # fingerprint key replaced on 8 Nov stayed in the app and was refused). The app tells the
+            # passkey app to drop it (WebAuthn signalUnknownCredential), only for a key the core removed.
+            self.auth._failed(workspace_id, "passkey")
+            raise CoreError(401, "removed_passkey", "that passkey was removed here; sign in with another one",
+                            rp_id=self.rp_id, credential_id=row["credential_id"])
         try:
             v = webauthn.verify_authentication_response(
                 credential=credential, expected_challenge=challenge, expected_rp_id=self.rp_id,
@@ -304,6 +311,19 @@ class Passkeys:
             self.s.event(db, workspace_id, "passkey.used", row["id"], "patrick", {"device": row["device_id"]})
             session = self.auth.issue_session(workspace_id, method="passkey", device_id=row["device_id"], db=db)
         return row["device_id"], session
+
+    def accepted(self, workspace_id: str, device_id: str) -> dict:
+        """The passkeys the core takes now, for the app to tell his passkey app after a sign-in (WebAuthn
+        signalAllAcceptedCredentials): one it removed is then no longer offered. Only to Patrick, signed in."""
+        row = self.s.db.execute("SELECT principal_id FROM devices WHERE id = ? AND workspace_id = ?",
+                                (device_id, workspace_id)).fetchone()
+        if not row:
+            return {}
+        ids = [r["credential_id"] for r in self.s.db.execute(
+            "SELECT k.credential_id FROM passkeys k JOIN devices d ON d.id = k.device_id WHERE k.principal_id = ? "
+            "AND k.workspace_id = ? AND k.revoked_at IS NULL AND d.revoked_at IS NULL ORDER BY k.created_at",
+            (row["principal_id"], workspace_id))]
+        return {"rp_id": self.rp_id, "user_id": b64url(row["principal_id"].encode("utf-8")), "credential_ids": ids}
 
     def list(self, p: Principal) -> list[dict]:
         self.auth._need_patrick(p)

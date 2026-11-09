@@ -60,7 +60,8 @@ APP_FILES = {
 # and room are the tabs' first names (before Decisions, Board and Rooms), kept
 # so an old alert or home screen link still opens.
 APP_VIEWS = re.compile(r"^(|decisions|board|tasks|rooms|bots|bramble|settings|needs-you|work|room|"
-                       r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64}|"
+                       r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|bots/[a-z0-9][a-z0-9_-]{0,63}/s/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}|"
+                       r"rooms/[A-Za-z0-9_-]{1,64}|"
                        r"hermes/(?:me|one)|hermes/(?:me|one)/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}|hidden/(?:me|one))$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
            "font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -290,9 +291,11 @@ class Api:
             return 200, self._passkeys(core).sign_in_options(self.ws, key)
         if method == "POST" and route == ["passkeys", "sign-in"]:
             self._exact_origin(headers)
-            dev, sess = self._passkeys(core).sign_in(self.ws, data.get("credential"))
+            keys = self._passkeys(core)
+            dev, sess = keys.sign_in(self.ws, data.get("credential"))
             self._app_session(sess, extra)
-            return 200, {"device_id": dev, "csrf": sess.csrf, "expires_at": sess.expires_at}
+            return 200, {"device_id": dev, "csrf": sess.csrf, "expires_at": sess.expires_at,
+                         "accepted": keys.accepted(self.ws, dev)}
         if method == "POST" and route == ["recovery-sign-in"]:
             self._exact_origin(headers)
             label = str(data.get("label", ""))[:80] or "phone (recovery code)"
@@ -342,7 +345,8 @@ class Api:
         if method == "GET" and route == ["chat"]:
             return 200, Chat(core.s).summary(p)
         if method == "GET" and len(route) == 3 and route[0] == "chat" and route[2] == "messages":
-            return 200, Chat(core.s).page(p, route[1], before=query.get("before"), wait=query.get("wait"))
+            return 200, Chat(core.s).page(p, route[1], before=query.get("before"), wait=query.get("wait"),
+                                          session=query.get("session"))
         if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "react":
             return 200, Chat(core.s).react(p, route[1], data.get("message_id"), data.get("emoji"))
         if len(route) == 2 and route[0] == "chat":

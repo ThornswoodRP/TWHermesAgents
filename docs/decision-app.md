@@ -36,7 +36,7 @@ All of it is the decision core, `src/thornswood_decisions/`, one service on the 
 ## Signing in
 
 - **Pairing.** The first Desktop types a code made on the VM with `tw-decide pair`; later devices get theirs from a signed-in one. A code works once, for 10 minutes.
-- **Passkeys.** Checked by py_webauthn, added only from a fresh session on a paired phone. A phone can also hold its own platform key, so its fingerprint sheet signs in without leaving the app.
+- **Passkeys.** Checked by py_webauthn, added only from a fresh session on a paired phone. A phone can also hold its own platform key, so its fingerprint sheet signs in without leaving the app. A passkey app keeps a key the core removed (a replaced fingerprint key, a passkey or phone removed in Settings) and offers it with the live ones, so the app tells it through WebAuthn's Signal API: after each sign-in which keys the core takes, and after a refused one that the key it offered was removed here.
 - **Sessions** keep only hashes: 12 hours idle, 7 days at most, "fresh" for 5 minutes. Ten recovery codes, scrypt-hashed, each works once.
 - **Lockouts.** Five wrong codes or passkey failures in 15 minutes stop that kind of sign-in for 15 minutes.
 - **Requests.** The phone's session is an HttpOnly, Secure cookie, and every write needs the app's exact `Origin` and a CSRF token. Desktop's comes as a bearer token from the plugin's backend. `GET` never changes anything, and the API logs nothing.
@@ -63,7 +63,7 @@ For every chat:
 
 ## The Board
 
-One row for each Bot turn running right now: the Bot, the session's title, what the turn is doing, and for how long. With nothing running it says "No Bot is working right now", and when the reader goes quiet for 90 seconds it says when it last heard from the Bots, instead of showing what may have ended.
+One row for each Bot turn running right now: the Bot, the session's title, what the turn is doing, and for how long. A row opens that very session, read only from the Bot's own store, with what the turn is doing under it while it runs. With nothing running it says "No Bot is working right now", and when the reader goes quiet for 90 seconds it says when it last heard from the Bots, instead of showing what may have ended.
 
 ## Alerts
 

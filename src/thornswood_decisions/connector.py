@@ -119,6 +119,7 @@ FLEET = "the fleet queue"
 TURNED_AWAY_DIR = ("local", "thornswood-hermes", "turned-away")
 ROOM_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")  # own.SESSION_ID
 
 
 def bot_chat_id(hermes_home: Path, bot: str) -> str | None:
@@ -136,17 +137,33 @@ def bot_chat_id(hermes_home: Path, bot: str) -> str | None:
     return s["id"] if s else None
 
 
-def bot_page(hermes_home: Path, bot: str, before: int | None) -> dict:
-    """One page of a Bot's one canonical Bot Chat, from that profile's state.db, read only."""
+def bot_session(hermes_home: Path, bot: str, sid: str) -> bool:
+    """Whether that session is one of this Bot's own, in its profile's state.db, read only."""
+    from .own_connector import _ro
+    db = hermes_home / "profiles" / bot / "state.db"
+    if not db.exists():
+        return False
+    con = _ro(db)
+    try:
+        return con.execute("SELECT 1 FROM sessions WHERE id = ?", (sid,)).fetchone() is not None
+    finally:
+        con.close()
+
+
+def bot_page(hermes_home: Path, bot: str, before: int | None, session: str | None = None) -> dict:
+    """One page of a Bot's one canonical Bot Chat, from that profile's state.db, read only. With `session`,
+    a page of that one session of the Bot instead (the one the Board shows it working in), when it is one
+    of that Bot's own."""
     from .own_connector import messages_page
-    sid = bot_chat_id(hermes_home, bot)
+    sid = session if session is not None and bot_session(hermes_home, bot, session) else \
+        None if session is not None else bot_chat_id(hermes_home, bot)
     if sid is None:
         return {"messages": [], "more": False, "gone": True, "continued_as": None}
     db = hermes_home / "profiles" / bot / "state.db"
     n = 50
     while True:
         page = messages_page(db, sid, before, n)
-        page["continued_as"] = None  # one Bot Chat per Bot: the phone names it by the Bot, not by its id
+        page["continued_as"] = None  # the phone names a Bot's chat by the Bot (and a session by its id)
         if len(json.dumps(page, ensure_ascii=False).encode("utf-8")) <= PAGE_BYTES or n <= 1:
             return page
         n //= 2
@@ -610,6 +627,9 @@ class Connector:
             try:
                 if req.get("kind") == "bot" and isinstance(target, str) and PROFILE_ID.match(target):
                     page = bot_page(self.hermes_home, target, before)
+                elif (req.get("kind") == "bot_session" and isinstance(target, str) and PROFILE_ID.match(target)
+                      and isinstance(req.get("q"), str) and SESSION_ID.match(req["q"])):
+                    page = bot_page(self.hermes_home, target, before, session=req["q"])
                 elif req.get("kind") == "room" and isinstance(target, str) and ROOM_ID.match(target):
                     page = room_page(self.hermes_home / "shared-state.db", target, before)
                 else:

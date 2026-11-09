@@ -148,6 +148,7 @@ const SAID = {
   own_chat_off: 'Chat with your own Hermes from the phone is off for now.',
   session_manage_off: 'Renaming, hiding and deleting chats from the phone is off for now.',
   bot_chat_kept: 'Your Bot Chat is kept as it is: Bot Mode and every Bot\'s message to you find it by its name, so it is not renamed, hidden or deleted.',
+  removed_passkey: 'That passkey was removed here, so your phone was told to drop it. Sign in again and pick your other passkey.',
   passkey_needed: () => `This runs with full power on your own Hermes, so it needs a sign-in with your ${signInWord()} from the last 30 minutes.`,
   one_off: 'One is off',
   no_gateway: 'There is no such gateway.',
@@ -360,8 +361,30 @@ async function passkeySignIn() {
     return { status: -1, body: { message: `The ${word} did not sign in. Nothing changed.` } }
   }
   const r = await call('POST', '/passkeys/sign-in', { credential: credentialJSON(cred) })
-  if (r.status === 200) csrf = r.body.csrf
+  if (r.status === 200) {
+    csrf = r.body.csrf
+    passkeyAppAccepts(r.body.accepted)
+  } else if (r.status === 401 && r.body.error === 'removed_passkey') {
+    passkeyAppDrops(r.body.detail)
+  }
   return r
+}
+
+// His passkey app keeps a key after the core removed it (a fingerprint key replaced, a passkey or a phone
+// removed in Settings), and offers it with the live ones; on 9 Nov the one he picked was refused as "not one
+// of Patrick's". So the app tells the passkey app (WebAuthn's Signal API, where the browser has it): after a
+// sign-in, which keys the core takes, and after a refusal, that the key it offered was removed here. Only
+// the core's own word moves it, and a key the core never had is never named. Nothing waits on it.
+function passkeyAppAccepts(a) {
+  if (!a || !a.user_id || !Array.isArray(a.credential_ids) || !window.PublicKeyCredential ||
+      typeof PublicKeyCredential.signalAllAcceptedCredentials !== 'function') return
+  PublicKeyCredential.signalAllAcceptedCredentials({ rpId: a.rp_id, userId: a.user_id,
+    allAcceptedCredentialIds: a.credential_ids }).catch(() => {})
+}
+function passkeyAppDrops(d) {
+  if (!d || !d.credential_id || !window.PublicKeyCredential ||
+      typeof PublicKeyCredential.signalUnknownCredential !== 'function') return
+  PublicKeyCredential.signalUnknownCredential({ rpId: d.rp_id, credentialId: d.credential_id }).catch(() => {})
 }
 
 function newKey() {
@@ -712,7 +735,7 @@ let answerBack = null  // the Bot Chat a card was answered from
 // running now, in the Bots list's order, with the session's title, what the turn is doing and for how long.
 // A Bot with nothing running has no row, and nothing that ended stays. The VM sends it every 2 seconds while
 // it changes and the Board reads it again every 3 seconds while it is open. Its words are the Bot Chat's
-// live line (doingWords). When the VM has not sent it for a minute and a half, the Board says so instead of
+// live line (doingWords), and a row opens that Bot's chat. When the VM has not sent it for a minute and a half, the Board says so instead of
 // showing what may have ended.
 const LIVE_MS = 3000
 
@@ -741,14 +764,63 @@ async function boardView() {
   }
   const rank = b => (ORDER.indexOf(b) + 1) || ORDER.length + 1
   const rows = [...work.doing].sort((a, b) => rank(a.bot) - rank(b.bot) || (a.since < b.since ? -1 : 1))
-  show(bar, rows.length ? rows.map(d => el('div', { class: 'row doing', 'data-bot': d.bot },
-    avatar(d.bot, NAMES[d.bot] || d.bot),
-    el('div', { class: 't' },
-      el('strong', {}, NAMES[d.bot] || d.bot),
-      d.title ? el('span', { class: 'quiet' }, d.title) : null,
-      el('span', { class: 'what', 'data-doing': d.state }, doingWords(d))),
-    el('div', { class: 'w' }, forHowLong(d.since))))
+  // A row opens the very session that Bot is working in (Patrick, 9 Nov: "clicking a working agent should
+  // open that exact session not like a new one or their list of sessions").
+  show(bar, rows.length ? rows.map(d => listRow({ class: 'doing', 'data-bot': d.bot, onclick: () => go(sessionPath(d)) }, {
+    agent: d.bot, title: NAMES[d.bot] || d.bot,
+    lines: [d.title ? el('span', { class: 'quiet' }, d.title) : null,
+      el('span', { class: 'what', 'data-doing': d.state }, doingWords(d))],
+    right: forHowLong(d.since) }))
     : el('p', { class: 'quiet' }, 'No Bot is working right now.'))
+}
+
+function sessionPath(d) {
+  return d.session_id ? `/m/bots/${d.bot}/s/${encodeURIComponent(d.session_id)}` : '/m/bots/' + d.bot
+}
+
+// One session of a Bot, the one a Board row names: its messages from Hermes's own store, read only (a Bot
+// takes Patrick's messages in its Bot Chat), with what the turn is doing now under them while it runs.
+async function botSessionView(bot, sid) {
+  setTab('board')
+  const seqNow = ++viewSeq
+  const name = NAMES[bot] || bot
+  const key = `session:${bot}:${sid}`
+  const t = threads[key] || (threads[key] = { newest: null, older: [], olderMore: false })
+  const base = `/chat/${encodeURIComponent(bot)}/messages?session=${encodeURIComponent(sid)}`
+  const [w, p] = await Promise.all([call('GET', '/work'), ownPage(base)])
+  if (seqNow !== viewSeq) return
+  if (refused(p)) return
+  if (p.status === 200 && !p.body.pending) t.newest = p.body
+  const live = w.status === 200 && w.body.live && w.body.work && Array.isArray(w.body.work.doing)
+    ? w.body.work.doing.find(d => d.bot === bot && d.session_id === sid) : null
+  const title = live && live.title ? live.title : 'Session'
+  const top = [chatBar(() => go('/m/board'), 'Board', name, title, bot, name)]
+  const seen = new Set()
+  const raw = t.newest ? t.older.concat(t.newest.messages).filter(m => !seen.has(m.mid) && seen.add(m.mid)) : []
+  if (t.newest && (t.older.length ? t.olderMore : t.newest.more) && raw.length) {
+    const olderNote = el('p', { class: 'warn', role: 'status' })
+    top.push(el('button', { class: 'secondary older', type: 'button', onclick: async () => {
+      olderNote.textContent = 'Asking for older messages...'
+      const o = await ownPage(`${base}&before=${raw[0].mid}`)
+      if (o.status !== 200 || o.body.pending) {
+        olderNote.textContent = o.status === 200 ? 'No answer yet. Try again in a moment.' : said(o.body)
+        return
+      }
+      t.older = o.body.messages.concat(t.older)
+      t.olderMore = o.body.more
+      chatPlace.keep = String(raw[0].mid)
+      route()
+    } }, 'Older messages'), olderNote)
+  }
+  if (!t.newest) top.push(el('p', { class: 'quiet', role: 'status' },
+    p.status === 200 ? 'Reading this session from Hermes...' : said(p.body)))
+  else if (t.newest.gone) top.push(el('p', { class: 'quiet' }, `This session is not one of ${name}'s.`))
+  else if (!raw.length) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
+  const items = raw.map(m => ({ mine: m.role === 'user', who: name, agent: name, at: m.at,
+    text: m.text, mid: m.mid, noReact: `A reaction goes on ${name}'s Bot Chat only.` }))
+  const list = [bubbles(items), live ? workingItem(name, bot, live) : null]
+  const dock = [el('p', { class: 'quiet' }, live ? `${name} is working in this session now.` : `${name} is not working in this session now.`)]
+  showChat(key, top, list, dock, items)
 }
 
 // ── Tasks: subagents, background commands and scheduled jobs (Patrick, 3 Nov) ──
@@ -3735,6 +3807,8 @@ function mainView(path) {
   if (path === 'tasks') return tasksView()
   const bot = path.match(/^bots\/([a-z0-9][a-z0-9_-]{0,63})$/)
   if (bot) return chatView(bot[1], 'bots')
+  const session = path.match(/^bots\/([a-z0-9][a-z0-9_-]{0,63})\/s\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/)
+  if (session) return botSessionView(session[1], session[2])
   const room = path.match(/^rooms\/([A-Za-z0-9_-]{1,64})$/)
   if (room) return chatView(room[1], 'rooms')
   if (path === 'room') return chatView('room', 'rooms')
