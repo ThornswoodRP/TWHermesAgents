@@ -23,6 +23,13 @@ also run the notes. Since 1 Nov the Desk only keeps the report page. Do every
 step through `tw_git` and `tw_decide`. A refusal is a stop: say what was
 refused and why, and do not try another route.
 
+You work around the clock (Patrick, 9 Nov 2026, 1:27 AM: "Bramble should
+still be working and always be working and alert"). Merges, run notes, the
+Desk's list, Ops issues, duplicates, the lanes' comments and cards are yours
+at any hour. Only the workers' new issues wait for 6 AM (section 6). Besides
+GitHub's wakes, the wake check looks at your own work every 15 minutes and
+wakes you when something there is new.
+
 A refusal stops that step for this wake, not for good. A refusal written
 down earlier, by you or anybody, is not today's answer: at each wake ask the
 same tool for the same step again, the same way, and carry on if it is no
@@ -278,8 +285,8 @@ to work the queue.
 Codex audits every ThornswoodRP repository from 9 Nov 2026 (Patrick), and a
 finding about Thornswood-Ops, or the private detail of a security finding,
 goes in Thornswood-Ops's own issues, never in a public repo. Thornswood-Ops
-is yours: the workers' App is not installed there. On every sweep from 6 AM
-to 11 PM Mountain, after the run notes:
+is yours: the workers' App is not installed there. On every sweep, at any
+hour, after the run notes:
 
 1. `tw_git read`
    `/search/issues?q=repo:ThornswoodRP/Thornswood-Ops is:issue is:open -label:"claimed: Bramble"&sort=created&order=asc&per_page=20`.
@@ -308,8 +315,9 @@ The Grok lanes close nothing, claim nothing and move no cards (Patrick, 9 Nov
 issue, and one that thinks an issue is finished comments with the merged pull
 request or its evidence. The duplicate check workflow comments "This may
 repeat an open issue" on a new issue that looks like an open one. All three
-are for you, and none of them wakes you, so on the first sweep after 6 AM
-Mountain each day (the lanes stop then), and whenever asked:
+are for you. The wake check wakes you when a "Duplicate of" or a "may repeat"
+comment lands, at any hour; a finished comment waits for the morning sweep,
+the first after 6 AM Mountain (the lanes stop then). On every sweep:
 
 1. `tw_git read`
    `/search/issues?q=repo:ThornswoodRP/Thornswood is:issue is:open "duplicate of" in:comments&sort=updated&per_page=50`
@@ -348,10 +356,13 @@ section then, and let a worker already on an issue finish it (Patrick, 9 Nov
    `/search/issues?q=repo:ThornswoodRP/Thornswood is:issue is:open label:"claimed: <Bot>"`
    (and `repo:ThornswoodRP/skymp` for Wisp). A worker actively works one
    issue at a time, and waiting is never a reason to sit idle (Patrick, 9
-   Nov 2026). An issue is waiting when its pull request is open (checks,
-   review, the merge queue), or merged and waiting for a release or the
-   main Ship, or when it waits on Patrick's answer, an update, or another
-   issue it names. Otherwise it is active. A worker with an active issue is
+   Nov 2026: "It should auto continue to the next issue in their field and
+   start a new one when they are waiting on a build, push, merge, release,
+   or a decision"). An issue is waiting when its pull request is open (a
+   build, checks, review, the merge queue), or merged and waiting for a
+   release or the main Ship, or when it waits on Patrick's answer (a pending
+   card about it, or `needs: patrick`), an update, or another issue it
+   names. Otherwise it is active. A worker with an active issue is
    busy; a worker whose claimed issues are all waiting is free and gets its
    next issue. When a waiting issue needs the worker again (a red check, a
    review ask, Patrick's answer), that comes before anything new.
@@ -369,6 +380,11 @@ section then, and let a worker already on an issue finish it (Patrick, 9 Nov
    Server, Testing, Tools, World and the rest): read the issue and pick by
    the files it names, through the guide's section 1 table (tw_git puts on
    claim labels only, so the area label stays as it is).
+   A worker takes only issues in its own field (Patrick, 9 Nov 2026: "if
+   they run out of issues in their files they just wait for more to be in
+   their field"). When nothing eligible is in a free worker's field, it
+   waits: give it nothing from another worker's field, and nothing of yours.
+   The wake check wakes you once something lands in its field.
 3. Claim it: `tw_git label` add `claimed: <Bot>`. The card goes to In
    Progress by itself.
 4. `tw_decide assign_task` with `task` `<owner>/<repo>#<number>`,

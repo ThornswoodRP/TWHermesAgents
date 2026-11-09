@@ -105,12 +105,15 @@ class Idle:
     def __init__(self, room=True, claimed=None, open_=None, pulls=None):
         self.room, self.claimed, self.open = room, claimed or {}, open_ or {}
         self.pulls = pulls or []
+        self.cards = []
         self.asked = []
 
     def __call__(self, broker, op, args):
         self.asked.append((broker, op, args))
         if op == "wake_due":
             return {"owed": False, "due": False}
+        if op == "my_cards":
+            return self.cards
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "20 tickets were made in the last hour"}
         if op == "read":
@@ -228,14 +231,42 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("tw-git did not answer", out[-2])
 
     def test_no_free_worker_check_from_11_pm_to_6_am(self):
-        # Patrick, 9 Nov 2026: the Bots start new work only from 6 AM to 11 PM Mountain.
+        # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain.
         for t in (BEFORE_SIX, AFTER_SIX + 16 * 3600):  # 3:30 AM, 11:30 PM
             with self.subTest(t=t):
                 b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 4})
                 out = owed_wake.check(self.day(), "bramble", b, now=t, policy=POLICY)
                 self.assertFalse(wakes("\n".join(out)))
-                self.assertIn("no new work starts", out[-2])
-                self.assertEqual(b.reads(), [])
+                self.assertIn("no worker starts new work", out[-2])
+                paths = [a["path"] for a in b.reads()]
+                self.assertFalse([p for p in paths if "/pulls?" in p or "area%3A" in p], paths)
+
+    def test_bramble_is_alert_at_any_hour_for_its_own_work(self):
+        # Patrick, 9 Nov 2026, 1:27 AM: "Bramble should still be working and always be working and alert".
+        home = self.day()
+        items = {"Thornswood-Ops": [{"number": 261, "updated_at": "2026-11-09T08:00:00Z"}]}
+
+        def ask(broker, op, args):
+            if op == "read" and "/search/issues" in args["path"]:
+                repo = args["repo"].split("/")[-1]
+                q = urllib_q(args)
+                if repo == "Thornswood-Ops" and '-label:"claimed: Bramble"' in q:
+                    return {"body": {"total_count": len(items[repo]), "items": items[repo]}}
+                return {"body": {"total_count": 0, "items": []}}
+            return Idle()(broker, op, args)
+        out = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("Thornswood-Ops#261", out[-1])
+        later = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX + owed_wake.ALERT_EVERY, policy=POLICY)
+        self.assertFalse(wakes("\n".join(later)), "nothing changed, so no turn")
+        self.assertIn("nothing of your own is new", "\n".join(later))
+        soon = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX + owed_wake.ALERT_EVERY + 60, policy=POLICY)
+        self.assertFalse(wakes("\n".join(soon)))
+        items["Thornswood-Ops"] = [{"number": 261, "updated_at": "2026-11-09T09:00:00Z"},
+                                   {"number": 262, "updated_at": "2026-11-09T09:05:00Z"}]
+        changed = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX + 2 * owed_wake.ALERT_EVERY, policy=POLICY)
+        self.assertTrue(wakes("\n".join(changed)))
+        self.assertIn("Thornswood-Ops#262", changed[-1])
 
     def test_a_worker_whose_issues_all_wait_on_a_pull_request_is_free(self):
         # Patrick, 9 Nov 2026: waiting on a check, merge, release, update or him is no reason to sit idle.
@@ -250,6 +281,21 @@ class MorningAndFreeWorkers(unittest.TestCase):
         pulls[1] = {"head": {"ref": f"echo/{echo + 1}-feed"}, "state": "closed", "merged_at": None}
         out = owed_wake.check(self.day(), "bramble", Idle(claimed=claimed, pulls=pulls), now=NOON, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), "a closed, unmerged pull request leaves its issue active")
+
+    def test_a_worker_waiting_on_a_decision_is_free(self):
+        # Patrick, 9 Nov 2026: a decision is waiting too, so the worker goes on to its next issue.
+        claimed = dict(BUSY, **{"claimed: Echo": 1})
+        echo = 100 * (1 + list(claimed).index("claimed: Echo"))
+        b = Idle(claimed=claimed, open_={'"area: Website","area: Discord","area: Voice"': 2})
+        out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "its issue is active")
+        b.cards = [{"status": "pending", "task": f"ThornswoodRP/Thornswood#{echo}"}]
+        out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("echo", out[-1])
+        b.cards = [{"status": "answered", "task": f"ThornswoodRP/Thornswood#{echo}"}]
+        out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "an answered card leaves the issue active")
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}

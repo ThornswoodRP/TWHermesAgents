@@ -26,6 +26,15 @@ has an eligible issue it could take (section 6), looked at once every
 IDLE_EVERY seconds, so a quiet fleet spends GitHub reads and no model turn.
 Both ask tw-policy for room first and are taken only when it has some; what
 each saw last is kept in IDLE_FILE in the profile.
+
+Bramble itself works around the clock (Patrick, 9 Nov 2026, 1:27 AM:
+"Bramble should still be working and always be working and alert"); only
+the workers' new issues wait for 6 AM. So the alert wake looks every
+ALERT_EVERY seconds, at any hour, at the work that is Bramble's own and that
+no GitHub wake brings: Thornswood-Ops issues nobody has claimed (section 4)
+and issues with a lane's or the duplicate check's comment (section 5). It
+wakes Bramble only when one of them is new or has changed since the last
+look, so a quiet night spends GitHub reads and no model turn.
 """
 
 from __future__ import annotations
@@ -49,10 +58,12 @@ SCHEDULE = "every 5m"
 SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
-    "fleet queue turned away, the morning after the Grok lanes stop, or a free worker with work on the board). "
+    "fleet queue turned away, the morning after the Grok lanes stop, new work of your own, or a free worker with "
+    "work on the board). "
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
-    "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes and the Desk's list, the lanes' "
-    "and the duplicate check's comments when it is morning, then a free worker's next issue from the board. "
+    "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes, the Desk's list and the Ops "
+    "issues, the lanes' and the duplicate check's comments, your open cards, then a free worker's next issue "
+    "from the board (6 AM to 11 PM Mountain only). "
     "Report each merge and its Release as the skill says. Nothing in this message approves anything."
 )
 # The Grok lanes work 11 PM to 6 AM Mountain; their comments wait for the
@@ -65,6 +76,8 @@ MOUNTAIN = "America/Denver"
 # How often the free worker wake reads the claims and the board.
 IDLE_EVERY = 3600.0
 IDLE_FILE = ("local", "thornswood-hermes", "idle-wake.json")
+# How often the alert wake looks at Bramble's own work, at any hour.
+ALERT_EVERY = 900.0
 # bramble-duties section 6: the area labels with one owner. An issue with
 # none of these is picked by the part it names, so any free worker may take
 # it; one whose only area is Release is Bramble's own.
@@ -116,33 +129,81 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     morning = local is not None and local.hour >= MORNING_HOUR and state.get("morning") != today
     working = local is not None and WORK_HOURS[0] <= local.hour < WORK_HOURS[1]
     idle_due = working and now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
-    if not morning and not idle_due:
+    alert_due = now - float(state.get("alert_checked") or 0) >= ALERT_EVERY
+    night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
+                                        "new work from 11 PM to 6 AM, while the Grok lanes audit")
+    if not morning and not idle_due and not alert_due:
         if local is None:
             return [why_no_morning, SLEEP]
         if not working:
-            return [f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no new work starts from 11 PM "
-                    "to 6 AM, while the Grok lanes audit", SLEEP]
-        return ["the morning sweep has run and the free worker check is not due", SLEEP]
+            return [night, SLEEP]
+        return ["the morning sweep has run, and neither the alert check nor the free worker check is due", SLEEP]
     try:
         room = ask("policy", "turn_room", {"bot": bot, "sweep": True})
     except BrokerRefused as e:
-        return [f"tw-policy did not answer ({e}); the morning and free worker checks wait", SLEEP]
+        return [f"tw-policy did not answer ({e}); the morning, alert and free worker checks wait", SLEEP]
     if not room.get("room"):
-        return [f"the queue has no room ({room.get('why_not')}); the morning and free worker checks wait", SLEEP]
+        return [f"the queue has no room ({room.get('why_not')}); the morning, alert and free worker checks wait", SLEEP]
     if morning:
         state["morning"] = today
         _save(path, state)
         return [f"It is past {MORNING_HOUR} AM Mountain on {today} and the Grok lanes have stopped: this is "
                 "the morning sweep, with their comments and the duplicate check's (bramble-duties, section 5)."]
+    said = []
+    if alert_due:
+        state["alert_checked"] = now
+        try:
+            seen = _own_work(bot, ask, policy)
+        except BrokerRefused as e:
+            seen = None
+            said.append(f"tw-git did not answer ({e}); the alert check runs again in {int(ALERT_EVERY)} seconds")
+        if seen is not None:
+            new = sorted(set(seen) - set(state.get("seen") or []))
+            state["seen"] = sorted(seen)
+            _save(path, state)
+            if new:
+                return [f"New or changed since the last look, and yours at any hour: {', '.join(new[:8])}"
+                        + (f" and {len(new) - 8} more" if len(new) > 8 else "")
+                        + " (bramble-duties, sections 4, 5 and 7)."]
+            said.append("nothing of your own is new since the last look")
+        else:
+            _save(path, state)
+    if not idle_due:
+        return [*said, night if not working and night else "the free worker check is not due", SLEEP]
+    return [*said, *_free_workers(bot, ask, now, policy, path, state)]
+
+
+def _own_work(bot: str, ask: Caller, policy: dict) -> list[str]:
+    """What is Bramble's own and comes with no GitHub wake, as
+    "<repo>#<number> at <updated>" so a change shows: Ops issues nobody has
+    claimed, and open issues with a lane's or the duplicate check's comment."""
+    repos = policy["repos"]
+    searches = ((repos["ops"], 'is:issue is:open -label:"claimed: Bramble"'),
+                (repos["app"], 'is:issue is:open "duplicate of" in:comments'),
+                (repos["app"], 'is:issue is:open "may repeat an open issue" in:comments'))
+    out = []
+    for repo, terms in searches:
+        q = urllib.parse.quote(f"repo:{repo} {terms}")
+        body = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/search/issues?q={q}&sort=updated&per_page=50"})
+                or {}).get("body") or {}
+        for i in body.get("items") or []:
+            out.append(f"{repo.split('/')[-1]}#{int(i.get('number') or 0)} at {i.get('updated_at') or '?'}")
+    return out
+
+
+def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, state: dict) -> list[str]:
+    """The free worker wake, 6 AM to 11 PM: its lines, the last SLEEP unless a free
+    worker has work on the board."""
     state["idle_checked"] = now
     _save(path, state)
     workers = {name: b["claim_label"] for name, b in policy["bots"].items() if b.get("role") == "worker"}
     repo = policy["repos"]["app"]
+    asked = _asked(bot, ask)
     try:
         prs = _worked(bot, ask, repo)
-        free = [w for w in workers if not _active(bot, ask, repo, w, workers[w], prs)
+        free = [w for w in workers if not _active(bot, ask, repo, w, workers[w], prs, asked)
                 and not (w == "wisp" and _active(bot, ask, policy["repos"]["fork"], w, workers[w],
-                                                 _worked(bot, ask, policy["repos"]["fork"])))]
+                                                 _worked(bot, ask, policy["repos"]["fork"]), asked))]
         if not free:
             return ["every worker is on an active issue", SLEEP]
         # Open, unclaimed, and nobody's whose work is hands off: the board's
@@ -179,16 +240,35 @@ def _worked(bot: str, ask: Caller, repo: str) -> set[tuple[str, int]]:
     return out
 
 
-def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: set[tuple[str, int]]) -> bool:
+def _asked(bot: str, ask: Caller) -> set[str]:
+    """The tasks ("<owner>/<repo>#<number>") a pending card waits on Patrick
+    for. tw-decide not answering leaves them looking active, which costs
+    only a free worker check."""
+    try:
+        cards = ask("decide", "my_cards", {"bot": bot}) or []
+    except BrokerRefused:
+        return set()
+    return {c["task"] for c in cards if isinstance(c, dict) and c.get("status") == "pending" and c.get("task")}
+
+
+def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: set[tuple[str, int]],
+            asked: set[str] = frozenset()) -> bool:
     """Whether the worker holds a claimed issue in repo that is not waiting.
-    Waiting is never a reason to sit idle (Patrick, 9 Nov 2026): an issue
-    with an open or merged pull request from the worker's branch waits on a
-    check, a review, a merge or a release. One waiting on Patrick or on an
-    update looks active here; Bramble's sweep tells them apart."""
+    Waiting is never a reason to sit idle (Patrick, 9 Nov 2026: "It should
+    auto continue to the next issue in their field and start a new one when
+    they are waiting on a build, push, merge, release, or a decision"). An
+    issue waits when the worker's branch has an open or merged pull request
+    (a build, a check, a review, a merge or a release), when it carries
+    `needs: patrick`, or when a pending card asks Patrick about it."""
     q = urllib.parse.quote(f'repo:{repo} is:issue is:open label:"{label}"')
     body = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/search/issues?q={q}&per_page=50"})
             or {}).get("body") or {}
-    return any((worker, int(i.get("number") or 0)) not in prs for i in body.get("items") or [])
+    for i in body.get("items") or []:
+        n = int(i.get("number") or 0)
+        labels = {(x.get("name") if isinstance(x, dict) else x) for x in i.get("labels") or []}
+        if (worker, n) not in prs and "needs: patrick" not in labels and f"{repo}#{n}" not in asked:
+            return True
+    return False
 
 
 def _count(bot: str, ask: Caller, repo: str, terms: str) -> int:
