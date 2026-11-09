@@ -38,6 +38,8 @@ from .store import CoreError, Store, canonical, iso, new_id, parse, sha256_hex
 
 # A task's brief, as long as one chat message (chat.MAX_TEXT).
 MAX_BRIEF = 8000
+# How a kept message begins when the connector delivers it (chat.Chat._kept_text).
+KEPT_HEAD = "[Thornswood queue] This message reached your Bot Chat at "
 # The Bots take up new work from 6 AM to 11 PM Mountain, and the Grok lanes
 # audit from 11 PM to 6 AM (Patrick, 9 Nov 2026: "have them auto work between
 # 6 am and 11 pm so that there is nice transaction and not overload on the VM,
@@ -157,6 +159,34 @@ class DecisionCore:
                                   canonical({"task": task, "brief": brief, "by": p.label}), key, now, now))
                 told = cur.rowcount == 1
         return {"task": task, "bot": bot, "queued": told}
+
+    def keep_turned_away(self, p: Principal, text: str, reason: str, session: str) -> dict:
+        """A message that reached this Bot's Bot Chat but whose turn the fleet queue turned away, kept to be
+        delivered once the queue has room. The connector's own messages go back in the queue by themselves
+        (connector.py FLEET); this is for the rest, a message another Bot sent with Hermes's message_agent,
+        which nothing sent again: 9 Nov 2026, Rift's asks to Sprocket (#5650) and Magpie (#5645) were turned
+        away under the old fleet hour cap, each Bot answered that it had not started, and the asks were gone.
+        A kept message turned away again is kept again as it first was, not wrapped twice."""
+        if not isinstance(text, str) or not text.strip():
+            raise CoreError(400, "bad_text", "a kept message has some text")
+        text = text.strip()
+        if text.startswith(KEPT_HEAD) and "\n\n" in text:
+            text = text.split("\n\n", 1)[1].strip()
+        text = text[:MAX_BRIEF]
+        reason = str(reason or "the fleet queue had no room")[:300]
+        with self.s.tx() as db:
+            now = self.s.now()
+            # Each turned-away turn is its own: a message turned away again is kept again.
+            key = f"turned:{p.workspace_id}:{p.bot}:{session}:{sha256_hex(text)[:16]}:{new_id('k')}"
+            cur = db.execute("INSERT OR IGNORE INTO connector_outbox(id, workspace_id, decision_id, kind, target, "
+                             "body_json, idempotency_key, status, created_at, updated_at) "
+                             "VALUES(?,?,NULL,'bot.message',?,?,?,'queued',?,?)",
+                             (new_id("cx"), p.workspace_id, p.bot,
+                              canonical({"text": text, "reason": reason, "at": now}), key, now, now))
+            kept = cur.rowcount == 1
+            if kept:
+                self.s.event(db, p.workspace_id, "message.kept", p.bot, p.label, {"reason": reason})
+        return {"kept": kept}
 
     def open_card(self, p: Principal, *, kind: str, title: str, body: str, options: list[dict],
                   recommendation: str, scope_of_yes: str, risk: str = "normal", urgent: bool = False,

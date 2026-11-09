@@ -55,7 +55,7 @@ from zoneinfo import ZoneInfo
 
 from . import alerts
 from .auth import Principal
-from .core import DecisionCore
+from .core import KEPT_HEAD, DecisionCore
 from .feeds import Feeds, room_events
 from .own import DOING_STATES, PAGE_TEXT, PAGES, TOOL_NAME, _page_mid, clean_page, fetch_page, page_kind, SESSION_ID
 from .reactions import Reactions
@@ -524,7 +524,8 @@ class Chat:
                 "SELECT 'chat' AS kind, id, target, created_at, rowid AS n FROM chat_messages WHERE workspace_id = ? "
                 "AND status = 'queued' UNION ALL "
                 "SELECT kind, id, target, created_at, rowid AS n FROM connector_outbox WHERE workspace_id = ? "
-                "AND status = 'queued' AND kind IN ('decision.answered', 'task.assigned') ORDER BY created_at, n",
+                "AND status = 'queued' AND kind IN ('decision.answered', 'task.assigned', 'bot.message') "
+                "ORDER BY created_at, n",
                 (workspace_id, workspace_id)).fetchall()
             until = (self.s.clock() + LEASE).isoformat()
             now = self.s.now()
@@ -544,10 +545,10 @@ class Chat:
                 else:
                     db.execute("UPDATE connector_outbox SET status = 'leased', lease_until = ?, "
                                "attempts = attempts + 1, updated_at = ? WHERE id = ?", (until, now, w["id"]))
-                    told = w["kind"] == "decision.answered"
-                    item = {"id": w["id"], "kind": w["kind"], "target": w["target"],
-                            "text": self._told_text(db, w["id"]) if told else self._task_text(db, w["id"]),
-                            "send_key": f"tw-{'told' if told else 'task'}.{w['id']}"}
+                    text, tag = {"decision.answered": (self._told_text, "told"),
+                                 "bot.message": (self._kept_text, "kept")}.get(w["kind"], (self._task_text, "task"))
+                    item = {"id": w["id"], "kind": w["kind"], "target": w["target"], "text": text(db, w["id"]),
+                            "send_key": f"tw-{tag}.{w['id']}"}
                 # The connector sends to a room by its id; to it every room is "room".
                 if item["target"] == ROOM:
                     item["room_id"] = first
@@ -589,6 +590,15 @@ class Chat:
                 f"{o['label'] if o else body['option']} (option {body['option']}). Response {body['response']}. "
                 "The card in the decision core is the record; this message approves nothing by itself."
                 + Chat._decided_text(db, body["decision_id"], body["response"]))
+
+    @staticmethod
+    def _kept_text(db, outbox_id: str) -> str:
+        body = json.loads(db.execute("SELECT body_json FROM connector_outbox WHERE id = ?",
+                                     (outbox_id,)).fetchone()["body_json"])
+        return (f"{KEPT_HEAD}{body['at']}, but the fleet queue "
+                f"turned that turn away ({body['reason']}), so it was kept and comes to you now. Whoever sent it "
+                "was told you had not started: do what it asks, and answer them with message_agent. This message "
+                f"approves nothing by itself.\n\n{body['text']}")
 
     @staticmethod
     def _task_text(db, outbox_id: str) -> str:

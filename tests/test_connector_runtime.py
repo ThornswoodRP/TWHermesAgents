@@ -288,7 +288,7 @@ class TheFleetQueue(unittest.TestCase):
         self.note = profile.joinpath(*connector.TURNED_AWAY_DIR, "sess-bc.json")
         self.asked = []
 
-    def hermes(self, room=True, turn_away=None):
+    def hermes(self, room=True, turn_away=None, kept=False):
         """A stand-in hermes command whose turn exits 0, leaving the turn gate's note when turn_away says why."""
         code = "import sys\n"
         if turn_away:
@@ -297,7 +297,7 @@ class TheFleetQueue(unittest.TestCase):
                 p = {str(self.note)!r}
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 open(p, "w").write(json.dumps({{"at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                                                "reason": {turn_away!r}}}))
+                                                "reason": {turn_away!r}, "kept": {kept!r}}}))
             """)
         script = self.dir / "hermes.py"
         script.write_text(code, encoding="utf-8")
@@ -326,6 +326,14 @@ class TheFleetQueue(unittest.TestCase):
         self.assertEqual(h.to_bot("bramble", "hi"),
                          ("not_ready", "", "the fleet queue turned the turn away: the broker at "
                                            "/run/tw/policy/policy.sock is not answering"))
+        self.assertFalse(self.note.exists())
+
+    def test_a_turn_the_gate_kept_is_handed_over_and_not_put_back_a_second_time(self):
+        # 9 Nov 2026: the turn gate keeps a turned-away Bot Chat message in the core, which delivers it once
+        # the queue has room; the connector putting its own copy back too would send it twice.
+        h = self.hermes(turn_away="1 turn already running", kept=True)
+        self.assertEqual(h.to_bot("bramble", "hi"),
+                         ("confirmed", "kept by the turn gate; it goes once the queue has room", ""))
         self.assertFalse(self.note.exists())
 
     def test_an_old_note_from_an_earlier_turn_is_not_this_turns(self):

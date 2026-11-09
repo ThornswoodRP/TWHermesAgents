@@ -238,7 +238,14 @@ class BotRoute:
                 card["answer_text"] = Chat._told_text(self.store.db, cx["id"])
         return card
 
-    OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done")
+    def keep_turned_away(self, p: Principal, args: dict) -> dict:
+        """The Bot's own turn gate keeps a message the fleet queue turned away (core.keep_turned_away). It is
+        not one of the model's tw_decide ops (brokers.DECIDE_OPS): only the gate asks it, for its own Bot."""
+        return self.core.keep_turned_away(p, _text(args, "text"), str(args.get("reason") or ""),
+                                          str(args.get("session") or ""))
+
+    OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
+           "keep_turned_away")
 
     def ops(self) -> dict:
         """The ops for thornswood_brokers.wire.Server: name -> (handler(caller, args), callers)."""
