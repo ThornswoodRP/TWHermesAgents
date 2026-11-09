@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Send the commit Patrick merged to the Oracle VM and apply it there.
 #
-# Runs on One, from a clone of Thornswood-Hermes, by Hermes on One after
+# Runs on One, from a clone of TWHermesAgents, by Hermes on One after
 # Patrick merges:
 #
 #   scripts/send-to-oracle.sh <full commit of main> [--check]

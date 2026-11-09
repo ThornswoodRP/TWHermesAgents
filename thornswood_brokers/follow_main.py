@@ -3,7 +3,7 @@
 
 Runs as root from tw-follow-main.timer. Each run:
 
-  1. fetches main of Thornswood-Hermes over ssh with the VM's own read-only
+  1. fetches main of TWHermesAgents over ssh with the VM's own read-only
      deploy key (/etc/thornswood/hermes-read-key, root's alone; GitHub lets a
      deploy key read one repository and, without "Allow write access", never
      write), against GitHub's published host keys only;
@@ -39,6 +39,18 @@ everything each step printed, whether it passed or not, is in
 LOGS_KEPT stay). 2 Nov, #68: the install passed, the follower kept only its
 summary line, and the card asking for three of the install's PASS lines
 could not be answered from the VM.
+
+Each result also goes to GitHub (ThornswoodRP/Thornswood#5564: a failed
+install went unseen from 4 Nov to 8 Nov, because the file above is root's
+alone). The follower hands it to tw-git, the VM's one GitHub writer, as
+vm_install (vm_report.py), which writes it on the ops repository's ledger
+issue and keeps a board issue open while the VM is not installing main. A
+result is held in follow-main.json's report_pending until tw-git has taken
+it, and goes first at the next run when tw-git did not answer: the result
+is a message that has to arrive, so it waits in an outbox the way a letter
+does, and tw-git finds each write before it makes it, so a result sent again
+after a lost answer is written once. Only a new result is sent: a commit
+that already failed, or a fetch that fails the same way again, sends nothing.
 """
 
 from __future__ import annotations
@@ -51,13 +63,16 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from thornswood_guard.policy import Policy
 
+from . import wire
+
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
+CONNECTOR = "tw-decide-connector.service"
 
 
 def _text(b) -> str:
@@ -71,11 +86,36 @@ class Stop(Exception):
         super().__init__(why)
         self.step = step
 
+    @property
+    def reason(self) -> str:
+        """The sentence without the output a command printed (everything after
+        its first ": "), which is what may leave the VM."""
+        return str(self).split(": ", 1)[0]
+
+
+def packages_in(release: Path) -> Path:
+    """Where a release keeps its Python packages, as its own deploy/layout.json says,
+    so this copy reads another release's code wherever that release keeps it. A
+    release made before the file existed keeps them at its root."""
+    try:
+        packages = json.loads((release / "deploy" / "layout.json").read_text(encoding="utf-8"))["packages"]
+    except FileNotFoundError:
+        return release
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise Stop("put back", f"{release.name[:12]}'s deploy/layout.json does not say where its packages are ({exc})")
+    rel = PurePosixPath(packages) if isinstance(packages, str) else None
+    if rel is None or rel.is_absolute() or ".." in rel.parts:
+        raise Stop("put back", f"{release.name[:12]}'s deploy/layout.json names {packages!r}, not a folder inside it")
+    return release / rel
+
 
 class Follower:
     def __init__(self, policy: Policy, *, run: Run = subprocess.run, root: Path = Path("/"),
-                 say: Callable[[str], None] = print):
+                 say: Callable[[str], None] = print, report: Callable[[dict], object] | None = None):
         self.p = policy
+        # tw-git's vm_install, or a test's stand-in.
+        self.report_ = report or (lambda args: wire.call(policy.data["brokers"]["sockets"]["git"]["path"],
+                                                         "vm_install", args))
         self.r = policy.data["follow_main"]
         self.run_ = run
         self.root = root
@@ -141,6 +181,29 @@ class Follower:
         tmp.write_text(json.dumps(data, indent=2) + "\n")
         os.replace(tmp, self.state_file)
 
+    # -- the result, on GitHub
+    def report(self, result: str, *, commit: str | None, step: str | None = None, reason: str | None = None,
+               put_back: str | None = None, before: str | None = None) -> None:
+        """Hands one new result to tw-git, or holds it for the next run."""
+        self.record(report_pending={
+            "result": result, "commit": commit, "step": step, "reason": reason, "put_back": put_back,
+            "installed": self.installed(), "before": before,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        self.send_report()
+
+    def send_report(self) -> None:
+        pending = self.state().get("report_pending")
+        if not pending:
+            return
+        try:
+            self.report_(pending)
+        except (wire.Refused, OSError, ValueError) as e:
+            self.say(f"REPORT NOT SENT: tw-git did not take the {pending['result']} result of "
+                     f"{(pending.get('commit') or 'main')[:12]} ({e}); it is held and goes first at the next run")
+            return
+        self.record(report_pending=None, reported=pending)
+        self.say(f"reported: {pending['result']} for {(pending.get('commit') or 'main')[:12]} is on GitHub")
+
     def installed(self) -> str | None:
         cur = self.opt / "current"
         if not cur.is_symlink():
@@ -165,7 +228,7 @@ class Follower:
         except Stop as e:
             if "Permission denied" in str(e) or "publickey" in str(e):
                 pub = self._at(self.r["read_key"] + ".pub")
-                raise Stop("fetch", "GitHub refused the VM's read key. Add it to Thornswood-Hermes as a deploy key, "
+                raise Stop("fetch", "GitHub refused the VM's read key. Add it to TWHermesAgents as a deploy key, "
                                     "with Allow write access left off: " + (pub.read_text().strip() if pub.exists() else str(pub)))
             raise
         return self.sh("fetch", self.git("-C", str(self.mirror), "rev-parse", "refs/heads/main")).stdout.strip()
@@ -219,7 +282,22 @@ class Follower:
         if not core.exists():
             raise Stop("install", f"the decision core is installed here ({self.r['decide_env']}), "
                                   f"but {commit[:12]} has no deploy/decisions/install.sh to keep it at this release")
-        self.sh("install", ["bash", str(core), commit])
+        # A release whose core install can leave the connector stopped gets it stopped until every Bot
+        # runs this release (start_connector, after the reload and the canary): a message handed to a Bot
+        # still on the release before would meet its old tools. 2 Nov 2026: Patrick's answers that waited
+        # on tw_git's open_issue are put back in the queue by a migration, and the core's install runs
+        # that migration before apply.py and tw-reload-bots give the Bots the op.
+        self.connector_later = "--connector-later" in core.read_text(encoding="utf-8", errors="replace")
+        self.sh("install", ["bash", str(core), commit] + (["--connector-later"] if self.connector_later else []))
+
+    def start_connector(self) -> None:
+        """The connector the core's install left stopped, started now every Bot runs this release."""
+        if not getattr(self, "connector_later", False):
+            return
+        self.connector_later = False
+        self.sh("connector", ["systemctl", "reset-failed", CONNECTOR])
+        self.sh("connector", ["systemctl", "start", CONNECTOR])
+        self.sh("connector", ["systemctl", "is-active", "--quiet", CONNECTOR])
 
     def apply(self, dest: Path, commit: str) -> None:
         # hermes never runs git against the root-owned release: git refuses a
@@ -282,7 +360,8 @@ class Follower:
         """How many store migrations a release's own code knows."""
         c = self.sh("put back", ["python3", "-I", "-c",
                                  "import sys; sys.path.insert(0, sys.argv[1]); "
-                                 "from thornswood_decisions.schema import MIGRATIONS; print(len(MIGRATIONS))", str(dest)])
+                                 "from thornswood_decisions.schema import MIGRATIONS; print(len(MIGRATIONS))",
+                                 str(packages_in(dest))])
         try:
             return int(c.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -319,7 +398,7 @@ class Follower:
         self.sh("put back", ["runuser", "-u", self.r["decide_user"], "--", str(self._at(self.r["decide_python"])), "-I", "-c",
                              "import sys; sys.path.insert(0, sys.argv[1]); "
                              "from thornswood_decisions.cli import main; sys.exit(main(sys.argv[2:]))",
-                             str(failed), "--db", str(self._at(self.r["decide_db"])), "downgrade", "--to", str(to)])
+                             str(packages_in(failed)), "--db", str(self._at(self.r["decide_db"])), "downgrade", "--to", str(to)])
 
     def drop_units_not_in(self, dest: Path) -> list[str]:
         """Stops and disables the core's units that the release going back in
@@ -342,12 +421,20 @@ class Follower:
             # a hand install turned the stopped timer back on).
             self.say(f"paused: {self.r['pause_file']} is there, so nothing is fetched or installed")
             return 0
+        # A result tw-git did not take last time goes before anything new.
+        self.send_report()
+        st = self.state()
         try:
             tip = self.fetch()
         except Stop as e:
             self.say(f"STOP {e}")
             self.record(result="fetch failed", why=str(e))
+            if not (st.get("result") == "fetch failed" and st.get("why") == str(e)):
+                self.report("fetch failed", commit=None, step="fetch", reason=e.reason)
             return 1
+        if st.get("result") == "fetch failed":
+            self.record(result="fetched", why=None)
+            self.report("fetched", commit=tip)
         before = self.installed()
         if tip == before:
             return 0
@@ -365,21 +452,25 @@ class Follower:
             self.say(f"STOP {tip[:12]} is not installed: {e}")
             self.record(result="not installed", failed=tip, step=e.step, why=str(e), installed=before, put_back=None,
                         log=str(self.log))
+            self.report("not installed", commit=tip, step=e.step, reason=e.reason, before=before)
             return 1
         try:
             self.install(dest, tip)
             self.apply(dest, tip)
             self.restart()
             self.canary()
+            self.start_connector()
         except Stop as e:
             self.say(f"STOP {tip[:12]} failed at {e.step}: {e}")
             back = self.put_back(before, dest)
             self.record(result="failed", failed=tip, step=e.step, why=str(e), installed=self.installed(), put_back=back,
                         log=str(self.log))
+            self.report("failed", commit=tip, step=e.step, reason=e.reason, put_back=back.split(": ", 1)[0], before=before)
             return 1
         self.say(f"PASS {tip[:12]} is installed, applied, every Bot process reloaded and the canary passed")
         self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None,
                     log=str(self.log))
+        self.report("installed", commit=tip, before=before)
         return 0
 
     def put_back(self, before: str | None, failed: Path) -> str:
@@ -409,6 +500,7 @@ class Follower:
             self.apply(dest, before)
             self.restart()
             self.canary()
+            self.start_connector()
         except Stop as e:
             self.say(f"FAIL putting back {before[:12]} failed too, at {e.step}: {e}")
             return f"putting back {before} failed at {e.step}: {e}"

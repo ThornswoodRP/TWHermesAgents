@@ -11,8 +11,21 @@ from __future__ import annotations
 from .policy import Policy, Verdict
 
 
-def proxy_ready_in(policy: Policy) -> bool:
-    return bool((policy.data.get("admission_proxy") or {}).get("ready"))
+PROXY_ROUTES = ("credits", "qwen")
+
+
+def proxy_ready_in(policy: Policy) -> set[str]:
+    """The routes behind the admission proxy that a PR has said are ready."""
+    ready = (policy.data.get("admission_proxy") or {}).get("ready") or {}
+    return {r for r in PROXY_ROUTES if ready.get(r) is True}
+
+
+def _ready_set(policy: Policy, proxy_ready: bool | set[str] | None) -> set[str]:
+    if proxy_ready is None:
+        return proxy_ready_in(policy)
+    if isinstance(proxy_ready, bool):
+        return set(PROXY_ROUTES) if proxy_ready else set()
+    return set(proxy_ready)
 
 
 def proxy_url(policy: Policy, route: dict) -> str:
@@ -24,18 +37,16 @@ def proxy_url(policy: Policy, route: dict) -> str:
     return f"http://{listen}/{route['id']}{suffix}"
 
 
-def chain_for(policy: Policy, bot: str, *, proxy_ready: bool | None = None) -> list[dict]:
-    """The routes a Bot may use, in order. Routes behind the admission proxy
-    are left out until the proxy exists and passes its tests, which Patrick
-    says by setting admission_proxy.ready in the policy by a PR."""
-    if proxy_ready is None:
-        proxy_ready = proxy_ready_in(policy)
+def chain_for(policy: Policy, bot: str, *, proxy_ready: bool | set[str] | None = None) -> list[dict]:
+    """The routes a Bot may use, in order. A route behind the admission proxy
+    is left out until a PR sets it ready in admission_proxy.ready."""
+    ready = _ready_set(policy, proxy_ready)
     out = []
     for r in policy.data["routes"]:
         who = r["who"]
         if who != "all" and bot not in who:
             continue
-        if r.get("needs") == "admission-proxy" and not proxy_ready:
+        if r.get("needs") == "admission-proxy" and r["id"] not in ready:
             continue
         out.append(r)
     return out
@@ -50,7 +61,7 @@ def _entry(policy: Policy, r: dict) -> dict:
     return e
 
 
-def config_for(policy: Policy, bot: str, *, proxy_ready: bool | None = None) -> dict:
+def config_for(policy: Policy, bot: str, *, proxy_ready: bool | set[str] | None = None) -> dict:
     """The model part of a Bot's Hermes config, built from its chain."""
     chain = chain_for(policy, bot, proxy_ready=proxy_ready)
     first, rest = chain[0], chain[1:]
@@ -73,12 +84,13 @@ def route_allowed(policy: Policy, bot: str, route_id: str, risk: str) -> Verdict
 
 
 def next_route(policy: Policy, bot: str, risk: str, closed: set[str], *,
-               one_on: bool, proxy_ready: bool) -> str | None:
+               one_on: bool, proxy_ready: bool | set[str]) -> str | None:
     """The first open route this Bot may use for this work, or None to wait."""
+    ready = _ready_set(policy, proxy_ready)
     for r in policy.data["routes"]:
         if r["id"] in closed:
             continue
-        if r.get("needs") == "admission-proxy" and not proxy_ready:
+        if r.get("needs") == "admission-proxy" and r["id"] not in ready:
             continue
         if r.get("needs_one") and not one_on:
             continue
@@ -235,6 +247,32 @@ def _check(policy: Policy, who: str, chain: list[dict], config: dict, env_names:
     if (vision.get("provider"), vision.get("model")) != pair:
         problems.append(f"auxiliary.vision is {vision.get('provider') or 'auto'}/{vision.get('model') or 'auto'}, not pinned to the main route {pair[0]}/{pair[1]}")
 
+    # Smart approvals ask Hermes's approval check; it answers from the Bot's own
+    # main route, never the auto chain's fallbacks.
+    approval = aux.get("approval") if isinstance(aux.get("approval"), dict) else {}
+    if (approval.get("provider"), approval.get("model")) != pair:
+        problems.append(f"auxiliary.approval is {approval.get('provider') or 'auto'}/{approval.get('model') or 'auto'}, not pinned to the main route {pair[0]}/{pair[1]}")
+    problems += _check_approvals(config.get("approvals") or {})
+
     if "ANTHROPIC_API_KEY" in env_names:
         problems.append("ANTHROPIC_API_KEY is set; Hermes would spend the credits ahead of the subscription")
+    return problems
+
+
+def _check_approvals(approvals: dict) -> list[str]:
+    """Hermes's built-in smart mode with Thornswood's policy (Patrick, 2 Nov), the
+    unattended surfaces denied, and the deny list whole. Off is never allowed."""
+    from .profile_config import DENY_COMMANDS, SMART_POLICY
+
+    problems = []
+    if approvals.get("mode") != "smart":
+        problems.append(f"approvals.mode is {approvals.get('mode')!r}, not Hermes's smart mode")
+    if approvals.get("smart_policy") != SMART_POLICY:
+        problems.append("approvals.smart_policy is not Thornswood's policy")
+    for key in ("cron_mode", "unattended_mode", "single_query_mode"):
+        if approvals.get(key) != "deny":
+            problems.append(f"approvals.{key} is {approvals.get(key)!r}, not deny")
+    missing = [c for c in DENY_COMMANDS if c not in (approvals.get("deny") or [])]
+    if missing:
+        problems.append(f"approvals.deny is missing {', '.join(missing)}")
     return problems

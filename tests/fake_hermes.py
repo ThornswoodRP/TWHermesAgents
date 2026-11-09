@@ -1,5 +1,5 @@
 """A stand-in for the hermes command in apply.py's tests: only
-`hermes -p <bot> cron list --all|create|edit`, printed as Hermes 0.22.5
+`hermes -p <bot> cron list --all|create|edit`, printed as Hermes 0.23.0
 prints them (hermes_cli/cron.py cron_list). It keeps the jobs in the JSON
 file named by FAKE_HERMES_STATE, logs each call beside it, and fails every
 call when the state file holds {"broken": true}."""

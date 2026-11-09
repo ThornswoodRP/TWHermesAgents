@@ -69,7 +69,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 LOCAL_CORE = "http://127.0.0.1:9135/api/v1"
 GATEWAYS = {"me": "my-hermes", "one": "One's Hermes"}
@@ -911,7 +911,7 @@ class Updater:
     """Moves One's copy to the release the VM runs, the way the VM follows main by itself (#2862).
 
     The VM names the commit; the code comes from GitHub, never from the VM: Patrick's own clone of
-    Thornswood-Hermes on One fetches main, the commit has to be on main, and its two files are taken
+    TWHermesAgents on One fetches main, the commit has to be on main, and its two files are taken
     from that commit with `git show`, each checked to compile before either is put in place, then
     COMMIT. The connector then finishes the turns it is running, takes no new one, and stops with
     UPDATE_EXIT, which --supervise answers by starting the new copy at once. A failed update changes
@@ -929,6 +929,27 @@ class Updater:
         return self.run([self.git_bin, "-c", "credential.interactive=never", "-C", str(self.clone), *args],
                         capture_output=True, timeout=120, check=False, stdin=subprocess.DEVNULL, env=env, **quiet())
 
+    def _folder(self, release: str) -> str | None:
+        """The folder of the release that holds this package, from that release's own
+        deploy/layout.json (a release made before the file existed keeps it at its root);
+        None when git cannot read it, or it does not name a folder inside the release."""
+        listed = self._git("ls-tree", "--name-only", release, "deploy/layout.json")
+        if listed.returncode != 0:
+            return None
+        if not listed.stdout.strip():
+            return "thornswood_decisions"
+        got = self._git("show", f"{release}:deploy/layout.json")
+        if got.returncode != 0:
+            return None
+        try:
+            packages = json.loads(got.stdout)["packages"]
+        except (ValueError, KeyError, TypeError):
+            return None
+        rel = PurePosixPath(packages) if isinstance(packages, str) else None
+        if rel is None or rel.is_absolute() or ".." in rel.parts:
+            return None
+        return str(rel / "thornswood_decisions")
+
     def to(self, release: str) -> tuple[bool, str]:
         """(done, why not)."""
         if not RELEASE.match(release):
@@ -939,9 +960,12 @@ class Updater:
                 return False, f"git fetch in {self.clone.name} failed (exit {got.returncode})"
             if self._git("merge-base", "--is-ancestor", release, "origin/main").returncode != 0:
                 return False, f"{release[:12]} is not on main"
+            folder = self._folder(release)
+            if folder is None:
+                return False, f"could not read where {release[:12]} keeps its packages (deploy/layout.json)"
             files = {}
             for name in UPDATE_FILES:
-                got = self._git("show", f"{release}:thornswood_decisions/{name}")
+                got = self._git("show", f"{release}:{folder}/{name}")
                 if got.returncode != 0:
                     return False, f"{name} is not in {release[:12]}"
                 compile(got.stdout, name, "exec")
@@ -1419,7 +1443,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--token", help="this connector's token file")
     ap.add_argument("--core", default=LOCAL_CORE, help="the core's API: loopback on the VM, the VM's ts.net on One")
     ap.add_argument("--once", action="store_true", help="one round, then stop")
-    ap.add_argument("--clone", help="One: Patrick's clone of Thornswood-Hermes, which this copy updates itself from")
+    ap.add_argument("--clone", help="One: Patrick's clone of TWHermesAgents, which this copy updates itself from")
     ap.add_argument("--git", default="git", help="the git command for --clone")
     ap.add_argument("--supervise", action="store_true",
                     help="One's task: run the connector in its own process and start it again after an update")

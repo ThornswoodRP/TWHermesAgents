@@ -282,8 +282,43 @@ class Units(unittest.TestCase):
         for f in (REPO / "deploy" / "bin").iterdir():
             text = f.read_text()
             self.assertTrue(text.startswith("#!/usr/bin/python3 -I\n"), f.name)
-            self.assertIn('sys.path.insert(0, "/opt/thornswood-hermes/current")', text, f.name)
+            self.assertIn('sys.path.insert(0, str(Path(__file__).resolve().parents[2]))', text, f.name)
+            self.assertNotIn("/opt/thornswood-hermes/current", text, f.name)
             self.assertTrue(os.access(f, os.X_OK), f"{f.name} is not executable")
+
+    def test_a_launcher_runs_the_code_of_the_release_it_links_to(self):
+        # $opt/bin/<launcher> -> $opt/current/deploy/bin/<launcher>, and current ->
+        # releases/<commit>: the launcher imports that release's code, so the one
+        # rename of current moves every launcher and its code together.
+        opt = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, opt, True)
+        for commit in ("a" * 40, "b" * 40):
+            rel = opt / "releases" / commit
+            (rel / "deploy" / "bin").mkdir(parents=True)
+            shutil.copy(REPO / "deploy" / "bin" / "tw-serve", rel / "deploy" / "bin" / "tw-serve")
+            (rel / "thornswood_brokers").mkdir()
+            (rel / "thornswood_brokers" / "__init__.py").write_text("")
+            (rel / "thornswood_brokers" / "serve.py").write_text(
+                "import sys\ndef main(argv):\n    print(__file__)\n")
+        (opt / "bin").mkdir()
+        (opt / "bin" / "tw-serve").symlink_to(opt / "current" / "deploy" / "bin" / "tw-serve")
+        for commit in ("a" * 40, "b" * 40):
+            (opt / "current.new").symlink_to(opt / "releases" / commit)
+            os.replace(opt / "current.new", opt / "current")
+            out = subprocess.run([sys.executable, "-I", str(opt / "bin" / "tw-serve"), "git"],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(Path(out), opt / "releases" / commit / "thornswood_brokers" / "serve.py")
+
+    def test_the_install_links_the_launchers_and_the_plugins_through_the_release(self):
+        text = (REPO / "deploy" / "install.sh").read_text()
+        self.assertIn('link_in "$opt/current/deploy/bin/${f##*/}" "$opt/bin/${f##*/}"', text)
+        self.assertIn('link_in "$here" "$opt/current"', text)
+        self.assertIn('link_in "$here/plugins" "$opt/plugins"', text)
+        self.assertNotIn('install -m 0755 -o root -g root "$f" "$opt/bin/"', text)
+        core = (REPO / "deploy" / "decisions" / "install.sh").read_text()
+        self.assertIn('ln -sfnT "$opt/current/deploy/decisions/$f" "$opt/bin/$f.new"', core)
+        plugin = (REPO / "deploy" / "decisions" / "install-plugin.sh").read_text()
+        self.assertIn('target="$opt/plugins/thornswood-decisions"', plugin)
 
     def test_install_script_parses_and_stops_when_not_root(self):
         script = REPO / "deploy" / "install.sh"

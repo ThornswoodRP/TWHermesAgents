@@ -1,6 +1,0 @@
-#!/usr/bin/python3 -I
-# Registers the guard rail tests' runner with GitHub, as root; the token comes on standard input.
-import sys
-sys.path.insert(0, "/opt/thornswood-hermes/current")
-from thornswood_brokers.runner_register import main  # noqa: E402
-sys.exit(main(sys.argv[1:]))

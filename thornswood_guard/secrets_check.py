@@ -31,12 +31,10 @@ def env_names(path: Path) -> set[str]:
     return names
 
 
-def check_env(policy: Policy, names: set[str], where: str, *, later_allowed: bool = False) -> list[str]:
+def check_env(policy: Policy, names: set[str], where: str) -> list[str]:
     """`where` is "root" for the gateway's own .env, or a profile name."""
     s = policy.data["secrets"]
     allowed = {e["name"]: e["where"] for e in s["oracle_allowed"]}
-    if later_allowed:
-        allowed.update({e["name"]: e["where"] for e in s["oracle_later"]})
     settings = set(s["oracle_settings"])
     problems = []
     for name in sorted(names):
@@ -50,8 +48,6 @@ def check_env(policy: Policy, names: set[str], where: str, *, later_allowed: boo
                     problems.append(f"{name} sits in each Bot's own profile .env, never the gateway's")
             elif allowed[name] != where:
                 problems.append(f"{name} may sit only in the gateway's own .env, not in the {where} .env")
-        elif any(name == e["name"] for e in s["oracle_later"]):
-            problems.append(f"{name} is set before its route exists; no real tokens go on the VM yet")
         elif secret_shaped(policy, name):
             problems.append(f"{name} in the {where} .env looks like a secret and is not on the list of what may sit on the Oracle box")
     return problems

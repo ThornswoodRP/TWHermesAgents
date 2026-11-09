@@ -5,7 +5,7 @@ Puts the connector for Patrick's chat from the phone into his Hermes on One
 in place, and starts it at every sign-in.
 
 .DESCRIPTION
-Runs on One, as Patrick, from a clone of Thornswood-Hermes at main. Patrick
+Runs on One, as Patrick, from a clone of TWHermesAgents at main. Patrick
 chose a small connector on One that reaches out to the decision core on the
 VM (1 Nov, answer A): nothing listens on One, and the VM never reaches in.
 
@@ -167,7 +167,7 @@ Pass "$TokenFile is readable by its owner only"
 
 # 3. The connector's two files, from this clone.
 $commit = (& git -C $here rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) { Fail "$here is not a clone of Thornswood-Hermes" }
+if ($LASTEXITCODE -ne 0) { Fail "$here is not a clone of TWHermesAgents" }
 # Nobody is there to answer a sign-in prompt, here or when the connector updates itself from this
 # clone under Task Scheduler. One's git asks its credential helper selector by default, a window that
 # waits for a click, so a fetch would hang (2 Nov). This clone signs in to GitHub with gh instead, set
@@ -192,8 +192,13 @@ if ($LASTEXITCODE -ne 0) { Fail "git fetch origin main failed in $here (exit $LA
 $main = (& git -C $here rev-parse origin/main).Trim()
 if ($commit -ne $main) { Fail "this clone is at $commit, not main's $main; git -C $here checkout --detach origin/main first" }
 New-Item -ItemType Directory -Force -Path $Folder | Out-Null
+# Where this clone keeps the package, as its deploy/layout.json says (the connector's own update reads it the same way).
+$packages = (Get-Content -Raw -Path (Join-Path $here 'deploy\layout.json') | ConvertFrom-Json).packages
+if (-not ($packages -is [string]) -or [IO.Path]::IsPathRooted($packages) -or ($packages -split '[\\/]') -contains '..') {
+    Fail "deploy\layout.json in $here does not name a folder inside the clone"
+}
 foreach ($f in 'own_connector.py', 'room_send.py') {
-    Copy-Item (Join-Path $here "thornswood_decisions\$f") (Join-Path $Folder $f) -Force
+    Copy-Item (Join-Path (Join-Path $here $packages) "thornswood_decisions\$f") (Join-Path $Folder $f) -Force
 }
 Set-Content -Path (Join-Path $Folder 'COMMIT') -Value $commit -Encoding ascii
 Pass "own_connector.py and room_send.py from $commit are in $Folder"
