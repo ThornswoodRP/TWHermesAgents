@@ -401,6 +401,45 @@ def install_reviews(hermes: list[str], bot: str) -> list[str]:
     return failed
 
 
+# What a running Bot process loaded when it started and keeps until it
+# starts again: its config and the two plugins (the gateway's own profile has
+# config and the guard). Skills, the owed-wake script and cron jobs are read
+# from disk each time they are used, so a change to them needs no reload.
+# 9 Nov: every install reloaded every Bot, about every 15 minutes while
+# merges came in, and the phone showed them "not heard from" each time.
+HELD_PLUGINS = ("thornswood_guard", "thornswood_live")
+RELOAD_LINE = "RELOAD: "
+
+
+def held(home: Path, bots) -> dict[str, str]:
+    """{path under the Hermes home, with forward slashes on every host: sha256} of
+    every file a running Bot holds."""
+    import hashlib
+
+    out = {}
+    roots = [home / "profiles" / b for b in bots] + [home]
+    for root in roots:
+        files = [root / "config.yaml"]
+        for name in HELD_PLUGINS:
+            d = root / "plugins" / name
+            if d.is_dir():
+                files += sorted(f for f in d.rglob("*") if f.is_file() and "__pycache__" not in f.parts)
+        for f in files:
+            if f.is_file():
+                out[f.relative_to(home).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+def reload_line(before: dict[str, str], after: dict[str, str]) -> str:
+    """The last line apply prints, which follow_main reads: whether the Bots
+    must be reloaded for this release, and what changed."""
+    changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+    if not changed:
+        return RELOAD_LINE + "not needed; nothing a running Bot holds changed (its config and plugins are as they were)"
+    shown = ", ".join(changed[:5]) + (f" and {len(changed) - 5} more" if len(changed) > 5 else "")
+    return RELOAD_LINE + f"needed; {len(changed)} file{'s' if len(changed) != 1 else ''} a running Bot holds changed: {shown}"
+
+
 def write_config(pdir: Path, cfg_path: Path, merged: dict, commit: str, stamp: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=pdir, prefix=".config-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -510,6 +549,7 @@ def main() -> int:
             return 1
         print(f"Pulled {SANDBOX_IMAGE}.")
 
+    before = held(home, plans)
     stamp = datetime.now(timezone.utc).isoformat()
     for bot, (pdir, cfg_path, _, merged) in plans.items():
         work = Path(a.work_root) / bot
@@ -553,8 +593,11 @@ def main() -> int:
             print(f"  - {f}")
         return 1
     print(f"\nApplied {a.expect} to {', '.join(plans)} and the gateway's own profile. The guard's self-test passed in every profile.")
-    print("Every Bot process picks up the plugin and config when it starts again. End the hermes user's login sessions"
-          " (Hermes Desktop's backends) and restart the gateway in one step: ssh -t thornswood-bots sudo /opt/thornswood-hermes/bin/tw-reload-bots")
+    line = reload_line(before, held(home, plans))
+    if line.startswith(RELOAD_LINE + "needed"):
+        print("Every Bot process picks up the plugin and config when it starts again. End the hermes user's login sessions"
+              " (Hermes Desktop's backends) and restart the gateway in one step: ssh -t thornswood-bots sudo /opt/thornswood-hermes/bin/tw-reload-bots")
+    print(line)
     return 0
 
 

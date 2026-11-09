@@ -36,6 +36,21 @@ class StartLimit(unittest.TestCase):
                      "tw-hermes-gateway.service"):
             self.assertIn(unit, limited_units())
 
+    def test_the_limit_is_in_the_unit_section_where_systemd_reads_it(self):
+        # 9 Nov: the connector's journal said "Unknown key name
+        # 'StartLimitIntervalSec' in section 'Service', ignoring" at every
+        # daemon-reload, so it had no start-limit interval at all.
+        for d in UNIT_DIRS:
+            for f in sorted(d.iterdir()):
+                if f.suffix not in (".service", ".in") or not f.is_file():
+                    continue
+                section = None
+                for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                    if m := re.match(r"\[(\w+)\]", line):
+                        section = m.group(1)
+                    elif line.startswith("StartLimit"):
+                        self.assertEqual(section, "Unit", f"{f.name}:{n} puts {line} in [{section}]")
+
     def test_every_restart_of_a_limited_unit_clears_its_count_first(self):
         units = limited_units()
         for script in SCRIPTS:
