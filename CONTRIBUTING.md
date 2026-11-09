@@ -6,6 +6,7 @@ Thank you for looking. This page says how a change to TWHermesAgents is made, te
 
 - **Fix the cause.** A change finds why something goes wrong and changes that. A retry, a wait, a cap or a step that undoes damage after it happens is not a fix here. If the cause is not known yet, finding it is the work: say what you measured in the pull request.
 - **Security problems** go to [SECURITY.md](SECURITY.md), never to a public issue.
+- **Every issue carries a label**: `bug` for something wrong, `enhancement` for something new. The issue forms add it; an issue filed through the API names it itself.
 - **The Bots cannot change this repository.** The guard and the git broker both refuse it, so every change here comes from the team, through a pull request.
 
 ## Setting up

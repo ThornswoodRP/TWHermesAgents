@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: A security problem
+    url: https://github.com/ThornswoodRP/TWHermesAgents/blob/main/SECURITY.md
+    about: Never in a public issue; SECURITY.md says where it goes.
