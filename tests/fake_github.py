@@ -54,6 +54,13 @@ class FakeGitHub:
         # (repo, branch) -> the status checks the branch's rules require
         self.branch_rules: dict[tuple[str, str], list[str]] = {}
         self.auto_merged: list[tuple[str, int, str, str | None]] = []  # (repo, number, head, method) put on auto-merge
+        # Where each App's installation is, as on GitHub (policy github_apps.<app>.repos):
+        # a token asked for any other repository gets GitHub's 422, as the VM's install
+        # reports did after the workers' App came off Ops (8 Nov 2026).
+        self.installed: dict[str, set[str]] = {
+            "177392923": {"Thornswood", "skymp", "Thornswood-Ops"},
+            "177393064": {"Thornswood", "skymp"},
+        }
         self._next_id = 1000
 
     # Repositories on disk
@@ -125,6 +132,10 @@ class FakeGitHub:
             return Response(status, {"message": msg}, {})
         if path.startswith("/app/installations/"):
             assert headers["Authorization"].startswith("Bearer ")
+            reach = self.installed.get(path.split("/")[3])
+            if reach is not None and not set((body or {}).get("repositories") or []) <= reach:
+                return Response(422, {"message": "There is at least one repository that does not exist or is "
+                                                 "not accessible to the parent installation."}, {})
             self.tokens.append({"installation": path.split("/")[3], **body})
             self.token_permissions[f"tok-{len(self.tokens)}"] = dict(body.get("permissions") or {})
             return Response(201, {"token": f"tok-{len(self.tokens)}", "expires_at": "x"}, {})

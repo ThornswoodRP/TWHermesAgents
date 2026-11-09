@@ -5,8 +5,8 @@ The follower (follow_main.py) installs each new main by itself, as root. Until
 alone, so an install that stopped went unseen from 4 Nov to 8 Nov. The VM's
 own deploy key only reads, and no App is on this repository, so the follower
 hands each result to tw-git, the one GitHub writer here, over its socket (op
-vm_install, which only root may ask for), and tw-git writes it as the
-workers' App (policy follow_main.report):
+vm_install, which only root may ask for), and tw-git writes it as Bramble's
+App, the one App on the ops repository (policy follow_main.report):
 
   - one comment per install on the ledger issue in the ops repository: the
     commit, the result, the step it stopped at, the reason, what was put back;
