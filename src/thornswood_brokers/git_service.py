@@ -33,6 +33,20 @@ from thornswood_guard.policy import Policy, Verdict
 from .github_api import GitHub, GitHubError, quote
 from .wire import Refused
 
+# The board through the workers' App (policy.yaml board).
+BOARD_READ = {"organization_projects": "read", "issues": "read", "metadata": "read"}
+BOARD_QUERY = """
+query($org: String!, $number: Int!, $after: String, $status: String!, $order: String!) {
+  organization(login: $org) { projectV2(number: $number) { items(first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      status: fieldValueByName(name: $status) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+      order: fieldValueByName(name: $order) { ... on ProjectV2ItemFieldNumberValue { number } }
+      content { __typename ... on Issue { number title state repository { nameWithOwner } author { login }
+        labels(first: 30) { nodes { name } } assignees(first: 10) { nodes { login } } } }
+    } } } }
+}"""
+
 logger = logging.getLogger(__name__)
 
 WRITE = {
@@ -834,6 +848,53 @@ class GitService:
         self._check(self.rules.admin_call(bot, "GET", path))
         return {"body": self.gh.get(self.policy.reader_for(repo), repo, path)}
 
+    def board(self, caller: str, args: dict) -> dict:
+        """The board's open issues in do-order, for any Bot: each one's repo,
+        number, title, Status, Order, labels and assignees, read from the org
+        project through the workers' App (organization projects read).
+        eligible keeps only what a Bot may pick (the guide, section 3): Todo,
+        no claim label, assigned to nobody or to Patrick, not hands off.
+        limit (at most 100) bounds what comes back; the read itself is whole,
+        so the order is the board's."""
+        bot = self._bot(args)
+        cfg = self.policy.data["board"]
+        limit = max(1, min(int(args.get("limit") or 20), 100))
+        eligible = bool(args.get("eligible"))
+        repo = self.policy.data["repos"]["app"]
+        items, after = [], None
+        while True:
+            data = self.gh.graphql("workers", repo, BOARD_READ, BOARD_QUERY,
+                                   {"org": cfg["org"], "number": int(cfg["number"]), "after": after,
+                                    "status": cfg["status_field"], "order": cfg["order_field"]})
+            page = ((data.get("organization") or {}).get("projectV2") or {}).get("items") or {}
+            items.extend(page.get("nodes") or [])
+            if not (page.get("pageInfo") or {}).get("hasNextPage") or len(items) >= 20000:
+                break
+            after = page["pageInfo"]["endCursor"]
+        prefix = self.policy.data["claims"]["prefix"]
+        people = set(self.policy.data["hands_off"]["people"])
+        lane_labels = set(self.policy.data["hands_off"]["lanes"]["labels"])
+        patrick = self.policy.data["decisions"]["answered_by"]
+        out = []
+        for node in items:
+            c = node.get("content") or {}
+            if c.get("__typename") != "Issue" or c.get("state") != "OPEN":
+                continue
+            labels = [l["name"] for l in (c.get("labels") or {}).get("nodes") or []]
+            assignees = [a["login"] for a in (c.get("assignees") or {}).get("nodes") or []]
+            row = {"repo": (c.get("repository") or {}).get("nameWithOwner"), "number": c.get("number"),
+                   "title": c.get("title"), "author": (c.get("author") or {}).get("login"),
+                   "status": (node.get("status") or {}).get("name"),
+                   "order": (node.get("order") or {}).get("number"),
+                   "labels": labels, "assignees": assignees}
+            if eligible and (row["status"] != "Todo" or any(l.startswith(prefix) for l in labels)
+                             or set(labels) & lane_labels or row["author"] in people
+                             or set(assignees) & people or set(assignees) - {patrick}):
+                continue
+            out.append(row)
+        out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
+        return {"open": len(out), "issues": out[:limit]}
+
     def refused(self, caller: str, args: dict) -> dict:
         """Any other write a Bot asks for: named, and refused with the rule's reason."""
         bot = self._bot(args)
@@ -864,7 +925,7 @@ class GitService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-                 "start_run", "read", "refused", "ledger_event")
+                 "start_run", "read", "board", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
         # root's follower alone, never a Bot.
