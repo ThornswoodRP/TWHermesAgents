@@ -29,6 +29,16 @@ things were wrong, and both are fixed here:
   that will not end never keeps it stopped. The ended turns' tickets go back
   and the gateway starts in every case; the reload still fails, naming the
   session, when one is left.
+
+9 Nov 2026 (#52): the gateway was stopped 64 times from 1 to 9 Nov, mostly by
+this reload after follow-main installed a merge, and 14 of those stops cut a
+running turn off when the gateway's drain timed out. A cut turn leaves its
+writes for read-back and its sweep owed. So the reload first has tw-policy
+hold new turns (they wait in line), waits up to DRAIN_WAIT for the running
+ones to end, and only then stops the gateway. A turn still running after
+that is named and cut off; tw-policy's ten-minute rule has already ended
+any that went silent. The hold ends when the gateway is back, or by itself
+at tw-policy's HOLD_MAX if the reload dies.
 """
 
 from __future__ import annotations
@@ -44,6 +54,10 @@ GATEWAY = "tw-hermes-gateway.service"
 # Seconds a terminated session gets to end on SIGTERM, then after SIGKILL.
 GRACE = 30
 AFTER_KILL = 10
+# How long running turns get to end before the gateway stops, and how often
+# the reload looks. Within follow-main's 45 minutes with the tests and install.
+DRAIN_WAIT = 20 * 60
+DRAIN_POLL = 10
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
@@ -65,14 +79,47 @@ def sessions(run: Runner, user: str = USER) -> list[str]:
     return out
 
 
-def _release_turns(why: str) -> dict:
-    """Ask tw-policy, as root, to take back every model turn's ticket."""
+def _policy(op: str, args: dict) -> dict:
+    """Ask tw-policy, as root."""
     import json
-    from pathlib import Path
 
     from .wire import call
     policy = json.loads(Path(__file__).resolve().parent.parent.joinpath("thornswood_guard", "policy.json").read_text())
-    return call(policy["brokers"]["sockets"]["policy"]["path"], "release_turns", {"why": why}, timeout=30)
+    return call(policy["brokers"]["sockets"]["policy"]["path"], op, args, timeout=30)
+
+
+def _release_turns(why: str) -> dict:
+    """Ask tw-policy, as root, to take back every model turn's ticket."""
+    return _policy("release_turns", {"why": why})
+
+
+def drain(ask: Callable[[str, dict], dict], sleep: Callable[[float], None], say, wait: int = DRAIN_WAIT) -> bool:
+    """Holds new turns and waits for the running ones to end. True when the
+    hold is on (end it with end_hold); False when tw-policy did not answer,
+    and the reload goes on as before."""
+    try:
+        running = ask("hold_turns", {"why": "the Bots are being reloaded after an install",
+                                     "seconds": wait + 600})["running"]
+    except Exception as e:  # noqa: BLE001  the reload still has to happen
+        say(f"FAIL: tw-policy did not hold new turns ({e}); a turn running now may be cut off")
+        return False
+    waited = 0
+    while running and waited < wait:
+        if waited == 0:
+            say(f"holding new turns; waiting for {running} running turn{'s' if running != 1 else ''} to end "
+                f"(at most {wait // 60} minutes)")
+        sleep(DRAIN_POLL)
+        waited += DRAIN_POLL
+        try:
+            running = ask("turns_running", {})["running"]
+        except Exception as e:  # noqa: BLE001
+            say(f"FAIL: tw-policy stopped answering while turns ended ({e}); going on")
+            break
+    if running:
+        say(f"{running} turn{'s' if running != 1 else ''} still running after {waited // 60} minutes; cut off now")
+    else:
+        say(f"no turn running{f' after {waited} seconds' if waited else ''}; new turns held until the gateway is back")
+    return True
 
 
 def _gone(run: Runner, sleep: Callable[[float], None], ended: list[str], seconds: int) -> list[str]:
@@ -130,7 +177,19 @@ def _end_sessions(run: Runner, sleep: Callable[[float], None], say) -> tuple[lis
 
 
 def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep, say=print,
-                release: Callable[[str], dict] = _release_turns) -> int:
+                release: Callable[[str], dict] = _release_turns, ask: Callable[[str, dict], dict] = _policy) -> int:
+    held = drain(ask, sleep, say)
+    try:
+        return _reload(run, sleep, say, release)
+    finally:
+        if held:
+            try:
+                ask("end_hold", {})
+            except Exception as e:  # noqa: BLE001  the hold ends by itself at HOLD_MAX
+                say(f"FAIL: tw-policy did not end the hold on new turns ({e}); it ends by itself within 40 minutes")
+
+
+def _reload(run: Runner, sleep: Callable[[float], None], say, release: Callable[[str], dict]) -> int:
     """Stop the gateway, end the hermes login sessions, give back the tickets
     of the turns that just ended, then start the gateway. Stopped first, so no
     new turn takes a ticket between the release and the start: 1 Nov, 3:42 PM,
