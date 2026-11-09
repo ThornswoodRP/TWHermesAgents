@@ -353,4 +353,7 @@ class FakeGitHub:
                 return Response(204, None, {})
             return Response(200, {"workflow_runs": [r for r in self.runs if r["workflow"] == wf
                                                     and r["head_sha"] == query.get("head_sha")]}, {})
+        if rest[0] == "actions" and rest[1] == "runs" and len(rest) == 3 and method == "GET":
+            run = next((r for r in self.runs if r["id"] == int(rest[2]) and r.get("repo", repo) == repo), None)
+            return Response(200, run, {}) if run else Response(404, {"message": "Not Found"}, {})
         return Response(404, {"message": f"the fake has no {method} {path}"}, {})
