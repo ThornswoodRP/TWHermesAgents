@@ -796,6 +796,26 @@ class Hermes:
             return {"why": f"the tasks helper failed (exit {out.returncode}): {printed(out.stderr, 160)}"[:200]}
         return mine
 
+    def control(self, session_id: str, want: dict | None) -> tuple[dict | None, bool, str]:
+        """(what Hermes holds for the chat, whether a change was made, why not): one chat's model, thinking
+        level, approvals and busy setting, and the models one of his sign-ins, a free model or a local one
+        covers, through the same helper and Python as the readiness check (room_send.py "control"). With
+        `want`, the helper changes that chat's model or thinking level first, with Hermes's own calls."""
+        req = json.dumps({"op": "control", "profile": "", "name": self.name, "session_id": session_id,
+                          **({"set": want} if want else {})}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
+                                 timeout=90, cwd=str(self.home_dir), check=False, env=probe_env())
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            return None, False, "Hermes did not answer in 90 seconds"
+        except (OSError, IndexError, json.JSONDecodeError):
+            return None, False, "could not run the helper with Hermes's Python"
+        if not isinstance(got, dict):
+            return None, False, "the helper said nothing"
+        state = got.get("state") if isinstance(got.get("state"), dict) else None
+        return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
+
     def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
@@ -1288,6 +1308,25 @@ class OwnConnector:
             self._report()
         return done
 
+    def controls(self, wanted: list) -> int:
+        """The chats whose model and thinking the core asked about, read (and changed, when asked) one after
+        another, and posted. Returns how many were posted."""
+        sent = 0
+        for r in wanted[:3]:
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("session_id"), str)
+                    and SESSION_ID.match(r["session_id"]) and (r.get("set") is None or isinstance(r["set"], dict))):
+                continue
+            state, applied, reason = self.hermes.control(r["session_id"], r.get("set"))
+            if r.get("set"):
+                self.say(f"{'PASS' if applied else 'NOTE'} chat settings: {'changed' if applied else reason}")
+            status, _ = self.core.post("control", {"id": r["id"], "state": state, "applied": applied,
+                                                   "reason": reason})
+            if status == 200:
+                sent += 1
+            elif status not in (409, 423):
+                self.say(f"FAIL control: the core answered {status}")
+        return sent
+
     def pages(self, wanted: list) -> int:
         """The pages the core handed over: each read from state.db, read only, and posted. Returns how many."""
         sent = 0
@@ -1398,6 +1437,9 @@ class OwnConnector:
         ops = body.get("sessions", [])
         if isinstance(ops, list):
             self.sessions(ops)
+        controls = body.get("controls", [])
+        if isinstance(controls, list) and controls:
+            self.controls(controls)
         items = body.get("items", [])
         for item in items:
             t = threading.Thread(target=self._deliver, args=(item,), daemon=True)
