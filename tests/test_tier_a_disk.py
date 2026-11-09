@@ -21,8 +21,15 @@ from unittest import mock
 
 from helpers import REPO, policy
 
-from thornswood_brokers import canary, limits_check
 from thornswood_guard.profile_config import WORK_ROOT, build
+
+# The canary and the limits check are Linux code (pwd, podman, systemd): they
+# run only on the Oracle VM, so their tests run in the VM half. The Bots'
+# config is read the same everywhere and is checked on One's Python too.
+LINUX = sys.platform.startswith("linux")
+ON_THE_VM = "the canary, the limits check and the install run only on the Oracle VM"
+if LINUX:
+    from thornswood_brokers import canary, limits_check
 
 BOTS = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
 
@@ -41,11 +48,13 @@ class TheBotsConfig(unittest.TestCase):
             # podman's size option needs XFS with project quotas; the cap is the folder's filesystem.
             self.assertEqual(t["container_disk"], 0, bot)
 
+    @unittest.skipUnless(LINUX, ON_THE_VM)
     def test_each_bots_filesystem_is_its_disk_quota_size(self):
         p = policy()
         self.assertEqual(limits_check.tier_a_caps(p), {b: (25 if b == "wisp" else 10) for b in BOTS})
 
 
+@unittest.skipUnless(LINUX, ON_THE_VM)
 class CanaryReading(unittest.TestCase):
     def test_a_container_held_to_its_caps_passes(self):
         self.assertEqual(canary.parse_disk("WORKSPACE 29\nTMP 512\nDONE\n", 32, 512), [])
@@ -61,6 +70,7 @@ class CanaryReading(unittest.TestCase):
         self.assertIn("? MB to a 32 MB /workspace", canary.parse_disk("TMP 1\nDONE\n", 32, 512)[0])
 
 
+@unittest.skipUnless(LINUX, ON_THE_VM)
 class CanaryRun(unittest.TestCase):
     def test_5b_runs_hermes_flags_and_the_bots_own_on_a_32_mb_filesystem_then_unmounts_it(self):
         calls: list[list[str]] = []
@@ -107,7 +117,7 @@ class CanaryRun(unittest.TestCase):
         self.assertIn('c.tier_a_disk(SANDBOX_IMAGE, build(policy, "rift")["terminal"]["docker_extra_args"])', src)
 
 
-@unittest.skipUnless(sys.platform.startswith("linux"), "the install runs only on the Oracle VM")
+@unittest.skipUnless(LINUX, ON_THE_VM)
 class TheInstall(unittest.TestCase):
     """Step 7d of deploy/install.sh, run with stand-ins for the tools that touch the host."""
 
