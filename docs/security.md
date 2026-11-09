@@ -126,6 +126,4 @@ These stay in each Bot's `SOUL.md` and the `thornswood-ops` and `thornswood-guid
 
 ## Known limits
 
-What the code above does not hold yet, each with what is missing:
-
-- **The game box's backup drop.** The install sets up the box's SFTP jail only once the box's public key is in `deploy/keys/box-drop.pub`, which is not in the repository yet.
+Nothing the code above names is missing now. The last was the game box's backup drop: the box's public key went into `deploy/keys/box-drop.pub` on 9 Nov 2026, and the install sets up its SFTP jail from it.
