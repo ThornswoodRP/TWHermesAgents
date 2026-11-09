@@ -455,6 +455,23 @@ class PolicyService:
             return None
         return {"ticket": row[0], "kind": row[1], "risk": row[2], "task": row[3]}
 
+    def bot_turns(self, caller: str, args: dict) -> dict:
+        """For each Bot: whether a model turn of its is running, and when its
+        last admitted turn was last heard from (finished, touched or admitted).
+        Asks nothing of the queue and spends nothing. Bramble's wake check reads
+        it to find a worker that holds an active issue but has stopped: on 9 Nov
+        2026 Sprocket's turn was turned away at 9:23 AM mid-issue, its claim
+        still read as active work, and nothing woke it again."""
+        with self._tx():
+            self._expire_silent()
+            out = {}
+            for bot in self.policy.data["bots"]:
+                row = self.db.execute(
+                    "SELECT MAX(COALESCE(finished_at, seen_at, admitted_at)), SUM(state='admitted') FROM tickets "
+                    "WHERE bot=? AND kind='turn' AND admitted_at IS NOT NULL", (bot,)).fetchone()
+                out[bot] = {"running": bool(row[1]), "last": row[0]}
+        return {"bots": out}
+
     def set_task_risk(self, caller: str, args: dict) -> dict:
         """Bramble sets a task's risk class when it admits it; nobody else does.
         A task with no class is high risk, so it never reaches routes 2 or 4."""
@@ -874,6 +891,7 @@ class PolicyService:
             "wake_due": (self.wake_due, {gw}),
             "wake_paid": (self.wake_paid, {gw}),
             "turn_room": (self.turn_room, {gw}),
+            "bot_turns": (self.bot_turns, {gw}),
         }
         return {name: (self._one_at_a_time(handler), users) for name, (handler, users) in table.items()}
 

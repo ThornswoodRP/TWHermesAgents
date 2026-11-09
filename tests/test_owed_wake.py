@@ -2,6 +2,7 @@
 Hermes's cron runs, deploy/hermes-scripts/tw-owed-wake.py)."""
 
 import json
+from datetime import datetime, timezone
 import shutil
 import subprocess
 import sys
@@ -106,6 +107,7 @@ class Idle:
         self.room, self.claimed, self.open = room, claimed or {}, open_ or {}
         self.pulls = pulls or []
         self.cards = []
+        self.turns = {}
         self.asked = []
 
     def __call__(self, broker, op, args):
@@ -114,6 +116,8 @@ class Idle:
             return {"owed": False, "due": False}
         if op == "my_cards":
             return self.cards
+        if op == "bot_turns":
+            return {"bots": self.turns}
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "20 tickets were made in the last hour"}
         if op == "read":
@@ -296,6 +300,32 @@ class MorningAndFreeWorkers(unittest.TestCase):
         b.cards = [{"status": "answered", "task": f"ThornswoodRP/Thornswood#{echo}"}]
         out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), "an answered card leaves the issue active")
+
+    def test_a_worker_that_stopped_mid_issue_wakes_bramble_once(self):
+        # 9 Nov 2026: Sprocket's turn was turned away at 9:23 AM on #4329, its
+        # claim read as active work, and nothing woke it again.
+        home = self.day()
+        b = Idle(claimed=BUSY)
+        an_hour_ago = datetime.fromtimestamp(NOON - owed_wake.IDLE_EVERY - 60, timezone.utc).isoformat()
+        just_now = datetime.fromtimestamp(NOON - 120, timezone.utc).isoformat()
+        b.turns = {"sprocket": {"running": False, "last": an_hour_ago},
+                   "rift": {"running": True, "last": an_hour_ago},
+                   "echo": {"running": False, "last": just_now},
+                   "magpie": {"running": False, "last": None}}
+        out = owed_wake.check(home, "bramble", b, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("magpie, sprocket hold an active issue", out[-1])
+        self.assertIn("section 6, item 6", out[-1])
+        for w in ("rift", "echo", "wisp"):
+            self.assertNotIn(w, out[-1], "running, recently heard from, or unknown is not stopped")
+        later = NOON + owed_wake.IDLE_EVERY + 1
+        b.turns["echo"] = {"running": True, "last": just_now}
+        out = owed_wake.check(home, "bramble", b, now=later, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "the same stop wakes Bramble once")
+        b.turns["sprocket"] = {"running": False, "last": just_now}
+        out = owed_wake.check(home, "bramble", b, now=later + owed_wake.IDLE_EVERY + 1, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), "a new stop after it ran again wakes Bramble again")
+        self.assertIn("sprocket", out[-1])
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
