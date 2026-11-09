@@ -56,6 +56,7 @@ class Reactions:
                        "reason = NULL, principal_id = excluded.principal_id, device_id = excluded.device_id, "
                        "updated_at = excluded.updated_at",
                        (p.workspace_id, gateway, chat, mid, wanted, p.id, p.device_id, now, now))
+            self.s.wake(p.workspace_id, gateway)
             self.s.event(db, p.workspace_id, "reaction.wanted", f"{gateway}:{chat}:{mid}", "patrick",
                          {"gateway": gateway, "emoji": wanted, "device": p.device_id})
         return {"message_id": mid, "emoji": wanted, "status": "queued"}

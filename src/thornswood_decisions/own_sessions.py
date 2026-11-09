@@ -90,6 +90,7 @@ class OwnSessions:
             db.execute("INSERT INTO own_session_ops(id, workspace_id, gateway, session_id, op, title, status, "
                        "principal_id, device_id, created_at, updated_at) VALUES(?,?,?,?,?,?,'queued',?,?,?,?)",
                        (oid, p.workspace_id, gw, sid, op, title, p.id, p.device_id, now, now))
+            self.s.wake(p.workspace_id, gw)
             self.s.event(db, p.workspace_id, "own.session_" + op, oid, "patrick", {"gateway": gw, "device": p.device_id})
             receipt = {"id": oid, "gateway": gw, "session_id": sid, "op": op, "status": "queued", "created_at": now}
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "

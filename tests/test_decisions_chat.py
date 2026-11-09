@@ -199,9 +199,11 @@ class ConnectorSide(unittest.TestCase):
         self.send("rift", "three", "key-00000018")
         self.send("echo", "four", "key-00000019")
         self.assertEqual([i["text"] for i in self.chat.claim(self.w.ws, self.tok, limit=1)["items"]], ["two"])
-        for bad in (0, 8, True, "3"):
+        for bad in (-1, 8, True, "3"):
             with self.assertRaises(CoreError):
                 self.chat.claim(self.w.ws, self.tok, limit=bad)
+        self.assertEqual(self.chat.claim(self.w.ws, self.tok, limit=0)["items"], [],
+                         "0 while every turn the connector can run is running: its reactions only")
         self.assertEqual(sorted(i["text"] for i in self.chat.claim(self.w.ws, self.tok)["items"]), ["four", "three"])
 
 

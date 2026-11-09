@@ -156,6 +156,7 @@ class Store:
         self.path = Path(path)
         self.clock = clock
         self.db = connect(self.path)
+        self._woken: set[tuple[str, str]] = set()  # gateways to wake once this transaction is in
         try:
             migrate(self.db)
         except BaseException:
@@ -168,13 +169,31 @@ class Store:
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
         self.db.execute("BEGIN IMMEDIATE")
+        self._woken.clear()
         try:
             yield self.db
         except BaseException:
+            self._woken.clear()
             self.db.execute("ROLLBACK")
             raise
         else:
             self.db.execute("COMMIT")
+            woken, self._woken = self._woken, set()
+            for ws, gw in woken:
+                self._bump(ws, gw)
+
+    def wake(self, workspace_id: str, gw: str) -> None:
+        """That gateway's connector has new work (wakes.py): told once the transaction it is written in is
+        in, so the connector it wakes finds it; at once outside one."""
+        if self.db.in_transaction:
+            self._woken.add((workspace_id, gw))
+        else:
+            self._bump(workspace_id, gw)
+
+    @staticmethod
+    def _bump(workspace_id: str, gw: str) -> None:
+        from .wakes import WAKES  # wakes.py reads CoreError from here
+        WAKES.bump(workspace_id, gw)
 
     def now(self) -> str:
         return iso(self.clock())

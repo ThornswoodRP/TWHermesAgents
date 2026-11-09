@@ -32,6 +32,7 @@ import time
 from datetime import datetime, timedelta
 
 from .store import CoreError, new_id
+from .wakes import WAKES
 
 FRESH = timedelta(seconds=30)       # a read answers from memory this long
 AGAIN = timedelta(seconds=20)       # an ask not answered is handed out again after this
@@ -156,6 +157,7 @@ class _Controls:
             got = self.read.get(key)
             if key not in self.asked and not (got and now - got[0] < FRESH):
                 self.asked[key] = {"id": new_id("ctl"), "set": None, "at": now, "handed": None}
+                WAKES.bump(key[0], key[1])
 
     def wait(self, key: tuple, seconds: float, since) -> None:
         """Until a read newer than `since` is in, for at most `seconds` of real time."""
@@ -182,7 +184,8 @@ class _Controls:
             # The newest change wins: an older one not handed out yet is replaced, never run after it.
             self.asked[key] = {"id": cid, "set": want, "at": now, "handed": None}
             self.changes[key] = {"id": cid, "set": want, "status": "queued", "reason": None, "at": now, "key": idem}
-            return {"id": cid, "status": "queued"}
+        WAKES.bump(key[0], key[1])
+        return {"id": cid, "status": "queued"}
 
     def hand(self, ws: str, gw: str, now: datetime) -> list[dict]:
         with self.cond:

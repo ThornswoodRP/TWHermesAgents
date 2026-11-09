@@ -186,7 +186,7 @@ class ReadsBesideTurns(unittest.TestCase):
             rounds.append(1)
             self.turn.wait(5)  # the turn, still running
             return 1
-        c.once = once
+        c.round = once
         self.run_forever(c)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and sum(p == "/connector/live" for p, _ in core.posts) < 4:
@@ -203,7 +203,7 @@ class ReadsBesideTurns(unittest.TestCase):
         def pages():
             raise RuntimeError("the store went away")
         c.pages = pages
-        c.once = lambda: 0
+        c.round = lambda: 0
         t, stopped = self.run_forever(c)
         t.join(5)
         self.assertFalse(t.is_alive())

@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 from .auth import Auth, Principal
 from .schema import KINDS
 from .store import CoreError, Store, canonical, iso, new_id, parse, sha256_hex
+from .wakes import BOTS_GW
 
 # A task's brief, as long as one chat message (chat.MAX_TEXT).
 MAX_BRIEF = 8000
@@ -158,6 +159,8 @@ class DecisionCore:
                                  (new_id("cx"), p.workspace_id, bot,
                                   canonical({"task": task, "brief": brief, "by": p.label}), key, now, now))
                 told = cur.rowcount == 1
+                if told:
+                    self.s.wake(p.workspace_id, BOTS_GW)
         return {"task": task, "bot": bot, "queued": told}
 
     def keep_turned_away(self, p: Principal, text: str, reason: str, session: str) -> dict:
@@ -186,6 +189,7 @@ class DecisionCore:
             kept = cur.rowcount == 1
             if kept:
                 self.s.event(db, p.workspace_id, "message.kept", p.bot, p.label, {"reason": reason})
+                self.s.wake(p.workspace_id, BOTS_GW)
         return {"kept": kept}
 
     def open_card(self, p: Principal, *, kind: str, title: str, body: str, options: list[dict],
@@ -398,6 +402,7 @@ class DecisionCore:
                        (new_id("cx"), p.workspace_id, decision_id, "decision.answered", requester["bot"],
                         canonical({"decision_id": decision_id, "revision": revision, "option": option_key,
                                    "response": rid}), f"answer:{rid}", now, now))
+            self.s.wake(p.workspace_id, BOTS_GW)
             receipt = self._receipt_for(db, decision_id)
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
                        "result_json, created_at) VALUES(?,?,?,?,?,?,?)",
