@@ -30,6 +30,7 @@ import json
 import re
 from datetime import timedelta
 from typing import Callable, Iterable
+from zoneinfo import ZoneInfo
 
 from .auth import Auth, Principal
 from .schema import KINDS
@@ -37,6 +38,15 @@ from .store import CoreError, Store, canonical, iso, new_id, parse, sha256_hex
 
 # A task's brief, as long as one chat message (chat.MAX_TEXT).
 MAX_BRIEF = 8000
+# The Bots take up new work from 6 AM to 11 PM Mountain, and the Grok lanes
+# audit from 11 PM to 6 AM (Patrick, 9 Nov 2026: "have them auto work between
+# 6 am and 11 pm so that there is nice transaction and not overload on the VM,
+# VPS, One and GitHub"; "If it is in the middle of something by the time it
+# may Finnish but not start on a new issue"). A brief told outside it is
+# refused, so no worker starts a new issue at night; one already working
+# finishes.
+WORK_HOURS = (6, 23)
+WORK_ZONE = "America/Denver"
 
 DEFAULT_EXPIRY = timedelta(days=3)
 MAX_BODY_BYTES = 256 * 1024
@@ -124,6 +134,12 @@ class DecisionCore:
             brief = brief.strip()
             if len(brief) > MAX_BRIEF:
                 raise CoreError(413, "too_big", f"a brief is at most {MAX_BRIEF} characters")
+        if brief is not None:
+            local = parse(self.s.now()).astimezone(ZoneInfo(WORK_ZONE))
+            if not WORK_HOURS[0] <= local.hour < WORK_HOURS[1]:
+                raise CoreError(409, "after_hours",
+                                f"new work starts from {WORK_HOURS[0]} AM to {WORK_HOURS[1] - 12} PM Mountain; it is "
+                                f"{local.strftime('%I:%M %p').lstrip('0')} there, so this waits for the morning")
         told = False
         with self.s.tx() as db:
             now = self.s.now()

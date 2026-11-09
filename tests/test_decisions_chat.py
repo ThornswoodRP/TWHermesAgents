@@ -232,6 +232,25 @@ class ConnectorSide(unittest.TestCase):
             with self.subTest(brief=len(bad)), self.assertRaises(CoreError):
                 self.w.core.assign_task(self.w.bramble, "5549", "wisp", bad)
 
+    def test_no_new_work_is_handed_out_from_11_pm_to_6_am_mountain(self):
+        # Patrick, 9 Nov 2026: the Bots auto work 6 AM to 11 PM; at night the Grok lanes audit.
+        flags(self.w, "connector_effects")
+        cases = [(datetime(2026, 11, 9, 12, 59, tzinfo=timezone.utc), False),  # 5:59 AM MST
+                 (datetime(2026, 11, 9, 13, 0, tzinfo=timezone.utc), True),    # 6:00 AM
+                 (datetime(2026, 11, 10, 5, 59, tzinfo=timezone.utc), True),   # 10:59 PM
+                 (datetime(2026, 11, 10, 6, 0, tzinfo=timezone.utc), False)]   # 11:00 PM
+        for n, (t, ok) in enumerate(cases):
+            self.w.clock.t = t
+            with self.subTest(t=t.isoformat()):
+                if ok:
+                    self.assertTrue(self.w.core.assign_task(self.w.bramble, f"6{n}", "echo", "Do it.")["queued"])
+                else:
+                    with self.assertRaises(CoreError) as e:
+                        self.w.core.assign_task(self.w.bramble, f"6{n}", "echo", "Do it.")
+                    self.assertEqual(e.exception.reason, "after_hours")
+        # An assignment with no brief tells nobody and is not held.
+        self.assertFalse(self.w.core.assign_task(self.w.bramble, "70", "echo")["queued"])
+
     def test_the_bot_that_asked_is_told_and_that_is_bot_told(self):
         flags(self.w, "connector_effects")
         card = self.w.card()
