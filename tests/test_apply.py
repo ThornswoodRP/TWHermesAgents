@@ -218,6 +218,30 @@ class Apply(unittest.TestCase):
         self.assertEqual((again["tw-weekly-board-review"]["id"], again["tw-weekly-board-review"]["schedule"],
                           again["tw-weekly-board-review"]["state"]), (board["id"], "37 8 * * 0", "paused"))
 
+    def test_finished_one_time_jobs_go_and_every_other_job_stays(self):
+        # 9 Nov: Bramble still listed five 1 Nov dry runs of the board review,
+        # four [completed] (one of them failed) and one paused.
+        home = self.home()
+        jobs = {"bramble": [
+            {"id": "1297f8b5947d", "name": "Weekly board review DRY RUN (1 Nov)", "schedule": "x",
+             "schedule_display": "once at 2026-11-01 15:30", "state": "completed"},
+            {"id": "22cc9a1e7490", "name": "Weekly board review DRY RUN rerun 3 (1 Nov)", "schedule": "x",
+             "schedule_display": "once at 2026-11-01 22:40", "state": "paused"},
+            {"id": "f0f0f0f0f0f0", "name": "Patrick's hourly check", "schedule": "every 1h"},
+            {"id": "e1e1e1e1e1e1", "name": "Patrick's paused nightly", "schedule": "0 2 * * *", "state": "paused"},
+            {"id": "d2d2d2d2d2d2", "name": "Next year", "schedule": "x", "schedule_display": "once at 2027-01-01 09:00"}],
+            "rift": [{"id": "c3c3c3c3c3c3", "name": "old one", "schedule": "x", "schedule_display": "once in 30m",
+                      "state": "completed"}]}
+        (home.parent / "hermes.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        left = {b: sorted(j["name"] for j in js) for b, js in self.hermes_state(home)["jobs"].items()}
+        self.assertEqual(left["bramble"], ["Next year", "Patrick's hourly check", "Patrick's paused nightly",
+                                           "tw-owed-wake", "tw-weekly-board-review", "tw-weekly-project-review"])
+        self.assertEqual(left["rift"], [])
+        for gone in ("1297f8b5947d", "22cc9a1e7490", "c3c3c3c3c3c3"):
+            self.assertIn(f"removed the finished one-time job {gone}", r.stdout)
+
     def test_two_owed_wake_jobs_are_named_not_guessed_between(self):
         home = self.home()
         two = [{"id": i, "name": "tw-owed-wake", "schedule": "every 5m", "script": "tw-owed-wake.py"} for i in ("a1", "b2")]

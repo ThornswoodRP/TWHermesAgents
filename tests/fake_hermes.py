@@ -1,5 +1,5 @@
 """A stand-in for the hermes command in apply.py's tests: only
-`hermes -p <bot> cron list --all|create|edit`, printed as Hermes 0.23.0
+`hermes -p <bot> cron list --all|create|edit|remove`, printed as Hermes 0.23.0
 prints them (hermes_cli/cron.py cron_list). It keeps the jobs in the JSON
 file named by FAKE_HERMES_STATE, logs each call beside it, and fails every
 call when the state file holds {"broken": true}."""
@@ -42,7 +42,7 @@ if verb == "list":
     for job in jobs:
         print(f"  {job['id']} [{job.get('state', 'active')}]")
         print(f"    {'Name:':<11}{job['name']}")
-        print(f"    {'Schedule:':<11}{job['schedule']}")
+        print(f"    {'Schedule:':<11}{job.get('schedule_display', job['schedule'])}")
         print(f"    {'Script:':<11}{job.get('script', '')}")
         print()
     sys.exit(0)
@@ -59,6 +59,12 @@ elif verb == "edit":
     for key in ("script", "timezone"):
         if key in o:
             job[key] = o[key][0]
+elif verb == "remove":
+    before = len(jobs)
+    jobs[:] = [j for j in jobs if j["id"] != o["_"][0]]
+    if len(jobs) == before:
+        print(f"Job '{o['_'][0]}' not found", file=sys.stderr)
+        sys.exit(1)
 else:
     sys.exit(2)
 state_file.write_text(json.dumps(state), encoding="utf-8")
