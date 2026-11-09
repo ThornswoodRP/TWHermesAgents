@@ -370,10 +370,13 @@ class PolicyService:
         spends nothing: the decision core's connector asks it before it hands a Bot a message, so a
         message waits in its own queue while the fleet has no room instead of becoming a turn that is
         turned away."""
-        _bot(self.policy, args)
+        bot = _bot(self.policy, args)
         with self._tx():
             self._expire_silent()
-            why_not = self._queue_full() or self._why_not_now("turn", None)
+            # sweep: Bramble's wake check asks for a whole sweep, which also
+            # waits while another sweep runs (wake_due).
+            why_not = ((args.get("sweep") and self.policy.is_router(bot) and self._sweep_running(bot))
+                       or self._queue_full() or self._why_not_now("turn", None))
         return {"room": not why_not, "why_not": why_not}
 
     def wake_paid(self, caller: str, args: dict) -> dict:
