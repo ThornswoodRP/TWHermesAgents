@@ -360,7 +360,34 @@ async def _control_read(client, sid: str) -> dict:
     provider = info.get("provider") or options.get("provider")
     return {"model": model, "provider": provider, "reasoning": reasoning,
             "levels": list(route_supported_efforts(provider, model)), "yolo": yolo == "1", "busy": busy,
-            "offered": await asyncio.to_thread(_offered, options)}
+            "offered": await asyncio.to_thread(_offered, options), **await _usage_read(client, sid)}
+
+
+USAGE_KEYS = ("input", "output", "total", "calls", "compressions")
+CONTEXT_KEYS = ("context_used", "context_max", "context_percent", "context_estimated")
+
+
+async def _usage_read(client, sid: str) -> dict:
+    """How full one chat's context is and the tokens it has used, read as Desktop's context meter reads them
+    (apps/desktop use-statusbar-items.tsx): session.context_breakdown when it knows the window (it estimates
+    from the chat's prompt, tools and messages before a turn has measured it), else session.usage's own
+    context figures; the token counters from session.usage. Neither calls a model. A part Hermes would not
+    give is null with Hermes's reason, and the rest of the read stands."""
+    from hermes_cli.gateway_client import GatewayRPCError
+
+    out = {}
+    try:
+        usage = await client.rpc("session.usage", session_id=sid) or {}
+        out["usage"] = {k: usage.get(k) for k in USAGE_KEYS}
+    except GatewayRPCError as exc:
+        usage, out["usage"], out["usage_why"] = {}, None, f"Hermes did not say ({str(exc)[:120]})"
+    try:
+        breakdown = await client.rpc("session.context_breakdown", session_id=sid) or {}
+    except GatewayRPCError as exc:
+        breakdown, out["context_why"] = {}, f"Hermes did not say ({str(exc)[:120]})"
+    reading = breakdown if (breakdown.get("context_max") or 0) > 0 else usage
+    out["context"] = {k: reading.get(k) for k in CONTEXT_KEYS} if (reading.get("context_max") or 0) > 0 else None
+    return out
 
 
 async def _control(endpoint, sid: str, want) -> dict:

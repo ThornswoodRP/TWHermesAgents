@@ -149,5 +149,9 @@
     "messages": "Hermes Desktop's chat search (GET /api/sessions/search): session ids first with SessionDB.search_sessions_by_id, then the words of every message with SessionDB.search_messages (Hermes's FTS5 index, with its own trigram and LIKE routes), each bare word given a trailing * so it also finds a longer word, a quoted phrase or a word already ending in * kept as typed, then titles with list_sessions_rich(search_query=). Hits are deduplicated by compression lineage and named by the chain's tip (get_compression_tip). room_send.py op search does the same for his own Hermes, with the chat list's excluded sources, unarchived chats only, and at most one page (50).",
     "messages_source": "hermes_cli/web_routers/sessions.py:286 search_sessions; hermes_state_search.py:1257 search_messages, :1432 search_sessions_by_id; hermes_state_sessions.py:1303 list_sessions_rich; hermes_state_compression.py:897 get_compression_tip",
     "snippet": "search_messages' snippet is SQLite's snippet(..., '>>>', '<<<', '...', 40) of the matched message; the helper takes the marks out and keeps its words as the chat's line."
+  },
+  "context_use": {
+    "meter": "Hermes Desktop's context meter (apps/desktop use-statusbar-items.tsx) takes session.context_breakdown when it gives a context_max above 0 (an estimate from the chat's frozen prompt, tools and transcript, chars/4, no model call, when no turn in this process has measured it), else session.usage's context_used, context_max, context_percent and context_estimated. Its popover's counters are session.usage's input, output, total, calls and compressions. room_send.py op control reads both after model.options, and a part Hermes refuses is null with its reason.",
+    "meter_source": "tui_gateway/methods_session.py:1443 session.usage, :1454 session.context_breakdown; tui_gateway/contracts/common.py:28 Usage; apps/desktop/src/app/shell/hooks/use-statusbar-items.tsx:337"
   }
 }

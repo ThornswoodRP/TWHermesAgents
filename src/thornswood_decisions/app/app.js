@@ -2637,7 +2637,28 @@ async function detailsPart(gw, sid, close, again) {
       el('p', { 'data-detail': 'approvals' }, st.yolo
         ? 'Approvals: skipped in this chat. Commands run without asking you.'
         : 'Approvals: it asks you before a command its rules flag.'),
-      st.busy ? el('p', { 'data-detail': 'busy' }, `Messages sent while it works ${BUSY_WORDS[st.busy]}.`) : null)]
+      st.busy ? el('p', { 'data-detail': 'busy' }, `Messages sent while it works ${BUSY_WORDS[st.busy]}.`) : null,
+      el('p', { 'data-detail': 'context' }, contextWords(st)),
+      el('p', { 'data-detail': 'tokens' }, tokenWords(st)))]
+}
+
+// How full a chat's context is and the tokens it used, as Hermes Desktop's context meter says them
+// (own_control.py): "About 41% full: 82K of 200K tokens", "estimated" before a turn has measured it.
+function bigNumber(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K'
+  return String(n)
+}
+function contextWords(st) {
+  const c = st.context
+  if (!c) return 'Context: not known yet' + (st.context_why ? ` (${st.context_why})` : '') + '.'
+  return `Context: ${c.estimated ? 'about ' : ''}${c.percent}% full, ${bigNumber(c.used)} of ${bigNumber(c.max)} tokens.`
+}
+function tokenWords(st) {
+  const u = st.usage
+  if (!u) return 'Tokens used: not known yet' + (st.usage_why ? ` (${st.usage_why})` : '') + '.'
+  const squeezed = u.compressions ? `, compressed ${u.compressions} time${u.compressions === 1 ? '' : 's'}` : ''
+  return `Tokens used: ${bigNumber(u.input)} in, ${bigNumber(u.output)} out, over ${u.calls} call${u.calls === 1 ? '' : 's'}${squeezed}.`
 }
 
 // On a wide screen: the details on the right, in place of Decisions.
