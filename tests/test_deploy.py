@@ -309,6 +309,22 @@ class Units(unittest.TestCase):
                                  capture_output=True, text=True, check=True).stdout.strip()
             self.assertEqual(Path(out), opt / "releases" / commit / "thornswood_brokers" / "serve.py")
 
+    def test_every_launcher_the_installs_link_is_executable_in_git(self):
+        # $opt/bin holds links to the release's own copies, so the execute bit comes
+        # from git: a launcher stored as 100644 is "Permission denied" on the VM.
+        core = (REPO / "deploy" / "decisions" / "install.sh").read_text()
+        names = re.search(r"^for f in (tw-decide[^;]*); do\n  ln -sfnT", core, re.M)
+        self.assertIsNotNone(names, "decisions/install.sh's launcher list")
+        paths = [f"deploy/decisions/{n}" for n in names.group(1).split()]
+        paths += [f"deploy/bin/{f.name}" for f in (REPO / "deploy" / "bin").iterdir()]
+        listed = subprocess.run(["git", "-C", str(REPO), "ls-files", "-s", "--", *paths],
+                                capture_output=True, text=True)
+        if listed.returncode != 0 or not listed.stdout:
+            self.skipTest("not a git checkout")
+        modes = {line.split("\t", 1)[1]: line.split()[0] for line in listed.stdout.splitlines()}
+        for path in paths:
+            self.assertEqual(modes.get(path), "100755", f"{path} is not stored executable")
+
     def test_the_install_links_the_launchers_and_the_plugins_through_the_release(self):
         text = (REPO / "deploy" / "install.sh").read_text()
         self.assertIn('link_in "$opt/current/deploy/bin/${f##*/}" "$opt/bin/${f##*/}"', text)
