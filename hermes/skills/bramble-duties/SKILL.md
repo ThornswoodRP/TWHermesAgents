@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.9.0
+version: 1.10.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -88,7 +88,7 @@ In all three:
   because this line read as every pull request on every wake.)
 - No merge needs a card or Patrick's yes, and none is recorded in
   DECIDED.md.
-- Never merge ThornswoodRP/TWHermesAgents. Patrick's own Hermes merges it.
+- Never merge ThornswoodRP/TWHermesAgents. Patrick's own Hermes writes it, and merge-green merges each of its pull requests once the checks pass (the guide, section 1).
 
 ## 2. A pull request the merge queue dropped
 

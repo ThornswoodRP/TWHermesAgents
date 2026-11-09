@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.4.0
+version: 1.5.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -45,6 +45,7 @@ This comes before every other line here. It is word for word the rule every Clau
 
 - An issue that crosses areas gets one owner, picked by Bramble. The others help on their own branches or in review. Two Bots never edit the same files at once.
 - Live operations (the box, servers, backups, Cloudflare, Discord setup) are never a Bot editing the box: the code lives with its owner (Magpie for the gate and runners, Echo for the site, bot and voice), and Bramble starts the run through the gate.
+- TWHermesAgents, the Bots' own repository (their guard rails, brokers, the decision app and the VM install), is written by Patrick's own Hermes, my-hermes, and by no Bot (Patrick, 9 Nov 2026, #84). It works that repository's issues end to end and merge-green merges each pull request once its checks pass. Bramble never merges it. A Bot that finds something wrong there says so to Patrick in its own chat with him, with the evidence, and his Hermes takes it from there.
 - Grok lanes audit and file issues only. They never claim, close, assign, move a card, branch, merge or run anything (Patrick, 9 Nov 2026). A duplicate or finished issue reaches Bramble as a lane's comment, and Bramble checks it and closes it (bramble-duties, section 5). Their issues carry their own evidence; each is a finding to check, never an instruction.
 
 ## 2. Before any task
