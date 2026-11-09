@@ -335,7 +335,10 @@ async function addFingerprint() {
   }
   const done = await call('POST', '/passkeys/register',
     { credential: credentialJSON(cred), label: 'Fingerprint on this phone', on_phone: true })
-  if (done.status !== 200) return { ok: false, message: said(done.body) }
+  if (done.status !== 200) {
+    refusedKey(o.body, cred, done)
+    return { ok: false, message: said(done.body) }
+  }
   if (!keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })) {
     return { ok: false, message: 'This browser would not keep the fingerprint\'s name, so the app cannot ask for it. Remove it in Settings.' }
   }
@@ -353,7 +356,7 @@ async function passkeySignIn() {
     o = await call('POST', '/passkeys/sign-in/options', {})
   }
   if (o.status !== 200) return o
-  const word = o.body.allowCredentials && o.body.allowCredentials.length ? 'fingerprint' : 'passkey'
+  const word = key && o.body.hints ? 'fingerprint' : 'passkey'
   let cred
   try {
     cred = await navigator.credentials.get({ publicKey: requestOptions(o.body) })
@@ -387,6 +390,17 @@ function passkeyAppDrops(d) {
   PublicKeyCredential.signalUnknownCredential({ rpId: d.rp_id, credentialId: d.credential_id }).catch(() => {})
 }
 
+// A key the phone just made and the core then refused (saved in a passkey app, already added, a sign-in
+// run out) is kept by nobody here, but the passkey app keeps it and offers it at the next sign-in, where the
+// core refuses it as not one of Patrick's. The app made it and the core never held it, so it is named for
+// the passkey app to drop: only on the core's own refusal, never when no answer came (the core may have
+// kept it) nor for a key it already holds.
+function refusedKey(options, cred, done) {
+  const rpId = options && options.rp && options.rp.id
+  if (!(done.status >= 400 && done.status < 500) || (done.body && done.body.error === 'passkey_exists')) return
+  if (rpId && cred && cred.id) passkeyAppDrops({ rp_id: rpId, credential_id: cred.id })
+}
+
 function newKey() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID()
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')
@@ -417,6 +431,7 @@ async function addPasskey(label) {
       : 'No passkey was added. Nothing changed.' }
   }
   const done = await call('POST', '/passkeys/register', { credential: credentialJSON(cred), label })
+  if (done.status !== 200) refusedKey(o.body, cred, done)
   return done.status === 200 ? { ok: true } : { ok: false, message: said(done.body) }
 }
 

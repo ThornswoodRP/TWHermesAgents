@@ -16,6 +16,8 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   feed-token  print a new token for a feed (work, room, bots), the connector, the push worker
               or an own-Hermes connector (own-me, own-one) (replaces the old one)
   token-known whether the token on stdin is the core's for that name (the install checks its files with it)
+  passkeys    the passkeys the core holds and the last refused sign-ins, each key by the start of its
+              credential id, read only and with nothing secret (9 Nov: a refusal could not be matched to a key)
   peers       the tailnet's view of each machine an own-Hermes connector posts from (One): whether it is
               online, from `tailscale status --json`, so the phone says "One is off" only when it is
   push-reset  forget the push worker's keys and every phone's alerts, when the worker's keys are lost
@@ -159,6 +161,20 @@ def cmd_token_known(store: Store, args) -> dict:
     except CoreError:
         return {"known": False}
     return {"known": True}
+
+
+def cmd_passkeys(store: Store, args) -> dict:
+    """The passkeys the core holds and the last refused passkey sign-ins, read only. Each key is named by the
+    first 16 characters of its credential id, as a refusal records the key it was offered."""
+    ws, _ = _workspace(store, args.workspace)
+    keys = [dict(r) for r in store.db.execute(
+        "SELECT substr(k.credential_id, 1, 16) AS credential, k.label, k.aaguid, k.phone_key, k.created_at, "
+        "k.last_used_at, k.revoked_at, d.kind AS device, d.revoked_at AS device_revoked FROM passkeys k "
+        "LEFT JOIN devices d ON d.id = k.device_id WHERE k.workspace_id = ? ORDER BY k.created_at", (ws,))]
+    refused = [{"at": r["at"], **json.loads(r["body_json"] or "{}")} for r in store.db.execute(
+        "SELECT at, body_json FROM events WHERE workspace_id = ? AND kind = 'sign_in.failed' "
+        "AND subject = 'passkey' ORDER BY seq DESC LIMIT ?", (ws, args.last))]
+    return {"passkeys": keys, "refused": refused}
 
 
 def cmd_selfcheck(store: Store, args) -> dict:
@@ -318,6 +334,9 @@ def parser() -> argparse.ArgumentParser:
     p = sub.add_parser("token-known")
     p.add_argument("--workspace", required=True)
     p.add_argument("--name", choices=FEED_NAMES, required=True)
+    p = sub.add_parser("passkeys")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--last", type=int, default=10, help="how many of the last refused sign-ins")
     p = sub.add_parser("peers")
     p.add_argument("--workspace", required=True)
     p.add_argument("--tailscale", default="tailscale", help="the tailscale command (a stand-in in the tests)")
@@ -335,7 +354,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"init": cmd_init, "bind-room": cmd_bind_room, "pair": cmd_pair, "flag": cmd_flag,
             "test-card": cmd_test_card, "serve": cmd_serve, "serve-bots": cmd_serve_bots, "feed-token": cmd_feed_token, "selfcheck": cmd_selfcheck,
-            "token-known": cmd_token_known, "peers": cmd_peers,
+            "token-known": cmd_token_known, "passkeys": cmd_passkeys, "peers": cmd_peers,
             "push-reset": cmd_push_reset,
             "backup": cmd_backup, "verify": cmd_verify}
 
