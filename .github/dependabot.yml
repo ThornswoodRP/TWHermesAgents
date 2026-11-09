@@ -1,0 +1,36 @@
+# What Dependabot watches here (#54). Security updates (the repository
+# setting) open a pull request when an advisory names one of these; each
+# runs the guard rail tests and merges only when they pass
+# (scripts/merge_green.py). Every ecosystem has a limit of 0, which opens no
+# plain version update: an actions update changes .github/workflows, which
+# merge-green's token can never merge, so it would sit open.
+version: 2
+updates:
+  # The workflows' actions, pinned to a commit with the version beside it.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Denver
+    open-pull-requests-limit: 0
+  # The decision core's libraries (deploy/decisions/requirements.txt), each
+  # pinned with its hashes.
+  - package-ecosystem: pip
+    directory: /deploy/decisions
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Denver
+    open-pull-requests-limit: 0
+  # The test suite's own libraries on CI (tests/requirements-ci.txt).
+  - package-ecosystem: pip
+    directory: /tests
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Denver
+    open-pull-requests-limit: 0
