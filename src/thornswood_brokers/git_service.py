@@ -460,7 +460,7 @@ class GitService:
     def open_issue(self, caller: str, args: dict) -> dict:
         """A new issue, unclaimed, through the Bot's own App. Any Bot files what it
         finds; an answered card's DECIDED.md line needs one when the card has no issue
-        (thornswood_decisions/chat.py _decided_text). Patrick's answer on
+        (src/thornswood_decisions/chat.py _decided_text). Patrick's answer on
         dec_zf92laU0xp8mvmyfa8C7pA, 2 Nov 2026: five of his answers waited on it.
 
         The body ends with the write's marker, so a lost answer is found by it and

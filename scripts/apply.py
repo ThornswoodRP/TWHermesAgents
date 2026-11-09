@@ -22,13 +22,13 @@ For each Bot it:
      running turns are doing, for the phone's Board, and blocks nothing);
   6. makes the Bot's working folder, and installs the skills this repository
      owns for it (OWN_SKILLS: Bramble's bramble-duties);
-  7. installs the two Thornswood skills from skills/thornswood/ (until 1 Nov
+  7. installs the two Thornswood skills from hermes/skills/thornswood/ (until 1 Nov
      they lived only in each profile, so a stale line could be fixed by no PR);
   8. loads the installed plugin and checks it refuses what it must.
 
 For the Bot GitHub wakes (Bramble) it also installs the owed-wake check: the
 script into the profile's scripts/ and the cron job tw-owed-wake, made or
-brought up to date through the `hermes` command (thornswood_guard/owed_wake.py
+brought up to date through the `hermes` command (src/thornswood_guard/owed_wake.py
 says what it does). A job Patrick paused stays paused.
 
 The gateway's own profile (the hermes user's default profile, which
@@ -54,7 +54,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+SRC = REPO / "src"
+HERMES = REPO / "hermes"
+sys.path.insert(0, str(SRC))
 
 import yaml  # noqa: E402
 
@@ -65,8 +67,8 @@ from thornswood_guard.routes import check_config, check_gateway_config  # noqa: 
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
 SKILLS = ("thornswood-ops", "thornswood-guide")
-SKILLS_DIR = REPO / "skills" / "thornswood"
-# Skills this repository owns and installs, by Bot, from skills/<name>/SKILL.md
+SKILLS_DIR = HERMES / "skills" / "thornswood"
+# Skills this repository owns and installs, by Bot, from hermes/skills/<name>/SKILL.md
 # into the profile's skills/thornswood/<name>/. 2 Nov: Bramble had merge
 # authority but nothing told it to merge, hand back a dropped pull request, or
 # run the Ops run notes, so fork #147 and Ops #200 and #201 sat green.
@@ -194,7 +196,7 @@ def install_guard(pdir: Path, name: str = "thornswood_guard") -> None:
     plugins = pdir / "plugins"
     plugins.mkdir(exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=plugins, prefix=f".{name}-"))
-    shutil.copytree(REPO / name, staging / "pkg", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copytree(SRC / name, staging / "pkg", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     target = plugins / name
     old = plugins / f".{name}-old-{os.getpid()}"
     if target.exists():
@@ -242,12 +244,12 @@ def install_skills(pdir: Path) -> list[str]:
 
 
 def install_skill(pdir: Path, name: str) -> None:
-    """The repository's skills/<name>/SKILL.md into the profile, whole, in one rename."""
+    """The repository's hermes/skills/<name>/SKILL.md into the profile, whole, in one rename."""
     target = pdir / "skills" / "thornswood" / name
     target.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=target, prefix=".SKILL-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write((REPO / "skills" / name / "SKILL.md").read_text(encoding="utf-8"))
+        f.write((HERMES / "skills" / name / "SKILL.md").read_text(encoding="utf-8"))
     os.chmod(tmp, 0o644)
     os.replace(tmp, target / "SKILL.md")
 
@@ -356,7 +358,7 @@ def main() -> int:
         print("STOP: this checkout has changes that are not in the merged commit. Nothing was changed.")
         return 1
 
-    policy = Policy.load(REPO / "thornswood_guard" / "policy.json")
+    policy = Policy.load(SRC / "thornswood_guard" / "policy.json")
     home = Path(a.hermes_home)
     profiles = home / "profiles"
     root_env = env_names(home / ".env")
@@ -371,8 +373,8 @@ def main() -> int:
         if not (pdir / "SOUL.md").is_file():
             problems.append(f"{bot}: no SOUL.md")
         for skill in OWN_SKILLS.get(bot, ()):
-            if not (REPO / "skills" / skill / "SKILL.md").is_file():
-                problems.append(f"{bot}: this commit has no skills/{skill}/SKILL.md to install")
+            if not (HERMES / "skills" / skill / "SKILL.md").is_file():
+                problems.append(f"{bot}: this commit has no hermes/skills/{skill}/SKILL.md to install")
         cfg_path = pdir / "config.yaml"
         existing = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
         merged = merge_into(existing or {}, build(policy, bot))

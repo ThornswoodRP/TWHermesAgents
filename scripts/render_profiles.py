@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Write thornswood_guard/policy.json from policy.yaml, profiles/<bot>.yaml:
-each Bot's config as apply.py will set it, and profiles/gateway.yaml: the
+"""Write src/thornswood_guard/policy.json from policy.yaml, hermes/profiles/<bot>.yaml:
+each Bot's config as apply.py will set it, and hermes/profiles/gateway.yaml: the
 gateway's own profile.
 
 Run it after any change to policy.yaml. The guard reads policy.json (Hermes's
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "src"))
 
 import json  # noqa: E402
 
@@ -27,7 +27,7 @@ from thornswood_guard.profile_config import build, build_gateway  # noqa: E402
 
 HEADER = """# {name}'s Hermes config, as scripts/apply.py sets it in the existing
 # profile /home/hermes/.hermes/profiles/{bot}/config.yaml. Generated from
-# thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
+# src/thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
 # Every key not listed here stays as Hermes has it. `model` and
 # `fallback_providers` are replaced whole.
 #
@@ -51,7 +51,7 @@ GATEWAY_HEADER = """# The gateway's own profile, as scripts/apply.py sets it in
 # and makes the gateway's own helper calls, so it gets one route (the Max
 # login every Bot has first, no fallback), the helpers on it, and the guard,
 # which refuses every tool in a profile that is not one of the six Bots.
-# Generated from thornswood_guard/policy.yaml by scripts/render_profiles.py;
+# Generated from src/thornswood_guard/policy.yaml by scripts/render_profiles.py;
 # do not edit by hand. Every key not listed here stays as Hermes has it.
 # `model` and `fallback_providers` are replaced whole.
 """
@@ -68,8 +68,8 @@ def policy_json(policy: Policy) -> str:
 def main() -> int:
     policy = Policy.load_source()
     POLICY_FILE.write_text(policy_json(policy), encoding="utf-8", newline="\n")
-    print("wrote thornswood_guard/policy.json")
-    out = REPO / "profiles"
+    print("wrote src/thornswood_guard/policy.json")
+    out = REPO / "hermes" / "profiles"
     out.mkdir(exist_ok=True)
     for bot in policy.bots:
         (out / f"{bot}.yaml").write_text(render(policy, bot), encoding="utf-8", newline="\n")

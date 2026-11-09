@@ -844,7 +844,7 @@ class Hermes:
 # ── keeping One's copy current ────────────────────────────────────────────
 
 # The release the VM runs: a commit of main that passed the whole suite there before it was installed
-# (thornswood_brokers/follow_main.py). The core names it in every claim answer.
+# (src/thornswood_brokers/follow_main.py). The core names it in every claim answer.
 RELEASE = re.compile(r"^[0-9a-f]{40}$")
 UPDATE_FILES = ("own_connector.py", "room_send.py")
 UPDATE_EXIT = 75         # "updated, start me again at once", for --supervise
@@ -853,12 +853,12 @@ RESTART_SECONDS = 60     # how long --supervise waits after any other stop
 
 def own_commit(here: Path | None = None) -> str | None:
     """The commit this copy came from: COMMIT beside it (One: written by its installer and by each update
-    since), or the release folder it runs from (the VM: /opt/thornswood-hermes/releases/<commit>)."""
+    since), or the release folder it runs from (the VM: /opt/thornswood-hermes/releases/<commit>/src/thornswood_decisions)."""
     here = here or Path(__file__).resolve().parent
     try:
         commit = (here / "COMMIT").read_text(encoding="ascii").strip()
     except OSError:
-        commit = here.parent.name
+        commit = here.parents[1].name  # <release>/src/thornswood_decisions
     return commit if RELEASE.match(commit) else None
 
 

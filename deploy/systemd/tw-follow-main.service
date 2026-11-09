@@ -1,7 +1,7 @@
 # The VM follows main by itself: fetches it with its own read-only deploy
 # key, tests it, installs and applies it, restarts the gateway and runs the
 # canary, and puts the earlier release back if any of that fails
-# (thornswood_brokers/follow_main.py). Root, because the install is root's.
+# (src/thornswood_brokers/follow_main.py). Root, because the install is root's.
 [Unit]
 Description=TWHermesAgents follows main
 After=network-online.target

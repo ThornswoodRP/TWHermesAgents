@@ -381,8 +381,8 @@ PAGES = _Pages()
 
 def _release(here: Path | None = None) -> str | None:
     """The commit the core runs: the VM installs each release in /opt/thornswood-hermes/releases/<commit>
-    after the whole suite passed there (thornswood_brokers/follow_main.py). None anywhere else."""
-    name = (here or Path(__file__).resolve().parent).parent.name
+    after the whole suite passed there (src/thornswood_brokers/follow_main.py). None anywhere else."""
+    name = (here or Path(__file__).resolve().parent).parents[1].name  # <release>/src/thornswood_decisions
     return name if re.match(r"^[0-9a-f]{40}$", name) else None
 
 

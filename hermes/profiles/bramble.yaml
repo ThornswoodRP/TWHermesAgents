@@ -1,10 +1,10 @@
-# Wisp's Hermes config, as scripts/apply.py sets it in the existing
-# profile /home/hermes/.hermes/profiles/wisp/config.yaml. Generated from
-# thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
+# Bramble's Hermes config, as scripts/apply.py sets it in the existing
+# profile /home/hermes/.hermes/profiles/bramble/config.yaml. Generated from
+# src/thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
 # Every key not listed here stays as Hermes has it. `model` and
 # `fallback_providers` are replaced whole.
 #
-# Rooms: Thornswood Workbench.
+# Rooms: Thornswood Workbench, and the working rooms it opens.
 # Skills: thornswood-ops and thornswood-guide, already in the profile;
 # apply.py checks they are there.
 model:
@@ -32,10 +32,9 @@ agent:
   - discord
   - discord_admin
   - delegation
-  - cronjob
 terminal:
   backend: docker
-  cwd: /home/hermes/tw-work/wisp
+  cwd: /home/hermes/tw-work/bramble
   docker_image: docker.io/nousresearch/hermes-sandbox:desktop
   docker_mount_cwd_to_workspace: true
   docker_network: false

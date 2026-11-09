@@ -140,7 +140,7 @@ class TheRoute(unittest.TestCase):
 
     def test_the_rendered_gateway_profile_has_the_route(self):
         import yaml
-        rendered = yaml.safe_load((REPO / "profiles" / "gateway.yaml").read_text(encoding="utf-8"))
+        rendered = yaml.safe_load((REPO / "hermes" / "profiles" / "gateway.yaml").read_text(encoding="utf-8"))
         self.assertEqual(rendered["platforms"]["webhook"]["extra"]["routes"]["github-checks"], self.route)
 
 
@@ -336,7 +336,7 @@ exit 3
                 f'  if [[ $1 == hook ]]; then echo "NOT YET: the App has no webhook"; return {hook_rc}; fi\n'
                 '  if [[ $1 == funnel || $1 == allowed ]]; then ' + real_hook.replace("hook_py() {", "(").rstrip("}").rstrip() + ' ); fi; }')
         script = ('pol() { python3 -I -c \'import json,sys; d=json.load(open(sys.argv[1])); v=d\nfor k in sys.argv[2].split("."): v=v[k]\nprint(v)\' '
-                  f'{REPO}/thornswood_guard/policy.json "$1"; }}\n' + block.replace(real_hook, stub))
+                  f'{REPO}/src/thornswood_guard/policy.json "$1"; }}\n' + block.replace(real_hook, stub))
         if hang:
             (d / "bin" / "timeout").write_text("#!/bin/bash\nshift; exec /usr/bin/timeout 2 \"$@\"\n")
             (d / "bin" / "timeout").chmod(0o755)

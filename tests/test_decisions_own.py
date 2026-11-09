@@ -837,7 +837,7 @@ class VmInstall(unittest.TestCase):
         from helpers import REPO
         lines = (REPO / "deploy/decisions/tw-decide-own").read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines[0], "#!/usr/bin/python3 -I")
-        self.assertIn('runpy.run_path(str(Path(__file__).resolve().parents[2] / "thornswood_decisions" / '
+        self.assertIn('runpy.run_path(str(Path(__file__).resolve().parents[2] / "src" / "thornswood_decisions" / '
                       '"own_connector.py"), run_name="__main__")', lines)
         import subprocess
         mode = subprocess.run(["git", "-C", str(REPO), "ls-files", "-s", "deploy/decisions/tw-decide-own"],
@@ -892,7 +892,7 @@ class OneInstall(unittest.TestCase):
         run("git", "init", "-q", "--bare", "-b", "main", str(origin))
         run("git", "init", "-q", "-b", "main", str(clone))
         for rel in ("scripts/one/Install-OwnConnector.ps1", "deploy/layout.json",
-                    "thornswood_decisions/own_connector.py", "thornswood_decisions/room_send.py"):
+                    "src/thornswood_decisions/own_connector.py", "src/thornswood_decisions/room_send.py"):
             (clone / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / rel, clone / rel)
         run("git", "-c", "user.name=t", "-c", "user.email=t@t", "add", ".", cwd=clone)

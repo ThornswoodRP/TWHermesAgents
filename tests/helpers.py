@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+SRC = REPO / "src"
+sys.path.insert(0, str(SRC))
 
 from thornswood_guard.decisions import DecisionStore, new_decision  # noqa: E402
 from thornswood_guard.github import CheckRun, GitHubRules, Issue, PullRequest  # noqa: E402
