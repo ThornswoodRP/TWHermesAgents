@@ -379,16 +379,25 @@ class PhoneFingerprint(unittest.TestCase):
     # 8 Nov: the fingerprint button opened Bitwarden. The key added on 2 Nov had been saved in
     # Bitwarden, and the core took it as the phone's own without looking at which app made it.
 
-    def test_a_phone_key_saved_in_a_passkey_app_is_refused_and_nothing_is_kept(self):
+    def test_a_phone_key_saved_in_a_passkey_app_is_kept_as_a_passkey_not_the_fingerprint(self):
+        # 9 Nov: refusing such a key left it in the passkey app (which may keep it in place of the key it had),
+        # and the phone came to hold no key the core took. It is kept, but never as the phone's own key.
+        own = self.add(self.key())
         for aaguid, name in ((BITWARDEN, "Bitwarden"), (passkey.NO_AAGUID, "did not say its name"),
                              ("12345678-1234-1234-1234-123456789abc", "a passkey app")):
-            with self.assertRaises(CoreError) as cm:
-                self.add(self.key(aaguid))
-            self.assertEqual((cm.exception.status, cm.exception.reason), (409, "saved_in_app"))
-            self.assertIn(name, str(cm.exception))
-            self.assertIn("Google Password Manager", str(cm.exception))
-            self.assertIn(name, cm.exception.detail["maker"])
-        self.assertEqual(self.w.store.db.execute("SELECT count(*) FROM passkeys").fetchone()[0], 0)
+            key = self.key(aaguid)
+            out = self.add(key)
+            self.assertFalse(out["phone_key"])
+            self.assertIn(name, out["maker"])
+            row = self.w.store.db.execute("SELECT phone_key, label, revoked_at FROM passkeys WHERE id = ?",
+                                          (out["passkey_id"],)).fetchone()
+            self.assertEqual((row["phone_key"], row["revoked_at"]), (0, None))
+            self.assertIn(name, row["label"])
+            # It signs in, and the phone's own key is left as it was.
+            self.pk.sign_in(self.w.ws, key.get(self.pk.sign_in_options(self.w.ws)))
+        mine = self.w.store.db.execute("SELECT phone_key, revoked_at FROM passkeys WHERE id = ?",
+                                       (own["passkey_id"],)).fetchone()
+        self.assertEqual((mine["phone_key"], mine["revoked_at"]), (1, None))
 
     def test_a_plain_passkey_from_a_passkey_app_is_still_taken(self):
         key = self.key(BITWARDEN)
@@ -535,12 +544,12 @@ class AppRoutes(unittest.TestCase):
         status, _, body = s.call("POST", "/passkeys/register/options", headers=h, body={"on_phone": True})
         self.assertEqual((status, body["authenticatorSelection"]["authenticatorAttachment"]), (200, "platform"))
         if HAVE_PASSKEY_LIB:
-            # The app's register sends on_phone, so a key saved in Bitwarden is refused with its name.
+            # The app's register sends on_phone; a key saved in Bitwarden is kept as a passkey, with its maker.
             from thornswood_decisions.softkey import SoftKey
             cred = SoftKey(ORIGIN, RP_ID, aaguid=BITWARDEN).create(body)
             status, _, out = s.call("POST", "/passkeys/register", headers=h,
                                     body={"credential": cred, "label": "Fingerprint on this phone", "on_phone": True})
-            self.assertEqual((status, out["error"], out["detail"]["maker"]), (409, "saved_in_app", "Bitwarden"))
+            self.assertEqual((status, out["phone_key"], out["maker"]), (200, False, "Bitwarden"))
         status, _, body = s.call("POST", "/passkeys/sign-in/options", headers={"Origin": ORIGIN}, body={"phone_key": 5})
         self.assertEqual((status, body["error"]), (400, "bad_field"))
         status, _, body = s.call("POST", "/passkeys/sign-in/options", headers={"Origin": ORIGIN},

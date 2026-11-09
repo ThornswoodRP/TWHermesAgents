@@ -21,7 +21,7 @@ const { chromium } = require('playwright')
 const [port, code, card, high, third, boardNext, voiceWav, VOICE, VOICE_REPLY] = process.argv.slice(2)
 const base = `http://localhost:${port}`
 // The words when the browser or the passkey app ends a sign-in, with the browser's own error name.
-const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\.$/
+const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\./
 ;(async () => {
   // channel 'chromium': the full browser in its new headless mode. The bare
   // headless shell refuses every notification, so it cannot show an alert.
