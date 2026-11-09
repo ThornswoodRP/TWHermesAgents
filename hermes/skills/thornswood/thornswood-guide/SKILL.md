@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.2.0
+version: 1.3.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -51,7 +51,7 @@ This comes before every other line here. It is word for word the rule every Clau
 
 1. Read the issue whole: body, every comment, the timeline, labels, assignee, linked PRs.
 2. Read what binds it: docs/DECIDED.md for the area, the Developer-Guide.md sections it touches, the ops skill (`thornswood-ops`) for anything that runs.
-3. Search for it: open and closed issues, open PRs, two ways of saying the symptom. If a PR already covers it, the work is that PR.
+3. Search for it: open and closed issues, open PRs, two ways of saying the symptom, with `tw_git read` on `/search/issues?q=repo:<repo> <words>` (the query names that one repo; add `is:open`, `is:pr` or `in:title` as you need). If a PR already covers it, the work is that PR.
 4. Read the code around it, including the band-aids already there. A fix that leaves one in place is not finished.
 5. Say the cause in one sentence. If you can't, measure until you can: logs, files, timestamps, a harness. The measurement goes on the issue (evidence in Ops `issues/<n>.md`).
 
@@ -76,7 +76,8 @@ This comes before every other line here. It is word for word the rule every Clau
    - `Closes #N` only for a change nobody would notice in the game.
    - The test task text for the issue (section 9), in the PR, ready to post.
 6. If the change needs a run (a deploy, a Ship, a box step, a Nexus step), commit a run note to Thornswood-Ops beside it (the ops skill, section 7).
-7. Hand back to Bramble: PR number, exact head SHA, the CI runs, the tests you ran and what they printed, the files touched, what is left. Then stop. Never merge your own work.
+7. What you find on the way: anything wrong that this issue does not cover (another bug, a band-aid, a stale doc, a missing test) goes on the board, never into this PR. Search first as in section 2; if an issue already holds it, add what you found there as a plain comment. If none does, `tw_git open_issue` it: a plain title, two to five lines saying what is wrong and where, and a last line `Done when:` with one thing somebody can check, unclaimed. Name each one in your hand-back.
+8. Hand back to Bramble: PR number, exact head SHA, the CI runs, the tests you ran and what they printed, the files touched, what is left. Then stop. Never merge your own work.
 
 ## 5. Review
 

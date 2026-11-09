@@ -19,6 +19,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 
 from fake_github import FakeGitHub, git
@@ -813,6 +814,23 @@ class PullRequestsAndIssues(unittest.TestCase):
         w = World()
         w.fake.add_issue(APP, 3150)
         self.assertEqual(w.git.read("hermes", {"bot": "rift", "repo": APP, "path": f"/repos/{APP}/issues/3150"})["body"]["number"], 3150)
+
+    def test_a_bot_searches_the_issues_of_one_repo_before_filing(self):
+        w = World()
+        w.fake.add_issue(APP, 5547)
+        w.fake.issues[(APP, 5547)]["title"] = "test-feed-store failed once reading the feed"
+        w.fake.add_issue(OPS, 12)
+        w.fake.issues[(OPS, 12)]["title"] = "test-feed-store note"
+        q = urllib.parse.quote(f"repo:{APP} is:issue test-feed-store")
+        out = w.git.read("hermes", {"bot": "sprocket", "repo": APP, "path": f"/search/issues?q={q}"})
+        self.assertEqual([i["number"] for i in out["body"]["items"]], [5547])
+        for bad in (f"repo:{OPS} feed", "org:ThornswoodRP feed", f"repo:{APP} repo:{OPS} feed", "feed",
+                    f"repo:{APP} user:someone feed"):
+            with self.subTest(q=bad), self.assertRaises(Refused):
+                w.git.read("hermes", {"bot": "sprocket", "repo": APP,
+                                      "path": f"/search/issues?q={urllib.parse.quote(bad)}"})
+        with self.assertRaises(Refused):
+            w.git.read("hermes", {"bot": "sprocket", "repo": APP, "path": "/search/code?q=" + q})
         # The repository's own fields, such as its default branch (1 Nov).
         self.assertEqual(w.git.read("hermes", {"bot": "bramble", "repo": APP, "path": f"/repos/{APP}"})["body"]["default_branch"], "main")
         for path in ("/user", f"/repos/{APP}/../../orgs/x", "/repos/EvilPatrick06/Other/issues/1",
