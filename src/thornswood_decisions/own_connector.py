@@ -1038,12 +1038,18 @@ def supervise(argv: list[str], run=subprocess.Popen, sleep=time.sleep, rounds: i
     when it stops to load an update, and a minute after any other stop. On Windows the connector is in
     a job object that ends with this process, so stopping the task never leaves a connector behind."""
     child = [sys.executable, "-I", str(Path(__file__).resolve()), *[a for a in argv if a != "--supervise"]]
+    # The connector gets the supervisor's own standard streams. Under pythonw (One's task) there are none,
+    # and naming any one stream to Popen makes Windows fill the others with a pipe whose reading end is
+    # already closed (subprocess.Popen._get_handles). The connector then had a stdout, so say() printed into
+    # that dead pipe instead of writing connector.log, and its first line stopped it: on 9 Nov One's first
+    # start ended with exit code 120 (Python's own code for an output it could not flush) and left no line.
+    std = {"stdin": subprocess.DEVNULL} if sys.stdin is not None else {}
     try:
         job = _job() if WINDOWS and contain else None
         n = 0
         while rounds is None or n < rounds:
             n += 1
-            proc = run(child, stdin=subprocess.DEVNULL, **quiet())
+            proc = run(child, **std, **quiet())
             if job is not None:
                 _in_job(job, proc)
             code = proc.wait()

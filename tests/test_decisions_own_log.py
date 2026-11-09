@@ -6,6 +6,8 @@ One's task runs the connector with pythonw, which has no stdout, so every line i
   goes there as before and no file is written;
 - the log is kept to about LOG_BYTES, with the one before it as connector.log.1;
 - --supervise writes each stop of the connector with its exit code, and an update as an update;
+- a supervisor with no streams (pythonw) names none for the connector, so the connector has none either
+  and writes connector.log (9 Nov: it printed into a pipe nobody read, and stopped with exit code 120);
 - a supervisor that stops writes why before it goes, and so does the connector itself, except when it
   stops to load an update.
 
@@ -76,6 +78,17 @@ class Log(unittest.TestCase):
             "NOTE the connector stopped to load an update; starting the new copy",
             f"NOTE the connector stopped with exit code 1; starting it again in {wait}s",
             f"NOTE the connector stopped with exit code 3221225786; starting it again in {wait}s"])
+
+    def test_a_supervisor_with_no_streams_names_none_for_the_connector(self):
+        """Under pythonw the supervisor has no streams. Naming one to Popen made Windows give the connector a
+        stdout pipe nobody reads, so its say() printed into it and its first line stopped it (exit 120)."""
+        for stdin, want in ((None, {}), (io.StringIO(), {"stdin": own_connector.subprocess.DEVNULL})):
+            seen = []
+            with mock.patch.object(own_connector.sys, "stdin", stdin):
+                own_connector.supervise(["--supervise"], run=lambda argv, **kw: seen.append(kw) or Proc(0),
+                                        sleep=lambda s: None, rounds=1, contain=False)
+            (kw,) = seen
+            self.assertEqual({k: v for k, v in kw.items() if k in ("stdin", "stdout", "stderr")}, want)
 
     def test_a_supervisor_that_stops_writes_why_first(self):
         def run(argv, **kw):
