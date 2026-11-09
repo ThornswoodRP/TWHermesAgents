@@ -615,10 +615,72 @@ class Ledger(unittest.TestCase):
         self.assertEqual(s.ledger_pending(), [])
 
 
+class MainCardImport(unittest.TestCase):
+    """Step 6: tw-git brings Patrick's "authorize" on a Main card from the
+    decision core, and tw-policy records it as his decision, used once."""
+
+    def answer(self, s, **kw):
+        a = {"decision_id": "dec_abcdefghijklmnop", "for": "publish", "repo": APP, "commit": HEAD, "pr": None,
+             "revision": 2, "option": "authorize", "answered_at": s.clock().isoformat(), "restored": False}
+        a.update(kw)
+        return a
+
+    def test_authorize_becomes_a_record_bound_to_the_card(self):
+        s = service()
+        self.assertEqual(s.decision_import("tw-git", {"answer": self.answer(s)}),
+                         {"id": "dec_abcdefghijklmnop", "recorded": True})
+        d = s._decision("dec_abcdefghijklmnop")
+        self.assertEqual((d.kind, d.repo, d.commit, d.revision, d.answered_by), ("publish", APP, HEAD, 2, "EvilPatrick06"))
+        self.assertTrue(s.check_decision(d.id, kind="publish", repo=APP, commit=HEAD).allowed)
+        self.assertFalse(s.check_decision(d.id, kind="publish", repo=APP, commit=OTHER).allowed)
+        self.assertFalse(s.check_decision(d.id, kind="main", repo=APP, commit=HEAD).allowed)
+
+    def test_asking_again_changes_nothing_and_it_is_still_used_once(self):
+        s = service()
+        s.decision_import("tw-git", {"answer": self.answer(s)})
+        s.decision_use("tw-git", {"id": "dec_abcdefghijklmnop"})
+        self.assertFalse(s.decision_import("tw-git", {"answer": self.answer(s)})["recorded"])
+        self.assertIn("used once", s.check_decision("dec_abcdefghijklmnop", kind="publish", repo=APP, commit=HEAD).reason)
+
+    def test_another_binding_under_the_same_id_is_refused(self):
+        s = service()
+        s.decision_import("tw-git", {"answer": self.answer(s)})
+        with self.assertRaises(Refused):
+            s.decision_import("tw-git", {"answer": self.answer(s, commit=OTHER)})
+
+    def test_only_authorize_and_only_a_core_card_with_a_full_binding(self):
+        s = service()
+        for bad in ({"option": "not_now"}, {"decision_id": "d1"}, {"for": "deploy"}, {"commit": HEAD[:12]},
+                    {"repo": "Thornswood"}, {"revision": 0}, {"pr": True}, {"answered_at": "soon"}):
+            with self.subTest(bad), self.assertRaises(Refused):
+                s.decision_import("tw-git", {"answer": self.answer(s, **bad)})
+
+    def test_an_answer_from_before_a_restore_authorizes_nothing(self):
+        clock = Clock()
+        s = service(clock=clock)
+        with self.assertRaises(Refused):
+            s.decision_import("tw-git", {"answer": self.answer(s, restored=True)})
+        old = self.answer(s)
+        clock.advance(minutes=5)
+        s.mark_restored("root", {})
+        with self.assertRaises(Refused):
+            s.decision_import("tw-git", {"answer": old})
+        clock.advance(minutes=1)
+        self.assertTrue(s.decision_import("tw-git", {"answer": self.answer(s, decision_id="dec_after")})["recorded"])
+
+    def test_it_expires_with_the_policys_hours(self):
+        clock = Clock()
+        s = service(clock=clock)
+        s.decision_import("tw-git", {"answer": self.answer(s)})
+        clock.advance(hours=73)
+        self.assertIn("expired", s.check_decision("dec_abcdefghijklmnop", kind="publish", repo=APP, commit=HEAD).reason)
+
+
 class Callers(unittest.TestCase):
     def test_each_op_names_its_callers(self):
         ops = service().ops()
         self.assertEqual(ops["decision_record"][1], {"root"})
+        self.assertEqual(ops["decision_import"][1], {"tw-git"})
         self.assertEqual(ops["op_begin"][1], {"tw-git"})
         self.assertNotIn("hermes", ops["decision_use"][1])
         self.assertNotIn("hermes", ops["route_admit"][1])

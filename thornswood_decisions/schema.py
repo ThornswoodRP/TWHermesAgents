@@ -20,7 +20,7 @@ FLAGS = FLAGS_7 + ("session_manage_write",)
 # Patrick's own Hermes: the gateways the phone reaches beside the Bots' own.
 OWN_GATEWAYS = ("me", "one")
 
-# Card kinds (07 section 5). "main" is step 6, which waits for phase 7.
+# Card kinds (07 section 5). "main" is Patrick's tap for a release (core.py, step 6).
 KINDS = ("question", "change", "review", "todo", "board_review", "weekly_review", "main")
 STATUSES = ("draft", "pending", "resolved", "superseded", "cancelled", "expired")
 PRINCIPAL_KINDS = ("patrick", "bramble", "specialist", "push_worker")
@@ -762,6 +762,20 @@ UPDATE passkeys SET phone_key = 1 WHERE label = 'Fingerprint on this phone';
     # turns away now leaves its message in the queue. The VM's follower starts the connector only after
     # every Bot runs this release (follow_main.py start_connector), so these reach Bramble with the op.
     _replay(REPLAY_16),
+    # 17: a Main card names what Patrick's "authorize" is for in one release link (core.py, step 6):
+    # release:<main|publish|cutover>:<owner>/<repo>@<commit>[#<pull request>]. The link kinds are a
+    # CHECK, so the table is made again with the new kind; every link is copied as it is.
+    """
+CREATE TABLE task_links_17 (
+  id TEXT PRIMARY KEY,
+  decision_id TEXT NOT NULL REFERENCES decisions(id),
+  kind TEXT NOT NULL CHECK (kind IN ('issue', 'pr', 'kanban', 'room', 'report_page', 'release')),
+  ref TEXT NOT NULL
+);
+INSERT INTO task_links_17 SELECT id, decision_id, kind, ref FROM task_links;
+DROP TABLE task_links;
+ALTER TABLE task_links_17 RENAME TO task_links;
+""",
 ]
 
 
@@ -909,4 +923,16 @@ ALTER TABLE passkeys DROP COLUMN aaguid;
     # A data step: no table changed. An answer it put back in the queue is one the older release sends
     # the same way. Nothing to undo.
     16: ([], "", ""),
+    # A Main card's release link would be lost, and with it what an answer on that card authorizes.
+    17: ([("SELECT count(*) FROM task_links WHERE kind = 'release'", "Main cards' release links")], """
+CREATE TABLE task_links_16 (
+  id TEXT PRIMARY KEY,
+  decision_id TEXT NOT NULL REFERENCES decisions(id),
+  kind TEXT NOT NULL CHECK (kind IN ('issue', 'pr', 'kanban', 'room', 'report_page')),
+  ref TEXT NOT NULL
+);
+INSERT INTO task_links_16 SELECT id, decision_id, kind, ref FROM task_links;
+DROP TABLE task_links;
+ALTER TABLE task_links_16 RENAME TO task_links;
+""", ""),
 }
