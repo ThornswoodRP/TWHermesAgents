@@ -269,6 +269,32 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 @keyframes tw-dot { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
 @media (prefers-reduced-motion: reduce) { .dots i { animation: none; opacity: .7; } }
 
+/* A turn as it happens (9 Nov, live_turns.py): above the live line, its thinking (folded once past), the
+   reply as it is written, each tool with what it runs, each subagent, and Hermes's status lines. */
+.chat .msg.working .bub.live { display: block; margin-bottom: 6px; }
+.chat .msg.working .bub.live[hidden] { display: none; }
+.lv-think { margin: 2px 0 6px; color: var(--muted); font-size: 14px; }
+.lv-think summary { cursor: pointer; font-style: italic; }
+.lv-think-text { white-space: pre-wrap; border-left: 2px solid var(--line2); padding-left: 10px; margin-top: 4px;
+  max-height: 14em; overflow-y: auto; }
+.lv-step { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 4px 0; font-size: 14px;
+  color: var(--muted); min-width: 0; }
+.lv-step .lv-mark { width: 1.1em; text-align: center; color: var(--one-text); flex: none; }
+.lv-step.running .lv-mark::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--one-text); animation: tw-dot 1.2s infinite ease-in-out; }
+.lv-step.failed .lv-mark { color: var(--warn); }
+.lv-step .lv-name { color: var(--fg); }
+.lv-step .lv-preview { font: 12.5px var(--mono); background: rgba(0,0,0,.35); border-radius: 4px; padding: 0 4px;
+  overflow-wrap: anywhere; min-width: 0; }
+.lv-step .lv-prog { font-size: 13px; }
+.lv-sub { border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; margin: 6px 0; font-size: 14px; }
+.lv-sub.running { border-color: var(--one); }
+.lv-sub-now { color: var(--muted); overflow-wrap: anywhere; }
+.lv-sub-sum { color: var(--muted); margin-top: 4px; }
+.lv-note { color: var(--muted); font-size: 13px; margin: 4px 0; }
+.lv-text + .lv-step, .lv-step + .lv-text { margin-top: 8px; }
+@media (prefers-reduced-motion: reduce) { .lv-step.running .lv-mark::before { animation: none; } }
+
 /* Online and offline (2 Nov): a dot on the corner of each agent's avatar, and its state in words on the
    right of each Bot's row. Green: running. Red: not running. Amber: on its way, or not known. The dot's
    colours measure 6.9 (green), 5.2 (red) and 9.4 (amber) to 1 on the night ground, and the words say the

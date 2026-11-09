@@ -80,7 +80,9 @@ class ConnectorTurn(unittest.TestCase):
         flags(self.s.w, "mobile_read", "mobile_chat_write", "connector_effects")
         self.dir = Path(tempfile.mkdtemp())
         (self.dir / "hermes.py").write_text(FAKE_STREAM, encoding="utf-8")
-        (self.dir / "helper.py").write_text(FAKE_HELPER, encoding="utf-8")
+        # The helper runs the Bot Chat turn (room_send.py chat) as well as its other ops.
+        turn = "import sys\nif sys.argv[1:2] == ['chat']:\n" + textwrap.indent(FAKE_STREAM, "    ") + "    sys.exit(0)\n"
+        (self.dir / "helper.py").write_text(turn + FAKE_HELPER, encoding="utf-8")
         self.go = self.dir / "go"
         env = {"TW_FAKE_LOG": str(self.dir / "log"), "TW_FAKE_GO": str(self.go)}
         old = {k: os.environ.get(k) for k in env}
@@ -122,7 +124,7 @@ class ConnectorTurn(unittest.TestCase):
         self.assertNotIn("doing", m)
         argv = json.loads((self.dir / "log").read_text(encoding="utf-8"))
         self.assertEqual(argv[argv.index("--format") + 1], "stream-json")
-        self.assertEqual(argv[:8], ["-p", "wisp", "chat", "--in", str(self.dir), "-c", "Bot Chat", "--create-if-missing"])
+        self.assertEqual(argv[:8], ["chat", "-p", "wisp", "--in", str(self.dir), "-c", "Bot Chat", "--create-if-missing"])
         self.assertEqual(self.c.doing, {}, "a finished turn is not kept")
 
 

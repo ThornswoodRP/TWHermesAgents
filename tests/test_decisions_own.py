@@ -583,6 +583,8 @@ class FakeCore:
             if op == "tasks":
                 # The Tasks tab's report, which test_decisions_tasks checks against the real core.
                 return 200, {}
+            if op == "turns":
+                return 200, self.own.turns(self.ws, self.gw, self.token, body)
             return 200, self.own.result(self.ws, self.gw, self.token, body["id"], body["outcome"], body["ref"],
                                         body["reason"], body.get("session_id"))
         except CoreError as exc:

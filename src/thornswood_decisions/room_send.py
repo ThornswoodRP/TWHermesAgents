@@ -697,6 +697,75 @@ def ask_line(prompt) -> dict | None:
     return out
 
 
+# What a turn shows while it runs, as Desktop shows it (Patrick, 9 Nov: "I want it all to be live"): besides
+# the stream-json lines Hermes's own emitter writes (text, tool_use, tool_result), each event of the chat's
+# gateway stream that Desktop draws is said as one line, cut to size: the thinking as it comes, the tools
+# with the preview Hermes's own display makes of each, a tool's progress, the status lines, the turn's
+# subagents, and a background task's end. The connector keeps them in memory and the core holds them in
+# memory only (own_connector.LiveTurn, live_turns.py), as the pages are held.
+LIVE_TEXT = 4000
+
+
+def _cut_str(payload: dict, key: str, n: int) -> str | None:
+    v = payload.get(key)
+    return v[:n] if isinstance(v, str) else None
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _tool_preview(name, args) -> str | None:
+    if not isinstance(name, str) or not isinstance(args, dict):
+        return None
+    try:
+        from agent.display import build_tool_preview
+        got = build_tool_preview(name, args, max_len=200)
+    except Exception:  # a preview is a nicety: a tool Hermes's display cannot preview shows by its name
+        return None
+    return got[:200] if isinstance(got, str) and got.strip() else None
+
+
+def live_line(kind, payload) -> dict | None:
+    """One gateway event of the turn as the connector reads it, or None for one the app does not draw."""
+    if not isinstance(payload, dict) or not isinstance(kind, str):
+        return None
+    if kind in ("reasoning.delta", "thinking.delta"):
+        text = _cut_str(payload, "text", LIVE_TEXT)
+        return {"type": "thinking", "text": text} if text else None
+    if kind == "status.update":
+        text = _cut_str(payload, "text", 300)
+        return {"type": "status", "kind": _cut_str(payload, "kind", 32) or "", "text": text} \
+            if text and text.strip() else None
+    if kind == "tool.generating":
+        return {"type": "tool_generating", "name": _cut_str(payload, "name", 64) or ""}
+    if kind == "tool.start":
+        name = payload.get("name") or payload.get("tool_name")
+        preview = _cut_str(payload, "preview", 200) or _tool_preview(name, payload.get("args"))
+        return {"type": "step", "id": _cut_str(payload, "tool_id", 128) or "",
+                "name": name[:64] if isinstance(name, str) else "", "preview": preview or ""}
+    if kind == "tool.progress":
+        return {"type": "step_progress", "id": _cut_str(payload, "tool_id", 128) or "",
+                "percent": _num(payload.get("percent")), "message": _cut_str(payload, "message", 200) or ""}
+    if kind == "tool.complete":
+        return {"type": "step_done", "id": _cut_str(payload, "tool_id", 128) or "",
+                "name": _cut_str(payload, "name", 64) or "", "error": payload.get("is_error") is True,
+                "secs": _num(payload.get("duration_s"))}
+    if kind.startswith("subagent."):
+        sid = payload.get("subagent_id") or payload.get("child_session_id")
+        index = _num(payload.get("task_index"))
+        return {"type": "subagent", "event": kind[9:40],
+                "id": sid[:64] if isinstance(sid, str) and sid else f"task-{index}",
+                "goal": _cut_str(payload, "goal", 300) or "", "status": _cut_str(payload, "status", 16) or "",
+                "tool": _cut_str(payload, "tool_name", 64) or "", "preview": _cut_str(payload, "tool_preview", 200) or "",
+                "tools": _num(payload.get("tool_count")), "summary": _cut_str(payload, "summary", 600) or "",
+                "secs": _num(payload.get("duration_seconds"))}
+    if kind == "background.complete":
+        return {"type": "background", "id": _cut_str(payload, "task_id", 64) or "",
+                "text": _cut_str(payload, "text", 300) or ""}
+    return None
+
+
 class _Attended:
     """The view's gateway client, submitting its turn without `finite`: a turn Patrick is there to answer."""
 
@@ -806,6 +875,10 @@ def follow_busy_setting(has_file: bool, orders=None) -> None:
                 return say(told | {"status": "refused", "reason": f"Hermes refused it ({type(exc).__name__})"})
 
     class BusyAware(Attended if orders is not None else base):
+        def _dispatch_event(self, kind, admission, payload):
+            super()._dispatch_event(kind, admission, payload)
+            say(live_line(kind, payload))
+
         def _running(self):
             # The admission running now, from the chat's snapshot (the resume this view was made from).
             return next((r["admission_id"] for r in self.pending

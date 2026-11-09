@@ -820,6 +820,12 @@ FAKE_HERMES = textwrap.dedent('''
 FAKE_HELPER = textwrap.dedent('''
     import json, os, sys
     from pathlib import Path
+    if sys.argv[1:2] == ["chat"]:  # a Bot Chat turn, as room_send.py chat runs Hermes's own hermes chat
+        args = sys.argv[1:]
+        text = Path(args[args.index("--query-file") + 1]).read_text(encoding="utf-8")
+        with Path(os.environ["TW_FAKE_LOG"]).open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"argv": args, "text": text, "home": os.environ.get("HERMES_HOME")}) + "\\n")
+        sys.exit(int(os.environ.get("TW_FAKE_RC", "0")))
     req = json.loads(sys.stdin.read())
     with Path(os.environ["TW_FAKE_LOG"]).open("a", encoding="utf-8") as f:
         f.write(json.dumps({"helper": req}) + "\\n")
@@ -873,8 +879,9 @@ class ConnectorProcess(unittest.TestCase):
         self.assertEqual(self.c.once(), 1)
         self.assertEqual(self.status(m)["status"], "sent")
         run = [x for x in self.lines() if "argv" in x][0]
-        self.assertEqual(run["argv"][:8], ["-p", "sprocket", "chat", "--in", str(self.dir), "-c", "Bot Chat",
+        self.assertEqual(run["argv"][:8], ["chat", "-p", "sprocket", "--in", str(self.dir), "-c", "Bot Chat",
                                            "--create-if-missing"])
+        self.assertEqual(run["home"], str(self.dir / ".hermes" / "profiles" / "sprocket"))
         self.assertIn("--query-file", run["argv"])
         self.assertEqual(run["text"], "please look at the launcher log")
         self.assertNotIn("please look", " ".join(run["argv"]))
@@ -925,7 +932,7 @@ class ConnectorProcess(unittest.TestCase):
         self.assertTrue(self.s.w.core.states(card["id"])["bot_told"])
         run = [x for x in self.lines() if "argv" in x]
         self.assertEqual(len(run), 1)
-        self.assertEqual(run[0]["argv"][:2], ["-p", "bramble"])
+        self.assertEqual(run[0]["argv"][:3], ["chat", "-p", "bramble"])
         self.assertIn("Patrick answered the card", run[0]["text"])
 
     def test_a_room_whose_gateway_cannot_be_reached_waits_too(self):
@@ -973,7 +980,9 @@ class ConnectorProcess(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
     def test_a_missing_hermes_command_means_not_sent(self):
-        self.c.hermes.cmd = [str(self.dir / "no-such-hermes")]
+        # The gateway answered ready, then the turn's command could not start: nothing was sent.
+        self.c.hermes.check = lambda bot: ("ready", "")
+        self.c.hermes.helper_cmd = [str(self.dir / "no-such-python")]
         m = self.send("rift", "hi", "key-00000036")
         self.c.once()
         self.assertEqual(tuple(self.status(m)), ("dead", "could not start the hermes command"))

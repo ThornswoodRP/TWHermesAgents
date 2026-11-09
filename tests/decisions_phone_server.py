@@ -181,6 +181,11 @@ own.claim(w.ws, "one", to, 1, True)
 ASK = {"prompt_id": "p_colour", "kind": "clarify", "question": "Which **branch** first?", "choices": ["main", "dev"],
        "multi_select": False}
 TURNS = {"turns": [{"id": WORK, "state": "tool", "tool": "terminal", "admitted": True, "asks": [ASK]}]}
+# What that turn shows, as Desktop draws it (live_turns.py): its thinking, a command running, a subagent.
+ONE_PARTS = [{"k": "think", "text": "Which branch builds?"},
+             {"k": "step", "name": "terminal", "preview": "npm test", "done": False, "error": False},
+             {"k": "sub", "goal": "Read the launcher log", "status": "running", "tool": "read_file",
+              "preview": "launcher.log", "tools": 2, "summary": ""}]
 ANSWERS = []
 def set_reaction(r, db=None, sid=None):
     """Patrick's reaction, as Hermes sets it: one per person on the row (the helper's own path is in
@@ -288,6 +293,7 @@ def one_pages():
     while True:
         try:
             got = o.claim(w.ws, "one", to, 0, True, "", None, None, TURNS)
+            o.turns(w.ws, "one", to, {"turns": [{"id": WORK, "parts": ONE_PARTS}]})
             for r in got.get("sessions", []):
                 one_session(o, r)
             for r in got.get("controls", []):
@@ -403,6 +409,7 @@ def bots_pages():
     conn = Connector(Direct(), None, say=lambda _: None, hermes_home=bhome)
     store = Store(w.path, clock=w.clock)
     chat = Chat(store)
+    words = 0
     while True:
         # connector_effects stays off here, so the Bots' reactions are handed as its claim would hand them.
         with store.tx() as db:
@@ -413,6 +420,10 @@ def bots_pages():
                                     "outcome": out})
         conn.pages()
         chat.doing(w.ws, tc, {"turns": [{"id": WISP, "state": "writing"}]})
+        # Wisp's reply as it is written, a word more each round, as the Bots' connector posts it.
+        words += 1  # it keeps writing for the whole check (a part keeps its newest 12000 characters)
+        chat.turns(w.ws, tc, {"turns": [{"id": WISP, "parts": [
+            {"k": "text", "text": "The gamemode build is" + " still going" * words}]}]})
         time.sleep(0.3)
 threading.Thread(target=bots_pages, daemon=True).start()
 def board_feed():

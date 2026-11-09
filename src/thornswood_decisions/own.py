@@ -46,6 +46,7 @@ from . import alerts
 from .own_turns import ORDERS, answer_value, clean_asks, clean_order
 from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
 from .schema import OWN_GATEWAYS
+from .live_turns import LIVE
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
 NAMES = {"me": "my-hermes", "one": "One"}
@@ -1288,6 +1289,18 @@ class OwnChat:
                     alerts.queue(self.s, db, workspace_id, "asks", f"{mid}:{a['prompt_id']}", alerts.OWN_WHO[gw],
                                  alerts.own_path(gw, row["session_id"] or row["made_session_id"]))
 
+    def turns(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """What each turn this connector runs now shows, as Desktop draws it (live_turns.py), each time it
+        changes. Only turns of this gateway's own messages."""
+        self._check_token(workspace_id, gw, token)
+        turns = body.get("turns") if isinstance(body, dict) else None
+        ids = [t.get("id") for t in turns if isinstance(t, dict)] if isinstance(turns, list) else []
+        if any(not isinstance(i, str) or not DOING_ID.match(i) for i in ids) or (ids and self.s.db.execute(
+                "SELECT count(*) FROM own_messages WHERE workspace_id = ? AND gateway = ? "
+                f"AND id IN ({','.join('?' * len(ids))})", (workspace_id, gw, *ids)).fetchone()[0] != len(set(ids))):
+            raise CoreError(400, "bad_live", "each turn is one of his messages to this Hermes")
+        return {"kept": LIVE.put(workspace_id, turns, self.s.clock())}
+
     def result(self, workspace_id: str, gw: str, token: str | None, item_id: str, outcome: str, ref: str = "",
                reason: str = "", session_id=None) -> dict:
         self._check_token(workspace_id, gw, token)
@@ -1308,6 +1321,7 @@ class OwnChat:
         # from memory for up to PAGE_FRESH without it.
         for sid in {row["session_id"], made} - {None}:
             PAGES.forget(workspace_id, gw, ("messages",), sid)
+        LIVE.done(workspace_id, item_id)
         with self.s.tx() as db:
             db.execute("UPDATE own_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ?, "
                        "made_session_id = coalesce(made_session_id, ?) WHERE id = ?",
