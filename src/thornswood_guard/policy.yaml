@@ -715,6 +715,24 @@ backups:
     # The box's public key, in this repository so a merge is how it changes.
     box_key_file: deploy/keys/box-drop.pub
 
+# The disk cap inside a Tier A container. Every place a Bot's container can
+# write is capped. Its system files are read-only (--read-only), which is
+# already the rule the approval policy states: a Bot installs no package
+# outside /workspace. /root, /home, /tmp, /var/tmp, /run and /dev/shm are
+# tmpfs that Hermes sizes, and their pages count against the container's
+# 2 GB memory cap. /workspace, the Bot's folder, is a filesystem of its own,
+# of the Bot's size in brokers.files.disk_quota_gb, so a Bot that fills it
+# fills only its own. A quota cannot do this on the VM's ext4 (8 Nov 2026):
+# every container runs as the one hermes user and holds CHOWN, so a file
+# could be handed to a group with no cap, and podman's own size option needs
+# XFS with project quotas and a rootful podman. A filesystem's size cannot be
+# stepped around. The images are sparse files; the free-space floors in
+# admission.admit (srv_free_gb, boot_free_gb) stop new work before the host
+# disk runs short.
+tier_a_disk:
+  images: /var/lib/thornswood/tier-a
+  work_root: /home/hermes/tw-work
+
 # The VM follows main by itself (src/thornswood_brokers/follow_main.py,
 # tw-follow-main.timer). Patrick's answer A on q-retire-hermes-one, 31 Oct
 # (#2862): no other machine sends it a commit. It reads this repository with
