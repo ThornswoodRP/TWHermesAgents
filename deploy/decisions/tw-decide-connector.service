@@ -11,6 +11,8 @@
 [Unit]
 Description=Thornswood decision core connector (phone chat into Hermes)
 After=tw-decide.service tw-hermes-gateway.service
+StartLimitIntervalSec=15min
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -35,8 +37,6 @@ CapabilityBoundingSet=
 MemoryMax=900M
 Restart=on-failure
 RestartSec=30s
-StartLimitIntervalSec=15min
-StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

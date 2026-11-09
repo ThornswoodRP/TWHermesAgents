@@ -211,9 +211,12 @@ class TheDropJail(unittest.TestCase):
 class FakeVM:
     """Records each command the follower runs and answers it."""
 
-    def __init__(self, tip: str, fail: dict[str, int] | None = None):
+    def __init__(self, tip: str, fail: dict[str, int] | None = None, apply_says: str = "",
+                 on_install=None):
         self.tip = tip
         self.fail = fail or {}
+        self.apply_says = apply_says  # what apply.py prints as hermes (its RELOAD line)
+        self.on_install = on_install  # what deploy/install.sh does besides answering
         self.calls: list[list[str]] = []
         self.inputs: dict[int, bytes] = {}
 
@@ -232,6 +235,12 @@ class FakeVM:
             out = "Ran 412 tests in 30s\n\nOK\n"
         if "bundle" in args and "create" in args:
             return subprocess.CompletedProcess(args, 0, b"# v2 git bundle\n" + joined.encode(), b"")
+        if args[0] == "runuser" and "apply.py" in joined:
+            out = self.apply_says
+            if isinstance(kw.get("input"), bytes):
+                return subprocess.CompletedProcess(args, 0, out.encode(), b"")
+        if self.on_install and joined.endswith(("deploy/install.sh " + self.tip)):
+            self.on_install()
         return subprocess.CompletedProcess(args, 0, out, "")
 
     def ran(self, needle: str) -> list[str]:
@@ -257,10 +266,15 @@ class FollowMain(unittest.TestCase):
             self.reports.append(json.loads(json.dumps(args)))
             return {"ledger": 1, "board": None}
         self.drained = 0
+        self.holds_ended = 0
 
         def drain():
             self.drained += 1
-        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append, report=report, drain=drain)
+
+        def end_hold():
+            self.holds_ended += 1
+        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append, report=report, drain=drain,
+                                 end_hold=end_hold)
         if installed:
             (f.opt / "releases" / installed).mkdir(parents=True)
             (f.opt / "current").symlink_to(f.opt / "releases" / installed)
@@ -292,6 +306,50 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(json.loads(f.state_file.read_text())["installed"], NEW)
         # #52: running turns end before the install restarts the brokers and the gateway.
         self.assertEqual(self.drained, 1)
+
+    # 9 Nov: every install reloaded every Bot, about every 15 minutes while
+    # merges came in, and the phone showed them "not heard from" each time.
+    def test_a_release_that_changes_nothing_a_bot_holds_reloads_no_bot(self):
+        vm = FakeVM(NEW, apply_says="Applied.\nRELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(vm.ran("tw-reload-bots"), [])
+        self.assertEqual(len(vm.ran("tw-canary")), 1, "the canary still runs")
+        self.assertIn("no Bot process holds anything this release changed, so the Bots keep running", self.said)
+        self.assertTrue([l for l in self.said if l.startswith("PASS") and "the Bots kept running" in l], self.said)
+        self.assertEqual((self.drained, self.holds_ended), (1, 1), "the hold on new turns ends without a reload")
+
+    def test_a_release_that_changes_what_a_bot_holds_reloads_them(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: needed; 1 file a running Bot holds changed: profiles/rift/config.yaml\n")
+        f = self.follower(vm)
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(len(vm.ran("tw-reload-bots")), 1)
+        self.assertTrue([l for l in self.said if l.startswith("PASS") and "every Bot process reloaded" in l], self.said)
+        self.assertEqual(self.holds_ended, 1)
+
+    def test_a_changed_gateway_unit_reloads_them_even_when_apply_changed_nothing(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        unit = f.root / "etc" / "systemd" / "system" / "tw-hermes-gateway.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nMemoryMax=2G\n")
+
+        def install():
+            (unit.parent / "tw-hermes-gateway.service.d").mkdir(exist_ok=True)
+            (unit.parent / "tw-hermes-gateway.service.d" / "50-github-webhook.conf").write_text("[Service]\nX=1\n")
+        vm.on_install = install
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(len(vm.ran("tw-reload-bots")), 1)
+
+    def test_an_apply_that_does_not_say_reloads_them_as_before(self):
+        vm = FakeVM(NEW, apply_says="Applied, from a release before the RELOAD line.\n")
+        self.assertEqual(self.follower(vm).follow(), 0, self.said)
+        self.assertEqual(len(vm.ran("tw-reload-bots")), 1)
+
+    def test_the_hold_ends_when_the_install_fails_too(self):
+        vm = FakeVM(NEW, fail={"tw-canary": 1})
+        self.follower(vm).follow()
+        self.assertEqual(self.holds_ended, 1)
 
     # 2 Nov, #68: the install passed and only the follower's summary line was
     # kept, so a card asking for the install's own lines could not be answered.

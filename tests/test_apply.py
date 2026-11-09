@@ -146,6 +146,31 @@ class Apply(unittest.TestCase):
         self.assertEqual(got.read_text(encoding="utf-8"), want, "the next apply puts the repo's copy back")
         self.assertEqual([p.name for p in got.parent.iterdir()], ["SKILL.md"], "no half-written file is left")
 
+    def test_the_last_line_says_whether_the_running_bots_need_a_reload(self):
+        # 9 Nov: every install reloaded every Bot; follow_main reads this line.
+        home = self.home()
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        last = r.stdout.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("RELOAD: needed;"), last)
+        self.assertIn("files a running Bot holds changed: config.yaml, plugins/thornswood_guard/", last)
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1],
+                         "RELOAD: not needed; nothing a running Bot holds changed (its config and plugins are as they were)")
+        self.assertNotIn("tw-reload-bots", r.stdout)
+        # A skill is read from disk when it is used, so changing one needs no reload.
+        skill = home / "profiles" / "rift" / "skills" / "thornswood" / "thornswood-guide" / "SKILL.md"
+        skill.write_text("changed on the VM\n", encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertTrue(r.stdout.strip().splitlines()[-1].startswith("RELOAD: not needed"), r.stdout)
+        # A plugin file is held by every running process.
+        (home / "profiles" / "wisp" / "plugins" / "thornswood_guard" / "policy.yaml").write_text("x: 1\n")
+        r = self.run_apply(home)
+        last = r.stdout.strip().splitlines()[-1]
+        self.assertEqual(last, "RELOAD: needed; 1 file a running Bot holds changed: "
+                               "profiles/wisp/plugins/thornswood_guard/policy.yaml")
+
     def test_bramble_gets_its_owed_wake_check_once_and_no_other_bot_does(self):
         # 1 Nov, 10:02 PM on: every wake the fleet queue turned away was
         # dropped. The owed-wake check wakes Bramble once the queue has room.

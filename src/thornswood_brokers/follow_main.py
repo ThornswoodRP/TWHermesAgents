@@ -23,7 +23,12 @@ Runs as root from tw-follow-main.timer. Each run:
      checks first, as send-to-oracle.sh did), reloads every Bot process with
      tw-reload-bots (the hermes user's login sessions end and the gateway
      restarts, since a gateway restart alone left Desktop's turns on the old
-     tool list on 31 Oct) and runs the canary;
+     tool list on 31 Oct) when apply.py says a file a running Bot holds
+     changed or the install changed the gateway's unit, and runs the canary.
+     Before the install, new turns are held and running ones end (#52); the
+     hold ends after the reload, or straight away when none is needed (9 Nov:
+     every install reloaded every Bot, about every 15 minutes while merges
+     came in);
   6. if any of 5 fails, installs and applies the release that was running
      before, the same way, and says both. When the failed release migrated
      the core's store past what the earlier release knows, the core's units
@@ -55,6 +60,7 @@ that already failed, or a fetch that fails the same way again, sends nothing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -73,6 +79,8 @@ from . import reload, wire
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
 CONNECTOR = "tw-decide-connector.service"
+# The line scripts/apply.py ends with (apply.RELOAD_LINE).
+RELOAD_LINE = "RELOAD: "
 
 
 def _text(b) -> str:
@@ -112,12 +120,13 @@ def packages_in(release: Path) -> Path:
 class Follower:
     def __init__(self, policy: Policy, *, run: Run = subprocess.run, root: Path = Path("/"),
                  say: Callable[[str], None] = print, report: Callable[[dict], object] | None = None,
-                 drain: Callable[[], object] | None = None):
+                 drain: Callable[[], object] | None = None, end_hold: Callable[[], object] | None = None):
         self.p = policy
         # Before the install restarts the brokers and the reload the gateway,
         # new turns are held and running ones end (#52; tw-reload-bots ends
         # the hold). A test's stand-in, or tw-policy as root.
         self.drain_ = drain or (lambda: reload.drain(reload._policy, time.sleep, self.say))
+        self.end_hold_ = end_hold or self._end_hold
         # tw-git's vm_install, or a test's stand-in.
         self.report_ = report or (lambda args: wire.call(policy.data["brokers"]["sockets"]["git"]["path"],
                                                          "vm_install", args))
@@ -131,6 +140,12 @@ class Follower:
         self.hermes_releases = self._at(self.r["hermes_releases"])
         self.logs = self.state_file.parent / "follow-main"
         self.log: Path | None = None
+
+    def _end_hold(self) -> None:
+        try:
+            reload._policy("end_hold", {})
+        except Exception as e:  # noqa: BLE001  the hold ends by itself at HOLD_MAX
+            self.say(f"FAIL: tw-policy did not end the hold on new turns ({e}); it ends by itself within 40 minutes")
 
     def _at(self, path: str) -> Path:
         return self.root / path.lstrip("/")
@@ -304,7 +319,7 @@ class Follower:
         self.sh("connector", ["systemctl", "start", CONNECTOR])
         self.sh("connector", ["systemctl", "is-active", "--quiet", CONNECTOR])
 
-    def apply(self, dest: Path, commit: str) -> None:
+    def apply(self, dest: Path, commit: str) -> bool:
         # hermes never runs git against the root-owned release: git refuses a
         # repository another user owns ("dubious ownership"), and a -c
         # safe.directory does not reach the upload-pack a local fetch starts
@@ -339,7 +354,21 @@ class Follower:
             f"python3 scripts/apply.py --expect '{commit}'\n"
             f"ln -sfn \"$dest\" '{self.hermes_releases.parent / 'current'}'\n"
         )
-        self.sh("apply", ["runuser", "-u", user, "--", "bash", "-c", script], input=bundle)
+        c = self.sh("apply", ["runuser", "-u", user, "--", "bash", "-c", script], input=bundle)
+        # apply.py's last RELOAD line says whether anything a running Bot
+        # holds changed; a release from before it said nothing, so it reloads.
+        said = [l for l in (c.stdout or "").splitlines() if l.startswith(RELOAD_LINE)]
+        return not said or not said[-1].startswith(RELOAD_LINE + "not needed")
+
+    def gateway_unit(self) -> str:
+        """What the gateway's unit and its drop-ins say, as one digest: an
+        install that changes them needs the gateway started again."""
+        h = hashlib.sha256()
+        unit = self._at("/etc/systemd/system/" + reload.GATEWAY)
+        for f in [unit] + sorted(unit.with_name(unit.name + ".d").glob("*.conf")):
+            if f.is_file():
+                h.update(f.name.encode() + b"\0" + f.read_bytes() + b"\0")
+        return h.hexdigest()
 
     def restart(self) -> None:
         # The installed release's own tw-reload-bots (src/thornswood_brokers/reload.py),
@@ -461,9 +490,17 @@ class Follower:
             return 1
         try:
             self.drain_()
+            unit = self.gateway_unit()
             self.install(dest, tip)
-            self.apply(dest, tip)
-            self.restart()
+            needed = self.apply(dest, tip)
+            if needed or self.gateway_unit() != unit:
+                self.restart()
+                reloaded = "every Bot process reloaded"
+            else:
+                # 9 Nov: every install reloaded every Bot, about every 15
+                # minutes while merges came in. Only what they hold needs it.
+                self.say("no Bot process holds anything this release changed, so the Bots keep running")
+                reloaded = "the Bots kept running (nothing they hold changed)"
             self.canary()
             self.start_connector()
         except Stop as e:
@@ -473,7 +510,11 @@ class Follower:
                         log=str(self.log))
             self.report("failed", commit=tip, step=e.step, reason=e.reason, put_back=back.split(": ", 1)[0], before=before)
             return 1
-        self.say(f"PASS {tip[:12]} is installed, applied, every Bot process reloaded and the canary passed")
+        finally:
+            # The drain's hold on new turns ends here whatever happened; a
+            # reload has ended it already, and ending it again changes nothing.
+            self.end_hold_()
+        self.say(f"PASS {tip[:12]} is installed, applied, {reloaded} and the canary passed")
         self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None,
                     log=str(self.log))
         self.report("installed", commit=tip, before=before)
