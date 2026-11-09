@@ -53,6 +53,20 @@ class Workflow(unittest.TestCase):
                 for label in labels:
                     self.assertRegex(label, hosted, f"{wf.name} {name}")
 
+    def test_windows_has_gits_bash_before_any_bash_step(self):
+        """8 Nov 2026: tw-hermes-box's first jobs stopped at "bash: command
+        not found", since a service's PATH holds Git's cmd folder only."""
+        steps = self.wf["jobs"]["tests"]["steps"]
+        names = [s.get("name", "") for s in steps]
+        i = names.index("Git's bash on Windows, as on One")
+        step = steps[i]
+        self.assertEqual(step["if"], "runner.os == 'Windows'")
+        self.assertEqual(step["shell"], "pwsh")
+        self.assertIn("Join-Path $env:ProgramFiles 'Git\\bin'", step["run"])
+        self.assertIn("$env:GITHUB_PATH", step["run"])
+        first_bash = min(n for n, s in enumerate(steps) if s.get("shell") == "bash")
+        self.assertLess(i, first_bash)
+
     def test_only_hashed_wheels(self):
         installs = [ln for ln in self.text.splitlines() if "pip install" in ln]
         self.assertTrue(installs)
