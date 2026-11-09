@@ -241,6 +241,52 @@ class OutsideAnswers(unittest.TestCase):
                                                           body=OUTSIDE_BODY))
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"),
+                     "the route's ops are served by the brokers' wire, which is Linux code (Unix sockets, pwd)")
+class MainAnswers(unittest.TestCase):
+    """Step 6: Bramble opens a Main card through its route, and tw-git reads
+    Patrick's answer on it from its own socket, with what the card is for."""
+
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+        self.route = BotRoute(self.w.path, "test")
+        self.addCleanup(self.route.close)
+
+    def open(self, bot="bramble"):
+        handler, _ = self.route.ops()["open_card"]
+        return handler("hermes", card_args(
+            bot=bot, kind="main", title="Publish revision 9", task="t1",
+            options=[{"key": "authorize", "label": "Authorize", "consequence": "Bramble publishes revision 9."},
+                     {"key": "not_now", "label": "Not now", "consequence": "Nothing is published."}],
+            recommendation="authorize", scope_of_yes=f"One publish at {self.SHA}.",
+            links=[{"kind": "release", "ref": f"publish:ThornswoodRP/Thornswood@{self.SHA}"}]))
+
+    def main_answer(self, did):
+        handler, callers = self.route.git_ops()["main_answer"]
+        self.assertEqual(callers, {"tw-git", "root"})
+        return handler("tw-git", {"decision_id": did})
+
+    def test_tw_git_reads_his_authorize_with_the_binding(self):
+        card = self.open()
+        self.assertEqual(card["risk"], "high")
+        self.assertIsNone(self.main_answer(card["id"]))
+        self.w.core.answer(self.w.patrick(device=self.w.device()), **World.answer_args(card, option="authorize"))
+        a = self.main_answer(card["id"])
+        self.assertEqual((a["for"], a["commit"], a["option"], a["restored"]), ("publish", self.SHA, "authorize", False))
+
+    def test_a_specialist_cannot_open_one_and_an_ordinary_card_is_no_main_answer(self):
+        from thornswood_brokers.wire import Refused
+        with self.assertRaises(Refused):
+            self.open(bot="rift")
+        handler, _ = self.route.ops()["open_card"]
+        card = handler("hermes", card_args(bot="bramble"))
+        with self.assertRaises(Refused):
+            self.main_answer(card["id"])
+
+
 class Deploy(unittest.TestCase):
     def unit(self):
         cp = configparser.ConfigParser(strict=False, interpolation=None)

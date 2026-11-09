@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "src"))
 
 from thornswood_guard.policy import Policy  # noqa: E402
 
@@ -26,7 +26,7 @@ WHAT = {
 
 def render(name: str, limits: dict) -> str:
     lines = [f"# {WHAT[name]}.",
-             "# Generated from thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.",
+             "# Generated from src/thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.",
              "# A limit changes only by a PR to the policy, never on the box."]
     if name == "hermes-user.slice":
         lines.insert(1, "# Installed as /etc/systemd/system/user-<uid of hermes>.slice.d/50-thornswood.conf.")

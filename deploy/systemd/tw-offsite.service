@@ -1,4 +1,4 @@
-# Off-site copies (thornswood_brokers/offsite.py): root takes each complete
+# Off-site copies (src/thornswood_brokers/offsite.py): root takes each complete
 # drop out of the box's add-only jail, then tw-offsite copies the VM's and the
 # box's encrypted backups to Google Drive and says whether last night's of
 # each arrived.

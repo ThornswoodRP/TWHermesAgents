@@ -38,9 +38,10 @@ CALLERS = {"hermes", "root"}
 # How long a card waits for Patrick before it expires, at most.
 MAX_EXPIRY_DAYS = 14
 
-# Who may read Patrick's answers on Bramble's outside pull request cards (#132):
-# tw-git alone, on a socket of its own, so it can carry out "close it" and
-# "let them merge" itself.
+# Who may read Patrick's answers on Bramble's outside pull request cards (#132)
+# and on Main cards (step 6): tw-git alone, on a socket of its own, so it can
+# carry out "close it" and "let them merge" itself, and have tw-policy record
+# his "authorize" as the decision record a release needs.
 GIT_CALLERS = {"tw-git", "root"}
 
 # An outside pull request card (bramble-duties section 3) names, as pr links,
@@ -211,11 +212,20 @@ class BotRoute:
         return out
 
     def git_ops(self) -> dict:
-        """tw-git's one op, for its own socket: read Patrick's outside answers."""
-        def handle(caller: str, args: dict):
+        """tw-git's ops, for its own socket: read Patrick's outside answers, and
+        his answer on one Main card."""
+        def outside(caller: str, args: dict):
             with self.lock:
                 return self.outside_answers()
-        return {"outside_answers": (handle, set(GIT_CALLERS))}
+
+        def main(caller: str, args: dict):
+            with self.lock:
+                try:
+                    return self.core.main_answer(self.ws, _text(args, "decision_id"))
+                except CoreError as e:
+                    from thornswood_brokers.wire import Refused
+                    raise Refused(f"{e.reason}: {e}") from None
+        return {"outside_answers": (outside, set(GIT_CALLERS)), "main_answer": (main, set(GIT_CALLERS))}
 
     def _with_answer(self, card: dict) -> dict:
         """The four states, and once Patrick answered, the words the Bot is told."""

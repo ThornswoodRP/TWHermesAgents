@@ -1,6 +1,6 @@
 """The model order with no extra spend, what may sit on the Oracle box, the
 decision records. The phone push's rules are the decision core's
-(thornswood_decisions/push.py, tests/test_decisions_push.py)."""
+(src/thornswood_decisions/push.py, tests/test_decisions_push.py)."""
 
 import tempfile
 import unittest

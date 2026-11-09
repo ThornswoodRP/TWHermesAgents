@@ -694,7 +694,7 @@ backups:
     - "*.db-wal"
     - "*.db-shm"
   exclude_dirs: [cache, image_cache, audio_cache, document_cache, node_modules, hermes-agent, logs, checkpoints, tools, installs]
-  # Off-site copies (thornswood_brokers/offsite.py, tw-offsite.service).
+  # Off-site copies (src/thornswood_brokers/offsite.py, tw-offsite.service).
   # Patrick, 31 Oct: Google Drive, through the VM, so a stolen box cannot
   # delete the copies it sent. The Drive sign-in is tw-offsite's alone.
   offsite:
@@ -736,7 +736,7 @@ tier_a_disk:
   images: /var/lib/thornswood/tier-a
   work_root: /home/hermes/tw-work
 
-# The VM follows main by itself (thornswood_brokers/follow_main.py,
+# The VM follows main by itself (src/thornswood_brokers/follow_main.py,
 # tw-follow-main.timer). Patrick's answer A on q-retire-hermes-one, 31 Oct
 # (#2862): no other machine sends it a commit. It reads this repository with
 # its own read-only deploy key, root's alone.

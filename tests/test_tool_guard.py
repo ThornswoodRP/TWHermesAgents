@@ -153,7 +153,7 @@ class Plugin(unittest.TestCase):
         return module
 
     def test_registers_one_pre_tool_call_hook(self):
-        m = self.load(REPO / "thornswood_guard", "_tw_plugin_a")
+        m = self.load(REPO / "src" / "thornswood_guard", "_tw_plugin_a")
         ctx = self.Ctx("wisp")
         m.register(ctx)
         self.assertEqual(len(ctx.hooks["pre_tool_call"]), 1)
@@ -175,7 +175,7 @@ class Plugin(unittest.TestCase):
         import shutil
         import tempfile
         tmp = Path(tempfile.mkdtemp()) / "thornswood_guard"
-        shutil.copytree(REPO / "thornswood_guard", tmp, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(REPO / "src" / "thornswood_guard", tmp, ignore=shutil.ignore_patterns("__pycache__"))
         if ready is not None:
             data = json.loads((tmp / "policy.json").read_text(encoding="utf-8"))
             data["brokers"]["ready"] = ready

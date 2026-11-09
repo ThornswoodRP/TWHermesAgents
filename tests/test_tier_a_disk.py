@@ -113,7 +113,7 @@ class CanaryRun(unittest.TestCase):
         self.assertIn("mkfs.ext4 failed", c.results[-1][2])
 
     def test_the_canary_runs_5b_with_the_bots_own_extra_flags(self):
-        src = (REPO / "thornswood_brokers" / "canary.py").read_text(encoding="utf-8")
+        src = (REPO / "src" / "thornswood_brokers" / "canary.py").read_text(encoding="utf-8")
         self.assertIn('c.tier_a_disk(SANDBOX_IMAGE, build(policy, "rift")["terminal"]["docker_extra_args"])', src)
 
 

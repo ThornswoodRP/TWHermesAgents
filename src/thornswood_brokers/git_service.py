@@ -79,15 +79,46 @@ CARRIED_FROM = re.compile(r"^carried-from:[ \t]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+
 
 
 class RemoteDecisions:
-    """GitHubRules' decision store, answered by tw-policy."""
+    """GitHubRules' decision store, answered by tw-policy.
 
-    def __init__(self, ask: Callable[[str, dict], dict]):
+    A decision core card id (dec_...) is a Main card (thornswood_decisions/core.py):
+    tw-git reads Patrick's answer on it from the core, on its own socket, and
+    has tw-policy record an "authorize" (decision_import) before the check, so
+    his tap in the app is the record. Any other id is one root recorded."""
+
+    def __init__(self, ask: Callable[[str, dict], dict], ask_decide: Callable[[str, dict], object] | None = None):
         self.ask = ask
+        self.ask_decide = ask_decide
 
     def check(self, decision_id, *, kind, repo, commit, revision=None, pr=None, at=None) -> Verdict:
+        if isinstance(decision_id, str) and decision_id.startswith("dec_"):
+            no = self._bring(decision_id)
+            if no:
+                return Verdict.no(no)
         r = self.ask("decision_check", {"id": decision_id, "kind": kind, "repo": repo, "commit": commit,
                                         "revision": revision, "pr": pr})
         return Verdict(bool(r["allowed"]), r["reason"])
+
+    def _bring(self, decision_id: str) -> str | None:
+        """Patrick's answer on a Main card, recorded in tw-policy; or why not."""
+        if self.ask_decide is None:
+            return (f"{decision_id} is a Main card, and tw-git has no route to the decision core to read "
+                    "Patrick's answer on it")
+        try:
+            a = self.ask_decide("main_answer", {"decision_id": decision_id})
+        except Refused as e:
+            return f"the decision core did not answer for card {decision_id}: {e}"
+        if a is None:
+            return f"Patrick has not answered Main card {decision_id} on its current revision"
+        if not isinstance(a, dict) or a.get("decision_id") != decision_id:
+            return f"the decision core's answer for card {decision_id} is not one tw-git reads"
+        if a.get("option") != "authorize":
+            return f"Patrick answered {a.get('option')!r} on Main card {decision_id}, which authorizes nothing"
+        try:
+            self.ask("decision_import", {"answer": a})
+        except Refused as e:
+            return str(e)
+        return None
 
 
 class GitService:
@@ -99,9 +130,9 @@ class GitService:
         self.gh = github
         self.ask = ask_policy
         # tw-git's read of Patrick's answers on outside pull request cards
-        # (#132): tw-decide-bots' socket for tw-git alone.
+        # (#132) and Main cards (step 6): tw-decide-bots' socket for tw-git alone.
         self.ask_decide = ask_decide
-        self.rules = GitHubRules(policy, RemoteDecisions(ask_policy))
+        self.rules = GitHubRules(policy, RemoteDecisions(ask_policy, ask_decide))
         self.mirrors = Path(mirrors)
         self.spool = Path(spool)
         self.git_base = git_base
@@ -460,7 +491,7 @@ class GitService:
     def open_issue(self, caller: str, args: dict) -> dict:
         """A new issue, unclaimed, through the Bot's own App. Any Bot files what it
         finds; an answered card's DECIDED.md line needs one when the card has no issue
-        (thornswood_decisions/chat.py _decided_text). Patrick's answer on
+        (src/thornswood_decisions/chat.py _decided_text). Patrick's answer on
         dec_zf92laU0xp8mvmyfa8C7pA, 2 Nov 2026: five of his answers waited on it.
 
         The body ends with the write's marker, so a lost answer is found by it and

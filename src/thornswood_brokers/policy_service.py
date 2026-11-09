@@ -491,7 +491,8 @@ class PolicyService:
             return None
         return {"state": row[0], "attempt": row[1], "receipt": json.loads(row[2]) if row[2] else None, "reason": row[3]}
 
-    # Decisions (08 section 7): only Patrick's, recorded by root on the VM
+    # Decisions (08 section 7): only Patrick's. Root records one on the VM;
+    # tw-git brings one from a Main card he answered in the decision core.
 
     def decision_record(self, caller: str, args: dict) -> dict:
         d = Decision(**args["decision"])
@@ -504,6 +505,55 @@ class PolicyService:
             self.db.execute("INSERT INTO decisions(id, body) VALUES(?, ?)", (d.id, json.dumps(d.__dict__)))
             self._audit(caller, "decision_record", {"id": d.id, "kind": d.kind, "commit": d.commit})
         return {"id": d.id}
+
+    def decision_import(self, caller: str, args: dict) -> dict:
+        """Patrick's "authorize" on a Main card (thornswood_decisions/core.py
+        main_answer, read by tw-git on its own socket) as a decision record:
+        bound to what the card names, his answer's revision and time, the
+        policy's expiry, and used once like any other. The core answers only
+        his responses, so answered_by is the policy's owner. Asking again for
+        the same card changes nothing; a different binding under the same id,
+        or an answer from before this store was restored, is refused."""
+        a = args.get("answer")
+        if not isinstance(a, dict):
+            raise Refused("decision_import carries the decision core's answer on one Main card")
+        did = a.get("decision_id")
+        if not (isinstance(did, str) and did.startswith("dec_") and 5 <= len(did) <= 64):
+            raise Refused(f"{did!r} is not a decision core card id")
+        if a.get("option") != "authorize":
+            raise Refused(f"Patrick answered {a.get('option')!r} on card {did}, which authorizes nothing")
+        if a.get("restored"):
+            raise Refused(f"Patrick's answer on card {did} was given before the decision core was restored from a "
+                          "backup; it authorizes nothing, so a new card is needed")
+        kind, repo, commit, pr, rev = a.get("for"), a.get("repo"), a.get("commit"), a.get("pr"), a.get("revision")
+        if kind not in ("main", "publish", "cutover") or not isinstance(repo, str) or "/" not in repo:
+            raise Refused(f"card {did} does not name a main, publish or cutover for a repository")
+        if not (isinstance(commit, str) and len(commit) == 40 and all(c in "0123456789abcdef" for c in commit)):
+            raise Refused(f"card {did} does not name a 40-character commit")
+        if not (pr is None or (isinstance(pr, int) and not isinstance(pr, bool) and pr > 0)):
+            raise Refused(f"card {did} names no pull request a record can carry")
+        if not (isinstance(rev, int) and not isinstance(rev, bool) and rev >= 1):
+            raise Refused(f"card {did} carries no revision")
+        try:
+            at = parse(a["answered_at"])
+        except (KeyError, TypeError, ValueError):
+            raise Refused(f"card {did} carries no time Patrick answered it") from None
+        restored = self._meta("restored_at")
+        if restored and at < parse(restored):
+            raise Refused(f"Patrick's answer on card {did} is from before this store was restored from a backup")
+        hours = self.policy.data["decisions"]["default_expiry_hours"]
+        d = Decision(id=did, kind=kind, repo=repo, commit=commit, revision=rev,
+                     answered_by=self.policy.data["decisions"]["answered_by"], answered_at=iso(at),
+                     expires_at=iso(at + timedelta(hours=hours)), pr=pr, scope=f"Main card {did}")
+        with self._tx():
+            have = self._decision(did)
+            if have is not None:
+                if (have.kind, have.repo, have.commit, have.revision, have.pr) != (kind, repo, commit, rev, pr):
+                    raise Refused(f"decision {did} is already recorded for something else")
+                return {"id": did, "recorded": False}
+            self.db.execute("INSERT INTO decisions(id, body) VALUES(?, ?)", (did, json.dumps(d.__dict__)))
+            self._audit(caller, "decision_import", {"id": did, "kind": kind, "commit": commit})
+        return {"id": did, "recorded": True}
 
     def _decision(self, decision_id: str) -> Decision | None:
         row = self.db.execute("SELECT body FROM decisions WHERE id=?", (decision_id,)).fetchone()
@@ -753,6 +803,7 @@ class PolicyService:
             "decision_check": (self.decision_check, {git}),
             "decision_use": (self.decision_use, {git}),
             "decision_record": (self.decision_record, {"root"}),
+            "decision_import": (self.decision_import, {git}),
             "mark_restored": (self.mark_restored, {"root"}),
             "limits_record": (self.limits_record, {"root"}),
             "route_limit": (self.route_limit, {gw, proxy}),

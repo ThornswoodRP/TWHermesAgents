@@ -9,7 +9,19 @@ receipt back; the same key with a different body is refused.
 
 Four states are kept apart and never merged: the decision accepted (a
 response), the Bot told (a confirmed connector receipt), the work done
-(Bramble's report) and a release authorized (the Main card, step 6, not built).
+(Bramble's report) and a release authorized (Patrick's "authorize" on a Main
+card).
+
+A Main card (step 6) is Patrick's tap for what the brokers need his yes for:
+a main run while runs.main_without_patrick is false, a collection publish, or
+the claim label cutover. Only Bramble opens one. It names exactly what it is
+for in one release link, release:<main|publish|cutover>:<owner>/<repo>@<the
+40-character commit>[#<pull request>], fixed for the card's life; its scope of
+a yes names that commit, so the commit is on the card he reads; it offers
+"authorize"; and it is high risk, so his answer needs a fresh sign-in. tw-git
+reads his answer from main_answer() on its own socket and tw-policy records
+it as a decision record (thornswood_guard/decisions.py), used once. An answer
+given before the store was restored from a backup authorizes nothing.
 """
 
 from __future__ import annotations
@@ -28,6 +40,9 @@ MAX_BODY_BYTES = 256 * 1024
 MAX_OPTIONS = 6
 LIVE = ("draft", "pending")
 ROOM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# A Main card's one release link: what Patrick's "authorize" is for.
+RELEASE_LINK = re.compile(r"(main|publish|cutover):([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})(?:#([1-9][0-9]*))?")
+AUTHORIZE = "authorize"
 
 
 def pushes(kind: str, urgent: bool) -> bool:
@@ -108,8 +123,16 @@ class DecisionCore:
         self._writes_on(p.workspace_id)
         if kind not in KINDS:
             raise CoreError(400, "bad_kind", f"no card kind {kind!r}")
-        if kind == "main":
-            raise CoreError(403, "main_waits", "the Main card is step 6 and waits for phase 7")
+        links = list(links)
+        release = self._release_of(kind, links)
+        if release:
+            if p.kind != "bramble":
+                raise CoreError(403, "not_bramble", "only Bramble opens a Main card")
+            if source_key:
+                raise CoreError(400, "main_source_key", "a Main card is for one commit and is never merged with another")
+            # His yes on a Main card always needs a fresh sign-in (answer()).
+            risk = "high"
+            self._check_main(options, scope_of_yes, release)
         if p.kind == "specialist":
             if kind != "question":
                 raise CoreError(403, "specialist_question_only", "a specialist opens questions only")
@@ -175,6 +198,8 @@ class DecisionCore:
             if row["revision"] != expected_revision:
                 raise CoreError(409, "stale_revision", f"the card is at revision {row['revision']}",
                                 revision=row["revision"])
+            if row["kind"] == "main":
+                self._check_main(options, scope_of_yes, self._release_row(db, decision_id))
             # Nothing changed is not a new revision: a new one makes the answer
             # Patrick may be giving to this one stale, for nothing.
             sha = sha256_hex(body)
@@ -351,6 +376,33 @@ class DecisionCore:
             raise CoreError(500, "artifact_corrupt", "the stored artifact does not match its hash")
         return {"revision": rev, "sha256": a["sha256"], "media_type": a["media_type"], "body": body.decode("utf-8")}
 
+    def main_answer(self, workspace_id: str, decision_id: str) -> dict | None:
+        """Patrick's answer on a Main card's current revision, with what the card
+        is for, or None while there is none. tw-git reads it on its own socket
+        and tw-policy makes it a decision record only when the option is
+        "authorize". An answer given before the store was last restored from a
+        backup is reported as restored and authorizes nothing."""
+        db = self.s.db
+        row = db.execute("SELECT * FROM decisions WHERE id = ? AND workspace_id = ? AND kind = 'main'",
+                         (decision_id, workspace_id)).fetchone()
+        if not row:
+            raise CoreError(404, "no_main_card", f"{decision_id} is not a Main card")
+        r = db.execute("SELECT r.option_key, r.answered_at, r.revision FROM responses r "
+                       "JOIN principals who ON who.id = r.principal_id "
+                       "WHERE r.decision_id = ? AND r.revision = ? AND who.kind = 'patrick'",
+                       (decision_id, row["revision"])).fetchone()
+        if not r:
+            return None
+        rel = self._release_row(db, decision_id)
+        answered = db.execute("SELECT seq FROM events WHERE kind = 'decision.answered' AND subject = ? "
+                              "ORDER BY seq DESC LIMIT 1", (decision_id,)).fetchone()
+        restored = db.execute("SELECT seq FROM events WHERE kind = 'store.restored' AND workspace_id = ? "
+                              "ORDER BY seq DESC LIMIT 1", (workspace_id,)).fetchone()
+        return {"decision_id": decision_id, "for": rel["for"], "repo": rel["repo"], "commit": rel["commit"],
+                "pr": rel["pr"], "revision": r["revision"], "option": r["option_key"],
+                "answered_at": r["answered_at"],
+                "restored": bool(restored and (not answered or answered["seq"] < restored["seq"]))}
+
     def report_work_done(self, p: Principal, decision_id: str, detail: str) -> None:
         if p.kind != "bramble":
             raise CoreError(403, "not_bramble", "only Bramble reports work done")
@@ -398,6 +450,38 @@ class DecisionCore:
             raise CoreError(400, "risk", "risk is normal or high")
 
     @staticmethod
+    def _release_of(kind: str, links: list[tuple[str, str]]) -> dict | None:
+        """A Main card's one release link, read; any other card has none."""
+        refs = [ref for lk, ref in links if lk == "release"]
+        if kind != "main":
+            if refs:
+                raise CoreError(400, "release_link", "only a Main card carries a release link")
+            return None
+        if len(refs) != 1:
+            raise CoreError(400, "release_link", "a Main card names what it is for in exactly one release link, "
+                                                 "release:<main|publish|cutover>:<owner>/<repo>@<40-character commit>"
+                                                 "[#<pull request>]")
+        m = RELEASE_LINK.fullmatch(refs[0])
+        if not m:
+            raise CoreError(400, "release_link", f"{refs[0]!r} is not <main|publish|cutover>:<owner>/<repo>@"
+                                                 "<40-character commit>[#<pull request>]")
+        return {"for": m.group(1), "repo": m.group(2), "commit": m.group(3),
+                "pr": int(m.group(4)) if m.group(4) else None}
+
+    def _release_row(self, db, decision_id: str) -> dict:
+        r = db.execute("SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'release'",
+                       (decision_id,)).fetchone()
+        return self._release_of("main", [("release", r["ref"])] if r else [])
+
+    @staticmethod
+    def _check_main(options: list[dict], scope_of_yes: str, release: dict) -> None:
+        if AUTHORIZE not in [o.get("key") for o in options]:
+            raise CoreError(400, "main_options", f"a Main card offers {AUTHORIZE!r}, the one answer that authorizes")
+        if release["commit"] not in scope_of_yes:
+            raise CoreError(400, "main_scope", "a Main card's scope of a yes names the exact commit, "
+                                               f"{release['commit']}, so Patrick reads what he authorizes")
+
+    @staticmethod
     def _write_options(db, decision_id: str, revision: int, options: list[dict]) -> None:
         for i, o in enumerate(options):
             db.execute("INSERT INTO decision_options(decision_id, revision, key, label, consequence, position) "
@@ -430,7 +514,12 @@ class DecisionCore:
                           (decision_id,)).fetchone() is not None
         done = db.execute("SELECT 1 FROM events WHERE subject = ? AND kind = 'work.done'",
                           (decision_id,)).fetchone() is not None
-        return {"decision_accepted": accepted, "bot_told": told, "work_done": done, "release_authorized": None}
+        release = None
+        row = db.execute("SELECT kind, workspace_id FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+        if row and row["kind"] == "main":
+            a = self.main_answer(row["workspace_id"], decision_id)
+            release = bool(a and a["option"] == AUTHORIZE and not a["restored"])
+        return {"decision_accepted": accepted, "bot_told": told, "work_done": done, "release_authorized": release}
 
     def _card(self, db, row) -> dict:
         opts = db.execute("SELECT key, label, consequence FROM decision_options WHERE decision_id = ? "

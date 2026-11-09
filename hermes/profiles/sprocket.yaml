@@ -1,6 +1,6 @@
-# Wisp's Hermes config, as scripts/apply.py sets it in the existing
-# profile /home/hermes/.hermes/profiles/wisp/config.yaml. Generated from
-# thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
+# Sprocket's Hermes config, as scripts/apply.py sets it in the existing
+# profile /home/hermes/.hermes/profiles/sprocket/config.yaml. Generated from
+# src/thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
 # Every key not listed here stays as Hermes has it. `model` and
 # `fallback_providers` are replaced whole.
 #
@@ -39,7 +39,7 @@ agent:
   - cronjob
 terminal:
   backend: docker
-  cwd: /home/hermes/tw-work/wisp
+  cwd: /home/hermes/tw-work/sprocket
   docker_image: docker.io/nousresearch/hermes-sandbox:desktop
   docker_mount_cwd_to_workspace: true
   docker_network: false

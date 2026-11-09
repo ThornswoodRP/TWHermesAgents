@@ -2,7 +2,7 @@
 
 When a Bot needs Patrick, it opens a card. He answers from an installable phone app or a pane in Hermes Desktop, signed in with a passkey, and the Bot is told the answer. The same app carries his chats with the Bots, the Workbench rooms and his own Hermes, a live Board of what each Bot is doing, push alerts and voice.
 
-All of it is the decision core, `thornswood_decisions/`, one service on the Bots' VM.
+All of it is the decision core, `src/thornswood_decisions/`, one service on the Bots' VM.
 
 ## The parts
 
@@ -10,8 +10,8 @@ All of it is the decision core, `thornswood_decisions/`, one service on the Bots
 |---|---|---|
 | **The core** | `tw-decide.service`, as `tw-decide`, on `127.0.0.1:9135` | Holds every card, answer, chat message and receipt in one SQLite store under `/srv/tw/decide`. Listens on loopback only; systemd lets it reach loopback and nothing else |
 | **The Bots' route** | `tw-decide-bots.service` | A Unix socket only the Bots' user can open, for the `tw_decide` tool: open, revise and close a card, assign a task, read a card, list the Bot's own cards, and report work done. No network |
-| **The phone app** | `thornswood_decisions/app/`, served at `/m/` | An installable web app with no framework and no inline code. It reaches the core through Tailscale Serve on the tailnet |
-| **The Desktop pane** | `plugins/thornswood-decisions/` | A Hermes plugin in Patrick's own Hermes: a backend (`dashboard/plugin_api.py`) that forwards to the core, and the pane itself (`desktop/plugin.js`) |
+| **The phone app** | `src/thornswood_decisions/app/`, served at `/m/` | An installable web app with no framework and no inline code. It reaches the core through Tailscale Serve on the tailnet |
+| **The Desktop pane** | `hermes/plugins/thornswood-decisions/` | A Hermes plugin in Patrick's own Hermes: a backend (`dashboard/plugin_api.py`) that forwards to the core, and the pane itself (`desktop/plugin.js`) |
 | **The Bots' connector** | `tw-decide-connector.service`, as `hermes` | Delivers Patrick's chat messages and "Bot told" messages into the Bots' Bot Chats and rooms, reads their history, and reports each Bot's state |
 | **His own Hermes's connectors** | `tw-decide-own.service` on the VM; a sign-in task on his Windows machine | Carry his chats with his own two Hermes gateways. Nothing listens on his machine: its connector reaches out to the core |
 | **The feeds** | `tw-decide-feed.timer`, once a minute | Send the rooms and the Bot Chats to the core, read only |
@@ -24,7 +24,8 @@ All of it is the decision core, `thornswood_decisions/`, one service on the Bots
 
 ## Cards and answers
 
-- **Who asks.** Bramble opens any card but a Main card. A worker opens a question only for a task Bramble assigned it. Bramble merges repeated requests by their source key.
+- **Who asks.** Bramble opens any card. A worker opens a question only for a task Bramble assigned it. Bramble merges repeated requests by their source key.
+- **Main cards.** Patrick's tap for what the brokers need his yes for: a collection publish, the claim label cutover, and a main run while `runs.main_without_patrick` is false. Only Bramble opens one. It names the exact repository and commit in one `release` link that never changes, its scope of a yes names that commit, it offers `authorize`, and it is high risk. When Bramble passes the card's id to `tw_git`, tw-git reads his answer on its own socket and tw-policy records an `authorize` as his decision record, bound to that commit and the card's revision, used once. An answer given before the core was restored from a backup authorizes nothing.
 - **Who answers.** Only Patrick. A Bot is a service principal and never holds a session.
 - **Revisions.** A changed card is a new revision and voids answers to the old one. An answer is checked against the revision and hash Patrick saw, and the answer, the event, the cancelled alerts, the message to the Bot and the command's result commit together.
 - **Exactly once.** Each answer carries an idempotency key. The same key and body give the same receipt; the same key with another body is refused. After an unclear result, the app reads the card's receipt before it offers to send again, so a retry is never a second answer.

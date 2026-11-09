@@ -16,6 +16,20 @@ from decisions_helpers import OPTIONS, World
 from thornswood_decisions.schema import FLAGS
 from thornswood_decisions.store import CoreError, Store
 
+REPO = "ThornswoodRP/Thornswood"
+SHA = "0123456789abcdef0123456789abcdef01234567"
+MAIN_OPTIONS = [
+    {"key": "authorize", "label": "Authorize", "consequence": "Bramble starts the main run at this commit."},
+    {"key": "not_now", "label": "Not now", "consequence": "Nothing runs; Bramble asks again with a new commit."},
+]
+
+
+def main_card(w, *, link=None, by=None, **kw):
+    args = dict(kind="main", title="Main release at 0123456", options=MAIN_OPTIONS, recommendation="authorize",
+                scope_of_yes=f"One main run of {REPO} at {SHA}.", links=[("release", link or f"main:{REPO}@{SHA}")])
+    args.update(kw)
+    return w.card(by=by, **args)
+
 
 class Flags(unittest.TestCase):
     def test_every_flag_starts_off(self):
@@ -63,10 +77,10 @@ class Cards(unittest.TestCase):
         self.assertNotIn(q["id"], n)
         self.assertEqual(n[u["id"]], 1)
 
-    def test_main_card_waits_for_phase_7(self):
+    def test_a_card_that_is_not_main_carries_no_release_link(self):
         with self.assertRaises(CoreError) as e:
-            self.w.card(kind="main")
-        self.assertEqual(e.exception.reason, "main_waits")
+            self.w.card(links=[("release", f"main:{REPO}@{SHA}")])
+        self.assertEqual(e.exception.reason, "release_link")
 
     def test_same_source_key_merges(self):
         a = self.w.card(source_key="rift:task-9:which-port")
@@ -376,3 +390,96 @@ class History(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MainCards(unittest.TestCase):
+    """Step 6: Patrick's tap on a Main card is what the brokers record as his yes."""
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+
+    def test_a_main_card_is_high_risk_and_names_what_it_is_for(self):
+        c = main_card(self.w, risk="normal")
+        self.assertEqual((c["kind"], c["risk"], c["status"]), ("main", "high", "pending"))
+        self.assertIn({"kind": "release", "ref": f"main:{REPO}@{SHA}"}, c["links"])
+        self.assertIsNone(self.w.core.main_answer(self.w.ws, c["id"]))
+        self.assertFalse(self.w.core.states(c["id"])["release_authorized"])
+
+    def test_only_bramble_opens_one(self):
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, by=self.w.rift, task="t1")
+        self.assertEqual(e.exception.reason, "not_bramble")
+
+    def test_it_needs_one_good_release_link(self):
+        for links, why in (([], "none"), ([("release", f"main:{REPO}@{SHA}"), ("release", f"publish:{REPO}@{SHA}")], "two"),
+                           ([("release", f"main:{REPO}@{SHA[:12]}")], "short commit"),
+                           ([("release", f"deploy:{REPO}@{SHA}")], "unknown kind")):
+            with self.subTest(why), self.assertRaises(CoreError) as e:
+                self.w.card(kind="main", options=MAIN_OPTIONS, recommendation="authorize",
+                            scope_of_yes=f"One main run at {SHA}.", links=links)
+            self.assertEqual(e.exception.reason, "release_link")
+
+    def test_it_offers_authorize_and_its_scope_names_the_commit(self):
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, options=OPTIONS, recommendation="a")
+        self.assertEqual(e.exception.reason, "main_options")
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, scope_of_yes="One main run of the latest commit.")
+        self.assertEqual(e.exception.reason, "main_scope")
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, source_key="bramble:main")
+        self.assertEqual(e.exception.reason, "main_source_key")
+
+    def test_his_yes_needs_a_fresh_sign_in(self):
+        c = main_card(self.w)
+        with self.assertRaises(CoreError) as e:
+            self.w.core.answer(self.w.patrick(fresh=False), **World.answer_args(c, "authorize"))
+        self.assertEqual(e.exception.reason, "sign_in_again")
+
+    def test_authorize_is_read_back_with_the_binding(self):
+        c = main_card(self.w, link=f"publish:{REPO}@{SHA}#5582")
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "authorize"))
+        a = self.w.core.main_answer(self.w.ws, c["id"])
+        self.assertEqual({k: a[k] for k in ("for", "repo", "commit", "pr", "revision", "option", "restored")},
+                         {"for": "publish", "repo": REPO, "commit": SHA, "pr": 5582, "revision": 1,
+                          "option": "authorize", "restored": False})
+        self.assertTrue(self.w.core.states(c["id"])["release_authorized"])
+
+    def test_not_now_authorizes_nothing(self):
+        c = main_card(self.w)
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "not_now"))
+        self.assertEqual(self.w.core.main_answer(self.w.ws, c["id"])["option"], "not_now")
+        self.assertFalse(self.w.core.states(c["id"])["release_authorized"])
+
+    def test_a_revision_keeps_authorize_and_the_commit(self):
+        c = main_card(self.w)
+        with self.assertRaises(CoreError) as e:
+            self.w.core.revise_card(self.w.bramble, c["id"], expected_revision=1, title="t", body="b",
+                                    options=OPTIONS, recommendation="a", scope_of_yes=f"at {SHA}")
+        self.assertEqual(e.exception.reason, "main_options")
+        r = self.w.core.revise_card(self.w.bramble, c["id"], expected_revision=1, title="Main release, checks green",
+                                    body="Now green.", options=MAIN_OPTIONS, recommendation="authorize",
+                                    scope_of_yes=f"One main run of {REPO} at {SHA}.")
+        self.assertEqual(r["revision"], 2)
+
+    def test_an_answer_from_before_a_restore_authorizes_nothing(self):
+        from thornswood_decisions import backup
+        c = main_card(self.w)
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "authorize"))
+        dest = self.w.dir / "b.db"
+        backup.backup(self.w.store, dest)
+        back = self.w.dir / "restored.db"
+        backup.restore(dest, back, clock=self.w.clock)
+        w2 = Store(back, clock=self.w.clock)
+        self.addCleanup(w2.close)
+        from thornswood_decisions.core import DecisionCore
+        core2 = DecisionCore(w2)
+        self.assertTrue(core2.main_answer(self.w.ws, c["id"])["restored"])
+        self.assertFalse(core2.states(c["id"])["release_authorized"])
+
+    def test_main_answer_is_for_main_cards_only(self):
+        c = self.w.card()
+        with self.assertRaises(CoreError) as e:
+            self.w.core.main_answer(self.w.ws, c["id"])
+        self.assertEqual(e.exception.reason, "no_main_card")

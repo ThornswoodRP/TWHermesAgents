@@ -17,7 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent)); sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE))
 from decisions_helpers import World
 from thornswood_decisions.api import Api, make_server
 from thornswood_decisions.feeds import Feeds

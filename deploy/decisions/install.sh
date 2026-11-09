@@ -331,7 +331,7 @@ ok "the live Board runs"
 
 # 10. The connector. While connector_effects is off it asks the core every half
 # minute and does nothing else. Only Patrick changes connector_effects.
-# --connector-later (the VM's follower, thornswood_brokers/follow_main.py):
+# --connector-later (the VM's follower, src/thornswood_brokers/follow_main.py):
 # it stays stopped, as step 5b left it, and the follower starts it once
 # apply.py and tw-reload-bots have every Bot on this release, so no message
 # reaches a Bot still running the tools of the release before.
@@ -418,7 +418,7 @@ start_voice() {
 # Asked as the core asks: Voice().check (which Whisper) or Voice().prepare (load its model).
 voice_ask() {
   runuser -u tw-decide -g tw-decide -G tw-decide-voice -- /usr/bin/python3 -I -c \
-    "import sys; sys.path.insert(0, sys.argv[1]); from thornswood_decisions.voice import Voice; print(Voice().$1() or '')" "$here"
+    "import sys; sys.path.insert(0, sys.argv[1]); from thornswood_decisions.voice import Voice; print(Voice().$1() or '')" "$here/src"
 }
 start_voice
 ok "dictation listens on /run/tw/decide-voice/voice.sock (660, tw-decide-voice)"

@@ -60,11 +60,15 @@ class World:
         # Patrick's answers on outside pull request cards, as tw-decide-bots
         # gives them to tw-git (#132); tests add to it.
         self.answers: list[dict] = []
+        # Patrick's answers on Main cards, by card id, as main_answer gives them (step 6).
+        self.mains: dict[str, dict] = {}
         self.git = GitService(p, gh, self.ask, mirrors=self.root / "mirrors", spool=self.spool,
                               git_base=f"file://{self.fake.remotes}/", allow_file_protocol=True,
                               ask_decide=self.ask_decide)
 
     def ask_decide(self, op: str, args: dict):
+        if op == "main_answer":
+            return json.loads(json.dumps(self.mains.get(args["decision_id"])))
         assert op == "outside_answers", op
         return json.loads(json.dumps(self.answers))
 
@@ -1003,8 +1007,6 @@ class Runs(unittest.TestCase):
             Policy(data)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class OneExecutor(unittest.TestCase):
@@ -1129,3 +1131,61 @@ class CanaryOneExecutor(unittest.TestCase):
                       executor_problem("patrick-hermes", '{"ok": false, "reason": "the head moved"}'))
         self.assertIn("did not answer", executor_problem("patrick-hermes", '{"ok": false, "reason": "NOCONNECT [Errno 2]"}'))
         self.assertIn("no answer the canary can read", executor_problem("bramble", ""))
+
+class MainCards(unittest.TestCase):
+    """Step 6: a decision core card id is Patrick's tap on a Main card. tw-git
+    reads his answer from the core and tw-policy records it before the check."""
+
+    HEAD = "c" * 40
+
+    def setUp(self):
+        self.w = World()
+        self.decisions = self.w.git.rules.decisions
+
+    def main(self, **kw):
+        a = {"decision_id": "dec_mainpublish0001", "for": "publish", "repo": APP, "commit": self.HEAD, "pr": None,
+             "revision": 1, "option": "authorize", "answered_at": self.w.policy.clock().isoformat(), "restored": False}
+        a.update(kw)
+        self.w.mains[a["decision_id"]] = a
+        return a["decision_id"]
+
+    def check(self, did, commit=None):
+        return self.decisions.check(did, kind="publish", repo=APP, commit=commit or self.HEAD)
+
+    def test_unanswered_says_so(self):
+        v = self.check("dec_nothing")
+        self.assertFalse(v.allowed)
+        self.assertIn("has not answered", v.reason)
+
+    def test_authorize_is_recorded_and_allows_once(self):
+        did = self.main()
+        self.assertTrue(self.check(did).allowed)
+        self.assertEqual(self.w.policy._decision(did).answered_by, "EvilPatrick06")
+        self.w.ask("decision_use", {"id": did})
+        v = self.check(did)
+        self.assertFalse(v.allowed)
+        self.assertIn("used once", v.reason)
+
+    def test_another_answer_or_commit_allows_nothing(self):
+        self.assertIn("authorizes nothing", self.check(self.main(option="not_now")).reason)
+        self.assertFalse(self.check(self.main(decision_id="dec_other"), commit="d" * 40).allowed)
+
+    def test_an_answer_from_before_a_restore_allows_nothing(self):
+        v = self.check(self.main(restored=True))
+        self.assertFalse(v.allowed)
+        self.assertIn("restored", v.reason)
+
+    def test_with_no_route_to_the_core_a_main_card_allows_nothing(self):
+        self.w.git.rules.decisions.ask_decide = None
+        self.assertIn("no route", self.check(self.main()).reason)
+
+    def test_a_record_root_made_is_checked_as_before(self):
+        from thornswood_guard.decisions import new_decision
+        d = new_decision(id="d-root", kind="publish", repo=APP, commit=self.HEAD, revision=1,
+                         answered_by="EvilPatrick06", at=self.w.policy.clock())
+        self.w.policy.decision_record("root", {"decision": d.__dict__})
+        self.assertTrue(self.check("d-root").allowed)
+
+
+if __name__ == "__main__":
+    unittest.main()

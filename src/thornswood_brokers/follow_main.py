@@ -337,7 +337,7 @@ class Follower:
         self.sh("apply", ["runuser", "-u", user, "--", "bash", "-c", script], input=bundle)
 
     def restart(self) -> None:
-        # The installed release's own tw-reload-bots (thornswood_brokers/reload.py),
+        # The installed release's own tw-reload-bots (src/thornswood_brokers/reload.py),
         # the step every apply ends with: it ends the hermes user's login
         # sessions, restarts the gateway and says STOP unless it is active.
         self.sh("reload", [str(self.opt / "bin" / "tw-reload-bots")])
