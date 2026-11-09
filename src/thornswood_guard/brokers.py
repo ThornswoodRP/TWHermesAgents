@@ -304,7 +304,7 @@ TW_GIT_SCHEMA = {
         "close_pr (Bramble only: closes a pull request only on Patrick's answer on the outside pull request card "
         "that names it; replaced_by names the merged pull request that carried it), close_issue (Bramble only: closes an "
         "issue with reason duplicate and duplicate_of, or reason completed and done_by_pr (merged) or done_by_run "
-        "(succeeded, in run_repo), with body saying why; never as not planned), start_run (Bramble only), read (a GET inside one repo), board (the board's open issues in do-order; eligible true keeps only what may be picked; limit, at most 100), ledger_event (Bramble only). Every write names "
+        "(succeeded, in run_repo), with body saying why; never as not planned), start_run (Bramble only), read (a GET inside one repo, or /search/issues with repo:<that repo> in q), board (the board's open issues in do-order; eligible true keeps only what may be picked; limit, at most 100), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
         "type": "object",

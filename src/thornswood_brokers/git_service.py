@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import Callable
 
@@ -892,8 +893,10 @@ class GitService:
         # The repository itself (default_branch and its other fields), or
         # anything under it. 1 Nov: Bramble could not read default_branch.
         inside = path == root or path.startswith((root + "/", root + "?"))
+        if not inside and path.startswith("/search/issues?"):
+            inside = self._search_in(repo, path)
         if not inside or ".." in path:
-            raise Refused(f"reads stay inside {root}")
+            raise Refused(f"reads stay inside {root}, or search its issues with repo:{repo} in the query")
         self._check(self.rules.admin_call(bot, "GET", path))
         return {"body": self.gh.get(self.policy.reader_for(repo), repo, path)}
 
@@ -943,6 +946,20 @@ class GitService:
             out.append(row)
         out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
         return {"open": len(out), "issues": out[:limit]}
+
+    @staticmethod
+    def _search_in(repo: str, path: str) -> bool:
+        """A search of issues and pull requests in this one repo: the query
+        names repo:<repo> and no other repo, owner or org. Before filing, a Bot
+        looks for the same problem in open and closed issues (the guide,
+        sections 2 and 4); until 9 Nov 2026 only a repo's own paths could be
+        read, so the one way to look was paging through a thousand open
+        issues, and Bramble filed #5580 and #5585 for a failure #5547 held."""
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("q", [])
+        if len(query) != 1:
+            return False
+        scopes = [t.lower() for t in query[0].split() if re.match(r"(?i)-?(repo|org|user|owner):", t)]
+        return scopes == [f"repo:{repo}".lower()]
 
     def refused(self, caller: str, args: dict) -> dict:
         """Any other write a Bot asks for: named, and refused with the rule's reason."""

@@ -21,7 +21,9 @@ Every few seconds it:
        a new chat:      hermes chat -Q --format stream-json --query-file <file> --yolo --source cli --in <home>
        an existing one: hermes chat -Q --format stream-json --query-file <file> --resume <session id>
 
-   through room_send.py, which runs that same `hermes chat` in Hermes's own
+   through room_send.py `attended-chat`, a turn Patrick is there to answer: Hermes asks
+   its questions and approvals instead of guessing, the turn says each one, and his
+   answers and Stop go to the turn's stdin (own_turns.py, 9 Nov). room_send.py runs that same `hermes chat` in Hermes's own
    runtime and hands a message to a chat whose turn is already running the way
    Desktop's box does, by the chat's busy-input setting (steer, interrupt or
    queue; Patrick's answer A on q-one-busy-chat, 2 Nov; contracts.json "busy");
@@ -33,7 +35,7 @@ Every few seconds it:
    a chat's launch settings for good and refuses a resume that would change
    them (gateway_chat.py check_resume_policy), so a chat started elsewhere runs
    the phone's turn with its own approvals: a step that needs an approval is
-   refused, unless that chat has /yolo on. Nothing here turns /yolo on. The
+   asked of Patrick in the app, unless that chat has /yolo on. Nothing here turns /yolo on. The
    text goes in a file only this user can read, never on a command line, and
    the file is gone when the turn ends;
 3. tells the core what came of it (`POST /own/<gateway>/result`): confirmed
@@ -666,6 +668,8 @@ def fitted(state_db: Path, wanted: list[str], now: datetime) -> bytes:
 
 # How room_send.py's turn says Hermes took a message, and the live line's state for it.
 ADMISSIONS = {"started": "thinking", "queued": "queued", "steered": "steered", "redirected": "redirected"}
+ASK_KEYS = ("prompt_id", "kind", "question", "description", "command", "choices", "multi_select")
+MAX_ASKS = 3
 
 
 def follow_turn(stream, seen: dict, tell) -> None:
@@ -679,7 +683,11 @@ def follow_turn(stream, seen: dict, tell) -> None:
     room_send.py's turn adds one line saying how Hermes took the message ({"type": "admission"}): "queued" (behind
     the turn already running, in Hermes's own queue), "steered" or "redirected" (into the running turn), or
     "started" (also said when a queued one leaves the queue to run). From then on `seen["admitted"]` is true:
-    Hermes has the message; `seen["taken"]` keeps a steer or redirect for the rest of the turn."""
+    Hermes has the message; `seen["taken"]` keeps a steer or redirect for the rest of the turn.
+
+    An attended turn (room_send.py `attended-chat`) also says each question or approval Hermes opens and
+    settles ({"type": "ask"} and {"type": "ask_settled"}), kept in `seen["asks"]` by prompt id, and how an
+    order went ({"type": "order"}), kept in `seen["order"]`; each is told again with the turn's state."""
     now = None
     for line in stream:
         try:
@@ -703,9 +711,28 @@ def follow_turn(stream, seen: dict, tell) -> None:
         if kind == "tool_use":
             name = ev.get("name")
             state = ("tool", name if isinstance(name, str) and TOOL_NAME.match(name) else None)
+        if kind in ("ask", "ask_settled", "order"):
+            asks = seen.setdefault("asks", {})
+            pid = ev.get("prompt_id")
+            if kind == "ask" and isinstance(pid, str) and len(asks) < MAX_ASKS:
+                asks[pid] = {k: ev[k] for k in ASK_KEYS if k in ev}
+            elif kind == "ask_settled" and isinstance(pid, str):
+                asks.pop(pid, None)
+            elif kind == "order":
+                seen["order"] = {k: ev[k] for k in ("op", "prompt_id", "status", "reason") if isinstance(ev.get(k), str)}
+            tell(*(state or now or ("thinking", None)))
+            now = state or now or ("thinking", None)
+            continue
         if state and state != now:
             now = state
             tell(*state)
+
+
+def _close(stream) -> None:
+    try:
+        stream.close()
+    except OSError:  # the turn had already gone, and its end of the pipe with it
+        pass
 
 
 class Hermes:
@@ -816,10 +843,12 @@ class Hermes:
         state = got.get("state") if isinstance(got.get("state"), dict) else None
         return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
 
-    def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None) -> tuple[str, str, str, str | None]:
+    def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None,
+             started=None) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
-        tool by its name."""
+        tool by its name, and the questions and approvals it has open. `started(proc)` hears the turn's process,
+        whose stdin takes Patrick's orders for it (room_send.py `attended-chat`: Stop, and his answers)."""
         if session_id is not None and not SESSION_ID.match(session_id):
             return "failed", "", "that is not a chat id Hermes gives", None
         with tempfile.TemporaryDirectory(prefix="tw-own-") as folder:
@@ -829,16 +858,17 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.turn_cmd, "chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
+            argv = [*self.turn_cmd, "attended-chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
             if image is not None:
                 argv += ["--image", str(image)]
             if session_id:
                 argv += ["--resume", session_id]
             else:
                 argv += ["--yolo", "--source", "cli", "--in", str(self.home_dir)]
-            return self._run(argv, session_id, doing)
+            return self._run(argv, session_id, doing, started)
 
-    def _run(self, argv: list[str], session_id: str | None, doing=None) -> tuple[str, str, str, str | None]:
+    def _run(self, argv: list[str], session_id: str | None, doing=None,
+             started=None) -> tuple[str, str, str, str | None]:
         seen: dict = {}
         tell = doing or (lambda state, tool, admitted=False, taken=None: None)
         began = time.time()
@@ -847,7 +877,8 @@ class Hermes:
         def heard(state, tool):
             if seen.get("events", 0) > 1:
                 moved.set()
-            tell(state, tool, bool(seen.get("admitted")), seen.get("taken"))
+            asks, order = list((seen.get("asks") or {}).values()), seen.get("order")
+            tell(state, tool, bool(seen.get("admitted")), seen.get("taken"), *((asks, order) if asks or order else ()))
 
         def read(stream):
             follow_turn(stream, seen, heard)
@@ -863,11 +894,13 @@ class Hermes:
                     tell("queued" if now else "thinking", None, bool(seen.get("admitted")), seen.get("taken"))
 
         try:
-            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, **quiet(),
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, **quiet(),
                                     stderr=subprocess.DEVNULL, cwd=str(self.home_dir), text=True,
                                     encoding="utf-8", errors="replace")
         except OSError:
             return "failed", "", "could not start the hermes command", None
+        if started is not None:
+            started(proc)
         reader = threading.Thread(target=read, args=(proc.stdout,), daemon=True)
         reader.start()
         if session_id and self.state_db is not None:
@@ -879,10 +912,12 @@ class Hermes:
             proc.wait()
             reader.join(5)
             proc.stdout.close()
+            _close(proc.stdin)
             return "uncertain", "", "no end to the turn in 15 minutes; Hermes may have the message", \
                 self._sid(seen, session_id)
         reader.join(30)
         proc.stdout.close()
+        _close(proc.stdin)
         result = seen.get("result")
         sid = self._sid(seen, session_id)
         if code == 0 and result and result.get("exit_code") == 0:
@@ -1155,6 +1190,7 @@ class OwnConnector:
         self.unsaid: list[dict] = []
         self.running: list[threading.Thread] = []
         self.doing: dict[str, dict] = {}    # message id -> what its turn is doing now (state, tool)
+        self.procs: dict[str, subprocess.Popen] = {}  # message id -> its turn's process, which takes his orders
         self.wanted: list[str] = []
         self._lock = threading.Lock()
         self._ready = ("check_failed", "not checked yet")
@@ -1214,13 +1250,19 @@ class OwnConnector:
                 self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": "that chat is gone"})
                 self.feed_now = True
             return
-        def doing(state, tool, admitted=False, taken=None):
+        def doing(state, tool, admitted=False, taken=None, asks=None, order=None):
             # `admitted`: Hermes has the message (room_send.py's turn said how it took it). The core hands this
             # connector the chat's next message only once each before it is in Hermes, so they keep order.
             # `taken`: steered or redirected into the turn already running, kept while that turn goes on.
+            # `asks`: the questions and approvals the turn has open; `order`: how his last order for it went.
             with self._lock:
                 self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool, "admitted": admitted,
-                                          **({"taken": taken} if taken else {})}
+                                          **({"taken": taken} if taken else {}), **({"asks": asks} if asks else {}),
+                                          **({"order": order} if order else {})}
+
+        def started(proc):
+            with self._lock:
+                self.procs[item["id"]] = proc
         text, image = item["text"], None
         files = item.get("attachments") or []
         if files:
@@ -1236,13 +1278,14 @@ class OwnConnector:
             refs = [file_ref(pth) for _, pth in paths if pth != image]
             text = "\n\n".join(x for x in (text, " ".join(refs)) if x) or f"[Patrick attached {image.name}]"
         try:
-            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image)
+            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image, started)
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
                                          item.get("session_id"))
         finally:
             with self._lock:
                 self.doing.pop(item["id"], None)
+                self.procs.pop(item["id"], None)
         r = {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
         if not item.get("session_id") and sid:
             r["session_id"] = sid
@@ -1326,6 +1369,30 @@ class OwnConnector:
             elif status not in (409, 423):
                 self.say(f"FAIL control: the core answered {status}")
         return sent
+
+    def orders(self, wanted: list) -> int:
+        """Patrick's orders for running turns (Stop, and his answers to Hermes's questions and approvals),
+        each written to its turn's stdin as one line; room_send.py's attended turn carries it out and says
+        how it went. An order for a turn that has ended goes nowhere: nothing is left to stop or answer."""
+        n = 0
+        for o in wanted[:10]:
+            if not isinstance(o, dict) or o.get("op") not in ("stop", "answer"):
+                continue
+            with self._lock:
+                proc = self.procs.get(o.get("message_id"))
+            if proc is None or proc.poll() is not None:
+                self.say(f"NOTE order {o.get('op')}: that turn has ended")
+                continue
+            line = {"op": o["op"], **({"prompt_id": o.get("prompt_id"), "value": o.get("value")}
+                                      if o["op"] == "answer" else {})}
+            try:
+                proc.stdin.write(json.dumps(line) + "\n")
+                proc.stdin.flush()
+                n += 1
+                self.say(f"PASS order {o['op']}: handed to its turn")
+            except (OSError, ValueError):  # the turn ended as this was written
+                self.say(f"NOTE order {o['op']}: that turn has ended")
+        return n
 
     def pages(self, wanted: list) -> int:
         """The pages the core handed over: each read from state.db, read only, and posted. Returns how many."""
@@ -1440,6 +1507,9 @@ class OwnConnector:
         controls = body.get("controls", [])
         if isinstance(controls, list) and controls:
             self.controls(controls)
+        orders = body.get("orders", [])
+        if isinstance(orders, list) and orders:
+            self.orders(orders)
         items = body.get("items", [])
         for item in items:
             t = threading.Thread(target=self._deliver, args=(item,), daemon=True)

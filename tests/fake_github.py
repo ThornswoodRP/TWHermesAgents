@@ -148,11 +148,23 @@ class FakeGitHub:
         refused = self._pr_write_refused(method, path, token)
         if refused:
             return refused
-        resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
+        if path == "/search/issues":
+            resp = self._search(query.get("q", ""))
+        else:
+            resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
         if key in self.lose_answer:
             self.lose_answer.discard(key)
             raise Lost(f"connection reset after {key}")
         return resp
+
+    def _search(self, q: str) -> Response:
+        """Issues whose repo the query names and whose title holds every plain word."""
+        terms = q.split()
+        repos = [t.split(":", 1)[1] for t in terms if t.lower().startswith("repo:")]
+        words = [t.lower() for t in terms if ":" not in t]
+        items = [dict(i, repository_url=f"{API}/repos/{r}") for (r, _), i in self.issues.items()
+                 if r in repos and all(w in str(i.get("title", "")).lower() for w in words)]
+        return Response(200, {"total_count": len(items), "items": items}, {})
 
     def _pr_write_refused(self, method: str, path: str, token: str) -> Response | None:
         """GitHub's rule for a label or a comment on a pull request through the

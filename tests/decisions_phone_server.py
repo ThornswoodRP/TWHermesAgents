@@ -177,7 +177,11 @@ one_feed()
 from test_decisions_own import passkey
 WORK = own.send(passkey(w), "one", "s_work", None, "is the build green?", "own-key-work")["message_id"]
 own.claim(w.ws, "one", to, 1, True)
-TURNS = {"turns": [{"id": WORK, "state": "tool", "tool": "terminal"}]}
+# Hermes has it, and has a question open for Patrick (own_turns.py); his answer settles it, as Hermes does.
+ASK = {"prompt_id": "p_colour", "kind": "clarify", "question": "Which **branch** first?", "choices": ["main", "dev"],
+       "multi_select": False}
+TURNS = {"turns": [{"id": WORK, "state": "tool", "tool": "terminal", "admitted": True, "asks": [ASK]}]}
+ANSWERS = []
 def set_reaction(r, db=None, sid=None):
     """Patrick's reaction, as Hermes sets it: one per person on the row (the helper's own path is in
     test_decisions_reactions.py)."""
@@ -265,6 +269,11 @@ def one_pages():
                 one_session(o, r)
             for r in got.get("controls", []):
                 one_control(o, r)
+            for r in got.get("orders", []):
+                if r["op"] == "answer":
+                    ANSWERS.append(r["value"])
+                    TURNS["turns"][0]["asks"] = []
+                    TURNS["turns"][0]["order"] = {"op": "answer", "prompt_id": r["prompt_id"], "status": "sent"}
             one_replies(o)
             for r in got.get("reactions", []):
                 o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],

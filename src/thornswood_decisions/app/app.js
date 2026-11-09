@@ -985,8 +985,8 @@ async function botsView(into = 'view') {
 // Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
 // (Patrick, 1 Nov). This says until when, or offers that sign-in. A new chat is
 // made with full power; Hermes keeps a chat's own approval setting for good, so
-// in a chat started elsewhere a step that needs an approval is refused unless
-// that chat has /yolo on.
+// in a chat started elsewhere a step that needs an approval is asked of him under
+// the live line (turnPart), unless that chat has /yolo on.
 // The passkey sign-in a send needs: nothing while it holds (the composer is the
 // sign that he can send), and a sign-in only once it has run out. Patrick, 2 Nov:
 // the paragraph that said until when he could send, on every chat, was clutter.
@@ -2217,22 +2217,82 @@ function workingItem(name, agent, doing) {
 // same way, so the chat is drawn again the moment it is taken and its turn's line shows (2 Nov: it waited
 // for the next 15-second read). One watch at a time, ended by any new page.
 let turnWatch = null
-function watchTurn(path, seqNow, turnId, name, was = 'leased', queued = false) {
+function watchTurn(path, seqNow, turnId, name, was = 'leased', queued = false, drawn = '') {
   clearTimeout(turnWatch)
   turnWatch = setTimeout(async () => {
     if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
     const r = await call('GET', path)
     if (seqNow !== viewSeq || r.status !== 200) return
     const m = r.body.mine.find(x => x.id === turnId)
-    // Taken from Hermes's queue to run: drawn again, so its line shows under it.
-    if (!m || m.status !== was || (was === 'leased' && inQueue(m) !== queued)) {
+    // Taken from Hermes's queue to run, or a question opened or settled: drawn again.
+    if (!m || m.status !== was || (was === 'leased' && inQueue(m) !== queued) || askSig(m.doing) !== drawn) {
       const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
       if (!typing) return route()
     }
     const line = document.querySelector('#view .msg.working .doing')
     if (line && m && was === 'leased' && !queued) line.textContent = doingWords(m.doing)
-    watchTurn(path, seqNow, turnId, name, was, queued)
+    watchTurn(path, seqNow, turnId, name, was, queued, drawn)
   }, 2000)
+}
+
+// ── a running turn of his own Hermes: Stop, and its questions and approvals (own_turns.py) ──────
+//
+// Patrick, 9 Nov: switch fully from Hermes Desktop to this app. Desktop has Stop, and shows a question
+// Hermes asks (its clarify tool) and an approval for a flagged command for him to answer; so does this,
+// under the live line of the turn being answered, with Hermes's own choices. Each needs the passkey
+// sign-in a message needs; the turn itself makes Hermes's own call, and Hermes checks it again.
+const APPROVAL_WORDS = { once: 'Allow once', session: 'Allow in this chat', always: 'Always allow', deny: 'Deny' }
+function askSig(doing) {
+  return doing && (doing.asks || doing.order) ? JSON.stringify([doing.asks || [], doing.order || null]) : ''
+}
+function turnPart(gw, name, turn, canAct) {
+  const d = turn && turn.doing
+  if (!d || !d.admitted || !canAct) return null
+  const status = el('p', { class: 'warn', role: 'status' })
+  const order = async (body, what) => {
+    status.className = 'receipt'
+    status.textContent = what
+    const r = await call('POST', `/own/${gw}/turn`, { message_id: turn.id, ...body })
+    if (r.status === 200) return route()
+    if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+    status.className = 'warn'
+    status.textContent = r.status === 0 ? 'Could not reach the core. Nothing was sent.' : said(r.body)
+  }
+  const answer = (a, value) => order({ op: 'answer', prompt_id: a.prompt_id, value }, `Sending your answer to ${name}...`)
+  const asks = (d.asks || []).map(a => {
+    if (a.kind === 'approval') {
+      return el('div', { class: 'card ask', 'data-ask': a.prompt_id },
+        el('p', {}, el('strong', {}, a.description || `${name} asks to run this`)),
+        a.command ? codeBlock(a.command, 'command') : null,
+        el('div', { class: 'opts' }, a.choices.map(c => el('button', {
+          class: c === 'deny' ? 'secondary' : 'primary', type: 'button', 'data-choice': c,
+          onclick: () => answer(a, c) }, APPROVAL_WORDS[c] || c))))
+    }
+    const own = el('input', { type: 'text', autocomplete: 'off', 'aria-label': 'Your answer', placeholder: 'Your answer' })
+    const picked = new Set()
+    const choices = a.choices.map(c => el('button', { class: 'secondary', type: 'button', 'data-choice': c,
+      'aria-pressed': a.multi_select ? 'false' : null,
+      onclick: e => {
+        if (!a.multi_select) return answer(a, c)
+        if (picked.has(c)) picked.delete(c); else picked.add(c)
+        e.currentTarget.setAttribute('aria-pressed', String(picked.has(c)))
+      } }, inlineMd(c, true)))
+    const form = el('form', { class: 'ask-own' }, own, el('button', { class: 'primary', type: 'submit' }, 'Send'))
+    form.addEventListener('submit', e => {
+      e.preventDefault()
+      if (own.value.trim()) return answer(a, own.value.trim())
+      if (a.multi_select && picked.size) return answer(a, a.choices.filter(c => picked.has(c)))
+    })
+    return el('div', { class: 'card ask', 'data-ask': a.prompt_id },
+      markdown(a.question || `${name} asks you something`),
+      choices.length ? el('div', { class: 'opts' }, choices) : null, form)
+  })
+  const went = d.order && d.order.status === 'refused'
+    ? el('p', { class: 'warn', role: 'status' }, (d.order.op === 'stop' ? 'Stop did not go: ' : 'Your answer did not go: ')
+      + (d.order.reason || d.order.status)) : null
+  return el('div', { class: 'turn-part' }, asks, went,
+    el('div', { class: 'turn-stop' }, el('button', { class: 'secondary', type: 'button', 'data-stop': turn.id,
+      onclick: () => order({ op: 'stop' }, `Stopping ${name}'s turn...`) }, 'Stop')), status)
 }
 
 function pendingItems(mine, readAt) {
@@ -2347,11 +2407,13 @@ async function ownChatView(gw, sid) {
     }
     // His message being answered now: the other side's live line under it, kept current while it runs.
     const turn = beingAnswered(v.mine)
-    const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing)] : bubbles(items)
+    const canAct = v.can_send && v.online && !!v.sign_in_until && !h.gone && !t.error && !ended
+    const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing), turnPart(gw, name, turn, canAct)] : bubbles(items)
     if (seqNow === viewSeq) {
       showChat('own:' + key, top, list, dock, items)
       const waits = turn || v.mine.find(inQueue) || v.mine.find(m => m.status === 'queued')
-      if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status, inQueue(waits))
+      if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status, inQueue(waits),
+        waits === turn ? askSig(turn.doing) : '')
     }
   }
   render()
