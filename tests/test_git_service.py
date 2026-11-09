@@ -713,6 +713,26 @@ class PullRequestsAndIssues(unittest.TestCase):
             w.git.open_pr("hermes", args)
         self.assertEqual(len(w.fake.writes("POST", "/pulls")), 1)
 
+    def test_a_second_pr_for_the_same_issue_is_refused_while_the_first_is_open(self):
+        """8 Nov 2026: Bramble opened #5502 and #5503 for #5495 fifteen
+        seconds apart, from two branches, and both merged."""
+        w = World()
+        w.push("sprocket", "sprocket/1-a", {"a": "a\n"})
+        w.push("sprocket", "sprocket/1-b", {"b": "b\n"})
+        w.push("sprocket", "sprocket/12-c", {"c": "c\n"})
+        w.git.open_pr("hermes", {"bot": "sprocket", "repo": APP, "task": "t-1", "head": "sprocket/1-a", "title": "A"})
+        with self.assertRaises(Refused) as e:
+            w.git.open_pr("hermes", {"bot": "sprocket", "repo": APP, "task": "t-1", "head": "sprocket/1-b", "title": "B"})
+        self.assertIn("already open for #1", str(e.exception))
+        out = w.git.open_pr("hermes", {"bot": "sprocket", "repo": APP, "task": "t-12", "head": "sprocket/12-c",
+                                       "title": "C"})
+        self.assertTrue(out["done"], "issue 12 is not issue 1")
+        first = next(p for p in w.fake.prs.values() if p["head"]["ref"] == "sprocket/1-a")
+        first["state"] = "closed"
+        out = w.git.open_pr("hermes", {"bot": "sprocket", "repo": APP, "task": "t-1", "head": "sprocket/1-b",
+                                       "title": "B"})
+        self.assertTrue(out["done"], "once the first is closed, a new one may open")
+
     def test_a_pr_from_another_bots_branch_is_refused(self):
         w = World()
         w.push("rift", "rift/1-a", {"a": "a\n"})

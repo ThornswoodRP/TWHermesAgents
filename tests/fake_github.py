@@ -256,6 +256,10 @@ class FakeGitHub:
             return Response(200, {"object": {"sha": sha}}, {}) if sha else Response(404, {"message": "Not Found"}, {})
         if rest[0] == "pulls" and len(rest) == 1:
             if method == "GET":
+                if "head" not in query:
+                    state = query.get("state", "open")
+                    return Response(200, [p for (r, _), p in self.prs.items() if r == repo
+                                          and state in ("all", p["state"])], {})
                 head = query.get("head", "").split(":", 1)[-1]
                 found = [p for (r, _), p in self.prs.items() if r == repo and p["head"]["ref"] == head]
                 return Response(200, found, {})

@@ -431,6 +431,18 @@ class GitService:
             raise Refused(f"{head} is not on GitHub; push it first")
         owner = repo.split("/")[0]
         app = "bramble" if bot == "bramble" else self._app(bot)
+        # One open pull request per issue per Bot. 8 Nov 2026, 6:12 PM UTC:
+        # Bramble opened #5502 and #5503 for #5495 fifteen seconds apart from
+        # two branches, and at 6:39 PM #5508 and #5509, so both of the first
+        # merged and the second pair was needed to take a line out again.
+        issue = re.match(rf"^{re.escape(bot)}/(\d+)-", head)
+        if issue:
+            mine = re.compile(rf"^{re.escape(bot)}/{issue.group(1)}-")
+            for other in self.gh.get(app, repo, f"/repos/{repo}/pulls?state=open&per_page=100") or []:
+                ref = (other.get("head") or {}).get("ref") or ""
+                if ref != head and mine.match(ref):
+                    raise Refused(f"PR {other.get('number')} from {ref} is already open for #{issue.group(1)}; "
+                                  "push to its branch instead of opening a second one")
 
         def find():
             prs = self.gh.get(app, repo, f"/repos/{repo}/pulls?state=all&head={quote(owner + ':' + head)}")
