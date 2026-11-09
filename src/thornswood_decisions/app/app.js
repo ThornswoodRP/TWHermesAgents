@@ -91,7 +91,7 @@ const ICON = {
   back: 'M15 18l-6-6 6-6', send: 'M4 12l16-8-6 16-3-7z', x: 'M6 6l12 12M18 6L6 18', plus: 'M12 5v14M5 12h14',
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
   more: 'M12 5h.01M12 12h.01M12 19h.01', down: 'M12 5v14M6 13l6 6 6-6',
-  panel: 'M3 4h18v16H3zM9 4v16', file: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6',
+  panel: 'M3 4h18v16H3zM9 4v16', info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v6M12 7h.01', file: 'M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6',
   image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', dec: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9',
   mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3',
   talk: 'M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4',
@@ -749,6 +749,130 @@ async function boardView() {
       el('span', { class: 'what', 'data-doing': d.state }, doingWords(d))),
     el('div', { class: 'w' }, forHowLong(d.since))))
     : el('p', { class: 'quiet' }, 'No Bot is working right now.'))
+}
+
+// ── Tasks: subagents, background commands and scheduled jobs (Patrick, 3 Nov) ──
+//
+// "I wanted to see the subagents, jobs, and background tasks on the Mobile and Desktop app." Every Hermes
+// keeps these per profile, so this one list holds all of them at once: Hermes, One and the six Bots, each
+// row with its agent's avatar, and a row of names to look at one of them only. What each part says comes
+// from that Hermes itself, read the way Hermes Desktop reads it (contracts.json "tasks"); a Hermes the core
+// has not heard from lately, or whose part could not be read, says so in one line at the foot, and none of
+// its rows are shown as though they were current.
+let tasksOnly = null   // the agent the list is narrowed to, for this visit; null is all of them
+
+function agentName(id) {
+  return GATEWAY[id] || NAMES[id] || id
+}
+
+function epochIso(sec) {
+  return typeof sec === 'number' ? new Date(sec * 1000).toISOString() : null
+}
+
+// Where a row's chat opens: one of Hermes's or One's chats, or a Bot's own chat.
+function taskChat(agent, chat) {
+  if (GATEWAY[agent]) return chat ? '/m/hermes/' + agent + '/' + encodeURIComponent(chat) : '/m/hermes/' + agent
+  return '/m/bots/' + agent
+}
+
+// When a job runs next, short enough for the pill on a phone: the time today, the day and time this week,
+// else the date.
+function nextWords(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d)) return ''
+  if (d.toDateString() === new Date().toDateString()) return at(iso)
+  if (d - Date.now() < 6 * 864e5) return d.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+// A job's state on the right: green only while it runs, as the other lists' dots; red when Hermes stopped it.
+function jobLine(j) {
+  if (j.running) return liveLine({ cls: 'on', words: 'Running now' })
+  if (j.state === 'error') return el('span', { class: 'rec off' }, 'Stopped')
+  if (j.state === 'paused') return el('span', { class: 'rec' }, 'Paused')
+  if (j.state === 'completed') return el('span', { class: 'rec' }, 'Done')
+  return el('span', { class: 'rec' }, j.next ? 'Next ' + nextWords(j.next) : 'Scheduled')
+}
+
+function taskRows(agents) {
+  const subs = [], procs = [], jobs = [], unheard = [], silent = []
+  for (const a of agents) {
+    const name = agentName(a.id)
+    if (!a.heard) { silent.push(name + (a.since ? ' (since ' + at(a.since) + ')' : '')); continue }
+    if (a.why) { unheard.push(`${name}: ${a.why}`); continue }
+    if (a.subagents === null || a.processes === null) unheard.push(`${name}: ${a.live_why || 'its gateway could not be read'}`)
+    if (a.jobs === null) unheard.push(`${name}: ${a.jobs_why || 'its scheduled jobs could not be read'}`)
+    for (const r of a.subagents || []) subs.push({ agent: a.id, ...r })
+    for (const r of a.processes || []) procs.push({ agent: a.id, ...r })
+    for (const r of a.jobs || []) jobs.push({ agent: a.id, ...r })
+  }
+  // The ones not heard from, in one sentence, before what the others could not read.
+  if (silent.length) unheard.unshift('Not heard from: ' + andList(silent))
+  return { subs, procs, jobs, unheard }
+}
+
+async function tasksView() {
+  setTab('tasks')
+  const r = await call('GET', '/tasks')
+  if (refused(r)) return
+  const agents = r.body.agents || []
+  const all = taskRows(agents)
+  const busy = new Set([...all.subs, ...all.procs, ...all.jobs].map(t => t.agent))
+  if (tasksOnly && !busy.has(tasksOnly)) tasksOnly = null
+  const mine = t => !tasksOnly || t.agent === tasksOnly
+  const subs = all.subs.filter(mine)
+  const procs = all.procs.filter(mine)
+  const jobs = all.jobs.filter(mine)
+  const name = t => agentName(t.agent)
+  const where = t => t.chat_title ? `${name(t)} · ${t.chat_title}` : name(t)
+  const pick = busy.size > 1 ? el('div', { class: 'picks', role: 'group', 'aria-label': 'Whose tasks' },
+    [null, ...agents.map(a => a.id).filter(id => busy.has(id))].map(id => el('button', {
+      type: 'button', class: 'pick-one', 'aria-pressed': String(tasksOnly === id),
+      onclick: () => { tasksOnly = id; tasksView() } }, id ? agentName(id) : 'All'))) : null
+  const live = (cls, words) => liveLine({ cls, words })
+  show(screenBar({ title: 'Tasks', heading: true }), pick,
+    subs.length ? [el('h2', { class: 'section' }, 'Subagents'), subs.map(t => listRow(
+      { 'data-task': 'subagent', onclick: () => go(taskChat(t.agent, t.chat)) }, {
+        agent: t.agent, title: t.goal || 'A subagent', lines: [el('span', { class: 'quiet' }, where(t)),
+          t.last_tool ? el('span', { class: 'what' }, toolWords(t.last_tool)) : null],
+        right: [t.status === 'running' || !t.status
+          ? live('on', t.background ? 'In the background' : 'Running')
+          : el('span', { class: t.status === 'failed' ? 'rec off' : 'rec' }, statusWords(t.status)),
+        forHowLong(epochIso(t.started))] }))] : null,
+    procs.length ? [el('h2', { class: 'section' }, 'Background tasks'), procs.map(t => listRow(
+      { 'data-task': 'process', onclick: () => go(taskChat(t.agent, t.chat)) }, {
+        agent: t.agent, title: el('code', { class: 'cmd' }, t.command || 'A command'), lines: [el('span', { class: 'quiet' }, where(t))],
+        right: t.status === 'running'
+          ? [live('on', 'Running'), forHowLong(epochIso(t.started))]
+          : [el('span', { class: t.exit_code === 0 ? 'rec' : 'rec off' },
+            t.exit_code === 0 ? 'Done' : t.exit_code === null ? 'Stopped' : `Failed (exit ${t.exit_code})`),
+          at(epochIso(t.ended))] }))] : null,
+    jobs.length ? [el('h2', { class: 'section' }, 'Scheduled jobs'), jobs.map(j => {
+      const failed = j.last_status && j.last_status !== 'ok'
+      return listRow({ 'data-task': 'job', onclick: () => go(taskChat(j.agent, null)) }, {
+        agent: j.agent, title: j.name || 'A job', lines: [el('span', { class: 'quiet' }, `${name(j)} · ${j.schedule || ''}`),
+          failed ? el('span', { class: 'warn' }, `Last run ${j.last_status === 'delivery_failed' ? 'was not delivered' : 'failed'}` +
+            (j.last_error ? `: ${j.last_error}` : '')) : null],
+        right: [jobLine(j)] })
+    })] : null,
+    subs.length || procs.length || jobs.length ? null
+      : el('p', { class: 'quiet' }, tasksOnly ? `${agentName(tasksOnly)} has nothing running and no scheduled jobs.`
+        : 'Nothing is running, and there are no scheduled jobs.'),
+    all.unheard.length ? el('p', { class: 'warn', role: 'status' }, all.unheard.join('. ') + '.') : null)
+}
+
+function andList(names) {
+  return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
+}
+
+function statusWords(s) {
+  return { running: 'Running', completed: 'Done', failed: 'Failed', interrupted: 'Stopped' }[s] || 'Running'
+}
+
+// A subagent's last tool in the words the line under a message uses for one (doingWords).
+function toolWords(tool) {
+  return doingWords({ state: 'tool', tool })
 }
 
 const NAMES = { bramble: 'Bramble', rift: 'Rift', sprocket: 'Sprocket', echo: 'Echo', magpie: 'Magpie', wisp: 'Wisp' }
@@ -1484,9 +1608,13 @@ function messageSheet(m) {
 
 // The bar on top of a chat: back, then the chat's name and where it lives.
 // More, when given, opens the chat's own actions.
-function chatBar(back, backLabel, title, under, agent, label, more, live) {
+function chatBar(back, backLabel, title, under, agent, label, more, live, info) {
+  const right = [
+    info ? el('button', { class: 'ib', type: 'button', 'aria-label': 'Chat details', 'data-details': '', onclick: info }, icon('info')) : null,
+    more ? el('button', { class: 'ib', type: 'button', 'aria-label': 'Chat actions', onclick: more }, icon('more')) : null
+  ].filter(Boolean)
   const bar = screenBar({ back, backLabel, agent, label, title, under, live,
-    right: more ? el('button', { class: 'ib', type: 'button', 'aria-label': 'Chat actions', onclick: more }, icon('more')) : null })
+    right: el('div', { class: 'bar-tools' }, right) })
   bar.classList.add('chatbar')
   return bar
 }
@@ -2194,7 +2322,8 @@ async function ownChatView(gw, sid) {
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
         undefined, gw, name,
-        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null, gatewayLive(v)),
+        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null, gatewayLive(v),
+        v.can_send && v.online && !h.gone && !t.error && !ended ? () => openDetails(gw, sid) : null),
       ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
       ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
         el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats')) : null,
@@ -2245,6 +2374,154 @@ async function ownChatView(gw, sid) {
   t.error = null
   keepThread('own:' + key, t)
   render()
+}
+
+// ── a chat's model and thinking: its details (own_control.py) ──────────────
+//
+// What Hermes holds for one of his own chats, read through that Hermes's connector: the model, the
+// thinking level, whether approvals are skipped in it, and what a message sent while it works does. The
+// model and the thinking level change for that chat only, never Hermes's default. Only models his
+// sign-ins, a free model or a local one covers are offered (plan Part 6, decision 4 A). On a wide screen
+// the details sit on the right in place of Decisions; on a phone they open in a sheet.
+
+const details = { open: false }
+const detailKeys = {}          // the idempotency key of each change, so asking again is the same change
+const detailWaited = new Set() // chats whose first read was waited for once on this visit
+const BUSY_WORDS = {
+  steer: 'go into the running turn at its next step',
+  queue: 'wait until the running turn ends',
+  interrupt: 'stop the running turn and start on them'
+}
+const WHY_WORDS = { subscription: 'Covered by your sign-ins', free: 'Free', local: 'On this machine' }
+const LEVEL_WORDS = { none: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High',
+  xhigh: 'Extra high', max: 'Max', ultra: 'Ultra' }
+
+function changeLine(c, name) {
+  if (!c) return null
+  const what = [c.set && c.set.model ? 'model' : null, c.set && c.set.reasoning ? 'thinking' : null]
+    .filter(Boolean).join(' and ')
+  if (c.status === 'queued') {
+    return el('p', { class: 'receipt', role: 'status' }, `Changing its ${what}. ${name} does it the next time it checks in.`)
+  }
+  if (c.status === 'done') return el('p', { class: 'receipt', role: 'status' }, `Its ${what} changed.`)
+  if (c.status === 'deferred') return el('p', { class: 'receipt', role: 'status' }, c.reason)
+  return el('p', { class: 'warn', role: 'status' }, `Its ${what} did not change: ${c.reason || 'no reason given'}`)
+}
+
+function modelName(st) {
+  const o = st.offered.find(x => x.model === st.model && x.provider === st.provider)
+  return st.model ? `${st.model}${o ? ' (' + o.name + ')' : st.provider ? ' (' + st.provider + ')' : ''}` : 'Not known'
+}
+
+// The details of one chat, as nodes for a pane or a sheet. `again` draws them again.
+async function detailsPart(gw, sid, close, again) {
+  const name = GATEWAY[gw]
+  const path = `/own/${gw}/chats/${encodeURIComponent(sid)}/control`
+  const key = `${gw}:${sid}`
+  // The first look at a chat waits up to 20 seconds for its connector's read; a redraw never waits.
+  let r = await call('GET', path + (detailWaited.has(key) ? '' : '?wait=20'))
+  detailWaited.add(key)
+  const head = screenBar({ title: 'Details', heading: true,
+    right: el('button', { class: 'ib', type: 'button', 'aria-label': 'Close details', onclick: close }, icon('x')) })
+  if (r.status === 401) { csrf = null; return [head, el('p', { class: 'warn', role: 'status' }, said(r.body))] }
+  if (r.status !== 200) return [head, el('p', { class: 'warn', role: 'status' }, r.body.message || said(r.body))]
+  const v = r.body
+  if (!v.state) {
+    return [head, el('p', { class: 'quiet', role: 'status' }, `${name} has not said yet. This fills in once it does.`),
+      changeLine(v.change, name)]
+  }
+  const st = v.state
+  const note = el('p', { class: 'warn', role: 'status' })
+  const busy = v.change && v.change.status === 'queued'
+  // The model: his current one first, then what can be picked, by why it costs nothing per message.
+  const pick = el('select', { 'aria-label': 'Model for this chat', 'data-detail': 'model' })
+  const here = st.offered.some(o => o.model === st.model && o.provider === st.provider)
+  if (!here) pick.append(el('option', { value: '', selected: '' }, `${st.model || 'Not known'} (now)`))
+  for (const why of ['subscription', 'free', 'local']) {
+    const rows = st.offered.filter(o => o.why === why)
+    if (!rows.length) continue
+    pick.append(el('optgroup', { label: WHY_WORDS[why] }, rows.map(o => {
+      const opt = el('option', { value: JSON.stringify([o.provider, o.model]) }, `${o.model} (${o.name})`)
+      if (o.model === st.model && o.provider === st.provider) opt.selected = true
+      return opt
+    })))
+  }
+  const level = el('select', { 'aria-label': 'Thinking for this chat', 'data-detail': 'reasoning' },
+    (st.levels.length ? st.levels : [st.reasoning].filter(Boolean)).map(lv => {
+      const opt = el('option', { value: lv }, LEVEL_WORDS[lv] || lv)
+      if (lv === st.reasoning) opt.selected = true
+      return opt
+    }))
+  async function save() {
+    const body = {}
+    if (pick.value) {
+      const [provider, model] = JSON.parse(pick.value)
+      if (model !== st.model || provider !== st.provider) body.model = { provider, model }
+    }
+    if (level.value && level.value !== st.reasoning) body.reasoning = level.value
+    if (!body.model && !body.reasoning) { note.textContent = 'Nothing is different from what the chat has now.'; return }
+    if (!v.can_change) {
+      const s = await passkeySignIn()
+      if (s.status !== 200) { note.textContent = said(s.body); return }
+    }
+    const k = JSON.stringify(body)
+    detailKeys[key + k] = detailKeys[key + k] || newKey()
+    note.textContent = 'Asking...'
+    const c = await call('POST', path, { ...body, idempotency_key: detailKeys[key + k] })
+    if (c.status === 200) { delete detailKeys[key + k]; return again() }
+    if (c.status === 401) { csrf = null; return signInView(said(c.body)) }
+    note.textContent = c.status === 0
+      ? 'Could not reach the core. Asking again sends the same change, never a second one.'
+      : (c.body.message || said(c.body))
+  }
+  for (const box of [pick, level]) box.addEventListener('change', () => { box.dataset.dirty = '' })
+  const row = (label, ...nodes) => el('label', { class: 'detail' }, el('span', {}, label), ...nodes)
+  return [head,
+    el('div', { class: 'details' },
+      row('Model', pick),
+      row('Thinking', level),
+      el('button', { class: 'primary', type: 'button', 'data-detail': 'save', disabled: busy ? '' : null, onclick: save },
+        v.can_change ? 'Change' : `Change (with your ${signInWord()})`),
+      changeLine(v.change, name),
+      note,
+      el('p', { 'data-detail': 'approvals' }, st.yolo
+        ? 'Approvals: skipped in this chat. Commands run without asking you.'
+        : 'Approvals: it asks you before a command its rules flag.'),
+      st.busy ? el('p', { 'data-detail': 'busy' }, `Messages sent while it works ${BUSY_WORDS[st.busy]}.`) : null)]
+}
+
+// On a wide screen: the details on the right, in place of Decisions.
+async function detailsView(into, gw, sid) {
+  const seqNow = viewSeq
+  const nodes = await detailsPart(gw, sid, () => { details.open = false; route() }, () => route())
+  if (seqNow === viewSeq || into !== 'view') showIn(into, nodes)
+}
+
+// On a phone (or a window too narrow for the right pane): the details in a sheet. While a change waits,
+// the sheet reads again every two seconds, as the poll holds while a sheet is open.
+async function detailsSheet(gw, sid) {
+  closeSheet()
+  const sheet = el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Chat details' })
+  const back = el('div', { class: 'sheet-back' }, sheet)
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  sheet.append(el('p', { class: 'quiet', role: 'status' }, 'Reading from ' + GATEWAY[gw] + '...'))
+  document.body.append(back)
+  async function fill() {
+    if (!back.isConnected) return
+    sheet.replaceChildren(...(await detailsPart(gw, sid, closeSheet, fill)).flat().filter(Boolean))
+    if (sheet.querySelector('[role="status"].receipt') && /^Changing/.test(sheet.querySelector('.receipt').textContent)) {
+      setTimeout(fill, 2000)
+    }
+  }
+  await fill()
+  const first = sheet.querySelector('select, button')
+  if (first) first.focus()
+}
+
+function openDetails(gw, sid) {
+  if (WIDE.matches && WIDEST.matches) { details.open = true; folded.side = false; return route() }
+  return detailsSheet(gw, sid)
 }
 
 // ── renaming, hiding and deleting his own chats (redesign step 3) ─────────
@@ -3198,8 +3475,7 @@ function voiceButtons() {
   if (!bar || !c || !canRecord() || bar.querySelector('.talk')) return
   const b = el('button', { class: 'ib talk', type: 'button', 'aria-label': 'Voice chat', 'aria-pressed': String(voice.mode === 'chat'),
     onclick: () => { const now = openComposer(); if (now) talk(now) } }, icon('talk'))
-  const more = bar.querySelector('.ib[aria-label="Chat actions"]')
-  bar.insertBefore(b, more)
+  bar.querySelector('.bar-tools').prepend(b)
 }
 
 function readAloud(m) {
@@ -3290,7 +3566,10 @@ async function route() {
   const d = desk(path)
   const drawn = [d.pick ? pickView(path) : mainView(path)]
   if (d.list) drawn.push(d.list('list').then(() => markCurrent(path)))
-  if (d.side) drawn.push(decisionsView('side'))
+  const ownChat = path.match(/^hermes\/(me|one)\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/)
+  if (!ownChat) details.open = false
+  if (d.side) drawn.push(details.open && ownChat ? detailsView('side', ownChat[1], ownChat[2]) : decisionsView('side'))
+  document.getElementById('side').setAttribute('aria-label', details.open && ownChat ? 'Chat details' : 'Decisions')
   await Promise.all(drawn)
 }
 
@@ -3391,6 +3670,7 @@ function mainView(path) {
   const card = path.match(/^decisions\/([A-Za-z0-9_-]{1,64})$/)
   if (card) return cardView(card[1])
   if (path === 'board') return boardView()
+  if (path === 'tasks') return tasksView()
   const bot = path.match(/^bots\/([a-z0-9][a-z0-9_-]{0,63})$/)
   if (bot) return chatView(bot[1], 'bots')
   const room = path.match(/^rooms\/([A-Za-z0-9_-]{1,64})$/)
@@ -3414,9 +3694,10 @@ async function poll() {
   // the box stays as it is (showChat). Any other box with focus or words in it (on the desktop, the chat
   // list's New chat box is on the page too) holds the redraw.
   const chatBox = '#view .dock .composer textarea'
-  const writing = [...document.querySelectorAll('textarea')].some(t => t.value && !t.matches(chatBox))
+  const writing = [...document.querySelectorAll('textarea')].some(t => t.value && !t.matches(chatBox)) ||
+    !!document.querySelector('select[data-dirty]')
   if (/^\/m\/(bramble$|room$|rooms\/|bots\/|hermes\/)/.test(path)) {
-    const other = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) &&
+    const other = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) &&
       !document.activeElement.matches(chatBox)
     if (!writing && !other) route()
     return
@@ -3476,5 +3757,10 @@ setInterval(() => {
   if (csrf && document.visibilityState === 'visible' && !answering && location.pathname === '/m/board' &&
     !document.querySelector('.sheet-back')) boardView()
 }, LIVE_MS)
+// Tasks are read again every 5 seconds while they are the page open: the connectors report every 20 or 30.
+setInterval(() => {
+  if (csrf && document.visibilityState === 'visible' && !answering && location.pathname === '/m/tasks' &&
+    !document.querySelector('.sheet-back')) tasksView()
+}, 5000)
 installBar()
 route()

@@ -9,6 +9,7 @@ way Desktop does (contracts.json "room"):
     <hermes python> -I room_send.py < {"op": "states", "profiles": ["<bot>", ...]}
     <hermes python> -I room_send.py < {"op": "react", "profile": "<bot or empty>", "session_id",
                                        "message_id", "emoji": "<one of the phone's, or null>"}
+    <hermes python> -I room_send.py < {"op": "control", "session_id", "set": {"model": {...}, "reasoning"}?}
 
 own_connector.py asks it the same readiness question for Patrick's own Hermes
 (profile empty, as that Hermes's own user), naming that gateway in `name`.
@@ -84,6 +85,26 @@ title, is already hidden or shown, or is already gone is done. It prints
 hidden chat titled exactly "Bot Chat", with every part Hermes compressed it
 into) is never changed. It needs no gateway.
 
+`tasks` reads, for the app's Tasks tab, what each named Hermes has going besides
+its chats (profile "" is the user's own Hermes), the way Hermes Desktop reads it
+(contracts.json "tasks"):
+
+    <hermes python> -I room_send.py < {"op": "tasks", "profiles": ["<bot or empty>", ...]}
+
+- subagents and background commands, from that profile's running gateway, never
+  started: `session.active_list` for its live chats, then `subagent.list` and
+  `process.list` for each (gateway/session_active_list.py, session_ancillary.py
+  read: Desktop's status stack polls the same three); a gateway that is not
+  running has none, and says its state;
+- scheduled jobs, with Hermes's own `cron.jobs.list_jobs` under that profile's
+  home, the reader Desktop's Scheduled jobs page gets from Hermes's dashboard
+  (hermes_cli/web_server_cron.py _call_cron_for_profile and _cron_store_scope);
+  a job whose latest run is claimed or running is running now (cron/executions.py).
+
+It prints {"tasks": {"<profile>": {"state", "subagents", "processes", "jobs", ...}}}.
+A part it could not read is null, with its reason beside it, never an empty list.
+Commands and errors are the ones Hermes already redacts for Desktop, cut short.
+
 `states` asks the same question of each Bot at once, for the phone's online
 dots: Hermes's own runtime state of each one's gateway (absent, starting,
 ready, draining, incompatible, inaccessible or conflict, gateway/runtime_contract.py),
@@ -123,6 +144,246 @@ def _found(profile: str):
         home = home / "profiles" / profile
     found = discover_gateway_endpoint(gateway_profile_home(home))
     return (found.endpoint if attachable(found) else None), found.state
+
+
+TASK_CHATS = 40      # the live chats whose subagents and background commands it reads, the newest first
+TASK_ROWS = 30       # at most this many of each kind for one Hermes
+TASK_SECONDS = 10    # one Hermes's gateway answers its part in this, or that part says it did not
+
+
+def _home(profile: str):
+    from pathlib import Path
+
+    from hermes_constants import get_default_hermes_root
+
+    home = Path(get_default_hermes_root())
+    return home / "profiles" / profile if profile else home
+
+
+def _cut(value, n: int):
+    return None if value is None else " ".join(str(value).split())[:n]
+
+
+def _jobs(profile: str) -> list:
+    """That profile's scheduled jobs, paused ones too, as Hermes lists them for Desktop."""
+    from agent.redact import redact_sensitive_text
+    from cron import jobs as cron_jobs
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home = _home(profile)
+    token = set_hermes_home_override(str(home))
+    try:
+        with cron_jobs.use_cron_store(home):
+            rows = cron_jobs.list_jobs(include_disabled=True)
+    finally:
+        reset_hermes_home_override(token)
+    out = []
+    for j in rows[:TASK_ROWS]:
+        run = j.get("latest_execution") if isinstance(j.get("latest_execution"), dict) else {}
+        err = j.get("last_error")
+        out.append({"id": _cut(j.get("id"), 64), "name": _cut(j.get("name"), 120),
+                    "schedule": _cut(j.get("schedule_display"), 80), "state": _cut(j.get("state"), 20),
+                    "next": _cut(j.get("next_run_at"), 40), "last": _cut(j.get("last_run_at"), 40),
+                    "last_status": _cut(j.get("last_status"), 30),
+                    # _format_job's own redaction (tools/cronjob_job_args.py)
+                    "last_error": _cut(redact_sensitive_text(err, force=True, redact_url_credentials=True), 200)
+                    if err else None,
+                    "running": run.get("status") in ("claimed", "running")})
+    return out
+
+
+async def _live(endpoint) -> dict:
+    """The subagents and background commands of the gateway's live chats."""
+    from hermes_cli.gateway_client import GatewayRPCError, connect_gateway
+
+    subs, procs, missed = [], [], []
+    async with connect_gateway(endpoint=endpoint) as client:
+        chats = (await client.rpc("session.active_list") or {}).get("sessions") or []
+        chats = sorted((c for c in chats if isinstance(c, dict) and isinstance(c.get("id"), str) and c["id"]),
+                       key=lambda c: float(c.get("started_at") or 0), reverse=True)[:TASK_CHATS]
+        for c in chats:
+            chat, title = c["id"][:128], _cut(c.get("title"), 120) or ""
+            try:
+                got_s = await client.rpc("subagent.list", session_id=c["id"]) or {}
+                got_p = await client.rpc("process.list", session_id=c["id"]) or {}
+            except GatewayRPCError as exc:
+                if str(exc) != "not_found":  # not_found: the chat closed after it was listed
+                    missed.append(str(exc))
+                continue
+            for r in got_s.get("subagents") or []:
+                if isinstance(r, dict):
+                    subs.append({"id": _cut(r.get("subagent_id"), 64), "chat": chat, "chat_title": title,
+                                 "goal": _cut(r.get("goal"), 300), "model": _cut(r.get("model"), 80),
+                                 "status": _cut(r.get("status"), 20), "depth": r.get("depth"),
+                                 "background": bool(r.get("delegation_id")), "tools": r.get("tool_count"),
+                                 "last_tool": _cut(r.get("last_tool"), 60), "started": r.get("started_at")})
+            for p in got_p.get("processes") or []:
+                if isinstance(p, dict):
+                    procs.append({"id": _cut(p.get("session_id"), 64), "chat": chat, "chat_title": title,
+                                  "command": _cut(p.get("command"), 200), "status": _cut(p.get("status"), 20),
+                                  "exit_code": p.get("exit_code"), "started": p.get("started_epoch"),
+                                  "ended": p.get("exited_at"), "why": _cut(p.get("completion_reason"), 40)})
+    out = {"subagents": subs[:TASK_ROWS], "processes": procs[:TASK_ROWS]}
+    if missed:
+        out["live_why"] = f"{len(missed)} of its chats did not answer ({missed[0][:40]})"
+    return out
+
+
+def _tasks(profile: str) -> dict:
+    out: dict = {}
+    try:
+        out["jobs"] = _jobs(profile)
+    except Exception as exc:  # its store could not be read: said, never an empty list
+        out["jobs"], out["jobs_why"] = None, f"Hermes could not read its scheduled jobs ({type(exc).__name__})"
+    try:
+        endpoint, state = _found(profile)
+    except Exception as exc:
+        endpoint, state = None, "check_failed"
+        out["live_why"] = f"could not find its gateway ({type(exc).__name__})"
+    out["state"] = str(state)
+    if endpoint is None:
+        out["subagents"] = out["processes"] = None
+        out.setdefault("live_why", f"its gateway is {state}")
+        return out
+    from hermes_cli.gateway_client import GatewayClientError
+
+    try:
+        out.update(asyncio.run(asyncio.wait_for(_live(endpoint), TASK_SECONDS)))
+    except (GatewayClientError, TimeoutError, asyncio.TimeoutError, OSError) as exc:
+        out["subagents"] = out["processes"] = None
+        out["live_why"] = (f"its gateway did not answer in {TASK_SECONDS} seconds"
+                           if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+                           else f"could not read its gateway ({type(exc).__name__}: {str(exc)[:60]})")
+    return out
+
+
+CONTROL_SECONDS = 60  # one read, or one change and its read back, answers in this
+# Sign-ins that cost nothing per message (Hermes's registry, hermes_cli/auth.py PROVIDER_REGISTRY): ChatGPT
+# (openai-codex), Grok's and Qwen's own logins and MiniMax's. Nous Portal is a sign-in too, but it spends
+# the plan's credits, so only its free models are offered. Anthropic is a sign-in only when its route
+# carries his Claude login (agent/anthropic_credentials.py anthropic_route_is_oauth); an API key there pays.
+SIGN_IN_AUTH = ("oauth_external", "oauth_minimax")
+
+
+def _signed_in(slug: str) -> bool:
+    from hermes_cli.auth import PROVIDER_REGISTRY
+
+    if slug == "anthropic":
+        from agent.anthropic_credentials import anthropic_route_is_oauth
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        try:
+            route = resolve_runtime_provider(requested="anthropic")
+        except Exception:  # no Anthropic credential at all: nothing of it is offered
+            return False
+        # The credential is only tested for its kind here; it is never printed or kept.
+        return anthropic_route_is_oauth(route.get("base_url"), route.get("api_key"), provider="anthropic")
+    cfg = PROVIDER_REGISTRY.get(slug)
+    return cfg is not None and cfg.auth_type in SIGN_IN_AUTH
+
+
+def _offered(options: dict) -> list:
+    """The models of Hermes's own picker (model.options) that cost nothing per message: covered by one of
+    his sign-ins, free in Hermes's own price list, or local (plan Part 6, decision 4 A)."""
+    out, signed = [], {}
+    for row in (options or {}).get("providers") or []:
+        if not isinstance(row, dict) or row.get("authenticated") is False or not isinstance(row.get("slug"), str):
+            continue
+        slug, pricing = row["slug"], row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+        locked = set(row.get("unavailable_models") or [])
+        for model in row.get("models") or []:
+            if not isinstance(model, str) or model in locked:
+                continue
+            price = pricing.get(model) if isinstance(pricing.get(model), dict) else {}
+            if row.get("auth_type") == "local" or row.get("source") == "local-runtime":
+                why = "local"
+            elif model.endswith(":free") or price.get("free") is True:
+                why = "free"
+            else:
+                if slug not in signed:
+                    signed[slug] = _signed_in(slug)
+                why = "subscription" if signed[slug] else None
+            if why:
+                out.append({"provider": slug, "model": model, "name": _cut(row.get("name"), 40) or slug, "why": why})
+    return out[:80]
+
+
+async def _control_read(client, sid: str) -> dict:
+    """What Hermes holds for one chat, read the way Desktop's details and pickers read it."""
+    from agent.reasoning_effort import route_supported_efforts
+
+    info = await client.rpc("session.info", session_id=sid) or {}
+    reasoning = (await client.rpc("config.get", session_id=sid, key="reasoning") or {}).get("value")
+    busy = (await client.rpc("config.get", session_id=sid, key="busy") or {}).get("value")
+    yolo = (await client.rpc("config.get", session_id=sid, key="yolo") or {}).get("value")
+    options = await client.rpc("model.options", session_id=sid) or {}
+    model = info.get("model") or options.get("model")
+    provider = info.get("provider") or options.get("provider")
+    return {"model": model, "provider": provider, "reasoning": reasoning,
+            "levels": list(route_supported_efforts(provider, model)), "yolo": yolo == "1", "busy": busy,
+            "offered": await asyncio.to_thread(_offered, options)}
+
+
+async def _control(endpoint, sid: str, want) -> dict:
+    """One chat's settings, changed first when `want` asks: a model (session.mutate model) and a thinking
+    level (session.mutate reasoning), each fenced to the chat's revision and generation by Hermes's own
+    PreparedMutations, as its ACP and TUI clients send them. A model Hermes's selection guard holds for a
+    confirmation is not switched: no confirmation is given from here."""
+    from hermes_cli.gateway_client import GatewayClientError, connect_gateway
+    from hermes_cli.gateway_mutations import PreparedMutations
+
+    applied, reason = False, ""
+    async with connect_gateway(endpoint=endpoint) as client:
+        # Opening the chat, as Desktop does before it reads or changes one (session.info needs it open).
+        await client.rpc("session.resume", session_id=sid)
+        if want:
+            mutations = PreparedMutations()
+            try:
+                pick = want.get("model")
+                if pick:
+                    # Checked again against Hermes's own list just before the switch: a request made by
+                    # hand never moves a chat to a model that is billed per message.
+                    now = _offered(await client.rpc("model.options", session_id=sid) or {})
+                    if not any(o["provider"] == pick.get("provider") and o["model"] == pick.get("model") for o in now):
+                        raise GatewayClientError("that model is not one his sign-ins, a free model or a local one covers")
+                    got = await mutations.apply(client, sid, "model",
+                                                {"model": pick["model"], "provider": pick["provider"]})
+                    if got.get("status") == "deferred":
+                        reason = "a turn is running; Hermes switches this chat when it ends"
+                if want.get("reasoning"):
+                    await mutations.apply(client, sid, "reasoning", {"effort": want["reasoning"]})
+                applied = True
+            except GatewayClientError as exc:
+                reason = str(exc)
+        state = await _control_read(client, sid)
+    return {"state": state, "applied": applied, "reason": reason[:200]}
+
+
+def _control_op(req: dict) -> dict:
+    from hermes_cli.gateway_client import GatewayClientError
+
+    sid, want = req.get("session_id"), req.get("set")
+    if not isinstance(sid, str) or not sid or len(sid) > 128 or not (want is None or isinstance(want, dict)):
+        return {"state": None, "applied": False, "reason": "bad request"}
+    if want is not None:
+        pick, level = want.get("model"), want.get("reasoning")
+        if set(want) - {"model", "reasoning"} or not (pick or level) or not (
+                pick is None or (isinstance(pick, dict) and isinstance(pick.get("model"), str)
+                                 and isinstance(pick.get("provider"), str))) or not (
+                level is None or isinstance(level, str)):
+            return {"state": None, "applied": False, "reason": "bad request"}
+    endpoint, state = _found("")
+    if endpoint is None:
+        name = req.get("name") if isinstance(req.get("name"), str) else "Hermes"
+        return {"state": None, "applied": False, "reason": f"{name[:40]}'s gateway is {state}"}
+    try:
+        return asyncio.run(asyncio.wait_for(_control(endpoint, sid, want), CONTROL_SECONDS))
+    except (TimeoutError, asyncio.TimeoutError):
+        return {"state": None, "applied": False, "reason": f"Hermes did not answer in {CONTROL_SECONDS} seconds"}
+    except GatewayClientError as exc:
+        return {"state": None, "applied": False, "reason": f"Hermes refused it ({str(exc)[:120]})"}
+    except OSError as exc:
+        return {"state": None, "applied": False, "reason": f"could not reach the gateway ({type(exc).__name__})"}
 
 
 async def _send(endpoint, req: dict) -> dict:
@@ -235,6 +496,19 @@ def main() -> int:
             except Exception:  # this one's check could not run; the others still answer
                 states[name] = "check_failed"
         print(json.dumps({"states": states}))
+        return 0
+    if op == "tasks":
+        names = req.get("profiles")
+        if not (isinstance(names, list) and 0 < len(names) <= 16 and len(set(names)) == len(names)
+                and all(isinstance(n, str) and (n == "" or PROFILE.match(n)) for n in names)):
+            print(json.dumps({"tasks": None, "reason": "bad request"}))
+            return 2
+        print(json.dumps({"tasks": {name: _tasks(name) for name in names}}))
+        return 0
+    if op == "control":
+        # His own Hermes only: a Bot's chat settings are not changed from the app.
+        print(json.dumps(_control_op(req) if not profile else
+                         {"state": None, "applied": False, "reason": "a Bot's chat settings are not changed from here"}))
         return 0
     if op not in ("send", "ready", "react", "session") or not isinstance(profile, str):
         print(json.dumps({"sent": False, "reason": "bad request"}))

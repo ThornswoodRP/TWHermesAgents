@@ -17,7 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent)); sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE))
 from decisions_helpers import World
 from thornswood_decisions.api import Api, make_server
 from thornswood_decisions.feeds import Feeds
@@ -242,6 +242,20 @@ def one_replies(o):
         # The core's clock here stands still; let the 20 seconds pass after which the core asks One for
         # the chat's newest page again, as they would while One answers.
         w.clock.advance(seconds=21)
+# One's chat settings, as its connector reads and changes them (room_send.py op control): a ChatGPT
+# sign-in model now, and a local model it can move to.
+CTL = {"model": "gpt-5.5", "provider": "openai-codex", "reasoning": "medium", "levels": ["low", "medium", "high", "xhigh"],
+       "yolo": False, "busy": "steer",
+       "offered": [{"provider": "openai-codex", "model": "gpt-5.5", "name": "OpenAI Codex", "why": "subscription"},
+                   {"provider": "openai-codex", "model": "gpt-5.5-mini", "name": "OpenAI Codex", "why": "subscription"},
+                   {"provider": "llamacpp", "model": "qwen3-8b.gguf", "name": "Local", "why": "local"}]}
+def one_control(o, r):
+    want = r.get("set") or {}
+    if want.get("model"):
+        CTL.update(model=want["model"]["model"], provider=want["model"]["provider"])
+    if want.get("reasoning"):
+        CTL["reasoning"] = want["reasoning"]
+    o.control_post(w.ws, "one", to, {"id": r["id"], "state": dict(CTL), "applied": bool(want), "reason": ""})
 def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
@@ -249,6 +263,8 @@ def one_pages():
             got = o.claim(w.ws, "one", to, 0, True, "", None, None, TURNS)
             for r in got.get("sessions", []):
                 one_session(o, r)
+            for r in got.get("controls", []):
+                one_control(o, r)
             one_replies(o)
             for r in got.get("reactions", []):
                 o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],
@@ -292,6 +308,36 @@ tc = f.new_token(w.ws, "connector", by="t")
 # The Bots' connector's report of each Bot's gateway (room_send.py op states): Bramble running, Rift not,
 # Sprocket starting; the other three left out, so they are not known.
 Chat(w.store).live(w.ws, tc, {"states": {"bramble": "ready", "rift": "absent", "sprocket": "starting"}})
+# Tasks, as the connectors report them (room_send.py op tasks): One has a subagent and a background command in
+# its chat s_md, and a job; Bramble two jobs, one paused and one whose last run failed, and a finished command;
+# Rift's gateway is absent, so it has no live part; my-hermes is never heard from.
+TASK_T0 = time.time()
+def tasks_feed():
+    store = Store(w.path, clock=w.clock)
+    chat, o = Chat(store), OwnChat(store)
+    while True:
+        o.tasks(w.ws, "one", to, {"tasks": {"state": "ready", "subagents": [
+            {"id": "sa_1", "chat": "s_md", "chat_title": "Markdown check", "goal": "Read the launcher log and find the crash",
+             "model": "claude", "status": "running", "depth": 1, "background": False, "tools": 4, "last_tool": "terminal",
+             "started": TASK_T0 - 300}], "processes": [
+            {"id": "proc_1", "chat": "s_md", "chat_title": "Markdown check", "command": "npm run build -- --watch",
+             "status": "running", "exit_code": None, "started": TASK_T0 - 1500, "ended": None, "why": None}],
+            "jobs": [{"id": "j1", "name": "Morning summary", "schedule": "every day at 8:00", "state": "scheduled",
+                      "next": "2026-11-04T15:00:00+00:00", "last": None, "last_status": None, "last_error": None,
+                      "running": False}]}})
+        chat.tasks(w.ws, tc, {"tasks": {
+            "bramble": {"state": "ready", "subagents": [], "processes": [
+                {"id": "proc_2", "chat": "s_bc", "chat_title": "Bot Chat", "command": "pytest -q", "status": "exited",
+                 "exit_code": 0, "started": TASK_T0 - 900, "ended": TASK_T0 - 600, "why": "exited"}],
+                "jobs": [{"id": "j2", "name": "Nightly merge sweep", "schedule": "0 3 * * *", "state": "scheduled",
+                          "next": "2026-11-04T10:00:00+00:00", "last": "2026-11-03T10:00:00+00:00",
+                          "last_status": "error", "last_error": "the fork was not reachable", "running": False},
+                         {"id": "j3", "name": "Weekly board review", "schedule": "every Monday", "state": "paused",
+                          "next": None, "last": None, "last_status": None, "last_error": None, "running": False}]},
+            "rift": {"state": "absent", "subagents": None, "processes": None, "jobs": [],
+                     "live_why": "its gateway is absent"}}})
+        time.sleep(1)
+threading.Thread(target=tasks_feed, daemon=True).start()
 class Direct:
     def __init__(self):
         self.chat = Chat(Store(w.path, clock=w.clock))

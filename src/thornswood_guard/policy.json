@@ -576,7 +576,7 @@
     "upstream_timeout_seconds": 900,
     "ready": {
       "credits": false,
-      "qwen": false
+      "qwen": true
     }
   },
   "admission": {

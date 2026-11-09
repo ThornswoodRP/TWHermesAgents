@@ -60,10 +60,17 @@ Every half minute, whatever connector_effects says, it also tells the core each
 Bot's gateway state for the phone's online dots (`POST /api/v1/connector/live`):
 Hermes's own runtime state, from `room_send.py` op `states`, which finds each
 gateway the way the readiness check does and never starts one. The core names
-the Bots to check in its answer. Those reports and the phone's pages run on a
-thread of their own, apart from the claims: a Bot's turn holds its round for
-as long as it runs, up to 15 minutes, and the core calls a Bot "not heard from"
-after two minutes without a report.
+the Bots to check in its answer.
+
+Every half minute too, it sends the core what each of those Bots has going
+besides its chats, for the app's Tasks tab (`POST /api/v1/connector/tasks`):
+its subagents, background commands and scheduled jobs, from `room_send.py` op
+`tasks`, read the way Hermes Desktop reads them (contracts.json "tasks").
+
+Those reports and the phone's pages run on a thread of their own, apart from
+the claims: a Bot's turn holds its round for as long as it runs, up to 15
+minutes, and the core calls a Bot "not heard from" after two minutes without a
+report.
 """
 
 from __future__ import annotations
@@ -91,6 +98,7 @@ POLL_SECONDS = 5
 TURN_SECONDS = 15 * 60
 CHECK_SECONDS = 60
 LIVE_SECONDS = 30  # how often each Bot's gateway state goes to the core, for the phone's dots
+TASKS_SECONDS = 30  # how often each Bot's subagents, background commands and scheduled jobs go to the core
 # At most this many `hermes` turns at once: each is a whole Hermes process, and
 # the unit's MemoryMax holds them all.
 PARALLEL = 3
@@ -262,6 +270,19 @@ class Hermes:
             return None
         return {k: v for k, v in states.items() if k in profiles and isinstance(v, str)}
 
+    def tasks(self, profiles: list[str]) -> dict:
+        """Each Bot's subagents, background commands and scheduled jobs (room_send.py op `tasks`), in one
+        helper run; {"why": ...} when the helper itself could not say."""
+        got = self._helper({"op": "tasks", "profiles": profiles}, CHECK_SECONDS)
+        if got is None:
+            return {"why": "the tasks helper did not answer in a minute"}
+        if got.get("helper_failed"):
+            return {"why": str(got.get("reason"))[:200]}
+        tasks = got.get("tasks")
+        if not isinstance(tasks, dict):
+            return {"why": str(got.get("reason") or "the tasks helper gave no tasks")[:200]}
+        return {"tasks": {k: v for k, v in tasks.items() if k in profiles and isinstance(v, dict)}}
+
     def to_room(self, room_id: str, send_key: str, text: str) -> tuple[str, str, str]:
         got = self._helper({"op": "send", "room_id": room_id, "event_id": send_key, "text": text}, CHECK_SECONDS)
         if got is None:
@@ -391,6 +412,8 @@ class Connector:
         self.doing: dict[str, dict] = {}    # each Bot Chat turn running now: what it is doing
         self.live_bots: list[str] = []      # the Bots the core asked about last time
         self.live_at: float | None = None
+        self.tasks_at: float | None = None
+        self._tasks_run: threading.Thread | None = None
 
     def deliver(self, item: dict) -> dict:
         if item["target"] == "room":
@@ -548,6 +571,30 @@ class Connector:
             self.say(f"FAIL live: the core answered {status}")
         return status == 200
 
+    def tasks(self, clock=time.monotonic) -> bool:
+        """Every TASKS_SECONDS, in a thread of its own so a slow read holds up no message or page: the Bots'
+        subagents, background commands and scheduled jobs, for the app's Tasks tab
+        (`POST /api/v1/connector/tasks`). The Bots are the ones the core named for the dots. Returns whether a
+        round started."""
+        now = clock()
+        if (self._tasks_run is not None and self._tasks_run.is_alive()) or not self.live_bots or (
+                self.tasks_at is not None and now - self.tasks_at < TASKS_SECONDS):
+            return False
+        self.tasks_at = now
+        bots = list(self.live_bots)
+
+        def report():
+            body = self.hermes.tasks(bots)
+            status, _ = self.core.post("/connector/tasks", body)
+            if "why" in body:
+                self.say(f"FAIL tasks: {body['why']}")
+            elif status not in (200, 423):
+                self.say(f"FAIL tasks: the core answered {status}")
+
+        self._tasks_run = threading.Thread(target=report, daemon=True)
+        self._tasks_run.start()
+        return True
+
     def pages(self) -> int:
         """The pages the phone asked for: each Bot Chat or room read from Hermes's own stores, read only, and
         posted. Reading only, so it runs whatever connector_effects says. Returns how many were posted."""
@@ -578,12 +625,13 @@ class Connector:
         return sent
 
     def reads(self, sleep=time.sleep) -> None:
-        """The phone's pages and each Bot's state, every few seconds, whatever connector_effects says. Reading
+        """The phone's pages, each Bot's state and its tasks, every few seconds, whatever connector_effects says. Reading
         only, so it never waits on a claim round: a round waits for its turns, and on 8 Nov a three-minute turn
         to Bramble left all six Bots "not heard from" on the phone while it ran."""
         while True:
             self.pages()
             self.live()
+            self.tasks()
             sleep(POLL_SECONDS)
 
     def forever(self) -> None:

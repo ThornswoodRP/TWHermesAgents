@@ -40,6 +40,7 @@ from pathlib import Path
 from .auth import Principal
 from . import reactions
 from .feeds import Feeds
+from .own_control import CONTROLS, MAX_WAIT as CONTROL_WAIT, wanted as control_wanted
 from .own_sessions import OwnSessions
 from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
 from .schema import OWN_GATEWAYS
@@ -1057,6 +1058,63 @@ class OwnChat:
         PAGES.answer(workspace_id, gw, body["id"], clean_page(key[2], body.get("page")), self.s.clock())
         return {"ok": True}
 
+    # ── this chat's model and thinking: the details pane (own_control.py) ───
+
+    def control(self, p: Principal, gw: str, chat, wait=0) -> dict:
+        """What Hermes holds for one chat: its model, thinking level, approvals and busy setting, and the
+        models that can be picked, with the newest change asked for and how it went. From memory, or read
+        through the connector, waiting at most `wait` seconds; "pending" while no read is in."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        chat = _sid(chat)
+        if not self._listed(p.workspace_id, gw, chat):
+            raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
+        try:
+            wait = min(max(float(wait or 0), 0.0), CONTROL_WAIT)
+        except (TypeError, ValueError):
+            raise CoreError(400, "bad_wait", f"wait is 0 to {CONTROL_WAIT} seconds") from None
+        key, now = (p.workspace_id, gw, chat), self.s.clock()
+        CONTROLS.ask(key, now)
+        if wait:
+            CONTROLS.wait(key, wait, None)
+        got = CONTROLS.state(key, self.s.clock())
+        return {"pending": got["state"] is None, **got, "can_change": self.sign_in_until(p) is not None}
+
+    def control_set(self, p: Principal, gw: str, chat, body) -> dict:
+        """Change one chat's model, thinking level or both; that chat only, never Hermes's default."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        chat = _sid(chat)
+        if not self._listed(p.workspace_id, gw, chat):
+            raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
+        if self.sign_in_until(p) is None:
+            raise CoreError(403, "passkey_needed", "changing a chat's model or thinking needs a passkey sign-in "
+                            "from the last 30 minutes, as a message does; sign in with your passkey again")
+        idem = body.get("idempotency_key") if isinstance(body, dict) else None
+        if not isinstance(idem, str) or not 8 <= len(idem) <= 200:
+            raise CoreError(400, "bad_key", "a change carries an idempotency key of 8 to 200 characters")
+        key = (p.workspace_id, gw, chat)
+        want = control_wanted(CONTROLS.state(key, self.s.clock())["state"], body)
+        self.must_be_online(p.workspace_id, gw)
+        out = CONTROLS.change(key, want, idem, self.s.clock())
+        if not out.get("replayed"):
+            with self.s.tx() as db:
+                # What was asked for, never any words of the chat.
+                self.s.event(db, p.workspace_id, "own.control", out["id"], "patrick",
+                             {"gateway": gw, "device": p.device_id, **want})
+        return out
+
+    def control_post(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """What the connector read for a chat, and for a change whether Hermes took it."""
+        self._check_token(workspace_id, gw, token)
+        if not self.s.flag(workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "the core takes no control answer while own_chat_write is off")
+        return CONTROLS.answer(workspace_id, gw, body, self.s.clock())
+
     # ── the connector's side ──────────────────────────────────────────────
 
     def feed(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
@@ -1075,6 +1133,16 @@ class OwnChat:
                        "received_at = excluded.received_at",
                        (workspace_id, gw, text, digest, snap["source_time"], self.s.now()))
         return {"sha256": digest, "wanted": self._wanted(workspace_id, gw)}
+
+    def tasks(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """What this Hermes has going besides its chats, for the app's Tasks tab (tasks.py). Refused while
+        own_chat_write is off, like the chat list, since it names his chats."""
+        self._check_token(workspace_id, gw, token)
+        if not self.s.flag(workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "the core takes nothing of his own Hermes while own_chat_write is off")
+        from .tasks import Tasks
+        Tasks(self.s).put(workspace_id, gw, body)
+        return {}
 
     def claim(self, workspace_id: str, gw: str, token: str | None, limit: int = MAX_CLAIM, ready=False,
               why: str = "", state: str | None = None, forwarded_for: str | None = None,
@@ -1132,7 +1200,7 @@ class OwnChat:
             sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
                 "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "sessions": sessions,
-                "release": RELEASE}
+                "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [], "release": RELEASE}
 
     def reacted(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
         """What came of setting one reaction. An answer about an older wish than the newest is dropped,

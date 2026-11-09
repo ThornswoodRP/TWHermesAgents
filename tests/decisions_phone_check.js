@@ -3,11 +3,12 @@ const { chromium } = require('playwright')
 // testing API): setting up the phone (pairing and its first passkey on one
 // screen), a deep link, adding a passkey, signing in with it,
 // answering a card (it leaves Decisions for good), a high-risk card's own
-// check screen, the four tabs, the Thornswood Bots list (Hermes, One, then the
+// check screen, the five tabs, the Thornswood Bots list (Hermes, One, then the
 // six Bots) and a chat with Patrick's own Hermes on One (as text, a new chat,
 // Hermes on the VM with no connector yet, and reactions: Hermes's own, setting
 // one from a message's actions and taking it off), the Rooms
-// list and a room (as text), the Board,
+// list and a room (as text), the Tasks tab (subagents, background commands and
+// scheduled jobs of every agent in one list, narrowed to one), the Board,
 // the install hint, the service worker, and alerts: a "no" kept, a push shown
 // as the one quiet line with its card's tag (delivered by DevTools, with no
 // push service), the alert of an answered card taken off, the alert of an
@@ -179,9 +180,44 @@ const base = `http://localhost:${port}`
   await step('then the passkey prompt opens by itself and answers it, with no button', async () => {
     await page.getByText('Answered "Delete the old test branches?": Wait.', { exact: true }).waitFor({ timeout: 8000 })
   })
-  await step('four tabs: Bots, Rooms, Board and Decisions', async () => {
+  await step('five tabs: Bots, Rooms, Tasks, Board and Decisions', async () => {
     const tabs = (await page.locator('#tabs a').allTextContents()).map(t => t.replace(/\s*\d*\s*$/, '').trim())
-    if (JSON.stringify(tabs) !== JSON.stringify(['Bots', 'Rooms', 'Board', 'Decisions'])) throw new Error(JSON.stringify(tabs))
+    if (JSON.stringify(tabs) !== JSON.stringify(['Bots', 'Rooms', 'Tasks', 'Board', 'Decisions'])) throw new Error(JSON.stringify(tabs))
+  })
+  await page.getByRole('link', { name: 'Tasks' }).click()
+  await step("Tasks: every agent's subagents, background tasks and scheduled jobs in one list", async () => {
+    await page.getByRole('heading', { name: 'Tasks', exact: true }).waitFor({ timeout: 5000 })
+    await page.getByText('Read the launcher log and find the crash').waitFor({ timeout: 8000 })
+    const got = await page.evaluate(() => ({
+      sections: [...document.querySelectorAll('#view h2.section')].map(h => h.textContent),
+      rows: [...document.querySelectorAll('#view button.row')].map(r => [r.dataset.task,
+        r.querySelector('.av').textContent, r.querySelector('strong').textContent,
+        [...r.querySelectorAll('.w .rec')].map(e => e.textContent).join('|')]),
+      warn: (document.querySelector('#view p.warn') || {}).textContent || '' }))
+    if (JSON.stringify(got.sections) !== JSON.stringify(['Subagents', 'Background tasks', 'Scheduled jobs'])) throw new Error(JSON.stringify(got))
+    const want = [['subagent', 'O', 'Read the launcher log and find the crash', 'Running'],
+      ['process', 'O', 'npm run build -- --watch', 'Running'], ['process', 'B', 'pytest -q', 'Done'],
+      ['job', 'O', 'Morning summary', got.rows[3] && got.rows[3][3]], ['job', 'B', 'Nightly merge sweep', got.rows[4] && got.rows[4][3]],
+      ['job', 'B', 'Weekly board review', 'Paused']]
+    if (JSON.stringify(got.rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(got.rows))
+    if (!/^Next /.test(got.rows[3][3])) throw new Error('a scheduled job says ' + got.rows[3][3])
+    await page.getByText('Last run failed: the fork was not reachable').waitFor({ timeout: 2000 })
+    for (const said of ['Not heard from: Hermes, Sprocket, Echo, Magpie and Wisp.', 'Rift: its gateway is absent.']) {
+      if (!got.warn.includes(said)) throw new Error('the foot does not say ' + said + ': ' + got.warn)
+    }
+    if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Tasks') throw new Error('not on the Tasks tab')
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-tasks.png', fullPage: true })
+  await step("Tasks narrowed to one agent, and a subagent's row opens its chat", async () => {
+    const picks = await page.locator('#view .pick-one').allTextContents()
+    if (JSON.stringify(picks) !== JSON.stringify(['All', 'One', 'Bramble'])) throw new Error(JSON.stringify(picks))
+    await page.locator('#view .pick-one', { hasText: 'Bramble' }).click()
+    await page.locator('#view .pick-one[aria-pressed="true"]', { hasText: 'Bramble' }).waitFor({ timeout: 3000 })
+    const shown = await page.locator('#view button.row strong').allTextContents()
+    if (JSON.stringify(shown) !== JSON.stringify(['pytest -q', 'Nightly merge sweep', 'Weekly board review'])) throw new Error(JSON.stringify(shown))
+    await page.locator('#view .pick-one', { hasText: 'All' }).click()
+    await page.getByText('Read the launcher log and find the crash').click()
+    await page.waitForURL(/\/m\/hermes\/one\/s_md$/, { timeout: 5000 })
   })
   await page.getByRole('link', { name: 'Bots' }).click()
   await step('the Thornswood Bots list: Hermes, One, then the six Bots', async () => {
@@ -1058,7 +1094,7 @@ const base = `http://localhost:${port}`
   const LONG = 'https://github.com/ThornswoodRP/TWHermesAgents/pull/44/commits/2e308db923bf40880adae89d38fedb307c18aa46'
   for (const [width, zoom] of [[412, 1], [360, 1], [412, 1.3], [1440, 1]]) {
     await page.setViewportSize({ width, height: 860 })
-    for (const view of ['/m/bots', '/m/rooms', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',
+    for (const view of ['/m/bots', '/m/rooms', '/m/tasks', '/m/board', '/m/decisions', '/m/decisions/' + card, '/m/settings',
       '/m/hermes/one', '/m/hermes/one/s_plan', '/m/hidden/one', '/m/bots/bramble', '/m/room']) {
       await page.goto(base + view)
       await page.locator('#view').filter({ hasNotText: 'Loading...' }).waitFor({ timeout: 5000 })
@@ -1099,6 +1135,15 @@ const base = `http://localhost:${port}`
     if (got.agent !== 'One') throw new Error('the rail marks ' + got.agent)
     if (!got.view.includes('Plan the week') || got.wider) throw new Error(JSON.stringify(got))
   })
+  await step('Tasks on the desktop: the rail has its tab, the list fills the middle, and Decisions stay on the right', async () => {
+    await page.locator('#tabs a[data-tab="tasks"]').click()
+    await page.getByText('Read the launcher log and find the crash').waitFor({ timeout: 8000 })
+    await page.locator('#side').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+    const got = await layout()
+    if (got.list || !got.side || !got.agents || got.wider) throw new Error(JSON.stringify(got))
+    if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Tasks') throw new Error('not on the Tasks tab')
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-desktop-tasks.png' })
   await step("the rail opens a Bot's chat, and the list beside it marks that Bot", async () => {
     await page.goto(base + '/m/bots')
     await page.locator('#view').getByText('Pick Hermes, One or a Bot on the left.').waitFor({ timeout: 5000 })
@@ -1123,6 +1168,20 @@ const base = `http://localhost:${port}`
     got = await layout()
     if (!got.list || !got.side) throw new Error(JSON.stringify(got))
   })
+  await step("a chat's details open on the right in place of Decisions, and close back to them", async () => {
+    await page.goto(base + '/m/hermes/one/s_plan')
+    await page.locator('#side').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+    await page.getByRole('button', { name: 'Chat details' }).click()
+    await page.locator('#side select[data-detail="model"]').waitFor({ timeout: 25000 })
+    if ((await page.locator('#side').getAttribute('aria-label')) !== 'Chat details') throw new Error('the pane is not named for the details')
+    await page.locator('#side').getByText('Approvals: it asks you before a command its rules flag.').waitFor({ timeout: 3000 })
+    await page.locator('#side').getByText('Messages sent while it works go into the running turn at its next step.').waitFor({ timeout: 3000 })
+    const got = await layout()
+    if (!got.list || !got.side || got.wider || got.sideText.includes('Waiting on you')) throw new Error(JSON.stringify(got))
+    await page.screenshot({ path: require('os').tmpdir() + '/tw-desktop-details.png' })
+    await page.getByRole('button', { name: 'Close details' }).click()
+    await page.locator('#side').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
+  })
   await step('Decisions is not shown twice: on its own tab it is the middle, with no pane on the right', async () => {
     await page.goto(base + '/m/decisions')
     await page.locator('#view').getByText(/^Waiting on you \(/).waitFor({ timeout: 5000 })
@@ -1143,6 +1202,31 @@ const base = `http://localhost:${port}`
     if (got.list || got.side || got.agents || got.railWidth < 400 || !got.view.includes('Plan the week')) throw new Error(JSON.stringify(got))
   })
   await page.setViewportSize({ width: 412, height: 860 })
+
+  // ── a chat's details on the phone: a sheet ──
+  await page.goto(base + '/m/hermes/one/s_plan')
+  await page.getByRole('button', { name: 'Chat details' }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details' })
+  await step("a chat's details open in a sheet with what One holds for it, offering only models that cost nothing per message", async () => {
+    const model = details.locator('select[data-detail="model"]')
+    await model.waitFor({ timeout: 25000 })
+    const groups = await model.locator('optgroup').evaluateAll(gs => gs.map(g => g.label + ': ' + [...g.children].map(o => o.textContent).join(', ')))
+    if (groups.join(' | ') !== 'Covered by your sign-ins: gpt-5.5 (OpenAI Codex), gpt-5.5-mini (OpenAI Codex) | On this machine: qwen3-8b.gguf (Local)') throw new Error(groups.join(' | '))
+    if ((await details.locator('select[data-detail="reasoning"]').inputValue()) !== 'medium') throw new Error('thinking is not medium')
+    const wide = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+    if (wide) throw new Error('the sheet is wider than the phone')
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-details.png' })
+  await details.locator('select[data-detail="model"]').selectOption({ label: 'qwen3-8b.gguf (Local)' })
+  await details.locator('select[data-detail="reasoning"]').selectOption('high')
+  await details.locator('button[data-detail="save"]').click()
+  await step('a change goes to One and the sheet shows what One then holds', async () => {
+    await details.getByText('Its model and thinking changed.').waitFor({ timeout: 20000 })
+    const model = JSON.parse(await details.locator('select[data-detail="model"]').inputValue())
+    if (model.join() !== 'llamacpp,qwen3-8b.gguf') throw new Error('the model is ' + model)
+    if ((await details.locator('select[data-detail="reasoning"]').inputValue()) !== 'high') throw new Error('thinking is not high')
+  })
+  await details.getByRole('button', { name: 'Close details' }).click()
 
   // ── voice ──
   const barMode = () => page.evaluate(() => { const b = document.getElementById('voicebar'); return b && !b.hidden ? b.dataset.mode : null })

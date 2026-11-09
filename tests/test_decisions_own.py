@@ -538,6 +538,10 @@ HERMES = textwrap.dedent("""\
 READY = textwrap.dedent("""\
     import json, os, sys
     req = json.loads(sys.stdin.read())
+    if req.get("op") == "tasks":
+        # The Tasks tab's read (room_send.py op tasks): this Hermes has nothing going besides its chats.
+        print(json.dumps({"tasks": {"": {"state": "ready", "subagents": [], "processes": [], "jobs": []}}}))
+        sys.exit(0)
     ok = os.environ.get("TW_FAKE_READY", "1") == "1"
     print(json.dumps({"ready": ok, "reason": req.get("name", "") + " is absent"}))
 """)
@@ -576,6 +580,9 @@ class FakeCore:
                 return 200, self.own.feed(self.ws, self.gw, self.token, body)
             if op == "page":
                 return 200, self.own.page_post(self.ws, self.gw, self.token, body)
+            if op == "tasks":
+                # The Tasks tab's report, which test_decisions_tasks checks against the real core.
+                return 200, {}
             return 200, self.own.result(self.ws, self.gw, self.token, body["id"], body["outcome"], body["ref"],
                                         body["reason"], body.get("session_id"))
         except CoreError as exc:

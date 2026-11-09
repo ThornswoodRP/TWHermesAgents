@@ -59,7 +59,7 @@ APP_FILES = {
 # The app's own views, each a deep link that loads the shell. needs-you, work
 # and room are the tabs' first names (before Decisions, Board and Rooms), kept
 # so an old alert or home screen link still opens.
-APP_VIEWS = re.compile(r"^(|decisions|board|rooms|bots|bramble|settings|needs-you|work|room|"
+APP_VIEWS = re.compile(r"^(|decisions|board|tasks|rooms|bots|bramble|settings|needs-you|work|room|"
                        r"decisions/[A-Za-z0-9_-]{1,64}|bots/[a-z0-9][a-z0-9_-]{0,63}|rooms/[A-Za-z0-9_-]{1,64}|"
                        r"hermes/(?:me|one)|hermes/(?:me|one)/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}|hidden/(?:me|one))$")
 APP_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
@@ -70,9 +70,10 @@ SW_CSP = "default-src 'none'; connect-src 'self'; img-src 'self'"
 # Data the phone reads only while mobile_read is on. Signing in, adding a
 # passkey and signing out work with it off, so the phone can be set up first.
 APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room"), ("GET", "chat"), ("GET", "push"),
-            ("GET", "own"), ("POST", "own"), ("POST", "voice")}
+            ("GET", "own"), ("POST", "own"), ("POST", "voice"),
+            ("GET", "tasks")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment")
+OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks", "control")
 # A file or photo for a message to his own Hermes comes as its own bytes, not JSON (own.py attach).
 ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/own/[a-z]+/attach$")
 # A recording to dictate from comes as its own bytes too (voice.py).
@@ -228,6 +229,10 @@ class Api:
                 return 200, own.reacted(self.ws, route[1], token, data)
             if route[2] == "session_done":
                 return 200, own.session_done(self.ws, route[1], token, data)
+            if route[2] == "tasks":
+                return 200, own.tasks(self.ws, route[1], token, data)
+            if route[2] == "control":
+                return 200, own.control_post(self.ws, route[1], token, data)
             if route[2] == "attachment":
                 return 200, Raw(own.attachment(self.ws, route[1], token, data.get("id"))[1])
             if route[2] == "claim":
@@ -260,6 +265,8 @@ class Api:
                 return 200, Chat(core.s).page_requests(self.ws, token)
             if route[1] == "live":
                 return 200, Chat(core.s).live(self.ws, token, data)
+            if route[1] == "tasks":
+                return 200, Chat(core.s).tasks(self.ws, token, data)
             if route[1] == "page":
                 return 200, Chat(core.s).page_post(self.ws, token, data)
             if route[1] == "claim":
@@ -330,6 +337,8 @@ class Api:
             return 200, Push(core.s).unsubscribe(p)
         if method == "POST" and route == ["push", "denied"]:
             return 200, Push(core.s).denied(p)
+        if method == "GET" and route == ["tasks"]:
+            return 200, Chat(core.s).tasks_view(p)
         if method == "GET" and route == ["chat"]:
             return 200, Chat(core.s).summary(p)
         if method == "GET" and len(route) == 3 and route[0] == "chat" and route[2] == "messages":
@@ -353,6 +362,10 @@ class Api:
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "session":
             return 200, OwnChat(core.s).session(p, route[1], data.get("session_id"), data.get("op"),
                                                 data.get("title"), data.get("idempotency_key"))
+        if len(route) == 5 and route[0] == "own" and route[2] == "chats" and route[4] == "control":
+            if method == "GET":
+                return 200, OwnChat(core.s).control(p, route[1], route[3], wait=query.get("wait"))
+            return 200, OwnChat(core.s).control_set(p, route[1], route[3], data)
         if method == "GET" and len(route) == 5 and route[0] == "own" and route[2] == "chats" and route[4] == "messages":
             return 200, OwnChat(core.s).page(p, route[1], "messages", chat=route[3], before=query.get("before"),
                                              wait=query.get("wait"))
