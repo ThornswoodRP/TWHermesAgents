@@ -59,6 +59,7 @@ from .feeds import Feeds, room_events
 from .own import DOING_STATES, PAGE_TEXT, PAGES, TOOL_NAME, _page_mid, clean_page, fetch_page, page_kind
 from .reactions import Reactions
 from .reactions import emoji as _emoji
+from .tasks import Tasks
 from .reactions import message_id as _message_id
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
@@ -394,6 +395,32 @@ class Chat:
             with _LIVE_LOCK:
                 _LIVE[workspace_id] = {"at": self.s.clock(), "states": dict(states), "why": (why or "")[:200]}
         return {"bots": bots}
+
+    def tasks(self, workspace_id: str, token: str | None, body) -> dict:
+        """The Bots' connector's report of what each Bot has going besides its chats (tasks.py). Reading only,
+        so it is taken while mobile_read is on, whatever connector_effects says."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not self.s.flag(workspace_id, "mobile_read"):
+            raise CoreError(423, "mobile_read_off", "the phone reads nothing while mobile_read is off")
+        bots = self.bots(workspace_id)
+        if not isinstance(body, dict):
+            raise CoreError(400, "bad_tasks", "a report is a JSON object")
+        if "why" in body:
+            for bot in bots:
+                Tasks(self.s).put(workspace_id, bot, {"why": body.get("why")})
+            return {"bots": bots}
+        reports = body.get("tasks")
+        if not isinstance(reports, dict) or any(k not in bots for k in reports):
+            raise CoreError(400, "bad_tasks", "tasks names bound Bots")
+        for bot, report in reports.items():
+            Tasks(self.s).put(workspace_id, bot, {"tasks": report})
+        return {"bots": bots}
+
+    def tasks_view(self, p: Principal) -> dict:
+        """The app's Tasks tab: Hermes, One and each bound Bot, in the rail's order (tasks.py)."""
+        self._patrick(p)
+        from .schema import OWN_GATEWAYS
+        return Tasks(self.s).view(p.workspace_id, [*OWN_GATEWAYS, *self.bots(p.workspace_id)])
 
     def live_states(self, workspace_id: str) -> dict:
         """Each Bot's state for the phone: Hermes's own word for its gateway and when it was read; "not_heard"

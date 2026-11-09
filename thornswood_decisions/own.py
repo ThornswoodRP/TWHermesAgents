@@ -1076,6 +1076,16 @@ class OwnChat:
                        (workspace_id, gw, text, digest, snap["source_time"], self.s.now()))
         return {"sha256": digest, "wanted": self._wanted(workspace_id, gw)}
 
+    def tasks(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """What this Hermes has going besides its chats, for the app's Tasks tab (tasks.py). Refused while
+        own_chat_write is off, like the chat list, since it names his chats."""
+        self._check_token(workspace_id, gw, token)
+        if not self.s.flag(workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "the core takes nothing of his own Hermes while own_chat_write is off")
+        from .tasks import Tasks
+        Tasks(self.s).put(workspace_id, gw, body)
+        return {}
+
     def claim(self, workspace_id: str, gw: str, token: str | None, limit: int = MAX_CLAIM, ready=False,
               why: str = "", state: str | None = None, forwarded_for: str | None = None,
               doing: dict | None = None) -> dict:

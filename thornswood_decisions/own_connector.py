@@ -43,6 +43,10 @@ Every few seconds it:
 4. every 20 seconds, and after each turn, sends the core the chat list, the
    way Hermes's own pickers list it, with the last messages of the five most
    recent chats and of any the phone asked for (`POST /own/<gateway>/feed`).
+5. every 20 seconds, in a thread of its own, sends what this Hermes has going
+   besides its chats, for the app's Tasks tab (`POST /own/<gateway>/tasks`):
+   its subagents, background commands and scheduled jobs, read by room_send.py
+   op `tasks` the way Hermes Desktop reads them (contracts.json "tasks").
 
 While own_chat_write is off the core answers 423 to all of it; this waits and
 copies nothing. It logs no message text, no chat title and no token.
@@ -62,6 +66,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -72,6 +77,7 @@ GATEWAYS = {"me": "my-hermes", "one": "One's Hermes"}
 POLL_SECONDS = 5
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 FEED_SECONDS = 20
+TASKS_SECONDS = 20      # how often its subagents, background commands and scheduled jobs go to the core
 READY_SECONDS = 60       # how often a running gateway is checked again
 NOT_READY_SECONDS = 15   # and one that was not running
 TURN_SECONDS = 15 * 60
@@ -129,10 +135,22 @@ def printed(data: bytes | None, n: int = 120) -> str:
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
+LOG = "connector.log"     # One's record, beside this file, for a connector that has no stdout
+LOG_BYTES = 1_000_000    # kept to about this size, with the one before it as connector.log.1
+
+
 def say(line: str) -> None:
-    """One line to the journal now. Under pythonw (One's task, with no window) there is no stdout."""
+    """One line to the journal now. Under pythonw (One's task, with no window) there is no stdout, so the line
+    goes to connector.log beside this file, with the time: on 7 Nov One's connector stopped at 7:17 PM and
+    nothing on One said why."""
     if sys.stdout is not None:
         print(line, flush=True)
+        return
+    path = Path(__file__).resolve().parent / LOG
+    if path.is_file() and path.stat().st_size > LOG_BYTES:
+        os.replace(path, path.with_name(LOG + ".1"))
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} {line}\n")
 
 
 def read_token(path: Path) -> str:
@@ -758,6 +776,26 @@ class Hermes:
         reason = got.get("reason") if isinstance(got, dict) else None
         return "failed", str(reason or "not done")[:200]
 
+    def tasks(self) -> dict:
+        """This Hermes's subagents, background commands and scheduled jobs (room_send.py op `tasks`), as the
+        helper read them; {"why": ...} when the helper itself could not say."""
+        req = json.dumps({"op": "tasks", "profiles": [""]}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
+                                 timeout=CHECK_SECONDS, cwd=str(self.home_dir), check=False, env=probe_env())
+        except subprocess.TimeoutExpired as exc:
+            return {"why": f"the tasks helper did not answer in a minute; it printed: {printed(exc.stderr)}"[:200]}
+        except OSError:
+            return {"why": "could not run the tasks helper with Hermes's Python"}
+        try:
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            got = None
+        mine = got.get("tasks", {}).get("") if isinstance(got, dict) and isinstance(got.get("tasks"), dict) else None
+        if not isinstance(mine, dict):
+            return {"why": f"the tasks helper failed (exit {out.returncode}): {printed(out.stderr, 160)}"[:200]}
+        return mine
+
     def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
@@ -945,16 +983,31 @@ def supervise(argv: list[str], run=subprocess.Popen, sleep=time.sleep, rounds: i
     when it stops to load an update, and a minute after any other stop. On Windows the connector is in
     a job object that ends with this process, so stopping the task never leaves a connector behind."""
     child = [sys.executable, "-I", str(Path(__file__).resolve()), *[a for a in argv if a != "--supervise"]]
-    job = _job() if WINDOWS and contain else None
-    n = 0
-    while rounds is None or n < rounds:
-        n += 1
-        proc = run(child, stdin=subprocess.DEVNULL, **quiet())
-        if job is not None:
-            _in_job(job, proc)
-        if proc.wait() != UPDATE_EXIT:
-            sleep(RESTART_SECONDS)
+    try:
+        job = _job() if WINDOWS and contain else None
+        n = 0
+        while rounds is None or n < rounds:
+            n += 1
+            proc = run(child, stdin=subprocess.DEVNULL, **quiet())
+            if job is not None:
+                _in_job(job, proc)
+            code = proc.wait()
+            if code == UPDATE_EXIT:
+                say("NOTE the connector stopped to load an update; starting the new copy")
+            else:
+                say(f"NOTE the connector stopped with exit code {code}; starting it again in {RESTART_SECONDS}s")
+                sleep(RESTART_SECONDS)
+    except BaseException as exc:
+        say(f"STOP the supervisor: {_why(exc)}")
+        raise
     return 0
+
+
+def _why(exc: BaseException) -> str:
+    """What stopped it, on one line: a SystemExit's own words, else the exception and where it was raised."""
+    if isinstance(exc, SystemExit):
+        return str(exc.code)
+    return " | ".join(" ".join(part.split()) for part in traceback.format_exception(exc)[-3:])
 
 
 def _job():
@@ -1088,6 +1141,8 @@ class OwnConnector:
         self._ready_at = None
         self._fed_at = None
         self.feed_now = True
+        self._tasks_at = None
+        self._tasks_run: threading.Thread | None = None
         self.last_claim = None
 
     def ready(self) -> tuple[str, str]:
@@ -1266,6 +1321,28 @@ class OwnConnector:
             self.say(f"FAIL feed: the core answered {status}")
         return status
 
+    def tasks(self) -> bool:
+        """Every TASKS_SECONDS, in a thread of its own so a slow read holds up no message: what this Hermes
+        has going besides its chats, read by the helper and posted (`POST /own/<gateway>/tasks`). Returns
+        whether a round started."""
+        now = self.clock()
+        if (self._tasks_run is not None and self._tasks_run.is_alive()) or (
+                self._tasks_at is not None and now - self._tasks_at < TASKS_SECONDS):
+            return False
+        self._tasks_at = now
+
+        def report():
+            got = self.hermes.tasks()
+            status, _ = self.core.post("tasks", {"why": got["why"]} if set(got) == {"why"} else {"tasks": got})
+            if set(got) == {"why"}:
+                self.say(f"FAIL tasks: {got['why']}")
+            elif status not in (200, 423):
+                self.say(f"FAIL tasks: the core answered {status}")
+
+        self._tasks_run = threading.Thread(target=report, daemon=True)
+        self._tasks_run.start()
+        return True
+
     def busy(self) -> dict:
         """What it is doing, for the phone's words about a message that waits: how many turns are running,
         of how many at once, since when the oldest runs, its commit, and an update it is on or could not do."""
@@ -1332,6 +1409,7 @@ class OwnConnector:
             self.feed_now = False
             self._fed_at = now
             self.feed()
+        self.tasks()
         return len(items)
 
     def forever(self) -> None:
@@ -1388,7 +1466,15 @@ def main(argv: list[str]) -> int:
         print(("WAIT own_chat_write is off" if n < 0 else f"PASS {n} handed to {GATEWAYS[args.gateway]}")
               + said.get(state, ""))
         return 1 if conn.unsaid else 0
-    conn.forever()
+    try:
+        conn.forever()
+    except SystemExit as exc:
+        if exc.code != UPDATE_EXIT:
+            say(f"STOP the connector: {_why(exc)}")
+        raise
+    except BaseException as exc:
+        say(f"STOP the connector: {_why(exc)}")
+        raise
     return 0
 
 
