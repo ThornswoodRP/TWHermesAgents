@@ -24,6 +24,11 @@ each day, when the Grok lanes stop (bramble-duties, section 5). The free
 worker wake runs a sweep when a worker holds no claimed issue and the board
 has an eligible issue it could take (section 6), looked at once every
 IDLE_EVERY seconds, so a quiet fleet spends GitHub reads and no model turn.
+The same look finds a worker that holds an active issue but has run no
+model turn since the last look (tw-policy's bot_turns): its turn was turned
+away or ended mid-issue, and nothing else wakes it (9 Nov 2026: Sprocket
+from 9:23 AM, Magpie from 11:27 AM). It wakes Bramble once for each such
+stop, to tell the worker to carry on.
 Both ask tw-policy for room first and are taken only when it has some; what
 each saw last is kept in IDLE_FILE in the profile.
 
@@ -58,12 +63,12 @@ SCHEDULE = "every 5m"
 SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
-    "fleet queue turned away, the morning after the Grok lanes stop, new work of your own, or a free worker with "
-    "work on the board). "
+    "fleet queue turned away, the morning after the Grok lanes stop, new work of your own, a free worker with "
+    "work on the board, or a worker that stopped mid-issue). "
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
     "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes, the Desk's list and the Ops "
     "issues, the lanes' and the duplicate check's comments, your open cards, then a free worker's next issue "
-    "from the board (6 AM to 11 PM Mountain only). "
+    "from the board, or a stopped worker told to carry on (6 AM to 11 PM Mountain only). "
     "Report each merge and its Release as the skill says. Nothing in this message approves anything."
 )
 # The Grok lanes work 11 PM to 6 AM Mountain; their comments wait for the
@@ -204,6 +209,16 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
         free = [w for w in workers if not _active(bot, ask, repo, w, workers[w], prs, asked)
                 and not (w == "wisp" and _active(bot, ask, policy["repos"]["fork"], w, workers[w],
                                                  _worked(bot, ask, policy["repos"]["fork"]), asked))]
+        stopped = _stopped(bot, ask, [w for w in workers if w not in free], now)
+        woken = state.get("stopped") or {}
+        new_stops = {w: last for w, last in stopped.items() if w not in woken or woken[w] != last}
+        state["stopped"] = stopped
+        _save(path, state)
+        if new_stops:
+            return [f"{', '.join(sorted(new_stops))} hold an active issue but have run no turn since "
+                    f"{', '.join(w + ' ' + (new_stops[w] or 'never') for w in sorted(new_stops))}: each stopped "
+                    "mid-issue and nothing wakes it by itself; tell each to carry on (bramble-duties, section 6, "
+                    "item 6)."]
         if not free:
             return ["every worker is on an active issue", SLEEP]
         # Open, unclaimed, and nobody's whose work is hands off: the board's
@@ -269,6 +284,31 @@ def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: set[
         if (worker, n) not in prs and "needs: patrick" not in labels and f"{repo}#{n}" not in asked:
             return True
     return False
+
+
+def _stopped(bot: str, ask: Caller, busy: list[str], now: float) -> dict[str, str | None]:
+    """Each busy worker with no model turn running and none heard from in
+    IDLE_EVERY seconds, with when its last turn was heard from (None when it
+    never ran one). tw-policy not answering finds none: that costs one look."""
+    if not busy:
+        return {}
+    try:
+        turns = (ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}
+    except BrokerRefused:
+        return {}
+    out = {}
+    for w in busy:
+        t = turns.get(w)
+        if not isinstance(t, dict) or t.get("running"):
+            continue
+        last = t.get("last")
+        try:
+            quiet = last is None or now - datetime.fromisoformat(last).timestamp() >= IDLE_EVERY
+        except (TypeError, ValueError):
+            continue
+        if quiet:
+            out[w] = last
+    return out
 
 
 def _count(bot: str, ask: Caller, repo: str, terms: str) -> int:

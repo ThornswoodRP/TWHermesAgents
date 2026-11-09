@@ -344,6 +344,20 @@ class OwedWakes(unittest.TestCase):
         for name in ("owe_wake", "wake_due", "wake_paid"):
             self.assertEqual(s.ops()[name][1], {s.policy.data["brokers"]["users"]["gateway"]}, name)
 
+    def test_bot_turns_says_who_runs_and_when_each_was_last_heard_from(self):
+        # 9 Nov 2026: Sprocket stopped mid-issue at 9:23 AM and nothing woke it.
+        clock = Clock()
+        s = service(clock=clock)
+        a = s.admit("hermes", {"bot": "sprocket", "task": "t"})["ticket"]
+        self.assertEqual(s.bot_turns("hermes", {})["bots"]["sprocket"]["running"], True)
+        clock.advance(minutes=5)
+        s.finish("hermes", {"bot": "sprocket", "ticket": a})
+        got = s.bot_turns("hermes", {})["bots"]
+        self.assertEqual(got["sprocket"]["running"], False)
+        self.assertEqual(datetime.fromisoformat(got["sprocket"]["last"]), clock.t)
+        self.assertEqual(got["wisp"], {"running": False, "last": None})
+        self.assertEqual(s.ops()["bot_turns"][1], {s.policy.data["brokers"]["users"]["gateway"]})
+
     def test_the_hours_cap_is_not_raised(self):
         self.assertEqual(policy().data["admission"]["queue_new_per_hour"], 20)
 
