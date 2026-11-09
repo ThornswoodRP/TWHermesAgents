@@ -233,11 +233,11 @@ class Auth:
                               "AND at > ?", (workspace_id, method, since)).fetchone()[0]
         return n >= FAILURE_LIMIT
 
-    def _failed(self, workspace_id: str, method: str) -> None:
+    def _failed(self, workspace_id: str, method: str, detail: dict | None = None) -> None:
         with self.s.tx() as db:
             db.execute("INSERT INTO sign_in_failures(workspace_id, method, at) VALUES(?,?,?)",
                        (workspace_id, method, self.s.now()))
-            self.s.event(db, workspace_id, "sign_in.failed", method, "unknown", {})
+            self.s.event(db, workspace_id, "sign_in.failed", method, "unknown", detail or {})
 
     # ── recovery codes ────────────────────────────────────────────────────
 

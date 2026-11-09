@@ -241,7 +241,10 @@ class Passkeys:
     def sign_in_options(self, workspace_id: str, phone_key: str | None = None) -> dict:
         """phone_key: the credential id of a paired phone's own key (its fingerprint). The
         request then names only that key, so the phone answers it itself and no passkey
-        provider app is opened. Without it, any of Patrick's passkeys may answer."""
+        provider app is opened. Without it, the request names every passkey the core takes now,
+        so a passkey app offers only those: 9 Nov, his phone offered a key the core never had (one a
+        refused registration had already saved in a passkey app) and the sign-in was refused as
+        "not one of Patrick's". A credential id is no secret, and there is one person here."""
         self._ready()
         webauthn, options_to_json, _, Descriptor, _, UV = _lib()
         if self.auth._locked(workspace_id, "passkey"):
@@ -262,12 +265,17 @@ class Passkeys:
                                 "passkey app; use the passkey and add the fingerprint again")
             _, Transport, _ = _phone_structs()
             allow = [Descriptor(id=unb64url(cred_id), transports=[Transport.INTERNAL])]
+        else:
+            live = [r["credential_id"] for r in self.s.db.execute(
+                "SELECT k.credential_id FROM passkeys k JOIN devices d ON d.id = k.device_id WHERE k.workspace_id = ? "
+                "AND k.revoked_at IS NULL AND d.revoked_at IS NULL ORDER BY k.created_at", (workspace_id,))]
+            allow = [Descriptor(id=unb64url(c)) for c in live] or None
         challenge = self._challenge(workspace_id, "sign_in", None)
         opts = webauthn.generate_authentication_options(
             rp_id=self.rp_id, challenge=challenge, timeout=int(CHALLENGE_LIFETIME.total_seconds() * 1000),
             user_verification=UV.REQUIRED, allow_credentials=allow)
         out = json.loads(options_to_json(opts))
-        if allow:
+        if phone_key is not None:
             out["hints"] = ["client-device"]  # WebAuthn level 3; py_webauthn 2.7 has no hints for a sign-in
         return out
 
@@ -285,14 +293,17 @@ class Passkeys:
         row = self.s.db.execute(
             "SELECT k.*, d.revoked_at AS device_revoked FROM passkeys k LEFT JOIN devices d ON d.id = k.device_id "
             "WHERE k.credential_id = ? AND k.workspace_id = ?", (b64url(unb64url(cred_id)), workspace_id)).fetchone()
+        # Which key was offered, by the start of its credential id (no secret), so a refusal can be matched
+        # against the keys the core holds (`tw-decide passkeys`).
+        offered = {"credential": b64url(unb64url(cred_id))[:16]}
         if not row:
-            self.auth._failed(workspace_id, "passkey")
+            self.auth._failed(workspace_id, "passkey", {**offered, "why": "unknown"})
             raise CoreError(401, "unknown_passkey", "that passkey is not one of Patrick's here")
         if row["revoked_at"] or row["device_revoked"]:
             # Removed here, but still in his passkey app, which offers it with the live ones (9 Nov: the
             # fingerprint key replaced on 8 Nov stayed in the app and was refused). The app tells the
             # passkey app to drop it (WebAuthn signalUnknownCredential), only for a key the core removed.
-            self.auth._failed(workspace_id, "passkey")
+            self.auth._failed(workspace_id, "passkey", {**offered, "why": "removed"})
             raise CoreError(401, "removed_passkey", "that passkey was removed here; sign in with another one",
                             rp_id=self.rp_id, credential_id=row["credential_id"])
         try:
@@ -301,7 +312,7 @@ class Passkeys:
                 expected_origin=self.origin, credential_public_key=bytes(row["public_key"]),
                 credential_current_sign_count=row["sign_count"], require_user_verification=True)
         except Exception as exc:  # InvalidAuthenticationResponse: bad signature, counter, origin, rp, flags
-            self.auth._failed(workspace_id, "passkey")
+            self.auth._failed(workspace_id, "passkey", {**offered, "why": type(exc).__name__})
             raise CoreError(401, "passkey_refused", f"the passkey sign-in was not accepted: {type(exc).__name__}") from None
         with self.s.tx() as db:
             n = db.execute("UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ? AND sign_count = ?",

@@ -164,6 +164,35 @@ class PasskeyCeremonies(unittest.TestCase):
             self.pk.sign_in(self.w.ws, stranger.get(self.pk.sign_in_options(self.w.ws)))
         self.assertEqual(cm.exception.reason, "unknown_passkey")
 
+    def test_a_sign_in_names_only_the_keys_the_core_takes(self):
+        # 9 Nov: the phone offered a key the core never had, and the sign-in was refused. The request now
+        # names the live keys, so a passkey app offers only those.
+        self.assertIsNone(self.pk.sign_in_options(self.w.ws).get("allowCredentials") or None)
+        self.enrol()
+        [row] = self.w.core.s.db.execute("SELECT credential_id FROM passkeys").fetchall()
+        opts = self.pk.sign_in_options(self.w.ws)
+        self.assertEqual([c["id"] for c in opts["allowCredentials"]], [row["credential_id"]])
+        self.assertNotIn("hints", opts)
+        self.w.core.auth.revoke_device(self.p, self.dev)
+        self.assertIsNone(self.pk.sign_in_options(self.w.ws).get("allowCredentials") or None)
+
+    def test_a_refused_sign_in_records_which_key_it_was_offered(self):
+        from thornswood_decisions import cli
+        self.enrol()
+        stranger = self.SoftKey(ORIGIN, RP_ID)
+        stranger.user_handle = b"x"
+        offered = stranger.get(self.pk.sign_in_options(self.w.ws))
+        with self.assertRaises(CoreError):
+            self.pk.sign_in(self.w.ws, offered)
+        name = self.w.core.s.db.execute("SELECT name FROM workspaces WHERE id = ?", (self.w.ws,)).fetchone()["name"]
+        out = cli.cmd_passkeys(self.w.core.s, type("A", (), {"workspace": name, "last": 5})())
+        [key] = out["passkeys"]
+        self.assertEqual(len(key["credential"]), 16)
+        self.assertNotIn("public_key", key)
+        self.assertEqual(out["refused"][0]["why"], "unknown")
+        self.assertEqual(out["refused"][0]["credential"], offered["rawId"][:16])
+        self.assertNotEqual(out["refused"][0]["credential"], key["credential"])
+
     def test_revoking_the_device_stops_its_passkey(self):
         self.enrol()
         self.w.core.auth.revoke_device(self.p, self.dev)
