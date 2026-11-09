@@ -412,7 +412,8 @@ RELOAD_LINE = "RELOAD: "
 
 
 def held(home: Path, bots) -> dict[str, str]:
-    """{path under the Hermes home: sha256} of every file a running Bot holds."""
+    """{path under the Hermes home, with forward slashes on every host: sha256} of
+    every file a running Bot holds."""
     import hashlib
 
     out = {}
@@ -425,7 +426,7 @@ def held(home: Path, bots) -> dict[str, str]:
                 files += sorted(f for f in d.rglob("*") if f.is_file() and "__pycache__" not in f.parts)
         for f in files:
             if f.is_file():
-                out[str(f.relative_to(home))] = hashlib.sha256(f.read_bytes()).hexdigest()
+                out[f.relative_to(home).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
     return out
 
 
