@@ -575,7 +575,7 @@
     "qwen_lease_seconds": 900,
     "upstream_timeout_seconds": 900,
     "ready": {
-      "credits": false,
+      "credits": true,
       "qwen": true
     }
   },

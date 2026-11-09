@@ -125,5 +125,4 @@ These stay in each Bot's `SOUL.md` and the `thornswood-ops` and `thornswood-guid
 What the code above does not hold yet, each with what is missing:
 
 - **No disk cap inside a container.** The VM's ext4 store cannot enforce one in podman (Hermes needs XFS with project quotas). The Bots' broker trees have theirs.
-- **The credits route is off.** It turns on when a pull request sets it ready in `admission_proxy.ready`, once its key is in the proxy's file and the proxy's attack tests pass on the VM. The credits key is not on the VM yet. The Qwen route is on (8 Nov).
 - **The game box's backup drop.** The install sets up the box's SFTP jail only once the box's public key is in `deploy/keys/box-drop.pub`, which is not in the repository yet.

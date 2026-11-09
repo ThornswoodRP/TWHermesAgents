@@ -586,14 +586,17 @@ admission_proxy:
   # Each route enters the Bots' chains, and the proxy admits it, only once a
   # PR here sets it true: after the install made the Bots' proxy tokens, the
   # route's real key is in env_file, and the proxy's attack tests passed on
-  # the VM (06 section 6.3). The two are apart because their keys are: Qwen's
-  # has been in proxy.env since the Phase 2 install; the credits key is not
-  # on the VM yet (read 8 Nov 2026). Qwen on 8 Nov: bfa8c71's install made
-  # the six Bots' tokens (proxy-tokens.json 440 root:tw-proxy, six digests,
-  # one TW_PROXY_TOKEN in each profile) and its canary passed, attack 18
-  # (the proxy refuses a request with no Bot token) included.
+  # the VM (06 section 6.3). The two are apart because their keys are. Qwen
+  # on 8 Nov: bfa8c71's install made the six Bots' tokens (proxy-tokens.json
+  # 440 root:tw-proxy, six digests, one TW_PROXY_TOKEN in each profile) and
+  # its canary passed, attack 18 (the proxy refuses a request with no Bot
+  # token) included. Credits on 8 Nov, 8:38 PM: Patrick's key, made in a
+  # workspace of its own with a spend limit, is TW_CLAUDE_CREDITS_KEY in
+  # proxy.env (440 root:tw-proxy, one line); with it Anthropic answered the
+  # models list and a one-token claude-opus-5-5 message with 200. His first
+  # key was refused with 400 because it was not made in a workspace.
   ready:
-    credits: false
+    credits: true
     qwen: true
 
 # The fleet admission queue (08 section 7; 02 section 8.5). Past the pilot
