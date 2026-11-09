@@ -90,6 +90,10 @@ class FakeHermes:
         self.asked.append(list(profiles))
         return None if self.states_out is None else {p: self.states_out.get(p, "absent") for p in profiles}
 
+    def tasks(self, profiles):
+        # The reads thread also starts the Tasks tab's report (test_decisions_tasks checks it).
+        return {"tasks": {}}
+
 
 class FakeCore:
     def __init__(self, bots=BOTS, status=200):
