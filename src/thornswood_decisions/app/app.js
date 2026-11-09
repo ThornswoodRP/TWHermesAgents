@@ -162,8 +162,6 @@ const SAID = {
   offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.',
   voice_off: 'Dictation is not running on the VM.',
   voice_slow: 'Whisper on the VM took too long with that. Try a shorter recording.',
-  saved_in_app: b => `That fingerprint key was saved in ${(b.detail && b.detail.maker) || 'a passkey app'}, so it would open there. ` +
-    'Nothing was added. Tap Use my fingerprint again and pick Google Password Manager when Android asks where to save it.'
 }
 
 function said(body) {
@@ -339,6 +337,13 @@ async function addFingerprint() {
     refusedKey(o.body, cred, done)
     return { ok: false, message: said(done.body) }
   }
+  if (done.body.phone_key === false) {
+    // Saved in a passkey app, not by the phone itself: the core keeps it as a passkey, so the key the app
+    // now holds signs in, but it is not the fingerprint key, which would open that app every time.
+    const app = done.body.maker || 'your passkey app'
+    return { ok: false, message: `That key was saved in ${app}, so it is kept as a passkey and signs in through ${app}. ` +
+      'The fingerprint sign-in was not added: tap Use my fingerprint again and pick Google Password Manager when Android asks where to save it.' }
+  }
   if (!keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })) {
     return { ok: false, message: 'This browser would not keep the fingerprint\'s name, so the app cannot ask for it. Remove it in Settings.' }
   }
@@ -366,7 +371,13 @@ async function passkeySignIn() {
     const name = (err && err.name) || 'Error'
     await call('POST', '/passkeys/sign-in/failed',
       { challenge: o.body.challenge, name, message: String((err && err.message) || '').slice(0, 160) })
-    return { status: -1, body: { message: `The ${word} did not sign in (${name}). Nothing changed.` } }
+    // 9 Nov: his phone held none of the keys the request named, so every sign-in ended here with nothing
+    // said about the way back in.
+    const none = (o.body.allowCredentials || []).length && !o.body.hints
+      ? ' If your phone showed no passkey for Hermes, it holds none the core takes: sign in with a recovery code ' +
+        'under Other ways in, then add a passkey.'
+      : ''
+    return { status: -1, body: { message: `The ${word} did not sign in (${name}). Nothing changed.${none}` } }
   }
   const r = await call('POST', '/passkeys/sign-in', { credential: credentialJSON(cred) })
   if (r.status === 200) {
@@ -395,9 +406,8 @@ function passkeyAppDrops(d) {
   PublicKeyCredential.signalUnknownCredential({ rpId: d.rp_id, credentialId: d.credential_id }).catch(() => {})
 }
 
-// A key the phone just made and the core then refused (saved in a passkey app, already added, a sign-in
-// run out) is kept by nobody here, but the passkey app keeps it and offers it at the next sign-in, where the
-// core refuses it as not one of Patrick's. The app made it and the core never held it, so it is named for
+// A key the phone just made and the core then refused (a sign-in run out) is kept by nobody here, but the
+// passkey app keeps it and offers it at the next sign-in, where the core refuses it as not one of Patrick's. The app made it and the core never held it, so it is named for
 // the passkey app to drop: only on the core's own refusal, never when no answer came (the core may have
 // kept it) nor for a key it already holds.
 function refusedKey(options, cred, done) {

@@ -208,13 +208,14 @@ class Passkeys:
         except Exception as exc:  # the library's InvalidRegistrationResponse and parse errors
             raise CoreError(400, "passkey_refused", f"the passkey was not accepted: {type(exc).__name__}") from None
         aaguid = str(v.aaguid or "").lower() or None
+        where = maker(aaguid)
         if on_phone and aaguid not in PHONE_AUTHENTICATORS:
-            # Nothing is kept: a phone key in a passkey app opens that app at every sign-in.
-            where = maker(aaguid)
-            raise CoreError(409, "saved_in_app",
-                            f"the fingerprint key was saved in {where}, so signing in with it would open {where}; "
-                            "nothing was added. Add it again and pick Google Password Manager when Android asks "
-                            "where to save it", maker=where)
+            # A key saved in a passkey app is not this phone's fingerprint key: that one would open the app at
+            # every sign-in. It is kept as a plain passkey all the same. The app has stored it already, and it
+            # may have stored it in place of the key it held before (one key per site, as Bitwarden keeps them).
+            # 9 Nov: refused keys like this left his phone with no key the core took, and every sign-in failed.
+            on_phone = False
+            label = f"Passkey in {where}"
         pk = new_id("pk")
         with self.s.tx() as db:
             if db.execute("SELECT 1 FROM passkeys WHERE credential_id = ?", (b64url(v.credential_id),)).fetchone():
@@ -233,9 +234,10 @@ class Passkeys:
                        (pk, p.workspace_id, p.id, p.device_id, b64url(v.credential_id), v.credential_public_key,
                         v.sign_count, (label or "passkey")[:80], self.s.now(), aaguid, 1 if on_phone else 0))
             self.s.event(db, p.workspace_id, "passkey.added", pk, "patrick",
-                         {"device": p.device_id, "maker": maker(aaguid), **({"phone_key": True} if on_phone else {})})
-        # The credential id goes back to the phone that made it, so its sign-in can name it.
-        return {"passkey_id": pk, "credential_id": b64url(v.credential_id)}
+                         {"device": p.device_id, "maker": where, **({"phone_key": True} if on_phone else {})})
+        # The credential id goes back to the phone that made it, so its sign-in can name it. phone_key says
+        # whether it was kept as this phone's fingerprint key, and maker where it was saved.
+        return {"passkey_id": pk, "credential_id": b64url(v.credential_id), "phone_key": on_phone, "maker": where}
 
     # ── signing in ────────────────────────────────────────────────────────
 
