@@ -15,12 +15,15 @@ import unittest as _unittest
 if not _sys.platform.startswith("linux"):
     raise _unittest.SkipTest("the brokers run only on the Oracle VM; their tests run there")
 
+import copy
 import unittest
 
 from fake_github import Lost
-from test_git_service import APP, OPS, World
+from test_git_service import APP, BRAMBLE_INSTALLATION, OPS, World
 
+from thornswood_brokers.github_api import GitHubError
 from thornswood_brokers.vm_report import BOARD_MARK, one_line
+from thornswood_guard.policy import Policy, PolicyError
 from thornswood_brokers.wire import Refused
 
 NEW = "b" * 40
@@ -137,13 +140,34 @@ class VmInstall(unittest.TestCase):
         self.assertNotIn("10.1.2.3", self.board()[0]["body"])
         self.assertNotIn("10.1.2.3", self.ledger()[0])
 
-    def test_it_writes_as_the_workers_app_with_issues_write_alone(self):
+    def test_it_writes_as_brambles_app_with_issues_write_alone(self):
         self.ask(result="not installed", step="tests", installed=OLD, reason="the suite fails")
         for tok in self.w.fake.tokens:
             self.assertEqual(tok.get("permissions"), {"issues": "write", "metadata": "read"}) if tok.get("permissions", {}).get("issues") == "write" else None
+        # Ops is Bramble's alone: the workers' App is not installed there (8 Nov 2026).
+        self.assertEqual({t["installation"] for t in self.w.fake.tokens}, {BRAMBLE_INSTALLATION})
         writes = [w for w in self.w.fake.writes() if not w[1].startswith("/app/installations/")]
         self.assertTrue(writes)
         self.assertTrue(all(p.startswith((f"/repos/{APP}/issues", f"/repos/{OPS}/issues")) for _, p, _ in writes))
+
+    def test_an_app_not_on_the_ledgers_repository_gets_githubs_422_and_nothing_is_written(self):
+        # What the VM measured from 9:23 PM on 8 Nov, when the reports still went as the workers' App.
+        self.w.fake.installed[BRAMBLE_INSTALLATION] = {"Thornswood", "skymp"}
+        with self.assertRaises(GitHubError) as e:
+            self.ask()
+        self.assertEqual(e.exception.status, 422)
+        self.assertEqual(self.ledger(), [])
+
+    def test_the_policy_refuses_a_report_app_that_does_not_reach_the_ledger_or_the_board(self):
+        data = copy.deepcopy(self.w.git.policy.data)
+        data["follow_main"]["report"]["app"] = "workers"
+        with self.assertRaises(PolicyError):
+            Policy(data)
+        data = copy.deepcopy(self.w.git.policy.data)
+        data["follow_main"]["report"]["board_repo"] = "nowhere"
+        with self.assertRaises(PolicyError):
+            Policy(data)
+        self.assertEqual(self.w.git.policy.data["follow_main"]["report"]["app_login"], "thornswood-bramble[bot]")
 
 
 if __name__ == "__main__":

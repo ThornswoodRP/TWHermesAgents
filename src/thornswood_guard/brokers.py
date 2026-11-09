@@ -286,8 +286,8 @@ class TurnGate:
                 pass
 
 
-GIT_OPS = ["base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr", "start_run",
-           "read", "board", "ledger_event"]
+GIT_OPS = ["base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
+           "close_issue", "start_run", "read", "board", "ledger_event"]
 FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
              "remove", "run_check"]
 
@@ -302,7 +302,9 @@ TW_GIT_SCHEMA = {
         "in Thornswood and the fork it turns GitHub's auto-merge on for a Bot's pull request at its exact head, and "
         "GitHub merges once the required checks pass; in Ops, where GitHub has no auto-merge, it merges a green one), "
         "close_pr (Bramble only: closes a pull request only on Patrick's answer on the outside pull request card "
-        "that names it; replaced_by names the merged pull request that carried it), start_run (Bramble only), read (a GET inside one repo), board (the board's open issues in do-order; eligible true keeps only what may be picked; limit, at most 100), ledger_event (Bramble only). Every write names "
+        "that names it; replaced_by names the merged pull request that carried it), close_issue (Bramble only: closes an "
+        "issue with reason duplicate and duplicate_of, or reason completed and done_by_pr (merged) or done_by_run "
+        "(succeeded, in run_repo), with body saying why; never as not planned), start_run (Bramble only), read (a GET inside one repo), board (the board's open issues in do-order; eligible true keeps only what may be picked; limit, at most 100), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
         "type": "object",
@@ -313,6 +315,8 @@ TW_GIT_SCHEMA = {
             "branch": {"type": "string"}, "bundle": {"type": "string"},
             "head": {"type": "string"}, "base": {"type": "string"},
             "number": {"type": "integer"}, "sha": {"type": "string"}, "replaced_by": {"type": "integer"},
+            "reason": {"type": "string", "enum": ["duplicate", "completed"]}, "duplicate_of": {"type": "integer"},
+            "done_by_pr": {"type": "integer"}, "done_by_run": {"type": "integer"}, "run_repo": {"type": "string"},
             "title": {"type": "string"}, "body": {"type": "string"}, "draft": {"type": "boolean"},
             "label": {"type": "string"}, "action": {"type": "string", "enum": ["add", "remove"]},
             "decision_id": {"type": "string"},

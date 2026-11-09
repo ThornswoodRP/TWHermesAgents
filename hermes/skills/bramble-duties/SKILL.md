@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, and run the Ops run notes and the Desk's list. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.4.0
+version: 1.5.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -247,8 +247,10 @@ to work the queue.
    - put what ran, when, what it printed and the health check on the issue;
    - make one Ops pull request for the batch that deletes the notes that ran
      and rewrites `ops/status.md`;
-   - close the issue the run finished, with its `Test task:` comment when
-     people would notice the fix;
+   - close the issue the run finished with `tw_git close_issue`, reason
+     `completed` and `done_by_run` (the run, and `run_repo` when it ran in
+     Ops), its body the `Test task:` comment when people would notice the
+     fix;
    - a note that cannot run keeps the reason written into it.
 5. Work the items on `ops/bramble-list.md` the same way, and take each one
    off the list in the same Ops pull request once it is done. Done means
@@ -258,6 +260,14 @@ to work the queue.
    the done ones off with the rest, so the list holds only what is left
    (2 Nov 2026: Ops merges others had landed stayed on it for a day,
    because only Bramble's own runs counted as done).
+
+## 5. Duplicates
+
+When an issue repeats another (yours included), put whatever it adds on the
+one that stays, then `tw_git close_issue` it with reason `duplicate`,
+`duplicate_of` the one that stays, and a body saying what it repeats. Keep
+the older issue unless the newer one holds the better record. Never close an
+issue for being later, and never as not planned: that is Patrick's.
 
 ## Every time
 

@@ -350,6 +350,49 @@ class GitHubRules:
             return Verdict.no("an issue is plain: no footer, no session link and no closing --- line")
         return Verdict.yes(f"a new issue in {repo}, unclaimed")
 
+    def close_issue(self, bot: str, issue: Issue, reason: str, body: str, *, duplicate: Issue | None = None,
+                    done_pr: PullRequest | None = None, done_run: dict | None = None) -> Verdict:
+        """Bramble closes an issue (Patrick, 9 Nov 2026: the Bots need the access
+        to do their jobs; bramble-duties section 4 has Bramble close the issue a
+        run finished, and Bramble's duplicates #5580 and #5585 waited for a
+        person to close them). Only as Developer-Guide's board rules allow: a
+        duplicate, pointing at the issue it repeats, or done, on a merged pull
+        request or a successful run read from GitHub. Never "not planned":
+        an issue is never closed for being later, and dropping work is Patrick's."""
+        p = self.policy
+        if not p.is_router(bot):
+            return Verdict.no(f"only Bramble closes an issue; {p.bot_name(bot) if p.is_bot(bot) else bot} files and comments")
+        if issue.repo == p.data["repos"]["hermes"]:
+            return Verdict.no("Bramble never closes anything in TWHermesAgents")
+        if p.data["merge"]["base"].get(issue.repo) is None:
+            return Verdict.no(f"{issue.repo} is not a repo the Bots work in")
+        if issue.pull_request:
+            return Verdict.no(f"#{issue.number} is a pull request; close_pr closes those")
+        if not issue.open:
+            return Verdict.no(f"#{issue.number} is not open")
+        if self._hands_off_issue(issue):
+            return Verdict.no(self._hands_off_reason(issue.author_login, None, issue))
+        if not body.strip():
+            return Verdict.no("a close says why in a comment: what repeats it, or what finished it")
+        if self.NOT_PLAIN.search(body):
+            return Verdict.no("a comment is plain: no footer, no session link and no closing --- line")
+        if reason == "duplicate":
+            if duplicate is None or duplicate.number == issue.number or duplicate.pull_request:
+                return Verdict.no("a duplicate names the other issue it repeats, in the same repo")
+            return Verdict.yes(f"#{issue.number} repeats #{duplicate.number}")
+        if reason == "completed":
+            if done_pr is not None:
+                if not done_pr.merged:
+                    return Verdict.no(f"PR {done_pr.number} has not merged, so it has not finished #{issue.number}")
+                return Verdict.yes(f"#{issue.number} was finished by PR {done_pr.number}")
+            if done_run is not None:
+                if done_run.get("status") != "completed" or done_run.get("conclusion") != "success":
+                    return Verdict.no(f"run {done_run.get('id')} did not succeed "
+                                      f"({done_run.get('status')}, {done_run.get('conclusion')})")
+                return Verdict.yes(f"#{issue.number} was finished by run {done_run.get('id')}")
+            return Verdict.no("a done issue names what finished it: a merged pull request or a successful run")
+        return Verdict.no("an issue closes as a duplicate or as done; dropping work is Patrick's")
+
     # Claims
 
     def add_label(self, bot: str, issue: Issue, label: str, *, decision_id: str | None = None) -> Verdict:
