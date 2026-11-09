@@ -375,6 +375,13 @@ class FakeRun:
 
     def __call__(self, argv):
         self.calls.append(argv)
+        if argv[0] == "findmnt" and "--mountpoint" in argv:
+            where = argv[-1]
+            bot = where.rsplit("/", 1)[-1]
+            if bot in getattr(self, "unmounted", ()):
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            size = getattr(self, "sizes", {}).get(bot, (25 if bot == "wisp" else 10) * 1024 ** 3)
+            return subprocess.CompletedProcess(argv, 0, f"{where} ext4 {size}\n", "")
         if argv[0] == "findmnt":
             return subprocess.CompletedProcess(argv, 0, "/\n", "")
         if argv[0] == "quota":
@@ -448,6 +455,21 @@ class LimitsCheck(unittest.TestCase):
         self.assertIn("group quotas are not on", got)
         self.assertIn("20 GB free on /srv/tw", got)
         self.assertIn("free on the boot disk", got)
+
+    def test_16_a_bot_whose_tier_a_folder_is_not_its_own_filesystem_is_found(self):
+        run = FakeRun()
+        run.unmounted = {"echo"}
+        got = "\n".join(self.check(run))
+        self.assertIn("/home/hermes/tw-work/echo is not a filesystem of its own", got)
+        self.assertIn(["findmnt", "-n", "-b", "-o", "TARGET,FSTYPE,SIZE", "--mountpoint", "/home/hermes/tw-work/echo"],
+                      run.calls)
+
+    def test_16_a_tier_a_filesystem_bigger_than_its_cap_is_found(self):
+        run = FakeRun()
+        run.sizes = {"rift": 11 * 1024 ** 3}
+        got = "\n".join(self.check(run))
+        self.assertIn("more than Rift's 10 GB", got)
+        self.assertNotIn("Wisp", got)
 
     def test_16_a_bot_without_its_disk_cap_is_found(self):
         run = FakeRun()

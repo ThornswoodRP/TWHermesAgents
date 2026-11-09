@@ -4,7 +4,8 @@ tw-limits-check.service runs this as root, once, ordered before the brokers
 and the gateway. It reads memory.max, memory.high, cpu.max and pids.max of
 each Thornswood slice from the cgroup tree, starts one throwaway check of each
 tier and reads which slice it really landed in, and checks the swapfile,
-/srv/tw's group quotas and the free-space floors. It records the outcome in
+/srv/tw's group quotas, each Bot's own Tier A disk and the free-space
+floors. It records the outcome in
 tw-policy. The gateway starts either way so Patrick can be told; tw-policy
 admits no sandbox job until a check passes. A failed check is never fixed by
 raising or removing a limit.
@@ -130,6 +131,29 @@ def disk_caps(policy: Policy) -> dict[str, float]:
     return {files["work_group_prefix"] + b: caps.get(b, caps["default"]) for b in policy.bots}
 
 
+def tier_a_disk_problems(run: Callable[[list[str]], subprocess.CompletedProcess], policy: Policy) -> list[str]:
+    """Each Bot's Tier A folder is a filesystem of its own (policy.yaml
+    tier_a_disk), no bigger than its cap. A folder that is not mounted is a
+    folder on the host disk, with no cap at all."""
+    root = policy.data["tier_a_disk"]["work_root"]
+    out = []
+    for bot, gb in tier_a_caps(policy).items():
+        where = f"{root}/{bot}"
+        r = run(["findmnt", "-n", "-b", "-o", "TARGET,FSTYPE,SIZE", "--mountpoint", where])
+        fields = (r.stdout or "").split()
+        if r.returncode != 0 or len(fields) != 3 or fields[0] != where:
+            out.append(f"{where} is not a filesystem of its own, so {policy.bot_name(bot)}'s container has no disk cap")
+            continue
+        if not fields[2].isdigit() or int(fields[2]) > gb * 1024 ** 3:
+            out.append(f"{where} is {fields[2]} bytes, more than {policy.bot_name(bot)}'s {gb:g} GB")
+    return out
+
+
+def tier_a_caps(policy: Policy) -> dict[str, float]:
+    caps = policy.data["brokers"]["files"]["disk_quota_gb"]
+    return {b: caps.get(b, caps["default"]) for b in policy.bots}
+
+
 def tier_problems(run: Callable[[list[str]], subprocess.CompletedProcess], policy: Policy, hermes_uid: int | None,
                   image: str) -> list[str]:
     """Start one throwaway job of each tier and read where it landed."""
@@ -162,6 +186,7 @@ def run_check(policy: Policy, *, root: Path = Path("/"), run=None, hermes_uid: i
     problems += swap_problems(root)
     srv = policy.data["brokers"]["state"]["work"].rsplit("/", 1)[0]
     problems += quota_problems(run, srv, disk_caps(policy))
+    problems += tier_a_disk_problems(run, policy)
     state = host_state or hostmod.read(root, srv=srv)
     rules = policy.data["admission"]
     if state.srv_free_gb < rules["admit"]["srv_free_gb"]:
@@ -189,7 +214,7 @@ def main() -> int:
     for p in problems:
         print(f"FAIL {p}")
     if ok:
-        print("PASS every slice's limits, the swapfile, the quotas and the floors hold")
+        print("PASS every slice's limits, the swapfile, the quotas, the Bots' own disks and the floors hold")
     Path("/run/tw").mkdir(exist_ok=True)
     Path("/run/tw/limits.json").write_text(json.dumps({"ok": ok, "problems": problems}) + "\n")
     from . import wire
