@@ -15,6 +15,9 @@ and exits 1 when any check fails.
       CPUQuota; a canary group writes past its disk quota
   5   a Tier A container (Hermes's own flags) mounts, sees the host home or
       has any network interface but lo
+  5b  a Tier A container (Hermes's flags and the Bots' own extra ones) writes
+      to its system files, past its /workspace filesystem's size (a 32 MB
+      canary one) and past /tmp's tmpfs size
   18  every listener of hermes and the brokers is on loopback or Tailscale
       only, and each Tailscale one refuses a request with no sign-in
   one executor: as hermes, a Bramble merge through tw-git's socket is refused
@@ -154,6 +157,17 @@ def executor_problem(executor: str, answer: str) -> str | None:
     return None
 
 
+DISK = r'''
+touch /usr/tw-canary 2>/dev/null && echo "ROOTFS writable"
+touch /etc/tw-canary 2>/dev/null && echo "ROOTFS writable"
+dd if=/dev/zero of=/workspace/fill bs=1M count=64 2>/dev/null
+echo "WORKSPACE $(($(stat -c %s /workspace/fill 2>/dev/null || echo 0) / 1048576))"
+dd if=/dev/zero of=/tmp/fill bs=1M count=640 2>/dev/null
+echo "TMP $(($(stat -c %s /tmp/fill 2>/dev/null || echo 0) / 1048576))"
+rm -f /workspace/fill /tmp/fill
+echo DONE
+'''
+
 CONTAINER = r'''
 mount -t tmpfs canary /mnt 2>/dev/null && echo "MOUNTED tmpfs"
 mount -t proc proc /mnt 2>/dev/null && echo "MOUNTED proc"
@@ -226,6 +240,23 @@ def parse_container(out: str) -> list[str]:
             bad.append("the container sees /home/hermes/.hermes")
         if line.startswith("IFACE ") and line.split()[1] != "lo":
             bad.append(f"the container has a network interface {line.split()[1]}")
+    return bad
+
+
+def parse_disk(out: str, workspace_mb: int, tmp_mb: int) -> list[str]:
+    """What the container wrote past its caps: anything to its system files,
+    more than its /workspace filesystem holds, or more than /tmp's size."""
+    if "DONE" not in out:
+        return [f"the container did not run the disk probe ({out.strip()[:200]})"]
+    bad = []
+    if "ROOTFS writable" in out:
+        bad.append("the container wrote to its system files")
+    got = {f[0]: int(f[1]) for f in (l.split() for l in out.splitlines())
+           if len(f) == 2 and f[0] in ("WORKSPACE", "TMP") and f[1].isdigit()}
+    if "WORKSPACE" not in got or got["WORKSPACE"] > workspace_mb:
+        bad.append(f"the container wrote {got.get('WORKSPACE', '?')} MB to a {workspace_mb} MB /workspace")
+    if "TMP" not in got or got["TMP"] > tmp_mb:
+        bad.append(f"the container wrote {got.get('TMP', '?')} MB to a {tmp_mb} MB /tmp")
     return bad
 
 
@@ -368,6 +399,30 @@ class Canary:
         self.check("5: a container cannot mount, see the host or reach a network",
                    parse_container(r.stdout + r.stderr))
 
+    def tier_a_disk(self, image: str, extra_args: list[str]) -> None:
+        """Attack 5b, on a 32 MB filesystem made the way deploy/install.sh makes each Bot's."""
+        work = Path(tempfile.mkdtemp(prefix="tw-canary-disk-"))
+        self.cleanup.append(lambda: shutil.rmtree(work, ignore_errors=True))
+        img, mnt = work / "canary.img", work / "workspace"
+        mnt.mkdir()
+        hermes = pwd.getpwnam("hermes")
+        os.chmod(work, 0o755)
+        self.run(["truncate", "-s", "32M", str(img)])
+        r = self.run(["mkfs.ext4", "-q", "-F", "-m", "0", "-E", f"root_owner={hermes.pw_uid}:{hermes.pw_gid}", str(img)])
+        if r.returncode != 0:
+            self.check("5b: a container writes nothing past its disk caps", f"mkfs.ext4 failed ({(r.stderr or '').strip()[:160]})")
+            return
+        r = self.run(["mount", "-o", "loop,nosuid,nodev", str(img), str(mnt)])
+        if r.returncode != 0:
+            self.check("5b: a container writes nothing past its disk caps", f"the canary filesystem did not mount ({(r.stderr or '').strip()[:160]})")
+            return
+        self.cleanup.append(lambda: self.run(["umount", str(mnt)]))
+        argv = ["runuser", "-u", "hermes", "--", "env", f"XDG_RUNTIME_DIR=/run/user/{hermes.pw_uid}", "podman", "run",
+                "--rm", "--pull=never", *HERMES_PODMAN_ARGS, "-v", f"{mnt}:/workspace", *extra_args, image, "sh", "-c", DISK]
+        r = self.run(argv, timeout=300, cwd="/")
+        self.check("5b: a container writes nothing to its system files, or past its /workspace or /tmp",
+                   parse_disk(r.stdout + r.stderr, workspace_mb=32, tmp_mb=512))
+
     # Network (attack 18)
 
     def listeners(self) -> None:
@@ -504,6 +559,8 @@ def main() -> int:
         c.tier_b(gateway_pid(c.run))
         c.disk_quota()
         c.tier_a(SANDBOX_IMAGE)
+        from thornswood_guard.profile_config import build
+        c.tier_a_disk(SANDBOX_IMAGE, build(policy, "rift")["terminal"]["docker_extra_args"])
         c.listeners()
         c.one_executor()
         c.connector_helper()

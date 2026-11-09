@@ -45,12 +45,13 @@ terminal:
   docker_volumes: []
   docker_forward_env: []
   docker_env: {}
-  docker_extra_args: []
+  docker_extra_args:
+  - --read-only
   docker_shared_container_key: ''
   container_cpu: 1
   container_memory: 2048
   container_disk: 0
-  container_persistent: true
+  container_persistent: false
 auxiliary:
   free_only: true
   openrouter_model: ''
