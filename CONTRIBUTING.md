@@ -40,7 +40,7 @@ Some tests need Linux, Windows, root, bash, Node or PowerShell and skip themselv
 1. Branch from `main`.
 2. Write a test that fails without the change. Every rule held in code has a test, and the attack tests in [docs/security.md](docs/security.md) must keep passing.
 3. Make the change.
-4. If you changed `thornswood_guard/policy.yaml`, regenerate what is built from it. A test fails if either is stale:
+4. If you changed `src/thornswood_guard/policy.yaml`, regenerate what is built from it. A test fails if either is stale:
 
    ```bash
    python scripts/render_profiles.py

@@ -1,0 +1,724 @@
+{
+  "version": 1,
+  "owner": "ThornswoodRP",
+  "repos": {
+    "app": "ThornswoodRP/Thornswood",
+    "fork": "ThornswoodRP/skymp",
+    "ops": "ThornswoodRP/Thornswood-Ops",
+    "hermes": "ThornswoodRP/TWHermesAgents"
+  },
+  "bots": {
+    "bramble": {
+      "name": "Bramble",
+      "role": "router",
+      "app": "bramble",
+      "claim_label": "claimed: Bramble",
+      "rooms": [
+        "Thornswood Workbench"
+      ],
+      "opens_working_rooms": true,
+      "cron": true
+    },
+    "rift": {
+      "name": "Rift",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Rift",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "sprocket": {
+      "name": "Sprocket",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Sprocket",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "echo": {
+      "name": "Echo",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Echo",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "magpie": {
+      "name": "Magpie",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Magpie",
+      "rooms": [
+        "Thornswood Workbench"
+      ]
+    },
+    "wisp": {
+      "name": "Wisp",
+      "role": "worker",
+      "app": "workers",
+      "claim_label": "claimed: Wisp",
+      "rooms": [
+        "Thornswood Workbench"
+      ],
+      "fork_branches": true
+    }
+  },
+  "github_apps": {
+    "bramble": {
+      "workflows": true,
+      "may_merge": true,
+      "repos": [
+        "ThornswoodRP/Thornswood",
+        "ThornswoodRP/skymp",
+        "ThornswoodRP/Thornswood-Ops"
+      ]
+    },
+    "workers": {
+      "workflows": false,
+      "may_merge": false,
+      "repos": [
+        "ThornswoodRP/Thornswood",
+        "ThornswoodRP/skymp"
+      ]
+    }
+  },
+  "executor": "bramble",
+  "merge": {
+    "required_checks": {
+      "ThornswoodRP/Thornswood": [
+        "Launcher builds",
+        "Build check result"
+      ],
+      "ThornswoodRP/Thornswood-Ops": [
+        "check"
+      ],
+      "ThornswoodRP/skymp": [
+        "build-pr"
+      ]
+    },
+    "method": {
+      "ThornswoodRP/Thornswood": "squash",
+      "ThornswoodRP/Thornswood-Ops": "squash",
+      "ThornswoodRP/skymp": "merge"
+    },
+    "base": {
+      "ThornswoodRP/Thornswood": "main",
+      "ThornswoodRP/Thornswood-Ops": "main",
+      "ThornswoodRP/skymp": "thornswood/engine-changes"
+    },
+    "auto_merge": {
+      "ThornswoodRP/Thornswood": [
+        "Build check result"
+      ],
+      "ThornswoodRP/Thornswood-Ops": [],
+      "ThornswoodRP/skymp": [
+        "build-pr"
+      ]
+    },
+    "robot_authors": [
+      "dependabot[bot]",
+      "thornswood-pin-robot[bot]"
+    ],
+    "auto_merge_people": [
+      "EvilPatrick06",
+      "WiccanDjinn"
+    ],
+    "workflow_authors": [
+      "github-actions[bot]"
+    ],
+    "outside_label": "outside work"
+  },
+  "runs": {
+    "main_without_patrick": true,
+    "ref": "main",
+    "verb_lists": [
+      "scripts/vps/gate/verbs.json",
+      "scripts/release/nexus-verbs.json"
+    ],
+    "repo": "ThornswoodRP/Thornswood",
+    "workflows": {
+      "box-run.yml": {
+        "repo": "ThornswoodRP/Thornswood-Ops",
+        "verbs": "scripts/vps/gate/verbs.json"
+      },
+      "nexus-run.yml": {
+        "verbs": "scripts/release/nexus-verbs.json"
+      },
+      "release.yml": {},
+      "release-tag.yml": {},
+      "tunnel.yml": {
+        "repo": "ThornswoodRP/Thornswood-Ops",
+        "required": [
+          "mode"
+        ],
+        "inputs": {
+          "mode": "install|switch|back",
+          "wait": "[0-9]{0,3}",
+          "recipient": "[A-Za-z0-9+/=<>]{0,4096}"
+        }
+      }
+    },
+    "refused_verbs": [
+      "Set-NexusKey"
+    ],
+    "patrick_switches": {
+      "New-NexusRevision": [
+        "Publish"
+      ]
+    }
+  },
+  "branches": {
+    "pattern": "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$",
+    "bramble_may_push_for": [
+      "magpie"
+    ]
+  },
+  "claims": {
+    "prefix": "claimed: ",
+    "label_color": "e8590c",
+    "label_description": "Claimed by {name}, a Thornswood Hermes Bot",
+    "retired_labels": [
+      "claimed: Claude",
+      "claimed: ChatGPT",
+      "claimed: Codex"
+    ]
+  },
+  "hands_off": {
+    "people": [
+      "WiccanDjinn",
+      "Jhinswife"
+    ],
+    "lanes": {
+      "names": [
+        "Anvil",
+        "Herald",
+        "Waystone",
+        "Wyrd",
+        "Smeagle",
+        "Codex"
+      ],
+      "labels": [
+        "claimed: Anvil",
+        "claimed: Herald",
+        "claimed: Waystone",
+        "claimed: Wyrd",
+        "claimed: Smeagle",
+        "claimed: Codex"
+      ],
+      "branch_prefixes": [
+        "anvil/",
+        "herald/",
+        "waystone/",
+        "wyrd/",
+        "smeagle/",
+        "codex/",
+        "grok/"
+      ]
+    }
+  },
+  "routes": [
+    {
+      "id": "max",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "who": "all",
+      "risk": "any"
+    },
+    {
+      "id": "credits",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "via": "admission-proxy",
+      "key_env": "TW_CLAUDE_CREDITS_KEY",
+      "who": [
+        "bramble"
+      ],
+      "risk": "low",
+      "needs": "admission-proxy",
+      "monthly_usd": 200,
+      "refresh_day": 21,
+      "stop_below_usd": 10,
+      "price_usd_per_mtok": {
+        "input": 4.0,
+        "output": 20.0,
+        "cache_read": 0.2,
+        "cache_write_5m": 5.0,
+        "cache_write_1h": 8.0
+      }
+    },
+    {
+      "id": "chatgpt",
+      "provider": "openai-codex",
+      "model": "gpt-6.1-sol",
+      "who": "all",
+      "risk": "any"
+    },
+    {
+      "id": "qwen",
+      "provider": "custom",
+      "via": "admission-proxy",
+      "key_env": "TW_QWEN_TOKEN",
+      "model": "qwen3.5-9b",
+      "who": "all",
+      "risk": "low",
+      "needs": "admission-proxy",
+      "needs_one": true
+    }
+  ],
+  "paid_providers": [
+    "openrouter",
+    "openai",
+    "openai-api",
+    "ai-gateway",
+    "nous",
+    "copilot",
+    "zai",
+    "kimi-coding",
+    "minimax",
+    "minimax-cn",
+    "deepseek",
+    "nvidia",
+    "gmi",
+    "upstage",
+    "bedrock",
+    "vertex",
+    "gemini",
+    "google",
+    "xai"
+  ],
+  "secrets": {
+    "oracle_allowed": [
+      {
+        "name": "DISCORD_BOT_TOKEN",
+        "where": "root"
+      },
+      {
+        "name": "TW_PROXY_TOKEN",
+        "where": "each_profile"
+      }
+    ],
+    "oracle_settings": [
+      "DISCORD_ALLOWED_USERS",
+      "DISCORD_HIDE_SLASH_COMMANDS",
+      "DISCORD_COMMAND_SYNC_POLICY",
+      "DISCORD_REQUIRE_MENTION",
+      "DISCORD_HOME_CHANNEL",
+      "DISCORD_HOME_CHANNEL_NAME"
+    ],
+    "oracle_other_users": [
+      {
+        "name": "TW_GAMEDATA_NEXUS_KEY",
+        "user": "tw-gamedata",
+        "use": "download the collection's published revision files only"
+      },
+      {
+        "name": "TW_CLAUDE_CREDITS_KEY",
+        "user": "tw-proxy",
+        "use": "route 2, added by the admission proxy to Bramble's low-risk turns"
+      },
+      {
+        "name": "QWEN_API_KEY",
+        "user": "tw-proxy",
+        "use": "route 4, added by the admission proxy to low-risk Qwen packets"
+      }
+    ],
+    "qwen_env_file": "/home/hermes/.config/thornswood/qwen.env",
+    "forbidden_names": [
+      "ANTHROPIC_API_KEY",
+      "TW_CLAUDE_CREDITS_KEY",
+      "QWEN_API_KEY",
+      "TW_QWEN_TOKEN",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "GITHUB_APP_*",
+      "*NEXUS*",
+      "DESK_KEY*",
+      "*SIGNING*",
+      "AZURE_*",
+      "CLOUDFLARE_*",
+      "CF_API_*",
+      "*BOX_KEY*",
+      "*BRIDGE_TOKEN*",
+      "OPENAI_API_KEY",
+      "OPENROUTER_API_KEY",
+      "THORNSWOOD_NOTICE_*",
+      "GOOGLE_*",
+      "DISCORD_ALLOW_ALL_USERS",
+      "DISCORD_ALLOW_BOTS",
+      "DISCORD_ALLOWED_ROLES"
+    ],
+    "secret_name_parts": [
+      "KEY",
+      "KEYS",
+      "TOKEN",
+      "TOKENS",
+      "SECRET",
+      "SECRETS",
+      "PASSWORD",
+      "PASSWD",
+      "PASS",
+      "PASSPHRASE",
+      "CREDENTIAL",
+      "CREDENTIALS",
+      "PRIVATE",
+      "AUTH",
+      "COOKIE",
+      "COOKIES",
+      "PAT"
+    ],
+    "forbidden_files": [
+      "signing.json",
+      "thornswood_ed25519",
+      "thornswood-box-token",
+      "*.pfx",
+      "*.p12",
+      "*private-key*.pem",
+      "*.private-key.pem",
+      "hosts.yml",
+      ".git-credentials"
+    ]
+  },
+  "wake": {
+    "app": "bramble",
+    "port": 8644,
+    "route": "github-checks",
+    "funnel_port": 8443,
+    "secret_file": "/etc/thornswood/github-webhook.env",
+    "repos": [
+      "app",
+      "ops",
+      "fork"
+    ]
+  },
+  "decisions": {
+    "answered_by": "EvilPatrick06",
+    "default_expiry_hours": 72
+  },
+  "toolsets": {
+    "never": [
+      "browser",
+      "code_execution",
+      "computer_use",
+      "connections",
+      "catalog",
+      "image_gen",
+      "video_gen",
+      "tts",
+      "web",
+      "search",
+      "x_search",
+      "discord",
+      "discord_admin",
+      "delegation"
+    ],
+    "workers_never": [
+      "cronjob"
+    ]
+  },
+  "brokers": {
+    "ready": true,
+    "tier_b": false,
+    "install_root": "/opt/thornswood-hermes",
+    "users": {
+      "gateway": "hermes",
+      "policy": "tw-policy",
+      "files": "tw-files",
+      "git": "tw-git",
+      "proxy": "tw-proxy",
+      "backup": "tw-backup"
+    },
+    "exec_users": {
+      "rift": "tw-rift",
+      "sprocket": "tw-sprocket",
+      "echo": "tw-echo",
+      "magpie": "tw-magpie",
+      "wisp": "tw-wisp"
+    },
+    "sockets": {
+      "policy": {
+        "path": "/run/tw/policy/policy.sock",
+        "group": "tw-policy-clients",
+        "clients": [
+          "hermes",
+          "tw-git",
+          "tw-files",
+          "tw-proxy",
+          "root"
+        ]
+      },
+      "git": {
+        "path": "/run/tw/git/git.sock",
+        "group": "tw-git-clients",
+        "clients": [
+          "hermes",
+          "root"
+        ]
+      },
+      "files": {
+        "path": "/run/tw/files/files.sock",
+        "group": "tw-files-clients",
+        "clients": [
+          "hermes",
+          "root"
+        ]
+      },
+      "decide": {
+        "path": "/run/tw/decide-bots/bots.sock",
+        "group": "tw-decide-bots",
+        "clients": [
+          "hermes",
+          "root"
+        ]
+      },
+      "decide_git": {
+        "path": "/run/tw/decide-git/git.sock",
+        "group": "tw-decide-git",
+        "clients": [
+          "tw-git",
+          "root"
+        ]
+      }
+    },
+    "state": {
+      "policy_db": "/srv/tw/policy/policy.db",
+      "git_mirrors": "/srv/tw/git",
+      "work": "/srv/tw/work",
+      "spool": "/srv/tw/spool",
+      "backups": "/srv/tw/backups",
+      "snapshots": "/srv/tw/snapshots"
+    },
+    "files": {
+      "max_write_bytes": 2097152,
+      "max_patch_bytes": 1048576,
+      "max_changed_files": 2000,
+      "check_minutes": 10,
+      "disk_quota_gb": {
+        "default": 10,
+        "wisp": 25
+      },
+      "work_group_prefix": "tw-work-",
+      "git_config_keys": [
+        "core.repositoryformatversion",
+        "core.filemode",
+        "core.bare",
+        "core.logallrefupdates",
+        "core.ignorecase",
+        "core.precomposeunicode",
+        "remote.origin.url",
+        "remote.origin.fetch",
+        "branch.*.remote",
+        "branch.*.merge"
+      ],
+      "commit_email": "{bot}@bots.thornswood.invalid",
+      "check_commands": [
+        [
+          "node",
+          "tests/test-{name}.js"
+        ],
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          "tests/test-{name}.ps1"
+        ],
+        [
+          "python3",
+          "tests/test-{name}.py"
+        ],
+        [
+          "pwsh",
+          "scripts/dev/Check-Words.ps1"
+        ]
+      ],
+      "check_limits": {
+        "MemoryMax": "2G",
+        "CPUQuota": "100%",
+        "TasksMax": 256
+      }
+    },
+    "apps": {
+      "bramble": {
+        "app_id": 5547080,
+        "installation_id": 177392923,
+        "key_file": "/etc/thornswood/apps/thornswood-bramble.pem"
+      },
+      "workers": {
+        "app_id": 5547094,
+        "installation_id": 177393064,
+        "key_file": "/etc/thornswood/apps/thornswood-workers.pem"
+      }
+    }
+  },
+  "admission_proxy": {
+    "listen": "127.0.0.1:8611",
+    "env_file": "/etc/thornswood/proxy.env",
+    "token_env": "TW_PROXY_TOKEN",
+    "tokens_file": "/etc/thornswood/proxy-tokens.json",
+    "upstreams": {
+      "credits": {
+        "url": "https://api.anthropic.com",
+        "key_env": "TW_CLAUDE_CREDITS_KEY"
+      },
+      "qwen": {
+        "url_env": "QWEN_BASE_URL",
+        "key_env": "QWEN_API_KEY"
+      }
+    },
+    "max_request_bytes": {
+      "credits": 33554432,
+      "qwen": 524288
+    },
+    "qwen_max_tokens": 8192,
+    "qwen_lease_seconds": 900,
+    "upstream_timeout_seconds": 900,
+    "ready": {
+      "credits": false,
+      "qwen": true
+    }
+  },
+  "admission": {
+    "stage": "after",
+    "model_turns": {
+      "pilot": 1,
+      "after": 6
+    },
+    "sandbox_jobs": {
+      "pilot": 0,
+      "after": 2
+    },
+    "mutating_ops": 1,
+    "room_round_turns": 6,
+    "queue_max_waiting": 100,
+    "queue_new_per_hour": 20,
+    "admit": {
+      "mem_available_gb": 3.0,
+      "sandbox_mem_available_gb": 4.0,
+      "swap_used_mb": 512,
+      "psi_memory_some_avg60": 10.0,
+      "load5": 1.6,
+      "srv_free_gb": 25,
+      "boot_free_gb": 10
+    },
+    "drain": {
+      "mem_available_gb": 1.5,
+      "swap_used_gb": 2.0,
+      "psi_memory_full_avg10": 5.0,
+      "disk_free_gb": 15
+    },
+    "route_backoff_seconds": {
+      "first": 60,
+      "max": 14400
+    }
+  },
+  "slices": {
+    "tw-hermes.slice": {
+      "MemoryHigh": "2560M",
+      "MemoryMax": "3G",
+      "CPUWeight": 200,
+      "CPUQuota": "150%",
+      "TasksMax": 512
+    },
+    "tw-brokers.slice": {
+      "MemoryHigh": "400M",
+      "MemoryMax": "512M",
+      "CPUWeight": 100,
+      "CPUQuota": "50%",
+      "TasksMax": 128
+    },
+    "tw-sandbox.slice": {
+      "MemoryHigh": "3584M",
+      "MemoryMax": "4G",
+      "CPUWeight": 50,
+      "CPUQuota": "100%",
+      "TasksMax": 1024
+    },
+    "hermes-user.slice": {
+      "MemoryHigh": "3584M",
+      "MemoryMax": "4G",
+      "CPUQuota": "100%",
+      "TasksMax": 1024
+    }
+  },
+  "backups": {
+    "age_recipient_file": "/etc/thornswood/backup-recipient.txt",
+    "archive_keep_days": 14,
+    "snapshot_keep_hourly": 24,
+    "snapshot_keep_daily": 7,
+    "snapshot_cap_gb": 5,
+    "include": [
+      "/home/hermes/.hermes",
+      "/srv/tw/policy"
+    ],
+    "exclude_names": [
+      "auth.json",
+      ".env",
+      "*.pem",
+      "*.key",
+      "*.pfx",
+      "*.p12",
+      "credentials*",
+      "hosts.yml",
+      ".git-credentials",
+      "*.db-wal",
+      "*.db-shm"
+    ],
+    "exclude_dirs": [
+      "cache",
+      "image_cache",
+      "audio_cache",
+      "document_cache",
+      "node_modules",
+      "hermes-agent",
+      "logs",
+      "checkpoints",
+      "tools",
+      "installs"
+    ],
+    "offsite": {
+      "remote": "thornswood-gdrive",
+      "rclone_config": "/var/lib/tw-offsite/rclone.conf",
+      "hermes_folder": "Thornswood-Hermes-Backups",
+      "box_folder": "Thornswood-Box-Backups",
+      "drive_keep_days": 90,
+      "box_drive_keep_days": 30,
+      "fresh_hours": 26,
+      "box_drop": "/srv/tw/boxdrop",
+      "box_store": "/srv/tw/boxbackups",
+      "box_keep_days": 30,
+      "box_keep_newest": 7,
+      "box_address": "192.135.112.23",
+      "box_key_file": "deploy/keys/box-drop.pub"
+    }
+  },
+  "tier_a_disk": {
+    "images": "/var/lib/thornswood/tier-a",
+    "work_root": "/home/hermes/tw-work"
+  },
+  "follow_main": {
+    "url": "git@github.com:ThornswoodRP/TWHermesAgents.git",
+    "read_key": "/etc/thornswood/hermes-read-key",
+    "known_hosts": "/etc/thornswood/github_known_hosts",
+    "mirror": "/srv/tw/follow/thornswood-hermes.git",
+    "state_file": "/var/lib/thornswood/follow-main.json",
+    "ci_user": "tw-ci",
+    "ci_dir": "/srv/tw/ci",
+    "tests_minutes": 20,
+    "hermes_user": "hermes",
+    "hermes_releases": "/home/hermes/thornswood-hermes/releases",
+    "decide_env": "/etc/thornswood/tw-decide.env",
+    "decide_db": "/srv/tw/decide/core.db",
+    "decide_user": "tw-decide",
+    "decide_python": "/opt/thornswood-hermes/decisions-venv/bin/python3",
+    "pause_file": "/etc/thornswood/follow-main.paused",
+    "report": {
+      "app": "workers",
+      "app_login": "thornswood-workers[bot]",
+      "ledger_repo": "ops",
+      "ledger_issue": 249,
+      "board_repo": "app"
+    }
+  }
+}

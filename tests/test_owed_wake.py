@@ -1,4 +1,4 @@
-"""Bramble's owed-wake check (thornswood_guard/owed_wake.py and the script
+"""Bramble's owed-wake check (src/thornswood_guard/owed_wake.py and the script
 Hermes's cron runs, deploy/hermes-scripts/tw-owed-wake.py)."""
 
 import json
@@ -87,7 +87,7 @@ class Check(unittest.TestCase):
         self.assertIn("bramble-duties", owed_wake.PROMPT)
         self.assertIn("approves anything", owed_wake.PROMPT)
         self.assertEqual((owed_wake.SKILL, owed_wake.SCRIPT), ("bramble-duties", "tw-owed-wake.py"))
-        self.assertTrue((REPO / "skills" / owed_wake.SKILL / "SKILL.md").is_file())
+        self.assertTrue((REPO / "hermes" / "skills" / owed_wake.SKILL / "SKILL.md").is_file())
 
 
 class Script(unittest.TestCase):
@@ -100,7 +100,7 @@ class Script(unittest.TestCase):
         (pdir / "scripts").mkdir()
         shutil.copy(REPO / "deploy" / "hermes-scripts" / "tw-owed-wake.py", pdir / "scripts")
         if with_guard:
-            shutil.copytree(REPO / "thornswood_guard", pdir / "plugins" / "thornswood_guard",
+            shutil.copytree(REPO / "src" / "thornswood_guard", pdir / "plugins" / "thornswood_guard",
                             ignore=shutil.ignore_patterns("__pycache__"))
             # The brokers' sockets point into this profile, where none
             # listens: on the VM the real tw-policy answers at its own path

@@ -17,9 +17,9 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-GUARD_COPY = REPO / "thornswood_guard" / "rule_zero.md"
-DECISIONS_COPY = REPO / "plugins" / "thornswood-decisions" / "rule_zero.md"
-SKILLS = [REPO / "skills" / "thornswood" / n / "SKILL.md" for n in ("thornswood-guide", "thornswood-ops")]
+GUARD_COPY = REPO / "src" / "thornswood_guard" / "rule_zero.md"
+DECISIONS_COPY = REPO / "hermes" / "plugins" / "thornswood-decisions" / "rule_zero.md"
+SKILLS = [REPO / "hermes" / "skills" / "thornswood" / n / "SKILL.md" for n in ("thornswood-guide", "thornswood-ops")]
 BOTS = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
 
 # Lines that must be there, word for word, from the project's rule.
@@ -99,7 +99,7 @@ class TheText(unittest.TestCase):
 class TheGuard(unittest.TestCase):
     def test_every_bot_gets_rule_zero_in_its_prompt(self):
         for i, bot in enumerate(BOTS):
-            m = load(self, REPO / "thornswood_guard", f"_tw_rz_guard_{i}")
+            m = load(self, REPO / "src" / "thornswood_guard", f"_tw_rz_guard_{i}")
             ctx = Ctx(bot)
             m.register(ctx)
             text, kw = ctx.sections["thornswood.rule-zero"]
@@ -109,17 +109,17 @@ class TheGuard(unittest.TestCase):
             self.assertEqual(kw["max_chars"], 4000)
 
     def test_only_bramble_gets_the_review_line(self):
-        m = load(self, REPO / "thornswood_guard", "_tw_rz_guard_b")
+        m = load(self, REPO / "src" / "thornswood_guard", "_tw_rz_guard_b")
         ctx = Ctx("bramble")
         m.register(ctx)
         self.assertIn("As Bramble you also reject", ctx.sections["thornswood.rule-zero"][0])
-        m = load(self, REPO / "thornswood_guard", "_tw_rz_guard_w")
+        m = load(self, REPO / "src" / "thornswood_guard", "_tw_rz_guard_w")
         ctx = Ctx("wisp")
         m.register(ctx)
         self.assertNotIn("As Bramble", ctx.sections["thornswood.rule-zero"][0])
 
     def test_the_gateway_profile_gets_it_too(self):
-        m = load(self, REPO / "thornswood_guard", "_tw_rz_guard_g")
+        m = load(self, REPO / "src" / "thornswood_guard", "_tw_rz_guard_g")
         ctx = Ctx("default")
         m.register(ctx)
         self.assertIn(MUST[1], ctx.sections["thornswood.rule-zero"][0])
@@ -127,7 +127,7 @@ class TheGuard(unittest.TestCase):
     def test_without_rule_zero_the_guard_refuses_every_tool(self):
         tmp = Path(tempfile.mkdtemp()) / "thornswood_guard"
         self.addCleanup(shutil.rmtree, tmp.parent, True)
-        shutil.copytree(REPO / "thornswood_guard", tmp, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(REPO / "src" / "thornswood_guard", tmp, ignore=shutil.ignore_patterns("__pycache__"))
         (tmp / "rule_zero.md").unlink()
         m = load(self, tmp, "_tw_rz_guard_missing")
         ctx = Ctx("echo")
@@ -140,7 +140,7 @@ class TheGuard(unittest.TestCase):
 
 class PatricksHermes(unittest.TestCase):
     def test_the_decisions_plugin_gives_rule_zero_and_nothing_else(self):
-        m = load(self, REPO / "plugins" / "thornswood-decisions", "_tw_rz_decisions")
+        m = load(self, REPO / "hermes" / "plugins" / "thornswood-decisions", "_tw_rz_decisions")
         ctx = Ctx("default")
         m.register(ctx)
         self.assertEqual(list(ctx.sections), ["thornswood.rule-zero"])
@@ -157,8 +157,8 @@ class Installed(unittest.TestCase):
         # rule_zero.md must not be one of the files it leaves out.
         src = (REPO / "scripts" / "apply.py").read_text(encoding="utf-8")
         self.assertIn('def install_guard(pdir: Path, name: str = "thornswood_guard")', src)
-        self.assertIn("shutil.copytree(REPO / name", src)
-        self.assertNotIn("*.md", src.split("shutil.copytree(REPO / name", 1)[1].split("\n", 1)[0])
+        self.assertIn("shutil.copytree(SRC / name", src)
+        self.assertNotIn("*.md", src.split("shutil.copytree(SRC / name", 1)[1].split("\n", 1)[0])
 
 
 if __name__ == "__main__":

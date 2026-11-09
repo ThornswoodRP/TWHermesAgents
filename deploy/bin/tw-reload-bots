@@ -1,8 +1,8 @@
 #!/usr/bin/python3 -I
-# After an apply: end the hermes user's login sessions and restart the gateway (thornswood_brokers/reload.py).
+# After an apply: end the hermes user's login sessions and restart the gateway (src/thornswood_brokers/reload.py).
 import sys
 from pathlib import Path
 # The release this file is in: /opt/thornswood-hermes/bin links here through current.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from thornswood_brokers.reload import main  # noqa: E402
 sys.exit(main())

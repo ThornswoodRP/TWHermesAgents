@@ -32,7 +32,7 @@ flowchart LR
     D -- passkey sign-in --> P["Patrick's phone and Desktop"]
 ```
 
-- **The policy** (`thornswood_guard/policy.yaml`) is every rule as data: the six Bots, the two GitHub Apps, what each Bot may push, merge and start, the model routes, the claim labels and the host's limits.
+- **The policy** (`src/thornswood_guard/policy.yaml`) is every rule as data: the six Bots, the two GitHub Apps, what each Bot may push, merge and start, the model routes, the claim labels and the host's limits.
 - **The guard** is a Hermes plugin in every Bot's profile. It checks each tool call before Hermes runs it and refuses anything the policy does not allow, with the reason. If it cannot read the policy, it refuses everything.
 - **The brokers** run as their own Linux users. The Bots hold no GitHub credential at all: every GitHub write goes through `tw-git`, which checks it against the policy again and holds the Apps' keys where the Bots cannot read them.
 - **The decision core** is where a Bot asks Patrick for a decision. He answers from an installable phone app or a Hermes Desktop pane, behind a passkey.
@@ -49,28 +49,28 @@ flowchart LR
 | [Setting up a VM](docs/setup.md) | A first install, the one-time settings, and the decision app |
 | [Running it](docs/operations.md) | Updates, pausing, rolling back, backups and restores |
 | [The decision app](docs/decision-app.md) | The decision core, the phone app and the Desktop pane |
-| [Fixes for Hermes](upstream/hermes/README.md) | Patches for Hermes itself, sent upstream |
+| [Fixes for Hermes](hermes/patches/README.md) | Patches for Hermes itself, sent upstream |
 | [Contributing](CONTRIBUTING.md) | How a change is made, tested and merged |
 | [Reporting a vulnerability](SECURITY.md) | How to tell us about a security problem quietly |
 
 ## Repository layout
 
-| Path | What it holds |
-|---|---|
-| `thornswood_guard/` | The policy, and the guard plugin that enforces it inside Hermes |
-| `thornswood_brokers/` | The brokers, the follower, backups, the limits check and the live canary |
-| `thornswood_decisions/` | The decision core, its HTTP API and the phone app (`app/`) |
-| `thornswood_live/` | A small Hermes plugin that reports what each Bot's turn is doing, for the app's live Board |
-| `plugins/thornswood-decisions/` | The Hermes Desktop pane for the decision core |
-| `skills/` | The Bots' skills that this repository installs |
-| `profiles/` | Each Bot's Hermes config as it will be set, generated from the policy for review |
-| `deploy/` | What the VM install puts in place: systemd units and slices, command wrappers, the SSH jail and the decision core's install |
-| `scripts/` | `apply.py`, the generators, `merge_green.py`, and the scripts run by hand from a machine on the tailnet |
-| `tests/` | The test suite: one test for every rule held in code, plus the attack tests |
-| `upstream/hermes/` | Patches for Hermes itself |
-| `docs/` | Everything above, written out |
-
-The four Python packages sit at the top level on purpose. The VM's units, the installed Hermes plugins and the copy of the follower already running on the VM all import them by these names from a release's root.
+```
+src/        the Python packages
+  thornswood_guard/      the policy, and the guard plugin that enforces it inside Hermes
+  thornswood_brokers/    the brokers, the follower, backups, the limits check and the live canary
+  thornswood_decisions/  the decision core, its HTTP API and the phone app (app/)
+  thornswood_live/       a small Hermes plugin that reports what each Bot's turn is doing
+hermes/     what goes into Hermes itself
+  plugins/               the Hermes Desktop pane for the decision core
+  profiles/              each Bot's Hermes config as it will be set, generated from the policy
+  skills/                the Bots' skills that this repository installs
+  patches/               fixes for Hermes, each sent upstream
+deploy/     what the VM install puts in place: units, slices, commands, the SSH jail, the core's install
+scripts/    apply.py, the generators, merge_green.py, and the scripts run by hand
+tests/      one test for every rule held in code, plus the attack tests
+docs/       everything above, written out
+```
 
 ## Running the tests
 

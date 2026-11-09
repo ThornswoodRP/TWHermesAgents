@@ -160,9 +160,9 @@ class SaysWhatItDoes(unittest.TestCase):
             own.RELEASE = old
 
     def test_the_release_is_read_from_the_release_folder(self):
-        here = self.dir / "releases" / C / "thornswood_decisions"
+        here = self.dir / "releases" / C / "src" / "thornswood_decisions"
         self.assertEqual(own._release(here), C)
-        self.assertIsNone(own._release(self.dir / "src" / "thornswood_decisions"))
+        self.assertIsNone(own._release(self.dir / "clone" / "src" / "thornswood_decisions"))
         here.mkdir(parents=True)
         self.assertEqual(own_connector.own_commit(here), C)
         (here / "COMMIT").write_text(A + "\n", encoding="ascii")

@@ -7,4 +7,4 @@
 import runpy
 from pathlib import Path
 # The release this file is in: /opt/thornswood-hermes/bin links here through current.
-runpy.run_path(str(Path(__file__).resolve().parents[2] / "thornswood_decisions" / "own_connector.py"), run_name="__main__")
+runpy.run_path(str(Path(__file__).resolve().parents[2] / "src" / "thornswood_decisions" / "own_connector.py"), run_name="__main__")

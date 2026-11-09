@@ -74,7 +74,7 @@ stale_procs() {
 
 pol() { python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); v=d
 for k in sys.argv[2].split("."): v=v[k]
-print(json.dumps(v) if isinstance(v,(dict,list,bool)) else v)' "$here/thornswood_guard/policy.json" "$1"; }
+print(json.dumps(v) if isinstance(v,(dict,list,bool)) else v)' "$here/src/thornswood_guard/policy.json" "$1"; }
 
 bots="bramble rift sprocket echo magpie wisp"
 workers="rift sprocket echo magpie wisp"
@@ -278,7 +278,7 @@ link_in() { ln -sfnT "$1" "$2.new" && mv -T "$2.new" "$2"; }
 install -d -m 0755 "$opt/bin"
 for f in "$here"/deploy/bin/*; do link_in "$opt/current/deploy/bin/${f##*/}" "$opt/bin/${f##*/}"; done
 link_in "$here" "$opt/current"
-link_in "$here/plugins" "$opt/plugins"
+link_in "$here/hermes/plugins" "$opt/plugins"
 ok "$opt/current is $commit"
 
 # 7. Checks start through tw-checks.socket (step 8), never sudo: the sudoers
@@ -316,7 +316,7 @@ fi
 if quotas_on; then
   for b in $bots; do
     gb="$(python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1]))["brokers"]["files"]["disk_quota_gb"]; print(c.get(sys.argv[2], c["default"]))' \
-      "$here/thornswood_guard/policy.json" "$b")"
+      "$here/src/thornswood_guard/policy.json" "$b")"
     setquota -g "tw-work-$b" 0 "$((gb * 1024 * 1024))" 0 0 "$srv_mnt"
   done
   ok "each Bot's work group has its disk cap on $srv_mnt"
@@ -328,7 +328,7 @@ if quotas_on; then
   for b in $bots; do keep+=" $(getent group "tw-work-$b" | cut -d: -f3)"; done
   report="$(repquota -g -n "$srv_mnt")" || stop "repquota could not read the group quotas on $srv_mnt."
   # shellcheck disable=SC2086  # the gids are words on purpose
-  left="$(printf '%s\n' "$report" | python3 -I "$here/thornswood_brokers/disk_caps.py" $keep)" \
+  left="$(printf '%s\n' "$report" | python3 -I "$here/src/thornswood_brokers/disk_caps.py" $keep)" \
     || stop "the group quotas on $srv_mnt could not be read; what it printed is above."
   for gid in $left; do
     name="$(getent group "$gid" | cut -d: -f1 || true)"
@@ -358,6 +358,89 @@ if [[ -z "$(swapon --show --noheadings)" ]]; then
     systemctl daemon-reload
   fi
   ok "a 4 GB swapfile is on, and in /etc/fstab for every boot"
+fi
+
+# 7d. The disk cap inside each Bot's Tier A container (policy tier_a_disk):
+# /workspace is the Bot's folder, and that folder is a filesystem of its own,
+# a sparse image of the Bot's size in brokers.files.disk_quota_gb, mounted by
+# a unit of its own at every boot. A folder that is not mounted yet is moved
+# onto its filesystem once, with the gateway stopped and Hermes's sandbox
+# containers removed, since those still hold the old folder. A filesystem
+# grows when its size in the policy does; one is never shrunk here.
+images="$(pol tier_a_disk.images)"
+work_root="$(pol tier_a_disk.work_root)"
+command -v mkfs.ext4 >/dev/null && command -v resize2fs >/dev/null || stop "e2fsprogs is not installed on the VM."
+install -d -m 0700 -o root -g root "$images"
+[[ -d "$work_root" ]] || install -d -m 0755 -o hermes -g hermes "$work_root"
+hermes_gid="$(id -g hermes)"
+gateway_was=""
+for b in $bots; do
+  gb="$(python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1]))["brokers"]["files"]["disk_quota_gb"]; print(c.get(sys.argv[2], c["default"]))' \
+    "$here/src/thornswood_guard/policy.json" "$b")"
+  want=$((gb * 1024 * 1024 * 1024))
+  img="$images/$b.img"
+  dir="$work_root/$b"
+  unit="$(systemd-escape --path --suffix=mount "$dir")"
+  if [[ ! -e "$img" ]]; then
+    truncate -s "$want" "$img"
+    chmod 0600 "$img"
+    mkfs.ext4 -q -F -m 0 -L "tw-$b" -E "root_owner=$hermes_uid:$hermes_gid" "$img" || stop "mkfs.ext4 could not make $img."
+  fi
+  have="$(stat -c %s "$img")"
+  (( have <= want )) || stop "$img is $have bytes, more than ${gb} GB; a Bot's filesystem is not shrunk here. Move its work off, delete $img, and run this again."
+  printf '%s\n' \
+    "# Placed by deploy/install.sh step 7d: $b's Tier A folder, a filesystem of its own (policy.yaml tier_a_disk)." \
+    "[Unit]" \
+    "Description=$b's Tier A folder, ${gb} GB" \
+    "Before=tw-hermes-gateway.service tw-limits-check.service" \
+    "" \
+    "[Mount]" \
+    "What=$img" \
+    "Where=$dir" \
+    "Type=ext4" \
+    "Options=loop,nosuid,nodev,noatime" \
+    "" \
+    "[Install]" \
+    "WantedBy=local-fs.target" > "/etc/systemd/system/$unit.tw-new"
+  mv "/etc/systemd/system/$unit.tw-new" "/etc/systemd/system/$unit"
+  systemctl daemon-reload
+  if ! mountpoint -q "$dir"; then
+    if [[ -z "$gateway_was" ]]; then
+      gateway_was="$(systemctl is-active tw-hermes-gateway.service 2>/dev/null || true)"
+      [[ "$gateway_was" == active ]] && systemctl stop tw-hermes-gateway.service
+      runuser -u hermes -- env XDG_RUNTIME_DIR="/run/user/$hermes_uid" sh -c \
+        'podman ps -aq --filter label=hermes-agent=1 | xargs -r podman rm -f >/dev/null' \
+        || stop "Hermes's sandbox containers could not be removed; they hold the Bots' old folders."
+    fi
+    old=""
+    if [[ -e "$dir" ]]; then
+      old="$dir.before-disk"
+      [[ ! -e "$old" ]] || stop "$old is there from an earlier run; look at it, then move it away and run this again."
+      mv "$dir" "$old"
+    fi
+    install -d -m 0700 -o hermes -g hermes "$dir"
+    systemctl enable --quiet --now "$unit" || stop "$unit did not mount: journalctl -u '$unit' -n 20"
+    mountpoint -q "$dir" || stop "$dir is not mounted after $unit started."
+    if [[ -n "$old" ]]; then
+      cp -a "$old/." "$dir/" || stop "$b's work could not be copied onto its filesystem; it is all still in $old."
+      rm -rf -- "$old"
+    fi
+  else
+    systemctl enable --quiet "$unit"
+  fi
+  if (( have < want )); then
+    truncate -s "$want" "$img"
+    dev="$(findmnt -n -o SOURCE --mountpoint "$dir")"
+    { losetup -c "$dev" && resize2fs "$dev" >/dev/null 2>&1; } || stop "$b's filesystem could not grow to ${gb} GB."
+  fi
+  chown hermes:hermes "$dir"
+  chmod 0700 "$dir"
+  ok "$dir is $b's own ${gb} GB filesystem"
+done
+if [[ "$gateway_was" == active ]]; then
+  systemctl reset-failed tw-hermes-gateway.service
+  systemctl start tw-hermes-gateway.service
+  systemctl is-active --quiet tw-hermes-gateway.service || stop "tw-hermes-gateway did not come back after the Bots' folders moved: journalctl -u tw-hermes-gateway -n 50"
 fi
 
 # 8. Units and slices. Every file in deploy/systemd is placed here or named
@@ -400,7 +483,7 @@ ok "units in place and started"
 # the events, on its settings page) and the tailnet's funnel and https node
 # attributes for this machine. Until both are there this step says which is
 # missing, changes nothing and waits on nothing, and the install goes on.
-hook_py() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from thornswood_brokers.app_hook import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"; }
+hook_py() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from thornswood_brokers.app_hook import main; sys.exit(main(sys.argv[2:]))' "$here/src" "$@"; }
 wake_path="/p/$(pol wake.app)/webhooks/$(pol wake.route)"
 wake_target="http://127.0.0.1:$(pol wake.port)$wake_path"
 wake_port="$(pol wake.funnel_port)"

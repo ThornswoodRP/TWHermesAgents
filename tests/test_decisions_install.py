@@ -17,7 +17,7 @@ import unittest
 from helpers import REPO
 
 DEPLOY = REPO / "deploy" / "decisions"
-PLUGIN = REPO / "plugins" / "thornswood-decisions"
+PLUGIN = REPO / "hermes" / "plugins" / "thornswood-decisions"
 COMMIT = "a" * 40
 
 
@@ -53,7 +53,7 @@ class Unit(unittest.TestCase):
                 ("tw-decide-feed", "#!/usr/bin/python3 -I", "feed_reader")):
             lines = (DEPLOY / name).read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0], shebang, name)
-            self.assertIn('sys.path.insert(0, str(Path(__file__).resolve().parents[2]))', lines)
+            self.assertIn('sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))', lines)
             self.assertIn(f"from thornswood_decisions.{module} import main  # noqa: E402", lines)
 
     def test_the_feed_runs_as_hermes_on_loopback_only(self):
@@ -119,7 +119,7 @@ class Unit(unittest.TestCase):
 
     def test_the_push_worker_logs_each_line_at_once(self):
         import ast
-        tree = ast.parse((REPO / "thornswood_decisions" / "push_worker.py").read_text(encoding="utf-8"))
+        tree = ast.parse((REPO / "src" / "thornswood_decisions" / "push_worker.py").read_text(encoding="utf-8"))
         say = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "say")
         call = say.body[-1].value
         self.assertEqual((call.func.id, [k.arg for k in call.keywords]), ("print", ["flush"]))

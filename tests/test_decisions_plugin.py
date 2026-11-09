@@ -24,7 +24,7 @@ from unittest import mock
 from test_decisions_api import Served
 
 REPO = Path(__file__).resolve().parent.parent
-PLUGIN = REPO / "plugins" / "thornswood-decisions"
+PLUGIN = REPO / "hermes" / "plugins" / "thornswood-decisions"
 PREFIX = "hermes-subject:"
 
 

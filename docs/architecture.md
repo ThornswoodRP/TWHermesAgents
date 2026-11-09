@@ -15,7 +15,7 @@ This page walks through every part of TWHermesAgents: where it runs, as which us
 
 The Bots are six profiles in one Hermes install, under `/home/hermes/.hermes/profiles/<bot>`, all served by one gateway: `tw-hermes-gateway.service`, run as the `hermes` user inside `tw-hermes.slice`.
 
-Each Bot's config is built from the policy by `thornswood_guard/profile_config.py` and set by `scripts/apply.py`. The generated copies in `profiles/` are what gets set, for reading in review. Every Bot has:
+Each Bot's config is built from the policy by `src/thornswood_guard/profile_config.py` and set by `scripts/apply.py`. The generated copies in `hermes/profiles/` are what gets set, for reading in review. Every Bot has:
 
 - the same model order: Claude (`claude-opus-5-5`) through Patrick's subscription sign-in first, then OpenAI Codex (`gpt-6.1-sol`). No provider that bills by use is allowed in a config;
 - the toolsets it may never use turned off (browser, code execution, computer use, web search, image and video generation, Discord admin and the rest in `policy.yaml` `toolsets`), and for the five workers, cron as well;
@@ -27,7 +27,7 @@ Each Bot's config is built from the policy by `thornswood_guard/profile_config.p
 
 ## The guard
 
-`thornswood_guard/` is both a Python package and a Hermes plugin. Installed into each profile, it registers:
+`src/thornswood_guard/` is both a Python package and a Hermes plugin. Installed into each profile, it registers:
 
 - a `pre_tool_call` hook (`tool_guard.py`) that Hermes runs before every tool a Bot calls. It refuses reads of Hermes's home, `.env` files, `auth.json`, process environments and the brokers' sockets; shell commands that push, merge or change git settings that run code; edits to the Bot's own config or shared skills; and anything else the policy forbids. A refusal comes back to the Bot with the reason;
 - two system prompt sections: rule zero (`rule_zero.md`, "fix the cause, no band-aids, ever") and a short one saying a refusal is a stop. Both are frozen into each new session's prompt, so only a change here can remove them;
@@ -37,12 +37,12 @@ The guard reads its rules from `policy.json`, the JSON form of `policy.yaml`, be
 
 ## The brokers
 
-The brokers in `thornswood_brokers/` run as their own users, each from a root-owned copy of the release under `/opt/thornswood-hermes`, never from anything the `hermes` user can write. They sit in `tw-brokers.slice`.
+The brokers in `src/thornswood_brokers/` run as their own users, each from a root-owned copy of the release under `/opt/thornswood-hermes`, never from anything the `hermes` user can write. They sit in `tw-brokers.slice`.
 
 | Broker | User | What it does |
 |---|---|---|
 | `tw-policy` | `tw-policy` | The fleet admission queue, exactly-once receipts, Patrick's decision records, route and credit state, and leases, in one SQLite store |
-| `tw-git` | `tw-git` | Every GitHub call. It holds the two Apps' keys (mode 400, its own), checks each write against `thornswood_guard/github.py`, writes a receipt first, and reads GitHub back before any retry |
+| `tw-git` | `tw-git` | Every GitHub call. It holds the two Apps' keys (mode 400, its own), checks each write against `src/thornswood_guard/github.py`, writes a receipt first, and reads GitHub back before any retry |
 | `tw-files` | `tw-files` | Each worker's trees under `/srv/tw/work/<bot>`. It walks every path from a folder handle without following links, and runs checks through `tw-run-check` as the Bot's own user, with no network and only that tree visible |
 | `tw-proxy` | `tw-proxy` | The admission proxy on `127.0.0.1:8611`, for model routes that need a key only it can read. It admits a route only once a pull request sets it ready in `admission_proxy.ready` |
 
@@ -69,7 +69,7 @@ Their ids and key paths are in `policy.yaml` `brokers.apps`.
 
 ## The decision core
 
-When a Bot needs Patrick, it opens a card in the decision core (`thornswood_decisions/`, the `tw-decide` service). He answers from the installable phone app or the Hermes Desktop pane, signed in with a passkey, and the core tells the Bot the answer. The core also carries his chats with the Bots and with his own Hermes, the live Board, push alerts and voice. [decision-app.md](decision-app.md) covers it in full.
+When a Bot needs Patrick, it opens a card in the decision core (`src/thornswood_decisions/`, the `tw-decide` service). He answers from the installable phone app or the Hermes Desktop pane, signed in with a passkey, and the core tells the Bot the answer. The core also carries his chats with the Bots and with his own Hermes, the live Board, push alerts and voice. [decision-app.md](decision-app.md) covers it in full.
 
 ## The live Board
 
@@ -77,7 +77,7 @@ When a Bot needs Patrick, it opens a card in the decision core (`thornswood_deci
 
 ## Keeping the VM on main
 
-`tw-follow-main.timer` runs `thornswood_brokers/follow_main.py` as root every ten minutes. It:
+`tw-follow-main.timer` runs `src/thornswood_brokers/follow_main.py` as root every ten minutes. It:
 
 1. fetches `main` with the VM's own read-only deploy key, checking GitHub's published host keys only;
 2. stops if that commit is already installed, or already failed here;

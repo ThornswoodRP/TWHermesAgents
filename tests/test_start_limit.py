@@ -54,7 +54,7 @@ class StartLimit(unittest.TestCase):
                                      f"on the line before it")
 
     def test_the_reload_clears_the_gateways_count_before_it_starts_it(self):
-        src = (REPO / "thornswood_brokers" / "reload.py").read_text(encoding="utf-8")
+        src = (REPO / "src" / "thornswood_brokers" / "reload.py").read_text(encoding="utf-8")
         self.assertLess(src.index('run(["systemctl", "reset-failed", GATEWAY])'),
                         src.index('run(["systemctl", "start", GATEWAY])'))
 

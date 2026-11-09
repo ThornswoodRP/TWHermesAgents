@@ -17,7 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent)); sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE))
 from decisions_helpers import World
 from thornswood_decisions.api import Api, make_server
 from thornswood_decisions.feeds import Feeds
@@ -242,6 +242,20 @@ def one_replies(o):
         # The core's clock here stands still; let the 20 seconds pass after which the core asks One for
         # the chat's newest page again, as they would while One answers.
         w.clock.advance(seconds=21)
+# One's chat settings, as its connector reads and changes them (room_send.py op control): a ChatGPT
+# sign-in model now, and a local model it can move to.
+CTL = {"model": "gpt-5.5", "provider": "openai-codex", "reasoning": "medium", "levels": ["low", "medium", "high", "xhigh"],
+       "yolo": False, "busy": "steer",
+       "offered": [{"provider": "openai-codex", "model": "gpt-5.5", "name": "OpenAI Codex", "why": "subscription"},
+                   {"provider": "openai-codex", "model": "gpt-5.5-mini", "name": "OpenAI Codex", "why": "subscription"},
+                   {"provider": "llamacpp", "model": "qwen3-8b.gguf", "name": "Local", "why": "local"}]}
+def one_control(o, r):
+    want = r.get("set") or {}
+    if want.get("model"):
+        CTL.update(model=want["model"]["model"], provider=want["model"]["provider"])
+    if want.get("reasoning"):
+        CTL["reasoning"] = want["reasoning"]
+    o.control_post(w.ws, "one", to, {"id": r["id"], "state": dict(CTL), "applied": bool(want), "reason": ""})
 def one_pages():
     o = OwnChat(Store(w.path, clock=w.clock))
     while True:
@@ -249,6 +263,8 @@ def one_pages():
             got = o.claim(w.ws, "one", to, 0, True, "", None, None, TURNS)
             for r in got.get("sessions", []):
                 one_session(o, r)
+            for r in got.get("controls", []):
+                one_control(o, r)
             one_replies(o)
             for r in got.get("reactions", []):
                 o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],

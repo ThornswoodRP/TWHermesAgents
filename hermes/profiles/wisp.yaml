@@ -1,0 +1,128 @@
+# Wisp's Hermes config, as scripts/apply.py sets it in the existing
+# profile /home/hermes/.hermes/profiles/wisp/config.yaml. Generated from
+# src/thornswood_guard/policy.yaml by scripts/render_profiles.py; do not edit by hand.
+# Every key not listed here stays as Hermes has it. `model` and
+# `fallback_providers` are replaced whole.
+#
+# Rooms: Thornswood Workbench.
+# Skills: thornswood-ops and thornswood-guide, already in the profile;
+# apply.py checks they are there.
+model:
+  provider: anthropic
+  default: claude-opus-5-5
+fallback_providers:
+- provider: openai-codex
+  model: gpt-6.1-sol
+- provider: custom
+  model: qwen3.5-9b
+  base_url: http://127.0.0.1:8611/qwen/v1
+  key_env: TW_PROXY_TOKEN
+timezone: America/Denver
+agent:
+  reasoning_effort: medium
+  service_tier: ''
+  disabled_toolsets:
+  - browser
+  - code_execution
+  - computer_use
+  - connections
+  - catalog
+  - image_gen
+  - video_gen
+  - tts
+  - web
+  - search
+  - x_search
+  - discord
+  - discord_admin
+  - delegation
+  - cronjob
+terminal:
+  backend: docker
+  cwd: /home/hermes/tw-work/wisp
+  docker_image: docker.io/nousresearch/hermes-sandbox:desktop
+  docker_mount_cwd_to_workspace: true
+  docker_network: false
+  docker_volumes: []
+  docker_forward_env: []
+  docker_env: {}
+  docker_extra_args:
+  - --read-only
+  docker_shared_container_key: ''
+  container_cpu: 1
+  container_memory: 2048
+  container_disk: 0
+  container_persistent: false
+auxiliary:
+  free_only: true
+  openrouter_model: ''
+  vision:
+    provider: anthropic
+    model: claude-opus-5-5
+  approval:
+    provider: anthropic
+    model: claude-opus-5-5
+  title_generation:
+    model_upgrade_enabled: false
+  background_review:
+    enabled: false
+curator:
+  enabled: false
+skills:
+  write_approval: true
+  guard_agent_created: true
+  inline_shell: false
+  project_discovery: false
+approvals:
+  mode: smart
+  smart_policy: "You are judging a command from a Thornswood Bot. Each Bot works only\
+    \ in its own\ncopy of a repository, mounted at /workspace in its own sandbox.\
+    \ Every write to\nGitHub, every merge, release, deploy and publish goes through\
+    \ Thornswood's\nbrokers, never through a shell command.\nDENY a command that:\n\
+    - reads, prints, copies or sends a credential: a token, key, password, .env file,\n\
+    \  auth.json, an SSH or GPG key, anything under /etc/thornswood or a .ssh folder;\n\
+    - pushes, merges, tags, releases, deploys or publishes, or writes to a remote\n\
+    \  service (git push, gh with a write, curl or wget sending data, scp, rsync to\
+    \ a\n  remote, nc);\n- changes the machine: services, schedules, users, groups,\
+    \ sudo, the firewall,\n  Tailscale, podman or docker, packages outside /workspace;\n\
+    - deletes, moves or changes files outside /workspace and /tmp, or changes their\n\
+    \  owner or permissions.\nAPPROVE a command that only reads or inspects, or that\
+    \ builds, tests, lints or\nformats the repository under /workspace with the repository's\
+    \ own scripts and\ntools, or that runs local git commands which do not reach a\
+    \ remote (status,\ndiff, log, show, add, commit, switch, branch, stash, restore).\n\
+    ESCALATE anything else, and anything you are not sure of: a person decides.\n"
+  timeout: 300
+  cron_mode: deny
+  unattended_mode: deny
+  single_query_mode: deny
+  deny:
+  - git push*
+  - '*git push *'
+  - gh pr merge*
+  - '*gh pr merge*'
+  - gh pr create*
+  - gh workflow run*
+  - '*gh workflow run*'
+  - gh api * -X *
+  - gh api * --method *
+  - gh label *
+  - gh issue edit*
+  - gh secret*
+  - gh variable*
+  - gh ruleset*
+  - gh auth login*
+  - gh auth token*
+  - '*cat *auth.json*'
+  - '*printenv*'
+  - '*/proc/*/environ*'
+  - sudo *
+plugins:
+  enabled:
+  - thornswood_guard
+  - thornswood_live
+  auto_apply: false
+  auto_update_check_hours: 0
+  hook_callback_timeout: 600
+hooks_auto_accept: false
+security:
+  redact_secrets: true
