@@ -300,6 +300,9 @@ class Apply(unittest.TestCase):
                      "Never merge ThornswoodRP/TWHermesAgents", "tw_decide", "start_run"):
             self.assertIn(must, text)
         self.assertIn("whoever did it", text)
+        # 9 Nov: two box-step cards stayed up after Patrick ran both steps by hand.
+        for must in ("tw_decide my_cards", "close_card", "`cancelled`", "Box step output:"):
+            self.assertIn(must, text)
         self.assertNotIn("\u2014", text)
 
     def test_the_gateways_own_profile_is_set_and_guarded(self):
