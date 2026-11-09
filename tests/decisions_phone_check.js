@@ -20,6 +20,8 @@ const { chromium } = require('playwright')
 // Started by test_decisions_phone_browser.py.
 const [port, code, card, high, third, boardNext, voiceWav, VOICE, VOICE_REPLY] = process.argv.slice(2)
 const base = `http://localhost:${port}`
+// The words when the browser or the passkey app ends a sign-in, with the browser's own error name.
+const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\.$/
 ;(async () => {
   // channel 'chromium': the full browser in its new headless mode. The bare
   // headless shell refuses every notification, so it cannot show an alert.
@@ -115,14 +117,21 @@ const base = `http://localhost:${port}`
   await page.getByText('Sign out').click()
   await page.getByRole('heading', { name: 'Welcome back' }).waitFor({ timeout: 5000 })
   await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: false })
+  const told = page.waitForResponse(r => new URL(r.url()).pathname === '/api/v1/passkeys/sign-in/failed', { timeout: 15000 })
   await page.goto(base + '/m/settings')
   await step('a dismissed prompt on opening shows the button, and the button signs in', async () => {
     const button = page.getByRole('button', { name: 'Sign in with your passkey' })
-    await page.getByText('The passkey did not sign in. Nothing changed.').waitFor({ timeout: 8000 })
+    await page.getByText(DID_NOT_SIGN_IN).waitFor({ timeout: 8000 })
     if (!(await button.isVisible())) throw new Error('no button after a dismissed prompt')
     await cdp.send('WebAuthn.setUserVerified', { authenticatorId, isUserVerified: true })
     await button.click()
     await page.getByText('Add a passkey on this phone').waitFor({ timeout: 8000 })
+  })
+  await step('a prompt the phone ended is told to the core, with the browser\'s own error, and the core takes it', async () => {
+    const r = await told
+    const sent = JSON.parse(r.request().postData() || '{}')
+    if (r.status() !== 200) throw new Error('the core answered ' + r.status())
+    if (sent.name !== 'NotAllowedError' || typeof sent.challenge !== 'string') throw new Error('sent ' + JSON.stringify(sent))
   })
   await page.getByRole('link', { name: /Decisions/ }).click()
   await step('the Decisions list after the passkey sign-in, with its badge', async () => {
@@ -168,7 +177,7 @@ const base = `http://localhost:${port}`
   await page.getByRole('button', { name: 'Choose: Wait' }).click()
   await step('a high-risk card asks again on its own screen', () => page.getByText('Check this answer').waitFor({ timeout: 3000 }))
   await step('a dismissed prompt on a high-risk answer shows its button and answers nothing', async () => {
-    await page.getByText('The passkey did not sign in. Nothing changed.').waitFor({ timeout: 8000 })
+    await page.getByText(DID_NOT_SIGN_IN).waitFor({ timeout: 8000 })
     if (!(await page.getByRole('button', { name: 'Answer Wait with your passkey' }).isVisible())) throw new Error('no button')
     await page.getByText('What yes covers: ').waitFor({ timeout: 3000 })
     if (await page.getByText(/^Answered "Delete the old test branches\?"/).count()) throw new Error('answered without the passkey')

@@ -16,8 +16,9 @@ checkout, `python3 -m thornswood_decisions.cli` does the same.)
   feed-token  print a new token for a feed (work, room, bots), the connector, the push worker
               or an own-Hermes connector (own-me, own-one) (replaces the old one)
   token-known whether the token on stdin is the core's for that name (the install checks its files with it)
-  passkeys    the passkeys the core holds and the last refused sign-ins, each key by the start of its
-              credential id, read only and with nothing secret (9 Nov: a refusal could not be matched to a key)
+  passkeys    the passkeys the core holds, the last refused sign-ins and the last sign-in requests (each
+              with whether an answer came), each key by the start of its credential id, read only and
+              with nothing secret (9 Nov: a refusal could not be matched to a key)
   peers       the tailnet's view of each machine an own-Hermes connector posts from (One): whether it is
               online, from `tailscale status --json`, so the phone says "One is off" only when it is
   push-reset  forget the push worker's keys and every phone's alerts, when the worker's keys are lost
@@ -174,7 +175,12 @@ def cmd_passkeys(store: Store, args) -> dict:
     refused = [{"at": r["at"], **json.loads(r["body_json"] or "{}")} for r in store.db.execute(
         "SELECT at, body_json FROM events WHERE workspace_id = ? AND kind = 'sign_in.failed' "
         "AND subject = 'passkey' ORDER BY seq DESC LIMIT ?", (ws, args.last))]
-    return {"passkeys": keys, "refused": refused}
+    # Each sign-in request the core handed out, and whether an answer came for it: one with no answer was
+    # ended on the phone (9 Nov: a failed sign-in left no refusal, and only this said it never came back).
+    asked = [dict(r) for r in store.db.execute(
+        "SELECT created_at, expires_at, used_at FROM webauthn_challenges WHERE workspace_id = ? "
+        "AND purpose = 'sign_in' ORDER BY created_at DESC LIMIT ?", (ws, args.last))]
+    return {"passkeys": keys, "refused": refused, "sign_in_requests": asked}
 
 
 def cmd_selfcheck(store: Store, args) -> dict:
@@ -336,7 +342,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--name", choices=FEED_NAMES, required=True)
     p = sub.add_parser("passkeys")
     p.add_argument("--workspace", required=True)
-    p.add_argument("--last", type=int, default=10, help="how many of the last refused sign-ins")
+    p.add_argument("--last", type=int, default=10, help="how many of the last refused sign-ins and sign-in requests")
     p = sub.add_parser("peers")
     p.add_argument("--workspace", required=True)
     p.add_argument("--tailscale", default="tailscale", help="the tailscale command (a stand-in in the tests)")

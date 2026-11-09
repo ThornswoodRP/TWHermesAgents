@@ -361,7 +361,12 @@ async function passkeySignIn() {
   try {
     cred = await navigator.credentials.get({ publicKey: requestOptions(o.body) })
   } catch (err) {
-    return { status: -1, body: { message: `The ${word} did not sign in. Nothing changed.` } }
+    // The browser or the passkey app ended it, so the core would hear nothing (9 Nov: "my key failed" left
+    // no record on the core). It is told, by this request's challenge, with the browser's own words.
+    const name = (err && err.name) || 'Error'
+    await call('POST', '/passkeys/sign-in/failed',
+      { challenge: o.body.challenge, name, message: String((err && err.message) || '').slice(0, 160) })
+    return { status: -1, body: { message: `The ${word} did not sign in (${name}). Nothing changed.` } }
   }
   const r = await call('POST', '/passkeys/sign-in', { credential: credentialJSON(cred) })
   if (r.status === 200) {
