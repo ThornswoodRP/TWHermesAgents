@@ -837,8 +837,8 @@ class VmInstall(unittest.TestCase):
         from helpers import REPO
         lines = (REPO / "deploy/decisions/tw-decide-own").read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines[0], "#!/usr/bin/python3 -I")
-        self.assertIn('runpy.run_path("/opt/thornswood-hermes/current/thornswood_decisions/own_connector.py", '
-                      'run_name="__main__")', lines)
+        self.assertIn('runpy.run_path(str(Path(__file__).resolve().parents[2] / "thornswood_decisions" / '
+                      '"own_connector.py"), run_name="__main__")', lines)
         import subprocess
         mode = subprocess.run(["git", "-C", str(REPO), "ls-files", "-s", "deploy/decisions/tw-decide-own"],
                               capture_output=True, text=True).stdout.split(" ")[0]
@@ -891,8 +891,8 @@ class OneInstall(unittest.TestCase):
         run = lambda *a, cwd=None: subprocess.run(a, cwd=cwd, check=True, capture_output=True)  # noqa: E731
         run("git", "init", "-q", "--bare", "-b", "main", str(origin))
         run("git", "init", "-q", "-b", "main", str(clone))
-        for rel in ("scripts/one/Install-OwnConnector.ps1", "thornswood_decisions/own_connector.py",
-                    "thornswood_decisions/room_send.py"):
+        for rel in ("scripts/one/Install-OwnConnector.ps1", "deploy/layout.json",
+                    "thornswood_decisions/own_connector.py", "thornswood_decisions/room_send.py"):
             (clone / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / rel, clone / rel)
         run("git", "-c", "user.name=t", "-c", "user.email=t@t", "add", ".", cwd=clone)
@@ -948,8 +948,8 @@ class OneInstall(unittest.TestCase):
         """origin is GitHub's address, as in Patrick's clone; git takes it from the scratch bare repo."""
         import subprocess
         origin = self.t / "origin.git"
-        for args in (("remote", "set-url", "origin", "https://github.com/ThornswoodRP/Thornswood-Hermes.git"),
-                     ("config", f"url.{origin}.insteadOf", "https://github.com/ThornswoodRP/Thornswood-Hermes.git")):
+        for args in (("remote", "set-url", "origin", "https://github.com/ThornswoodRP/TWHermesAgents.git"),
+                     ("config", f"url.{origin}.insteadOf", "https://github.com/ThornswoodRP/TWHermesAgents.git")):
             subprocess.run(["git", *args], cwd=self.clone, check=True, capture_output=True)
         gh = self.bin / "gh"
         gh.write_text(f"#!/bin/sh\n[ \"$1 $2\" = 'auth status' ] && exit {0 if signed_in else 1}\nexit 0\n", encoding="utf-8")

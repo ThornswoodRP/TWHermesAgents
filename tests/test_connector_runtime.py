@@ -21,11 +21,13 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -266,6 +268,109 @@ class HelperFailureIsSaidAsOne(unittest.TestCase):
         self.assertIn("no hermes_constants", why)
 
 
+class TheFleetQueue(unittest.TestCase):
+    """2 Nov: Patrick's answer on the #5327 ad18c2c card reached Bramble while the fleet queue turned turns
+    away. The turn said it had not started and ended, and the connector called the message sent. A Bot
+    Chat message now goes only when the queue would admit its turn, and one whose turn was turned away
+    all the same is not_ready: it goes back in the queue unspent."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        profile = self.dir / ".hermes" / "profiles" / "bramble"
+        profile.mkdir(parents=True)
+        import sqlite3
+        con = sqlite3.connect(profile / "state.db")
+        con.execute("CREATE TABLE sessions (id TEXT, title TEXT, archived INTEGER, started_at REAL)")
+        con.execute("INSERT INTO sessions VALUES ('sess-bc', 'Bot Chat', 0, 1)")
+        con.commit()
+        con.close()
+        self.note = profile.joinpath(*connector.TURNED_AWAY_DIR, "sess-bc.json")
+        self.asked = []
+
+    def hermes(self, room=True, turn_away=None):
+        """A stand-in hermes command whose turn exits 0, leaving the turn gate's note when turn_away says why."""
+        code = "import sys\n"
+        if turn_away:
+            code += textwrap.dedent(f"""
+                import json, os, datetime
+                p = {str(self.note)!r}
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                open(p, "w").write(json.dumps({{"at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                                "reason": {turn_away!r}}}))
+            """)
+        script = self.dir / "hermes.py"
+        script.write_text(code, encoding="utf-8")
+
+        def fleet(bot):
+            self.asked.append(bot)
+            return (True, "") if room else (False, "1 turn already running; the fleet runs at most 1 at once")
+        return connector.Hermes([sys.executable, str(script)], [sys.executable, "-c", "print('{\"ready\": true}')"],
+                                self.dir, fleet=fleet)
+
+    def test_no_room_sends_nothing_and_the_message_waits_with_why(self):
+        h = self.hermes(room=False)
+        why = "the fleet queue has no room for a turn of bramble's: 1 turn already running; the fleet runs at most 1 at once"
+        self.assertEqual(h.check("bramble"), ("not_ready", why))
+        self.assertEqual(h.to_bot("bramble", "hi"), ("not_ready", "", why))
+        self.assertFalse(self.note.exists())
+        # The room's gateway has no fleet turn of its own: only a Bot's check asks the queue.
+        self.assertEqual(h.check(""), ("ready", ""))
+        self.assertEqual(self.asked, ["bramble", "bramble"])
+
+    def test_a_turn_that_ran_is_confirmed(self):
+        self.assertEqual(self.hermes().to_bot("bramble", "hi"), ("confirmed", "turn finished", ""))
+
+    def test_a_turn_turned_away_all_the_same_goes_back_unspent_and_the_note_is_taken(self):
+        h = self.hermes(turn_away="the broker at /run/tw/policy/policy.sock is not answering")
+        self.assertEqual(h.to_bot("bramble", "hi"),
+                         ("not_ready", "", "the fleet queue turned the turn away: the broker at "
+                                           "/run/tw/policy/policy.sock is not answering"))
+        self.assertFalse(self.note.exists())
+
+    def test_an_old_note_from_an_earlier_turn_is_not_this_turns(self):
+        self.note.parent.mkdir(parents=True)
+        self.note.write_text(json.dumps({"at": "2026-11-02T23:00:00+00:00", "reason": "old"}), encoding="utf-8")
+        self.assertEqual(self.hermes().to_bot("bramble", "hi"), ("confirmed", "turn finished", ""))
+
+    def test_without_the_queue_nothing_is_asked(self):
+        h = self.hermes()
+        h.fleet = None
+        self.assertEqual(h.to_bot("bramble", "hi"), ("confirmed", "turn finished", ""))
+        self.assertEqual(self.asked, [])
+
+    def test_the_connector_holds_that_bots_messages_while_the_queue_has_no_room(self):
+        said = []
+        h = self.hermes(room=False)
+        c = connector.Connector(connector.Core("http://127.0.0.1:9/api/v1", "t"), h, say=said.append)
+        c.waiting["bramble"] = "the fleet queue turned the turn away: x"
+        self.assertTrue(c._still_waiting())
+        self.assertIn("has no room", c.waiting["bramble"])
+
+    def brokers(self, ready: bool) -> dict:
+        import copy
+        from helpers import policy
+        data = copy.deepcopy(policy().data)
+        data["brokers"]["ready"] = ready
+        return data
+
+    def test_fleet_room_is_off_while_the_brokers_are_off(self):
+        off = self.dir / "off.json"
+        off.write_text(json.dumps(self.brokers(False)), encoding="utf-8")
+        self.assertIsNone(connector.fleet_room(off))
+
+    # The brokers' sockets are Unix sockets, and the connector runs on the VM; Windows has none.
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "the brokers' sockets are Unix sockets, which only the VM has")
+    def test_fleet_room_asks_the_policy_socket_while_the_brokers_are_on(self):
+        data = self.brokers(True)
+        data["brokers"]["sockets"]["policy"]["path"] = str(self.dir / "no.sock")
+        on = self.dir / "on.json"
+        on.write_text(json.dumps(data), encoding="utf-8")
+        room, why = connector.fleet_room(on)("bramble")
+        self.assertFalse(room)
+        self.assertTrue(why.startswith("tw-policy did not answer"), why)
+
+
 class CheckReadyCommand(unittest.TestCase):
     """`tw-decide-connector --check-ready <bot>`, which the canary runs as hermes."""
 
@@ -347,6 +452,48 @@ class CanaryChecksTheHelper(unittest.TestCase):
         self.assertIsNone(self.canary.connector_problem(0, '{"ready": true}\n', ""))
         self.assertIsNotNone(self.canary.connector_problem(0, '{"ready": false}\n', ""))
         self.assertIn("Traceback", self.canary.connector_problem(1, "", "Traceback ..."))
+
+
+class ChecksNeverFinishAnUpdate(unittest.TestCase):
+    """The helper's quick ops run with Hermes's own HERMES_DISABLE_LAZY_INSTALLS (2 Nov, One's bar at 5:06 PM:
+    "the readiness check did not answer in a minute"). Hermes's bootstrap finishes an owed source update at
+    every start unless that switch is set (hermes_cli/venv_sync.py:343 prepare_launch), which takes minutes,
+    so a check started then ran out its minute. Here a stand-in bootstrap takes that long when the switch is
+    not set; the real room_send.py answers behind it from stand-in Hermes modules."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        root = stub_hermes(self.dir / "hermes-agent")
+        boot = (f"import os, sys, runpy, time\nsys.path.insert(0, {str(root)!r})\n"
+                "if os.environ.get('HERMES_DISABLE_LAZY_INSTALLS') != '1':\n"
+                "    sys.stderr.write('hermes: finishing the source update\\n'); sys.stderr.flush(); time.sleep(30)\n"
+                f"runpy.run_path({str(HELPER)!r}, run_name='__main__')\n")
+        self.cmd = [sys.executable, "-I", "-c", boot]
+        for mod in (own_connector, connector):
+            patch = unittest.mock.patch.object(mod, "CHECK_SECONDS", 5)
+            patch.start()
+            self.addCleanup(patch.stop)
+        env = unittest.mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+        os.environ.pop("TW_STUB_STATE", None)
+
+    def test_ones_readiness_check_answers_while_an_update_is_owed(self):
+        h = own_connector.Hermes(["hermes"], self.cmd, self.dir, "One's Hermes")
+        self.assertEqual(h.ready(), ("ready", ""))
+        self.assertNotIn("HERMES_DISABLE_LAZY_INSTALLS", os.environ)  # the connector's own environment is left as it is
+
+    def test_the_bots_check_answers_too(self):
+        self.assertEqual(connector.Hermes(["hermes"], self.cmd, self.dir).check("bramble"), ("ready", ""))
+
+    def test_a_check_that_runs_out_its_time_says_what_it_printed(self):
+        with unittest.mock.patch.object(own_connector, "PROBE_ENV", {}):
+            state, why = own_connector.Hermes(["hermes"], self.cmd, self.dir, "One's Hermes").ready()
+        self.assertEqual(state, "check_failed")
+        self.assertEqual(why, "the readiness check did not answer in a minute; it printed: "
+                              "hermes: finishing the source update")
 
 
 if __name__ == "__main__":

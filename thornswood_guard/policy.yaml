@@ -1,6 +1,6 @@
 # The Bots' guard rails, as data. Every rule the code enforces reads its
 # numbers and names from here, so a change to a rule is a change to this file,
-# reviewed and merged by Patrick. RULES.md says where each rule comes from.
+# reviewed and merged by Patrick. docs/security.md says how each rule is held.
 
 version: 1
 
@@ -10,7 +10,7 @@ repos:
   app: ThornswoodRP/Thornswood
   fork: ThornswoodRP/skymp
   ops: ThornswoodRP/Thornswood-Ops
-  hermes: ThornswoodRP/Thornswood-Hermes
+  hermes: ThornswoodRP/TWHermesAgents
 
 # Exactly six Bots. The ops file and the guide are skills, never Bots.
 # `app` names which GitHub App the git broker uses for that Bot's writes.
@@ -56,15 +56,25 @@ bots:
     fork_branches: true
 
 # The two GitHub Apps (Patrick, 30 Oct). Only Bramble's may update main, and
-# only through a pull request. The workers' App has no Workflows permission,
+# only through a pull request. repos is where each App is installed. The workers' App has no Workflows permission,
 # so GitHub itself refuses a worker push that changes a workflow file.
 github_apps:
   bramble:
     workflows: true
     may_merge: true
+    repos: [ThornswoodRP/Thornswood, ThornswoodRP/skymp, ThornswoodRP/Thornswood-Ops]
+  # The workers' App is not installed on Ops. Ops is private on GitHub Free,
+  # which keeps no rules there, so an App with contents write in Ops could push
+  # to its main and only the broker would stop it. The workers never wrote in
+  # Ops (no branch, pull request or comment of theirs there, read 8 Nov 2026),
+  # so Ops is Bramble's alone: tw-git refuses a worker's write there, reads
+  # there go through Bramble's App, and GitHub itself refuses the workers' App.
+  # Thornswood's and skymp's mains have rules that refuse any push but a pull
+  # request, the owner's included.
   workers:
     workflows: false
     may_merge: false
+    repos: [ThornswoodRP/Thornswood, ThornswoodRP/skymp]
 
 # One executor at a time (plan 01 phases 4 and 5; handoff of 31 Oct, Patrick's
 # answer A). Until the cutover the Bots triage and plan read only (the shadow
@@ -121,6 +131,27 @@ merge:
   # version bumps and the pin robot's engine pin (engine-pin.yml, where
   # Bramble already merged them under the merge rule).
   robot_authors: ["dependabot[bot]", "thornswood-pin-robot[bot]"]
+  # Whose work may merge (Patrick, 8 Nov 2026, 1:30 PM: "don't ever let them
+  # auto merge tho unless I saw that even if the PR is good unless I
+  # specficallyt say that I want that person to automerge", and 1:31 PM:
+  # "currently that list is only me and my team"). Before any merge tw-git
+  # reads every commit of the pull request: its author, and each person a
+  # Co-authored-by line credits, must be one of these people, a Bot (the
+  # files broker's commit_email), a robot above or one of our own workflows
+  # (workflow_authors). Work by anyone else, carried into a Bot's pull request
+  # with credit, merges only once Patrick answered "let them merge" for that
+  # person on their outside pull request card, which tw-git reads from the
+  # decision core itself (#132), or once he puts them on this list, quoted
+  # here with the date.
+  auto_merge_people: ["EvilPatrick06", "WiccanDjinn"]
+  # The commits our own workflows make (engine-pin.yml commits as GitHub
+  # Actions for the pin robot's pull request).
+  workflow_authors: ["github-actions[bot]"]
+  # The label a pull request carrying outside work wears. Thornswood's
+  # Auto-Merge.js leaves such a pull request alone whoever opened it
+  # (Thornswood #5544). tw-git refuses to merge one that credits nobody with a
+  # Co-authored-by line, because then the work's author cannot be read.
+  outside_label: "outside work"
 
 # What Bramble's release tooling may start. Nothing else, on main only.
 runs:
@@ -285,6 +316,12 @@ secrets:
   oracle_allowed:
     - name: DISCORD_BOT_TOKEN
       where: root
+    # Each Bot's own admission-proxy token, in its profile's .env, made by the
+    # install. It is no real key: it reaches only the loopback proxy, which
+    # maps it to the Bot, checks the turn's ticket and admits a route only
+    # once that route is ready (admission_proxy.ready).
+    - name: TW_PROXY_TOKEN
+      where: each_profile
   # Settings that sit beside it and hold no secret.
   oracle_settings:
     - DISCORD_ALLOWED_USERS
@@ -311,12 +348,6 @@ secrets:
     - name: QWEN_API_KEY
       user: tw-proxy
       use: route 4, added by the admission proxy to low-risk Qwen packets
-  # Allowed by the plan once their route exists, held by the service user
-  # only. Each Bot's own admission-proxy token, in its profile's .env: it
-  # reaches only the loopback proxy, which checks the turn's ticket.
-  oracle_later:
-    - name: TW_PROXY_TOKEN
-      where: each_profile
   # Set by Patrick's Hermes on 30 Oct for route 4, in its own file
   # (/home/hermes/.config/thornswood/qwen.env, mode 600: QWEN_BASE_URL and
   # QWEN_API_KEY). The Phase 2 install moves it into proxy.env; after that
@@ -365,12 +396,6 @@ secrets:
     # with the two Apps' installation tokens.
     - hosts.yml
     - .git-credentials
-
-notifications:
-  # Push only for a real decision, and only once per card revision.
-  push_kinds: [decision, main-approval]
-  lock_screen_text: "Thornswood needs you"
-  link: "/cards/{card_id}?rev={revision}"
 
 # Bramble wakes when GitHub finishes a pull request's checks (Patrick's answer
 # A on q-hermes-bramble-wake, 1 Nov). Cause: nothing reached Bramble when a
@@ -469,6 +494,13 @@ brokers:
       path: /run/tw/decide-bots/bots.sock
       group: tw-decide-bots
       clients: [hermes, root]
+    # tw-git's own socket on tw-decide-bots (#132): Patrick's answers on
+    # Bramble's outside pull request cards, read only, so tw-git closes the
+    # pull request or lets the author's work merge only on his answer.
+    decide_git:
+      path: /run/tw/decide-git/git.sock
+      group: tw-decide-git
+      clients: [tw-git, root]
   state:
     policy_db: /srv/tw/policy/policy.db
     git_mirrors: /srv/tw/git
@@ -551,9 +583,18 @@ admission_proxy:
   # Each Qwen request holds the one Qwen lease until One's answer ends.
   qwen_lease_seconds: 900
   upstream_timeout_seconds: 900
-  # Routes 2 and 4 enter the Bots' chains only when Patrick sets this true by a
-  # PR here, after the proxy's attack tests passed on the VM (06 section 6.3).
-  ready: false
+  # Each route enters the Bots' chains, and the proxy admits it, only once a
+  # PR here sets it true: after the install made the Bots' proxy tokens, the
+  # route's real key is in env_file, and the proxy's attack tests passed on
+  # the VM (06 section 6.3). The two are apart because their keys are: Qwen's
+  # has been in proxy.env since the Phase 2 install; the credits key is not
+  # on the VM yet (read 8 Nov 2026). Qwen on 8 Nov: bfa8c71's install made
+  # the six Bots' tokens (proxy-tokens.json 440 root:tw-proxy, six digests,
+  # one TW_PROXY_TOKEN in each profile) and its canary passed, attack 18
+  # (the proxy refuses a request with no Bot token) included.
+  ready:
+    credits: false
+    qwen: true
 
 # The fleet admission queue (08 section 7; 02 section 8.5). Past the pilot
 # since 1 Nov (Patrick picked 6 turns and 2 checks): the pilot's one turn
@@ -614,15 +655,6 @@ slices:
     CPUWeight: 50
     CPUQuota: 100%
     TasksMax: 1024
-  # The guard rail tests' own runner (deploy/runner, 3 Nov): GitHub's
-  # included minutes for a private repository ran out on 2 Nov and the
-  # spending limit stays at $0, so the Linux check runs here, as tw-runner.
-  tw-runner.slice:
-    MemoryHigh: 2560M
-    MemoryMax: 3G
-    CPUWeight: 50
-    CPUQuota: 100%
-    TasksMax: 512
   # Tier A: the hermes user's own manager runs the rootless podman containers,
   # so its user slice (user-<uid of hermes>.slice) carries the sandbox caps too.
   hermes-user.slice:
@@ -688,7 +720,7 @@ backups:
 # (#2862): no other machine sends it a commit. It reads this repository with
 # its own read-only deploy key, root's alone.
 follow_main:
-  url: git@github.com:ThornswoodRP/Thornswood-Hermes.git
+  url: git@github.com:ThornswoodRP/TWHermesAgents.git
   read_key: /etc/thornswood/hermes-read-key
   known_hosts: /etc/thornswood/github_known_hosts
   mirror: /srv/tw/follow/thornswood-hermes.git
@@ -711,3 +743,19 @@ follow_main:
   # While this file exists the follower fetches and installs nothing. An install
   # starts the timer again, so pausing is this file, never stopping the timer.
   pause_file: /etc/thornswood/follow-main.paused
+  # Where each install's result goes (ThornswoodRP/Thornswood#5564): until
+  # 8 Nov it was only in state_file, root's alone, so a failed install went
+  # unseen from 4 Nov to 8 Nov. The follower hands every result to tw-git
+  # (op vm_install, root's alone), which writes it as the workers' App: one
+  # comment per install on the ledger issue in the ops repository, and on the
+  # board an issue while the VM is not installing main, closed by the next
+  # good install. Only the commit, the result, the step and a one-line reason
+  # go out, with any address taken out; every step's output stays here.
+  report:
+    app: workers
+    # That App's account on GitHub: the board issue is looked for among the
+    # open issues it opened, so a lost answer never opens a second one.
+    app_login: thornswood-workers[bot]
+    ledger_repo: ops
+    ledger_issue: 249
+    board_repo: app

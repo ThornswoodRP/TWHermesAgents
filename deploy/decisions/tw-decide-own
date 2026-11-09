@@ -5,4 +5,6 @@
 # only (the same file runs on One); the readiness check it starts runs with that
 # Hermes's own Python.
 import runpy
-runpy.run_path("/opt/thornswood-hermes/current/thornswood_decisions/own_connector.py", run_name="__main__")
+from pathlib import Path
+# The release this file is in: /opt/thornswood-hermes/bin links here through current.
+runpy.run_path(str(Path(__file__).resolve().parents[2] / "thornswood_decisions" / "own_connector.py"), run_name="__main__")

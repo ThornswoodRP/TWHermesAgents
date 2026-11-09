@@ -37,6 +37,7 @@ class FakeGitHub:
         self.remotes = self.root / "remotes"
         self.prs: dict[tuple[str, int], dict] = {}
         self.pr_files: dict[tuple[str, int], list[str]] = {}
+        self.pr_commits: dict[tuple[str, int], list[dict]] = {}
         self.check_runs: dict[tuple[str, str], list[dict]] = {}
         self.issues: dict[tuple[str, int], dict] = {}
         self.comments: dict[tuple[str, int], list[dict]] = {}
@@ -128,7 +129,11 @@ class FakeGitHub:
             self.token_permissions[f"tok-{len(self.tokens)}"] = dict(body.get("permissions") or {})
             return Response(201, {"token": f"tok-{len(self.tokens)}", "expires_at": "x"}, {})
         assert headers["Authorization"].startswith("token tok-"), headers
-        refused = self._pr_write_refused(method, path, headers["Authorization"][len("token "):])
+        token = headers["Authorization"][len("token "):]
+        # Who writes: the App whose installation the token was minted for.
+        self.app_login = {"177392923": "thornswood-bramble[bot]", "177393064": "thornswood-workers[bot]"}.get(
+            self.tokens[int(token.split("-")[1]) - 1]["installation"], "someone")
+        refused = self._pr_write_refused(method, path, token)
         if refused:
             return refused
         resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
@@ -237,6 +242,20 @@ class FakeGitHub:
             if len(rest) == 2 and method == "PATCH":
                 pr.update(body)
                 return Response(200, pr, {})
+            if rest[2] == "commits":
+                commits = self.pr_commits.get((repo, n))
+                if commits is None:
+                    # By default the head commit, made by the Bot whose branch it is
+                    # (the files broker's identity), or by the PR's author.
+                    bot = pr["head"]["ref"].split("/")[0]
+                    login = pr["user"]["login"]
+                    if bot in ("bramble", "rift", "sprocket", "echo", "magpie", "wisp"):
+                        who, author = {"name": bot, "email": f"{bot}@bots.thornswood.invalid"}, None
+                    else:
+                        who, author = {"name": login, "email": f"1+{login}@users.noreply.github.com"}, {"login": login}
+                    commits = [{"sha": pr["head"]["sha"], "author": author,
+                                "commit": {"author": who, "message": "a change"}}]
+                return Response(200, commits[(page - 1) * 100: page * 100], {})
             if rest[2] == "files":
                 files = self.pr_files[(repo, n)][(page - 1) * 100: page * 100]
                 return Response(200, [{"filename": f} for f in files], {})
@@ -258,12 +277,28 @@ class FakeGitHub:
             if raw is None:
                 return Response(404, {"message": "Not Found"}, {})
             return Response(200, {"content": base64.b64encode(raw).decode()}, {})
+        if rest[0] == "issues" and len(rest) == 1:
+            # The repository's issues: listed by state (open unless asked) and
+            # creator, or a new one, opened as the App the token is for.
+            if method == "GET":
+                state = query.get("state", "open")
+                found = [i for (r, _), i in sorted(self.issues.items(), key=lambda kv: -kv[0][1]) if r == repo
+                         and (state == "all" or i.get("state", "open") == state)
+                         and (not query.get("creator") or i["user"]["login"] == query["creator"])]
+                return Response(200, json.loads(json.dumps(found[(page - 1) * 100: page * 100])), {})
+            n = max([k[1] for k in self.issues if k[0] == repo] + [k[1] for k in self.prs if k[0] == repo] + [99]) + 1
+            self.issues[(repo, n)] = {"number": n, "user": {"login": self.app_login}, "assignees": [], "labels": [],
+                                      "state": "open", "title": body["title"], "body": body.get("body"),
+                                      "html_url": f"https://github.com/{repo}/issues/{n}"}
+            return Response(201, json.loads(json.dumps(self.issues[(repo, n)])), {})
         if rest[0] == "issues":
             n = int(rest[1])
             issue = self.issues.get((repo, n))
             if issue is None:
                 return Response(404, {"message": "Not Found"}, {})
             if len(rest) == 2:
+                if method == "PATCH":
+                    issue.update({k: v for k, v in body.items() if k in ("state", "state_reason", "title", "body")})
                 return Response(200, issue, {})
             if rest[2] == "comments":
                 if method == "GET":

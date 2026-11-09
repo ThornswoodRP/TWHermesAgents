@@ -84,6 +84,54 @@ class Gate(unittest.TestCase):
         self.assertIsNone(wisp.before_llm(session_id="w1", task_id="9"))
         self.assertIsNone(wisp.before_tool("read_file", session_id="w1"))
 
+    def test_a_turn_turned_away_leaves_a_note_for_its_session_and_an_admitted_one_none(self):
+        # 2 Nov: the connector could not tell a Bot Chat turn the queue turned away from one that ran.
+        import tempfile
+        from pathlib import Path
+        f = Fleet()
+        notes = Path(tempfile.mkdtemp()) / "turned-away"
+        rift = gate(f, "rift")
+        wisp = TurnGate(ready_policy(), "wisp", f.ask, wait_seconds=0, sleep=lambda s: None, turned_away_dir=notes)
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        self.assertIn("not admitted", wisp.before_llm(session_id="sess-1", task_id="9")["context"])
+        note = json.loads((notes / "sess-1.json").read_text(encoding="utf-8"))
+        self.assertIn("running", note["reason"])
+        self.assertTrue(note["at"].endswith("+00:00"))
+        rift.after_turn(session_id="r1")
+        (notes / "sess-1.json").unlink()
+        self.assertIsNone(wisp.before_llm(session_id="sess-1", task_id="9"))
+        self.assertEqual(list(notes.iterdir()), [], "a turn that runs leaves no note")
+        # tw-policy down: the same note, with why.
+        def down(broker, op, args):
+            raise BrokerRefused("the broker at /run/tw/policy.sock is not answering")
+        g = TurnGate(ready_policy(), "rift", down, wait_seconds=0, sleep=lambda s: None, turned_away_dir=notes)
+        g.before_llm(session_id="sess-2")
+        self.assertIn("not answering", json.loads((notes / "sess-2.json").read_text(encoding="utf-8"))["reason"])
+        # A session id that is not a plain name leaves nothing, and a sweep is owed rather than noted.
+        g.before_llm(session_id="../x")
+        b = TurnGate(ready_policy(), "bramble", down, wait_seconds=0, sleep=lambda s: None, turned_away_dir=notes,
+                     owed_file=notes.parent / "owed")
+        b.before_llm(session_id="sess-3", platform="webhook")
+        self.assertEqual(sorted(p.name for p in notes.iterdir()), ["sess-2.json"])
+
+    def test_registering_puts_the_notes_in_the_profile(self):
+        from pathlib import Path
+        g = brokers.register(Ctx("rift"), ready_policy(), "rift", Fleet().ask)
+        self.assertEqual(g.turned_away_dir.parts[-3:], brokers.TURNED_AWAY_DIR)
+        self.assertEqual(g.turned_away_dir.parents[2], Path(brokers.__file__).resolve().parents[2])
+
+    def test_the_connector_asks_whether_a_turn_would_be_admitted_and_spends_nothing(self):
+        f = Fleet()
+        self.assertEqual(f.ask("policy", "turn_room", {"bot": "wisp"}), {"room": True, "why_not": ""})
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        tickets = f.policy.db.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
+        got = f.ask("policy", "turn_room", {"bot": "wisp"})
+        self.assertFalse(got["room"])
+        self.assertIn("running", got["why_not"])
+        self.assertEqual(f.policy.db.execute("SELECT COUNT(*) FROM tickets").fetchone()[0], tickets)
+        self.assertEqual(set(f.policy.ops()["turn_room"][1]), {"hermes"})
+
     def test_19_a_turn_with_no_ticket_does_nothing(self):
         f = Fleet()
         g = gate(f, "echo")

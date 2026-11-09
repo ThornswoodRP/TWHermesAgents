@@ -38,8 +38,8 @@ class Pinned(unittest.TestCase):
 
     def test_pinned_version_and_commit(self):
         h = self.c["hermes"]
-        self.assertEqual(h["version"], "0.22.5")
-        self.assertEqual(h["tag"], "v0.22.5")
+        self.assertEqual(h["version"], "0.23.0")
+        self.assertEqual(h["tag"], "v0.23.0")
         self.assertRegex(h["commit"], r"^[0-9a-f]{40}$")
 
     def test_profile_ids_are_ones_hermes_accepts(self):
@@ -87,7 +87,7 @@ class VmCheck(unittest.TestCase):
         self.fake.write_text(textwrap.dedent(f"""\
             import sys
             if sys.argv[1:] == ["--version"]:
-                print("Hermes Agent v0.22.5 (2026.10.22) · stable")
+                print("Hermes Agent v0.23.0 (2026.11.5) · stable")
                 print("Install directory: {self.install.as_posix()}")
                 print("Python: 3.12.3")
             """), encoding="utf-8")
@@ -141,6 +141,26 @@ class VmCheck(unittest.TestCase):
         self.add_room("room-wb", "Thornswood Workbench", SIX[:5])
         r = self.run_check()
         self.assertTrue(any("seats" in s for s in r["stop"]), r["stop"])
+
+    def test_the_room_check_passes_for_the_bound_room_seating_the_policys_bots(self):
+        r = check_script.run_room(self.home, "room-wb", self.c)
+        self.assertEqual(r["stop"], [])
+        self.assertEqual(len(r["pass"]), 1)
+
+    def test_the_room_check_needs_no_hermes_version(self):
+        # The install runs it at each release, whatever Hermes the VM runs.
+        self.stamp("c" * 40)
+        self.assertEqual(check_script.run_room(self.home, "room-wb", self.c)["stop"], [])
+
+    def test_the_room_check_stops_on_another_room_or_other_members(self):
+        self.assertTrue(any("bound to room" in s for s in check_script.run_room(self.home, "room-x", self.c)["stop"]))
+        con = sqlite3.connect(self.db)
+        con.execute("DELETE FROM hosted_rooms")
+        con.commit()
+        con.close()
+        self.add_room("room-wb", "Thornswood Workbench", SIX[:5] + ["patrick-hermes"])
+        stops = check_script.run_room(self.home, "room-wb", self.c)["stop"]
+        self.assertTrue(any("but the policy seats" in s for s in stops), stops)
 
     def test_the_check_writes_nothing(self):
         before = hashlib.sha256(self.db.read_bytes()).hexdigest()

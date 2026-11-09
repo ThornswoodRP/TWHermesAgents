@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply one merged version of Thornswood-Hermes to the six existing profiles
+"""Apply one merged version of TWHermesAgents to the six existing profiles
 and to the gateway's own profile.
 
 Runs on the Oracle VM as the `hermes` user, from a checkout of the exact
@@ -61,7 +61,7 @@ import yaml  # noqa: E402
 from thornswood_guard.policy import Policy  # noqa: E402
 from thornswood_guard.profile_config import (  # noqa: E402
     GATEWAY_PROFILE, SANDBOX_IMAGE, WORK_ROOT, build, build_gateway, merge_into)
-from thornswood_guard.routes import check_config, check_gateway_config, proxy_ready_in  # noqa: E402
+from thornswood_guard.routes import check_config, check_gateway_config  # noqa: E402
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
 SKILLS = ("thornswood-ops", "thornswood-guide")
@@ -360,10 +360,7 @@ def main() -> int:
     home = Path(a.hermes_home)
     profiles = home / "profiles"
     root_env = env_names(home / ".env")
-    # A Bot's proxy token sits in its profile only once the proxy is ready
-    # and the install made it.
-    later = proxy_ready_in(policy)
-    problems += check_env(policy, root_env, "root", later_allowed=later)
+    problems += check_env(policy, root_env, "root")
 
     plans = {}
     for bot in policy.bots:
@@ -380,7 +377,7 @@ def main() -> int:
         existing = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
         merged = merge_into(existing or {}, build(policy, bot))
         names = env_names(pdir / ".env")
-        problems += check_env(policy, names, bot, later_allowed=later)
+        problems += check_env(policy, names, bot)
         problems += [f"{bot}: {p}" for p in check_config(policy, bot, merged, names | root_env)]
         plans[bot] = (pdir, cfg_path, existing or {}, merged)
     gw_path = home / "config.yaml"

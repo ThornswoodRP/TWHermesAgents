@@ -215,7 +215,7 @@ class Apply(unittest.TestCase):
         self.assertTrue(text.startswith("---\nname: bramble-duties\n"))
         for must in ("ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp", "dequeued", "gh-readonly-queue/main/pr-",
                      "There is no timer and no retry", "ops/claude-queue/", "ops/bramble-list.md", "ops/status.md",
-                     "Never merge ThornswoodRP/Thornswood-Hermes", "tw_decide", "start_run"):
+                     "Never merge ThornswoodRP/TWHermesAgents", "tw_decide", "start_run"):
             self.assertIn(must, text)
         self.assertIn("whoever did it", text)
         self.assertNotIn("\u2014", text)
