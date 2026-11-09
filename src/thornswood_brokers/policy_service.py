@@ -223,7 +223,7 @@ class PolicyService:
                 running = self._sweep_running(bot) if sweep else ""
                 if running:
                     raise Refused(running)
-                full = self._queue_full()
+                full = self._queue_full(bot, kind)
                 if full:
                     raise Refused(full)
                 risk_row = self.db.execute("SELECT risk FROM task_risk WHERE task=?", (task,)).fetchone()
@@ -254,15 +254,22 @@ class PolicyService:
                               "AND state='admitted' ORDER BY admitted_at LIMIT 1", (bot,)).fetchone()
         return f"another sweep of {bot}'s is running (admitted {row[0]}); one sweep runs at a time" if row else ""
 
-    def _queue_full(self) -> str:
-        """Why the queue takes no new ticket now, or "" when it would."""
+    def _queue_full(self, bot: str, kind: str = "turn") -> str:
+        """Why the queue takes no new ticket of kind for bot now, or "" when it
+        would. The line holds at most queue_max_waiting tickets; a Bot starts at
+        most queue_turns_per_bot_hour model turns an hour (Patrick, 9 Nov 2026),
+        and a check counts toward neither, having its own slots."""
         waiting = self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='waiting'").fetchone()[0]
         if waiting >= self.rules["queue_max_waiting"]:
             return f"{waiting} tickets are already waiting; the queue holds at most {self.rules['queue_max_waiting']}"
+        if kind != "turn":
+            return ""
+        limit = self.rules["queue_turns_per_bot_hour"]
         hour_ago = iso(self.clock() - timedelta(hours=1))
-        new = self.db.execute("SELECT COUNT(*) FROM tickets WHERE created_at >= ?", (hour_ago,)).fetchone()[0]
-        if new >= self.rules["queue_new_per_hour"]:
-            return f"{new} tickets were made in the last hour; the queue takes at most {self.rules['queue_new_per_hour']} an hour"
+        new = self.db.execute("SELECT COUNT(*) FROM tickets WHERE bot=? AND kind='turn' AND created_at >= ?",
+                              (bot, hour_ago)).fetchone()[0]
+        if new >= limit:
+            return f"{bot} started {new} turns in the last hour; each Bot starts at most {limit} an hour"
         return ""
 
     def _why_not_now(self, kind: str, ticket: str | None) -> str:
@@ -410,7 +417,7 @@ class PolicyService:
             row = self.db.execute("SELECT since, last_at, refused, reason FROM owed_wakes WHERE bot=?", (bot,)).fetchone()
             if row is None:
                 return {"owed": False, "due": False}
-            why_not = self._sweep_running(bot) or self._queue_full() or self._why_not_now("turn", None)
+            why_not = self._sweep_running(bot) or self._queue_full(bot) or self._why_not_now("turn", None)
         return {"owed": True, "due": not why_not, "why_not": why_not, "since": row[0], "last_at": row[1],
                 "refused": row[2], "reason": row[3]}
 
@@ -425,7 +432,7 @@ class PolicyService:
             # sweep: Bramble's wake check asks for a whole sweep, which also
             # waits while another sweep runs (wake_due).
             why_not = ((args.get("sweep") and self.policy.is_router(bot) and self._sweep_running(bot))
-                       or self._queue_full() or self._why_not_now("turn", None))
+                       or self._queue_full(bot) or self._why_not_now("turn", None))
         return {"room": not why_not, "why_not": why_not}
 
     def wake_paid(self, caller: str, args: dict) -> dict:

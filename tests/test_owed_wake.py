@@ -52,10 +52,10 @@ class Check(unittest.TestCase):
         self.assertFalse(wakes("\n".join(out)))
 
     def test_owed_but_no_room_sleeps_and_says_why(self):
-        due = {"owed": True, "due": False, "why_not": "20 tickets were made in the last hour", "since": "t"}
+        due = {"owed": True, "due": False, "why_not": "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour", "since": "t"}
         out = owed_wake.check(self.home(), "bramble", Broker(due))
         self.assertFalse(wakes("\n".join(out)))
-        self.assertIn("20 tickets", out[0])
+        self.assertIn("50 turns", out[0])
 
     def test_owed_with_room_wakes(self):
         due = {"owed": True, "due": True, "why_not": "", "since": "t", "refused": 3, "reason": "r"}
@@ -119,7 +119,7 @@ class Idle:
         if op == "bot_turns":
             return {"bots": self.turns}
         if op == "turn_room":
-            return {"room": self.room, "why_not": "" if self.room else "20 tickets were made in the last hour"}
+            return {"room": self.room, "why_not": "" if self.room else "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour"}
         if op == "read":
             import urllib.parse
             if "/pulls?" in args["path"]:
