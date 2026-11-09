@@ -359,7 +359,7 @@ TW_DECIDE_SCHEMA = {
         "Patrick's decisions, through the decision core: the only place his answer is recorded. Ops: open_card "
         "(Bramble: any kind; a specialist: a question on a task Bramble assigned it), revise_card (a new revision; "
         "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
-        "(Bramble: give a task to a specialist so it may ask about it), get_card (the card, its four states and, once "
+        "(Bramble: give a task to a specialist; with brief, the brief goes to its chat and starts its turn), get_card (the card, its four states and, once "
         "Patrick answered, the answer and what to do with it), my_cards (your waiting cards and those answered in "
         "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card). A card holds what is "
         "wrong, what was measured, each option and what it does, a recommendation, and the exact scope of a yes. A Main "
@@ -383,6 +383,7 @@ TW_DECIDE_SCHEMA = {
             "risk": {"type": "string", "enum": ["normal", "high"]}, "urgent": {"type": "boolean"},
             "expires_in_days": {"type": "integer"}, "source_key": {"type": "string"},
             "task": {"type": "string"}, "assign_to": {"type": "string"},
+            "brief": {"type": "string", "description": "assign_task: what to do, for the specialist"},
             "links": {"type": "array", "items": {"type": "object", "properties": {
                 "kind": {"type": "string"}, "ref": {"type": "string"}},
                 "required": ["kind", "ref"], "additionalProperties": False}},

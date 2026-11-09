@@ -207,6 +207,31 @@ class ConnectorSide(unittest.TestCase):
         self.assertEqual(self.w.store.db.execute("SELECT status FROM chat_messages WHERE id = ?", (m,)).fetchone()[0],
                          "sent")
 
+    def test_a_task_with_a_brief_reaches_the_specialist_once(self):
+        # 9 Nov 2026: an assignment reached nobody, so no worker ever took up a picked issue.
+        flags(self.w, "connector_effects")
+        out = self.w.core.assign_task(self.w.bramble, "5547", "magpie",
+                                      "Claimed for you: Thornswood #5547. Name the failing check from the log.")
+        self.assertEqual(out, {"task": "5547", "bot": "magpie", "queued": True})
+        again = self.w.core.assign_task(self.w.bramble, "5547", "magpie",
+                                        "Claimed for you: Thornswood #5547. Name the failing check from the log.")
+        self.assertFalse(again["queued"])
+        # Without a brief nothing is told, as before.
+        self.assertFalse(self.w.core.assign_task(self.w.bramble, "5548", "echo")["queued"])
+        items = self.chat.claim(self.w.ws, self.tok)["items"]
+        self.assertEqual([(i["kind"], i["target"]) for i in items], [("task.assigned", "magpie")])
+        self.assertTrue(items[0]["send_key"].startswith("tw-task."))
+        self.assertIn("assigned you task 5547", items[0]["text"])
+        self.assertIn("Name the failing check from the log.", items[0]["text"])
+        self.assertIn("approves nothing by itself", items[0]["text"])
+        self.chat.result(self.w.ws, self.tok, items[0]["id"], "confirmed", "turn finished")
+        self.assertEqual(self.w.store.db.execute("SELECT status FROM connector_outbox WHERE id = ?",
+                                                 (items[0]["id"],)).fetchone()[0], "sent")
+        self.assertEqual(self.chat.claim(self.w.ws, self.tok)["items"], [])
+        for bad in ("", " ", "x" * 8001):
+            with self.subTest(brief=len(bad)), self.assertRaises(CoreError):
+                self.w.core.assign_task(self.w.bramble, "5549", "wisp", bad)
+
     def test_the_bot_that_asked_is_told_and_that_is_bot_told(self):
         flags(self.w, "connector_effects")
         card = self.w.card()

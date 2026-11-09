@@ -35,6 +35,9 @@ from .auth import Auth, Principal
 from .schema import KINDS
 from .store import CoreError, Store, canonical, iso, new_id, parse, sha256_hex
 
+# A task's brief, as long as one chat message (chat.MAX_TEXT).
+MAX_BRIEF = 8000
+
 DEFAULT_EXPIRY = timedelta(days=3)
 MAX_BODY_BYTES = 256 * 1024
 MAX_OPTIONS = 6
@@ -106,15 +109,38 @@ class DecisionCore:
 
     # ── opening and changing cards ────────────────────────────────────────
 
-    def assign_task(self, p: Principal, task: str, bot: str) -> None:
+    def assign_task(self, p: Principal, task: str, bot: str, brief: str | None = None) -> dict:
+        """Give a task to a specialist. With a brief, the specialist is also told: the brief goes
+        to its Bot Chat through the connector, as a card's answer does, and that message starts
+        its turn. Until 9 Nov 2026 an assignment only let the specialist ask about the task, and
+        nothing reached it, so no worker ever took up an issue Bramble picked: a Hermes turn
+        starts only with a message or a schedule. The same brief for the same task and Bot is
+        told once."""
         if p.kind != "bramble":
             raise CoreError(403, "not_bramble", "only Bramble assigns tasks")
+        if brief is not None:
+            if not isinstance(brief, str) or not brief.strip():
+                raise CoreError(400, "bad_brief", "a brief says what to do")
+            brief = brief.strip()
+            if len(brief) > MAX_BRIEF:
+                raise CoreError(413, "too_big", f"a brief is at most {MAX_BRIEF} characters")
+        told = False
         with self.s.tx() as db:
+            now = self.s.now()
             db.execute("INSERT INTO task_assignments(workspace_id, task, bot, assigned_by, assigned_at) "
                        "VALUES(?,?,?,?,?) ON CONFLICT(workspace_id, task) DO UPDATE SET bot = excluded.bot, "
                        "assigned_by = excluded.assigned_by, assigned_at = excluded.assigned_at",
-                       (p.workspace_id, task, bot, p.id, self.s.now()))
+                       (p.workspace_id, task, bot, p.id, now))
             self.s.event(db, p.workspace_id, "task.assigned", task, p.label, {"bot": bot})
+            if brief is not None:
+                key = f"task:{p.workspace_id}:{task}:{bot}:{sha256_hex(brief)[:16]}"
+                cur = db.execute("INSERT OR IGNORE INTO connector_outbox(id, workspace_id, decision_id, kind, "
+                                 "target, body_json, idempotency_key, status, created_at, updated_at) "
+                                 "VALUES(?,?,NULL,'task.assigned',?,?,?,'queued',?,?)",
+                                 (new_id("cx"), p.workspace_id, bot,
+                                  canonical({"task": task, "brief": brief, "by": p.label}), key, now, now))
+                told = cur.rowcount == 1
+        return {"task": task, "bot": bot, "queued": told}
 
     def open_card(self, p: Principal, *, kind: str, title: str, body: str, options: list[dict],
                   recommendation: str, scope_of_yes: str, risk: str = "normal", urgent: bool = False,

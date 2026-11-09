@@ -126,8 +126,8 @@ class BotRoute:
         bot = _text(args, "assign_to")
         if bot not in self.bots or bot == "bramble":
             raise CoreError(400, "not_a_specialist", f"{bot!r} is not one of the five specialists")
-        self.core.assign_task(p, _text(args, "task"), bot)
-        return {"task": args["task"], "bot": bot}
+        brief = args.get("brief")
+        return self.core.assign_task(p, _text(args, "task"), bot, None if brief is None else str(brief))
 
     def get_card(self, p: Principal, args: dict) -> dict:
         card = self.core.get_card(p, _text(args, "decision_id"))
