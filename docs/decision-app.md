@@ -24,7 +24,8 @@ All of it is the decision core, `src/thornswood_decisions/`, one service on the 
 
 ## Cards and answers
 
-- **Who asks.** Bramble opens any card but a Main card. A worker opens a question only for a task Bramble assigned it. Bramble merges repeated requests by their source key.
+- **Who asks.** Bramble opens any card. A worker opens a question only for a task Bramble assigned it. Bramble merges repeated requests by their source key.
+- **Main cards.** Patrick's tap for what the brokers need his yes for: a collection publish, the claim label cutover, and a main run while `runs.main_without_patrick` is false. Only Bramble opens one. It names the exact repository and commit in one `release` link that never changes, its scope of a yes names that commit, it offers `authorize`, and it is high risk. When Bramble passes the card's id to `tw_git`, tw-git reads his answer on its own socket and tw-policy records an `authorize` as his decision record, bound to that commit and the card's revision, used once. An answer given before the core was restored from a backup authorizes nothing.
 - **Who answers.** Only Patrick. A Bot is a service principal and never holds a session.
 - **Revisions.** A changed card is a new revision and voids answers to the old one. An answer is checked against the revision and hash Patrick saw, and the answer, the event, the cancelled alerts, the message to the Bot and the command's result commit together.
 - **Exactly once.** Each answer carries an idempotency key. The same key and body give the same receipt; the same key with another body is refused. After an unclear result, the app reads the card's receipt before it offers to send again, so a retry is never a second answer.
