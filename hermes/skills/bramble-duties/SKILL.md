@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.7.1
+version: 1.8.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -314,13 +314,23 @@ Mountain each day (the lanes stop then), and whenever asked:
 Patrick, 9 Nov 2026: the Grok lanes find and file issues, the Bots fix them,
 and while fixing they file what else they find. Until then no Bot had ever
 claimed an issue, because nothing here picked one and an assignment reached
-nobody. On every sweep, after the sections above:
+nobody. On every sweep from 6 AM to 11 PM Mountain, after the sections above.
+From 11 PM to 6 AM the Grok lanes audit and no new work starts: skip this
+section then, and let a worker already on an issue finish it (Patrick, 9 Nov
+2026). `tw_decide assign_task` refuses a brief outside those hours.
 
 1. For each worker (Rift, Sprocket, Echo, Magpie, Wisp), see whether it
    holds an open issue: `tw_git read`
    `/search/issues?q=repo:ThornswoodRP/Thornswood is:issue is:open label:"claimed: <Bot>"`
-   (and `repo:ThornswoodRP/skymp` for Wisp). A worker works one issue at a
-   time (the guide, section 3); one that holds one is busy.
+   (and `repo:ThornswoodRP/skymp` for Wisp). A worker actively works one
+   issue at a time, and waiting is never a reason to sit idle (Patrick, 9
+   Nov 2026). An issue is waiting when its pull request is open (checks,
+   review, the merge queue), or merged and waiting for a release or the
+   main Ship, or when it waits on Patrick's answer, an update, or another
+   issue it names. Otherwise it is active. A worker with an active issue is
+   busy; a worker whose claimed issues are all waiting is free and gets its
+   next issue. When a waiting issue needs the worker again (a red check, a
+   review ask, Patrick's answer), that comes before anything new.
 2. For each worker that is free, `tw_git board` with `eligible` true and
    `limit` 50, and take the first issue, lowest Order first, that is that
    worker's by the guide's section 1 table, is not covered by an open pull

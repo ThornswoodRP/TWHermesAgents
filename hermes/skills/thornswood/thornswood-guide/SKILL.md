@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.3.2
+version: 1.4.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -61,6 +61,8 @@ This comes before every other line here. It is word for word the rule every Clau
 - Eligible: open, unassigned or assigned to Patrick, not Djinn's or Jhinswife's, not claimed by someone working it, not covered by an open PR, its decisions answered.
 - "It needs Patrick's decision", "it needs the box" and "it names a date" are not reasons to skip (Developer-Guide.md "What is not a reason to skip an issue"). Write the decision out in full on the decision page, or do the box part through the gate, or check the date against what really waits on it.
 - Admit only what the queue can take: model quota, the Oracle box's headroom, CI queue depth, and no overlap in files with running work. Start with one task at a time and raise it only from measurements.
+- Hours (Patrick, 9 Nov 2026): new work starts only from 6 AM to 11 PM Mountain. From 11 PM to 6 AM the Grok lanes audit; a Bot already on an issue at 11 PM finishes it, and starts nothing new until 6 AM.
+- One issue in active work at a time per Bot, and waiting is never a reason to sit idle (Patrick, 9 Nov 2026). An issue waiting on a check, review, merge, release, update or Patrick's answer is waiting, not active: its Bot starts its next issue meanwhile, and goes back to the waiting one first the moment it needs work (a red check, a review ask, an answer). tw-git opens one pull request per issue per Bot.
 - Claim with the Bot's label (`claimed: Rift` and so on). The card goes to In Progress by itself within a minute, because its Status follows the claim (Thornswood docs/guide/the-board.md); nobody moves a card. No claim comment. People stay the only assignees.
 - Send the owner a brief: the issue, the cause or what to measure, the files, the tests, what not to touch, and what to hand back.
 
