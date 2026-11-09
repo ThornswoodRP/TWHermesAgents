@@ -92,8 +92,6 @@ main { padding: 0 16px 12px; max-width: 720px; margin: 0 auto; }
 .row .t > span { display: block; font-size: 13px; }
 .row .w { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: 12px; color: var(--faint);
   flex: 0 0 auto; max-width: 40%; text-align: right; }
-/* The Board: one row for each turn a Bot is running now. */
-.row.doing:hover { background: transparent; }
 .row.pinned { background: var(--card); }
 .row .what { color: var(--accent); margin-top: 1px; }
 .row .quiet { color: var(--muted); }

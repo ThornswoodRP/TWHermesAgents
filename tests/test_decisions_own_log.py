@@ -61,6 +61,22 @@ class Log(unittest.TestCase):
         self.assertEqual(out.getvalue(), "PASS printed\n")
         self.assertFalse(self.log.exists())
 
+    def test_under_pythonw_a_stdout_it_was_handed_is_not_taken_for_a_console(self):
+        # 9 Nov: the supervisor (pythonw, no stdout) handed the connector a pipe nobody read, and its first
+        # line stopped it with exit code 120. Under pythonw the line goes to the log whatever stdout is.
+        out = io.StringIO()
+        with mock.patch.object(own_connector.sys, "stdout", out), mock.patch.object(own_connector, "NO_CONSOLE", True):
+            own_connector.say("PASS updated to 12f846fa0000; stopping once the running turns end")
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self.lines(), ["PASS updated to 12f846fa0000; stopping once the running turns end"])
+
+    def test_the_supervisor_gives_the_connector_every_stream(self):
+        seen = []
+        own_connector.supervise(["--supervise"], run=lambda argv, **kw: seen.append(kw) or Proc(0),
+                                sleep=lambda s: None, rounds=1, contain=False)
+        for name in ("stdin", "stdout", "stderr"):
+            self.assertEqual(seen[0][name], own_connector.subprocess.DEVNULL, name)
+
     def test_the_log_is_kept_to_its_size_with_the_one_before(self):
         self.log.write_text("x" * (own_connector.LOG_BYTES + 1), encoding="utf-8")
         own_connector.say("NOTE after the turn")

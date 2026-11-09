@@ -887,6 +887,19 @@ const base = `http://localhost:${port}`
     await page.locator('[data-bot="rift"] .what', { hasText: 'Thinking' }).waitFor({ timeout: 8000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-board.png', fullPage: true })
+  await step('a Board row opens the very session that Bot is working in, with what it is doing now', async () => {
+    await page.locator('.row.doing[data-bot="rift"]').click()
+    await page.waitForURL(/\/m\/bots\/rift\/s\/s_rift_lo$/, { timeout: 5000 })
+    await page.getByText('Running the sort now.').waitFor({ timeout: 8000 })
+    await page.getByText('Rebuild the load order for #5367').waitFor({ timeout: 3000 })
+    if (await page.getByText('bramble 3', { exact: true }).count()) throw new Error("another chat's messages")
+    await page.locator('#view .msg.working').waitFor({ timeout: 3000 })
+    if (await page.locator('#view .dock textarea').count()) throw new Error('a composer in a session')
+  })
+  await step('a session that is not the Bot\'s says so', async () => {
+    await page.goto(base + '/m/bots/rift/s/s_nope')
+    await page.getByText("This session is not one of Rift's.").waitFor({ timeout: 8000 })
+  })
   await page.getByRole('link', { name: 'Rooms' }).click()
   await step('the Rooms list has one button for each room', async () => {
     await page.getByText('Thornswood Workbench', { exact: true }).waitFor({ timeout: 5000 })

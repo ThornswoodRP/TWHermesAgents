@@ -141,11 +141,23 @@ LOG = "connector.log"     # One's record, beside this file, for a connector that
 LOG_BYTES = 1_000_000    # kept to about this size, with the one before it as connector.log.1
 
 
+# Under pythonw (One's task, with no window) nothing reads this process's output. The supervisor has none,
+# and before 9 Nov it started the connector with only stdin set, so Python's subprocess gave the connector a
+# stdout of its own: a pipe whose reading end it closed at once (subprocess.py _get_handles, for a parent
+# with no standard handle). The connector took that for a console. Its first line went into the dead pipe,
+# and the write failed and stopped it; at exit the flush failed too, so Python ended it with code 120
+# (One's reinstall, 9 Nov 12:06 AM: the update's own stop came out as 120, and its lines were nowhere).
+# So under pythonw the lines go to connector.log, and the standard streams go to the null device.
+NO_CONSOLE = sys.stdout is None or (WINDOWS and Path(sys.executable).name.lower() == "pythonw.exe")
+if NO_CONSOLE:
+    sys.stdout = sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 (for the life of the process)
+
+
 def say(line: str) -> None:
-    """One line to the journal now. Under pythonw (One's task, with no window) there is no stdout, so the line
+    """One line to the journal now. Under pythonw there is no output anybody reads (NO_CONSOLE), so the line
     goes to connector.log beside this file, with the time: on 7 Nov One's connector stopped at 7:17 PM and
     nothing on One said why."""
-    if sys.stdout is not None:
+    if not NO_CONSOLE and sys.stdout is not None:
         print(line, flush=True)
         return
     path = Path(__file__).resolve().parent / LOG
@@ -1043,7 +1055,9 @@ def supervise(argv: list[str], run=subprocess.Popen, sleep=time.sleep, rounds: i
         n = 0
         while rounds is None or n < rounds:
             n += 1
-            proc = run(child, stdin=subprocess.DEVNULL, **quiet())
+            # Every stream given, so none is a dead pipe (NO_CONSOLE): the connector says its lines in its log.
+            proc = run(child, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       **quiet())
             if job is not None:
                 _in_job(job, proc)
             code = proc.wait()

@@ -169,7 +169,28 @@ class PasskeyCeremonies(unittest.TestCase):
         self.w.core.auth.revoke_device(self.p, self.dev)
         with self.assertRaises(CoreError) as cm:
             self.pk.sign_in(self.w.ws, self.key.get(self.pk.sign_in_options(self.w.ws)))
-        self.assertEqual(cm.exception.reason, "unknown_passkey")
+        # Named as removed, with its id, so the app can tell his passkey app to drop it.
+        self.assertEqual(cm.exception.reason, "removed_passkey")
+        self.assertEqual(cm.exception.detail["rp_id"], RP_ID)
+        row = self.w.core.s.db.execute("SELECT credential_id FROM passkeys").fetchone()
+        self.assertEqual(cm.exception.detail["credential_id"], row["credential_id"])
+
+    def test_a_removed_passkey_is_named_and_left_out_of_the_accepted(self):
+        self.enrol()
+        second = self.SoftKey(ORIGIN, RP_ID)
+        p = self.w.core.auth.authenticate(self.s.token)
+        added = self.pk.register(p, second.create(self.pk.register_options(p)), "second")
+        dev, _ = self.pk.sign_in(self.w.ws, second.get(self.pk.sign_in_options(self.w.ws)))
+        both = self.pk.accepted(self.w.ws, dev)
+        self.assertEqual(both["rp_id"], RP_ID)
+        self.assertEqual(len(both["credential_ids"]), 2)
+        self.assertIn(added["credential_id"], both["credential_ids"])
+        first = next(k for k in self.pk.list(p) if k["id"] != added["passkey_id"])
+        self.pk.revoke(self.w.core.auth.authenticate(self.s.token), first["id"])
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in(self.w.ws, self.key.get(self.pk.sign_in_options(self.w.ws)))
+        self.assertEqual(cm.exception.reason, "removed_passkey")
+        self.assertEqual(self.pk.accepted(self.w.ws, dev)["credential_ids"], [added["credential_id"]])
 
     def test_a_counter_that_goes_back_is_refused(self):
         key = self.SoftKey(ORIGIN, RP_ID, counter=5)
@@ -570,8 +591,8 @@ class FeedsIn(unittest.TestCase):
         snap = Feeds(self.w.store).get(self.w.ws, "work")
         self.assertEqual(snap["as_of"], "2026-11-01T18:00:00+00:00")
         row = snap["work"]["doing"][0]
-        self.assertEqual(set(row), {"bot", "title", "state", "tool", "since", "platform"})
-        self.assertEqual((len(row["title"]), row["state"], row["tool"]), (200, "tool", "terminal"))
+        self.assertEqual(set(row), {"bot", "title", "state", "tool", "since", "platform", "session_id"})
+        self.assertEqual((len(row["title"]), row["state"], row["tool"], row["session_id"]), (200, "tool", "terminal", "s1"))
         self.assertNotIn("secret", snap["work"])
         self.put("work", {"source_time": "2026-11-01T18:01:00+00:00", "doing": []})
         self.assertEqual(Feeds(self.w.store).get(self.w.ws, "work")["work"]["doing"], [])

@@ -43,6 +43,7 @@ ROLES = ("user", "assistant")
 # The live Board (live_reader.py): one row for each turn running now.
 MAX_DOING = 60
 DOING_FIELDS = {"bot": 64, "title": 200, "since": 40, "platform": 32}
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")  # own.SESSION_ID: the row opens that session
 LIVE_FOR = 90
 TOOL = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
@@ -78,6 +79,8 @@ def clean(name: str, body: dict) -> dict:
             row = {k: _text(d.get(k), n) for k, n in DOING_FIELDS.items()}
             tool = d.get("tool")
             row["tool"] = tool if isinstance(tool, str) and TOOL.fullmatch(tool) else ""
+            sid = d.get("session_id")
+            row["session_id"] = sid if isinstance(sid, str) and SESSION_ID.fullmatch(sid) else ""
             row["state"] = "tool" if row["tool"] and d.get("state") == "tool" else "thinking"
             out["doing"].append(row)
     elif name == "bots":
