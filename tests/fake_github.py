@@ -43,6 +43,7 @@ class FakeGitHub:
         self.comments: dict[tuple[str, int], list[dict]] = {}
         self.contents: dict[tuple[str, str, str], bytes] = {}
         self.runs: list[dict] = []
+        self.board_items: list[dict] = []   # the org project's items, as GraphQL gives them
         self.repo_labels: dict[tuple[str, str], dict] = {}   # (repo, lower-case name) -> label
         self.calls: list[tuple[str, str, dict | None]] = []
         self.tokens: list[dict] = []
@@ -185,6 +186,13 @@ class FakeGitHub:
     def _graphql(self, body) -> Response:
         """The GraphQL shapes tw-git sends: the queue state, the enqueue and auto-merge."""
         q, v = body["query"], body["variables"]
+        if "projectV2" in q:
+            start = int(v.get("after") or 0)
+            page = self.board_items[start:start + 100]
+            more = start + 100 < len(self.board_items)
+            return Response(200, {"data": {"organization": {"projectV2": {"items": {
+                "pageInfo": {"hasNextPage": more, "endCursor": str(start + 100) if more else None},
+                "nodes": page}}}}}, {})
         if "enablePullRequestAutoMerge" in q:
             repo, number = v["pr"].split("#")
             pr = self.prs[(repo, int(number))]

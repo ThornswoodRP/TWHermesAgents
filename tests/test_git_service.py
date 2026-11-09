@@ -810,6 +810,34 @@ class PullRequestsAndIssues(unittest.TestCase):
                 w.git.open_issue("hermes", dict(base, **bad))
         self.assertEqual(w.fake.writes("POST", "/issues"), [])
 
+    def test_the_board_comes_back_in_do_order_and_eligible_keeps_what_may_be_picked(self):
+        w = World()
+
+        def item(n, order, status="Todo", labels=(), assignees=(), author="EvilPatrick06", state="OPEN"):
+            return {"status": {"name": status}, "order": {"number": order} if order is not None else None,
+                    "content": {"__typename": "Issue", "number": n, "title": f"t{n}", "state": state,
+                                "repository": {"nameWithOwner": APP}, "author": {"login": author},
+                                "labels": {"nodes": [{"name": l} for l in labels]},
+                                "assignees": {"nodes": [{"login": a} for a in assignees]}}}
+
+        w.fake.board_items = [item(10000 + i, 10000 + i) for i in range(150)] + [
+            item(5, 5), item(6, 6, status="In Progress"), item(7, 7, labels=["claimed: Wisp"]),
+            item(8, 8, assignees=["WiccanDjinn"]), item(9, 9, author="WiccanDjinn"),
+            item(10, 10, labels=["claimed: Anvil"]), item(11, 11, state="CLOSED"),
+            item(12, 12, assignees=["EvilPatrick06"]), item(13, None),
+            {"status": None, "order": None, "content": {"__typename": "DraftIssue"}}]
+        out = w.git.board("hermes", {"bot": "bramble", "limit": 4})
+        self.assertEqual([r["number"] for r in out["issues"]], [5, 6, 7, 8])
+        picks = w.git.board("hermes", {"bot": "rift", "eligible": True, "limit": 3})
+        self.assertEqual([r["number"] for r in picks["issues"]], [5, 12, 10000])
+        self.assertEqual(picks["open"], 150 + 3)
+        self.assertEqual(picks["issues"][0]["order"], 5)
+        # The workers' App reads it, with organization projects read.
+        self.assertIn({"organization_projects": "read", "issues": "read", "metadata": "read"},
+                      [t["permissions"] for t in w.fake.tokens])
+        with self.assertRaises(Refused):
+            w.git.board("hermes", {"bot": "patrick"})
+
     def test_reads_stay_in_the_repo(self):
         w = World()
         w.fake.add_issue(APP, 3150)

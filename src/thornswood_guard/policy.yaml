@@ -397,6 +397,18 @@ secrets:
     - hosts.yml
     - .git-credentials
 
+# The board (Thornswood's To Do board, an org project since #5185): its Order
+# field is the do-order and its Status follows GitHub by itself
+# (Thornswood docs/guide/the-board.md). tw-git's board op reads it through the
+# workers' App, which holds organization projects read, so Bramble picks
+# from it without a script it cannot run (Read-Board.ps1 is PowerShell on a
+# person's machine).
+board:
+  org: ThornswoodRP
+  number: 1
+  status_field: Status
+  order_field: Order
+
 # Bramble wakes when GitHub finishes a pull request's checks (Patrick's answer
 # A on q-hermes-bramble-wake, 1 Nov). Cause: nothing reached Bramble when a
 # check finished, so every merge and hand-back waited for someone to nudge it.

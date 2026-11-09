@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.3.0
+version: 1.3.1
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -57,11 +57,11 @@ This comes before every other line here. It is word for word the rule every Clau
 
 ## 3. Picking and claiming (Bramble)
 
-- The do-order is the board's **Order** field (`scripts/ops/Read-Board.ps1`).
+- The do-order is the board's **Order** field. Read it with `tw_git` op `board` (`eligible` true keeps only what may be picked, lowest Order first; `limit` up to 100). `scripts/ops/Read-Board.ps1` is the same read for a person at a PowerShell prompt; no Bot runs it.
 - Eligible: open, unassigned or assigned to Patrick, not Djinn's or Jhinswife's, not claimed by someone working it, not covered by an open PR, its decisions answered.
 - "It needs Patrick's decision", "it needs the box" and "it names a date" are not reasons to skip (Developer-Guide.md "What is not a reason to skip an issue"). Write the decision out in full on the decision page, or do the box part through the gate, or check the date against what really waits on it.
 - Admit only what the queue can take: model quota, the Oracle box's headroom, CI queue depth, and no overlap in files with running work. Start with one task at a time and raise it only from measurements.
-- Claim with the Bot's label (`claimed: Rift` and so on) and move the card to In Progress. No claim comment. People stay the only assignees.
+- Claim with the Bot's label (`claimed: Rift` and so on). The card goes to In Progress by itself within a minute, because its Status follows the claim (Thornswood docs/guide/the-board.md); nobody moves a card. No claim comment. People stay the only assignees.
 - Send the owner a brief: the issue, the cause or what to measure, the files, the tests, what not to touch, and what to hand back.
 
 ## 4. The work (each specialist)
@@ -171,7 +171,7 @@ The shapes are in Developer-Guide.md "Test tasks and known issues". The bot post
 Both carry over from the Claude setup unchanged in what they check. Both are **report only**: nothing is changed until Patrick answers. They are Bramble's Hermes routines, run one model turn at a time like any other work, and they post their results on the decision page, not in chat.
 
 ### Weekly board review: Sundays at 8:37 AM Mountain
-1. Read the board with `scripts/ops/Read-Board.ps1` and read every open issue.
+1. Read the board with `tw_git` op `board` (`limit` 100, and `/search/issues` with `tw_git read` past that) and read every open issue.
 2. Look for: issues that go against docs/DECIDED.md, duplicates, issues already done, cards in the wrong column, claims `expire-claims.yml` missed, issues still on `area: triage`, Done cards with no test task, and stale labels.
 3. Each finding becomes a board-review decision card (what it is, the evidence, what to do, a recommendation), plus one board review record for the week on the decision page.
 4. When Patrick answers, carry the answers out and record them on #3192.

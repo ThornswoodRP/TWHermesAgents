@@ -287,7 +287,7 @@ class TurnGate:
 
 
 GIT_OPS = ["base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-           "close_issue", "start_run", "read", "ledger_event"]
+           "close_issue", "start_run", "read", "board", "ledger_event"]
 FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
              "remove", "run_check"]
 
@@ -304,7 +304,7 @@ TW_GIT_SCHEMA = {
         "close_pr (Bramble only: closes a pull request only on Patrick's answer on the outside pull request card "
         "that names it; replaced_by names the merged pull request that carried it), close_issue (Bramble only: closes an "
         "issue with reason duplicate and duplicate_of, or reason completed and done_by_pr (merged) or done_by_run "
-        "(succeeded, in run_repo), with body saying why; never as not planned), start_run (Bramble only), read (a GET inside one repo, or /search/issues with repo:<that repo> in q), ledger_event (Bramble only). Every write names "
+        "(succeeded, in run_repo), with body saying why; never as not planned), start_run (Bramble only), read (a GET inside one repo, or /search/issues with repo:<that repo> in q), board (the board's open issues in do-order; eligible true keeps only what may be picked; limit, at most 100), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
         "type": "object",
@@ -323,6 +323,7 @@ TW_GIT_SCHEMA = {
             "workflow": {"type": "string"}, "inputs": {"type": "object"}, "channel": {"type": "string"},
             "path": {"type": "string"}, "event": {"type": "string"}, "issue": {"type": "integer"},
             "release": {"type": "string"}, "note": {"type": "string"},
+            "eligible": {"type": "boolean"}, "limit": {"type": "integer"},
         },
         "required": ["op"],
         "additionalProperties": False,
