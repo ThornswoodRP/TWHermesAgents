@@ -3,8 +3,8 @@ const { chromium } = require('playwright')
 // testing API): setting up the phone (pairing and its first passkey on one
 // screen), a deep link, adding a passkey, signing in with it,
 // answering a card (it leaves Decisions for good), a high-risk card's own
-// check screen, the five tabs, the Thornswood Bots list (Hermes, One, then the
-// six Bots) and a chat with Patrick's own Hermes on One (as text, a new chat,
+// check screen, the five tabs, the Thornswood Bots list (the one last written in
+// first) and a chat with Patrick's own Hermes on One (as text, a new chat,
 // Hermes on the VM with no connector yet, and reactions: Hermes's own, setting
 // one from a message's actions and taking it off), the Rooms
 // list and a room (as text), the Tasks tab (subagents, background commands and
@@ -229,11 +229,15 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.waitForURL(/\/m\/hermes\/one\/s_md$/, { timeout: 5000 })
   })
   await page.getByRole('link', { name: 'Bots' }).click()
-  await step('the Thornswood Bots list: Hermes, One, then the six Bots', async () => {
+  await step('the Thornswood Bots list: the one last written in first, his own message counting', async () => {
     await page.getByRole('heading', { name: 'Thornswood Bots' }).waitFor({ timeout: 5000 })
     const rows = await page.locator('#view > button.row strong').allTextContents()
-    const want = ['Hermes', 'One', 'Bramble', 'Rift', 'Sprocket', 'Echo', 'Magpie', 'Wisp']
+    // Wisp: his message the Bot has not taken yet, newest of all; One's and Bramble's chats; then Hermes's;
+    // then the Bots where nothing was said, in their own order.
+    const want = ['Wisp', 'One', 'Bramble', 'Hermes', 'Rift', 'Sprocket', 'Echo', 'Magpie']
     if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(rows))
+    const line = await page.locator('#view > button.row[data-bot="wisp"] .snip').textContent()
+    if (line !== 'You: how is the gamemode build?') throw new Error(line)
     await page.getByText('your own Hermes on the VM', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('your Hermes on One', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('router, merges', { exact: true }).waitFor({ timeout: 3000 })

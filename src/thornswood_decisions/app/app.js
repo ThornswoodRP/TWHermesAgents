@@ -1043,21 +1043,28 @@ async function botsView(into = 'view') {
   if (refused(r, into)) return
   const rank = b => (ORDER.indexOf(b.bot) + 1) || ORDER.length + 1
   const bots = r.body.bots.slice().sort((a, b) => rank(a) - rank(b))
-  // Hermes, then One, then the six Bots (Patrick's mock-up answer, 1 Nov).
   const gateways = own.status === 200 ? ['me', 'one'].map(gw => own.body.gateways.find(g => g.gateway === gw)).filter(Boolean) : []
+  // The one last written in first, as a messenger lists its chats (Patrick, 9 Nov: Wisp had the newest chat
+  // and stayed at the bottom). His own message counts: the core gives a Bot's last line as the newer of the
+  // Bot Chat and what he sent it. Where nothing was said, Hermes, then One, then the six Bots (his mock-up
+  // answer, 1 Nov), which the sort keeps for equal times.
+  const when = at => { const t = Date.parse(at || ''); return Number.isNaN(t) ? -Infinity : t }
+  const rows = [...gateways.map(g => ({ g, at: when(g.last && g.last.last_at) })),
+    ...bots.map(b => ({ b, at: when(b.last && b.last.at) }))].sort((x, y) => y.at - x.at)
   showIn(into, [
     screenBar({ title: 'Thornswood Bots', heading: true }),
-    gateways.map(g => listRow({ 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) }, {
+    own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
+    rows.map(({ g, b }) => g ? listRow({ 'data-gateway': g.gateway, onclick: () => go('/m/hermes/' + g.gateway) }, {
       agent: g.gateway, title: GATEWAY[g.gateway], live: gatewayLive(g),
       lines: [el('span', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
         g.last ? snippet(g.last.preview, 2, el('b', { class: 'sender' }, chatName(g.last) + ': '))
           : el('span', { class: 'quiet' }, g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')],
-      right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })),
-    own.status === 200 ? null : el('p', { class: 'warn' }, said(own.body)),
-    bots.map(b => listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
+      right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })
+    : listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
       agent: b.bot, title: NAMES[b.bot] || b.bot, live: botLive(b.live),
       lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
-        b.last ? snippet(b.last.text) : el('span', { class: 'quiet' }, 'No messages yet.')],
+        b.last ? snippet(b.last.text, 2, b.last.role === 'user' ? el('b', { class: 'sender' }, 'You: ') : null)
+          : el('span', { class: 'quiet' }, 'No messages yet.')],
       right: [liveLine(botLive(b.live)), b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null] }))])
 }
 
@@ -3868,7 +3875,8 @@ async function poll() {
   const chatBox = '#view .dock .composer textarea'
   const writing = [...document.querySelectorAll('textarea')].some(t => t.value && !t.matches(chatBox)) ||
     !!document.querySelector('select[data-dirty]')
-  if (/^\/m\/(bramble$|room$|rooms\/|bots\/|hermes\/)/.test(path)) {
+  // The Bots and rooms lists too: a Bot's answer moves its row to the top and shows as its line.
+  if (/^\/m\/(bramble$|room$|rooms$|rooms\/|bots$|bots\/|hermes\/)/.test(path)) {
     const other = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) &&
       !document.activeElement.matches(chatBox)
     if (!writing && !other) route()

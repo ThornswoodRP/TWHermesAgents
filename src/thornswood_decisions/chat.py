@@ -50,7 +50,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from . import alerts
@@ -95,6 +95,10 @@ GATEWAY_STATES = ("absent", "starting", "ready", "draining", "incompatible", "in
 LIVE_STALE = timedelta(seconds=120)  # four of the connector's reports missed: it is not heard from
 _LIVE: dict[str, dict] = {}
 _LIVE_LOCK = threading.Lock()
+# The last line of each Bot's Bot Chat as the Bots' connector last read it from Hermes (a newest page), in
+# memory only like the pages themselves: the Bots list takes it when it is newer than the feed's once-a-minute
+# copy, so a Bot's answer shows there as soon as the core reads it (Patrick, 9 Nov). Keyed by workspace and Bot.
+_SAID: dict[tuple[str, str], dict] = {}
 
 
 def clean_room_page(body) -> dict:
@@ -145,6 +149,15 @@ def settle_from_room(store: Store, db, workspace_id: str, room_id: str, events: 
             n += 1
     return n
 
+
+
+def _when(at) -> datetime:
+    """A time as a feed or a row gives it, for comparing; none, or one that does not read, is the oldest."""
+    try:
+        t = parse(at or "")
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 class _Turns:
     """What each Bot Chat turn running now is doing, as the Bots' connector last said it (thinking, writing,
@@ -338,6 +351,23 @@ class Chat:
                 m["doing"] = doing  # the live line under a message being answered
         return mine
 
+    def _last(self, workspace_id: str, bot: str, said: dict | None) -> dict | None:
+        """What was last said in a Bot's Bot Chat, for the Bots list's line and its order: the newest of the
+        feed's last message, the last one the connector read from Hermes in a newest page (_SAID), and his own
+        newest message there. The feed is a copy made once a minute, and a message of his the Bot has not taken
+        yet (or never took) is only in chat_messages; from the feed alone the list showed the Bot's older line
+        and kept the Bot where it was (Patrick, 9 Nov)."""
+        row = self.s.db.execute("SELECT text, status, created_at FROM chat_messages WHERE workspace_id = ? "
+                                "AND target = ? AND session_id IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                                (workspace_id, bot)).fetchone()
+        with _LIVE_LOCK:
+            read = _SAID.get((workspace_id, bot))
+        lines = [m for m in (said, read) if m]
+        if row is not None:
+            lines.append({"role": "user", "text": row["text"], "at": row["created_at"], "status": row["status"]})
+        # The newest; at the same time, the copy from Hermes over his row, and the feed's over the page's.
+        return max(lines, key=lambda m: _when(m.get("at")), default=None)
+
     def _unsettled(self, workspace_id: str, target: str) -> int:
         targets = self._targets(workspace_id, target)
         return self.s.db.execute("SELECT count(*) FROM chat_messages WHERE workspace_id = ? "
@@ -389,7 +419,7 @@ class Chat:
         live = self.live_states(p.workspace_id)
         for bot in self.bots(p.workspace_id):
             msgs = chats.get(bot, {}).get("messages", [])
-            out.append({"bot": bot, "last": msgs[-1] if msgs else None,
+            out.append({"bot": bot, "last": self._last(p.workspace_id, bot, msgs[-1] if msgs else None),
                         "unsettled": self._unsettled(p.workspace_id, bot), "live": live.get(bot)})
         room_snap = feeds.get(p.workspace_id, "room")
         rooms = []
@@ -502,6 +532,12 @@ class Chat:
         page = body.get("page")
         clean = clean_room_page(page) if key[2] == "room" else clean_page("messages", page)
         PAGES.answer(workspace_id, PAGES_GW, body["id"], clean, self.s.clock())
+        if key[2] == "bot" and key[4] is None:
+            said = [m for m in clean.get("messages", []) if m.get("role") in ("user", "assistant")]
+            if said:
+                with _LIVE_LOCK:
+                    _SAID[(workspace_id, key[3])] = {"role": said[-1]["role"], "text": said[-1]["text"],
+                                                     "at": said[-1]["at"]}
         return {"ok": True}
 
     def claim(self, workspace_id: str, token: str | None, limit: int = MAX_CLAIM) -> dict:
@@ -689,6 +725,10 @@ class Chat:
                     sid = db.execute("SELECT session_id FROM chat_messages WHERE id = ?", (item_id,)).fetchone()[0]
                     alerts.queue(self.s, db, workspace_id, "answered", item_id, row["target"].capitalize(),
                                  alerts.bot_path(row["target"], sid))
+                    # The Bot's answer is in its Bot Chat now: its newest page is asked for at once, so the
+                    # Bots list has the answer within seconds and not at the feed's next run, up to a minute on.
+                    if sid is None:
+                        PAGES.ask((workspace_id, PAGES_GW, "bot", row["target"], None, ""), self.s.clock())
             return {"id": item_id, "status": state}
         cx = self.s.db.execute("SELECT status FROM connector_outbox WHERE id = ? AND workspace_id = ?",
                                (item_id, workspace_id)).fetchone()

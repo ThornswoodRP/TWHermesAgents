@@ -106,7 +106,35 @@ class ChatSend(unittest.TestCase):
         s = self.chat.summary(self.w.patrick())
         self.assertEqual([b["bot"] for b in s["bots"]], list(BOTS))
         self.assertEqual(s["bots"][0]["unsettled"], 1)
-        self.assertEqual(s["bots"][0]["last"]["text"], "All green.")
+        self.assertEqual(s["bots"][0]["last"], {"role": "user", "text": "thanks", "at": "2026-11-01T18:00:00.000000+00:00",
+                                                "status": "queued"}, "his newer message, not yet in Hermes")
+
+    def test_the_bots_list_line_is_the_newest_of_the_bot_chat_and_his_own_message(self):
+        """Patrick, 9 Nov: Wisp had the newest chat, his own message, yet the list showed Wisp's older line
+        (and so kept Wisp at the bottom), because the line came from Hermes's store alone."""
+        flags(self.w, "mobile_chat_write")
+        f = Feeds(self.w.store)
+        tok = f.new_token(self.w.ws, "bots", by="tests")
+
+        def feed(*msgs):
+            f.put(self.w.ws, "bots", tok, {"source_time": "2026-11-01T19:00:00+00:00", "bots": [
+                {"bot": "wisp", "session_id": "s1", "messages": list(msgs)}]})
+
+        def last():
+            return next(b for b in self.chat.summary(self.w.patrick())["bots"] if b["bot"] == "wisp")["last"]
+
+        reply = {"role": "assistant", "text": "No PR yet.", "at": "2026-11-01T17:00:00+00:00"}
+        feed(reply)
+        self.assertEqual(last(), reply)
+        self.chat.send(self.w.patrick(), "wisp", "any news?", "key-00000201")
+        self.assertEqual((last()["role"], last()["text"], last()["status"]), ("user", "any news?", "queued"))
+        taken = {"role": "user", "text": "any news?", "at": "2026-11-01T18:00:05+00:00"}
+        answer = {"role": "assistant", "text": "Building it now.", "at": "2026-11-01T18:01:00+00:00"}
+        feed(reply, taken, answer)
+        self.assertEqual(last(), answer, "the Bot's answer, once it is newer")
+        self.w.clock.advance(hours=1)
+        self.chat.send(self.w.patrick(), "wisp", "in a session", "key-00000202", session="s_other")
+        self.assertEqual(last(), answer, "a message into another of Wisp's sessions is not the Bot Chat")
 
 
 class ConnectorSide(unittest.TestCase):
