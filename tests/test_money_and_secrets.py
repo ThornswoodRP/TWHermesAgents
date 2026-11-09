@@ -23,9 +23,10 @@ class Routes(unittest.TestCase):
     def ids(self, bot, **kw):
         return [r["id"] for r in chain_for(self.p, bot, **kw)]
 
-    def test_order_today_is_max_then_chatgpt(self):
+    def test_order_today_is_max_then_chatgpt_then_qwen(self):
+        """Qwen's route is ready (8 Nov 2026); the credits route is not."""
         for bot in ("bramble",) + WORKERS:
-            self.assertEqual(self.ids(bot), ["max", "chatgpt"])
+            self.assertEqual(self.ids(bot), ["max", "chatgpt", "qwen"])
 
     def test_once_the_proxy_exists_only_bramble_gets_the_credits(self):
         self.assertEqual(self.ids("bramble", proxy_ready=True), ["max", "credits", "chatgpt", "qwen"])
@@ -150,11 +151,11 @@ class Routes(unittest.TestCase):
         self.assertFalse(v.allowed)
         self.assertIn("day 21", v.reason)
 
-    def ready(self):
+    def ready(self, credits=True, qwen=True):
         import copy
         from thornswood_guard.policy import Policy
         data = copy.deepcopy(self.p.data)
-        data["admission_proxy"]["ready"] = {"credits": True, "qwen": True}
+        data["admission_proxy"]["ready"] = {"credits": credits, "qwen": qwen}
         return Policy(data)
 
     def test_proxy_routes_point_at_the_loopback_proxy_with_the_bots_token(self):
@@ -184,8 +185,17 @@ class Routes(unittest.TestCase):
         self.assertTrue(check_config(p, "rift", cfg, set()))
 
     def test_before_the_proxy_is_ready_no_route_names_it(self):
-        cfg = build(self.p, "bramble")
+        p = self.ready(credits=False, qwen=False)
+        cfg = build(p, "bramble")
         self.assertNotIn("base_url", str(cfg))
+        cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
+                                             "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+        self.assertTrue(check_config(p, "bramble", cfg, set()))
+
+    def test_a_route_not_ready_stays_out_while_the_other_is_in(self):
+        cfg = build(self.p, "bramble")
+        self.assertIn("http://127.0.0.1:8611/qwen/v1", str(cfg))
+        self.assertNotIn("/credits", str(cfg))
         cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
                                              "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
         self.assertTrue(check_config(self.p, "bramble", cfg, set()))

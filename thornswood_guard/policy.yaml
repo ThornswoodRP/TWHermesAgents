@@ -588,10 +588,13 @@ admission_proxy:
   # route's real key is in env_file, and the proxy's attack tests passed on
   # the VM (06 section 6.3). The two are apart because their keys are: Qwen's
   # has been in proxy.env since the Phase 2 install; the credits key is not
-  # on the VM yet (read 8 Nov 2026).
+  # on the VM yet (read 8 Nov 2026). Qwen on 8 Nov: bfa8c71's install made
+  # the six Bots' tokens (proxy-tokens.json 440 root:tw-proxy, six digests,
+  # one TW_PROXY_TOKEN in each profile) and its canary passed, attack 18
+  # (the proxy refuses a request with no Bot token) included.
   ready:
     credits: false
-    qwen: false
+    qwen: true
 
 # The fleet admission queue (08 section 7; 02 section 8.5). Past the pilot
 # since 1 Nov (Patrick picked 6 turns and 2 checks): the pilot's one turn
