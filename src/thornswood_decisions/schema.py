@@ -776,6 +776,14 @@ INSERT INTO task_links_17 SELECT id, decision_id, kind, ref FROM task_links;
 DROP TABLE task_links;
 ALTER TABLE task_links_17 RENAME TO task_links;
 """,
+    # 18: which passkeys were made by a fingerprint try that a passkey app saved instead of the phone (kept as
+    # plain passkeys since 9 Nov). On 9 Nov, Patrick's phone saved two such tries in Bitwarden in a minute,
+    # and the Decisions list went on offering the fingerprint, because it looked only for a fingerprint key.
+    # The keys kept that way before this were all labelled "Passkey in <app>" by the core.
+    """
+ALTER TABLE passkeys ADD COLUMN fingerprint_try INTEGER NOT NULL DEFAULT 0 CHECK (fingerprint_try IN (0, 1));
+UPDATE passkeys SET fingerprint_try = 1 WHERE phone_key = 0 AND label LIKE 'Passkey in %';
+""",
 ]
 
 
@@ -934,5 +942,10 @@ CREATE TABLE task_links_16 (
 INSERT INTO task_links_16 SELECT id, decision_id, kind, ref FROM task_links;
 DROP TABLE task_links;
 ALTER TABLE task_links_16 RENAME TO task_links;
+""", ""),
+    # Which keys came from a fingerprint try would be lost, and the Decisions list would offer the
+    # fingerprint again on a phone whose passkey app took it.
+    18: ([("SELECT count(*) FROM passkeys WHERE fingerprint_try = 1", "passkeys kept from a fingerprint try")], """
+ALTER TABLE passkeys DROP COLUMN fingerprint_try;
 """, ""),
 }

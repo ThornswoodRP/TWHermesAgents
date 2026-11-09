@@ -1123,6 +1123,24 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     const said = await page.evaluate(() => flash)
     if (!/saved in your passkey app, so it opened that app.*pick Google Password Manager/.test(said)) throw new Error(said)
   })
+  // 9 Nov: Android saved both of Patrick's fingerprint tries in Bitwarden, and the Decisions list went on
+  // offering the fingerprint. A try a passkey app took is kept as a passkey, and the offer goes.
+  await page.goto(base + '/m/decisions')
+  await step('a fingerprint try a passkey app took is said, and Decisions stops offering it', async () => {
+    await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 8000 })
+    await page.route('**/api/v1/passkeys/register', async (r) => {
+      const real = await r.fetch()
+      const body = await real.json()
+      return r.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ ...body, phone_key: false, maker: 'Bitwarden' }) })
+    })
+    await page.getByRole('button', { name: 'Use my fingerprint' }).click()
+    await page.getByText(/^That key was saved in Bitwarden, so it is kept as a passkey/).waitFor({ timeout: 8000 })
+    await page.unroute('**/api/v1/passkeys/register')
+    await page.evaluate(() => { localStorage.removeItem('hermes.phoneKey.v1'); return route() })
+    await page.locator('#view').getByText(/^(Nothing needs you right now\.|Waiting on you)/).first().waitFor({ timeout: 8000 })
+    if (await page.getByText('Sign in with your fingerprint', { exact: true }).count()) throw new Error('still offered')
+  })
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
   // Each signed-in view gets one in every kind of text it shows, at Pixel widths and with larger text.

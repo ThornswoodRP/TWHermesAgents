@@ -209,12 +209,13 @@ class Passkeys:
             raise CoreError(400, "passkey_refused", f"the passkey was not accepted: {type(exc).__name__}") from None
         aaguid = str(v.aaguid or "").lower() or None
         where = maker(aaguid)
+        tried = False
         if on_phone and aaguid not in PHONE_AUTHENTICATORS:
             # A key saved in a passkey app is not this phone's fingerprint key: that one would open the app at
             # every sign-in. It is kept as a plain passkey all the same. The app has stored it already, and it
             # may have stored it in place of the key it held before (one key per site, as Bitwarden keeps them).
             # 9 Nov: refused keys like this left his phone with no key the core took, and every sign-in failed.
-            on_phone = False
+            on_phone, tried = False, True
             label = f"Passkey in {where}"
         pk = new_id("pk")
         with self.s.tx() as db:
@@ -230,9 +231,10 @@ class Passkeys:
                     self.s.event(db, p.workspace_id, "passkey.revoked", old, "patrick",
                                  {"device": p.device_id, "replaced_by": pk})
             db.execute("INSERT INTO passkeys(id, workspace_id, principal_id, device_id, credential_id, public_key, "
-                       "sign_count, label, created_at, aaguid, phone_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                       "sign_count, label, created_at, aaguid, phone_key, fingerprint_try) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                        (pk, p.workspace_id, p.id, p.device_id, b64url(v.credential_id), v.credential_public_key,
-                        v.sign_count, (label or "passkey")[:80], self.s.now(), aaguid, 1 if on_phone else 0))
+                        v.sign_count, (label or "passkey")[:80], self.s.now(), aaguid, 1 if on_phone else 0,
+                        1 if tried else 0))
             self.s.event(db, p.workspace_id, "passkey.added", pk, "patrick",
                          {"device": p.device_id, "maker": where, **({"phone_key": True} if on_phone else {})})
         # The credential id goes back to the phone that made it, so its sign-in can name it. phone_key says
@@ -370,7 +372,8 @@ class Passkeys:
 
     def list(self, p: Principal) -> list[dict]:
         self.auth._need_patrick(p)
-        rows = self.s.db.execute("SELECT id, label, device_id, created_at, last_used_at, aaguid, phone_key FROM passkeys "
+        rows = self.s.db.execute("SELECT id, label, device_id, created_at, last_used_at, aaguid, phone_key, fingerprint_try "
+                                 "FROM passkeys "
                                  "WHERE principal_id = ? AND revoked_at IS NULL ORDER BY created_at", (p.id,))
         out = []
         for r in rows:
@@ -378,6 +381,7 @@ class Passkeys:
             aaguid = d.pop("aaguid")
             d["maker"] = maker(aaguid) if aaguid else None
             d["phone_key"] = bool(d["phone_key"])
+            d["fingerprint_try"] = bool(d["fingerprint_try"])
             out.append(d)
         return out
 

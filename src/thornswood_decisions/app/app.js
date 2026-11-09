@@ -340,6 +340,7 @@ async function addFingerprint() {
   if (done.body.phone_key === false) {
     // Saved in a passkey app, not by the phone itself: the core keeps it as a passkey, so the key the app
     // now holds signs in, but it is not the fingerprint key, which would open that app every time.
+    fingerprintTried = true
     const app = done.body.maker || 'your passkey app'
     return { ok: false, message: `That key was saved in ${app}, so it is kept as a passkey and signs in through ${app}. ` +
       'The fingerprint sign-in was not added: tap Use my fingerprint again and pick Google Password Manager when Android asks where to save it.' }
@@ -558,10 +559,22 @@ function refused(r, into = 'view') {
 // until it is added or put off; Settings always has it.
 const FINGERPRINT_LATER = 'hermes.fingerprintLater.v1'
 
+// Whether this phone already tried the fingerprint and its passkey app took the key (9 Nov: Android saved
+// both of Patrick's tries in Bitwarden, and the offer stayed though he had done what it asked). Asked of
+// the core once a page load; a try made here sets it at once.
+let fingerprintTried = null
+
+async function triedFingerprint() {
+  if (fingerprintTried !== null) return fingerprintTried
+  const [me, keys] = await Promise.all([call('GET', '/me'), call('GET', '/passkeys')])
+  if (me.status !== 200 || keys.status !== 200) return false
+  return (fingerprintTried = keys.body.passkeys.some(k => k.fingerprint_try && k.device_id === me.body.device_id))
+}
+
 async function fingerprintOffer() {
   let later = false
   try { later = localStorage.getItem(FINGERPRINT_LATER) === '1' } catch (e) {}
-  if (later || phoneKey() || !(await canUseFingerprint())) return null
+  if (later || phoneKey() || !(await canUseFingerprint()) || await triedFingerprint()) return null
   const note = el('p', { class: 'warn', role: 'status' })
   const part = el('div', { class: 'card' },
     el('p', {}, el('strong', {}, 'Sign in with your fingerprint')),
@@ -3156,11 +3169,15 @@ async function settingsView(note) {
     held = null
     status.textContent = "This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add it again here."
   }
+  const tried = !held && r.status === 200 && (await canUseFingerprint()) && (await triedFingerprint())
   const finger = held
     ? [el('p', { class: 'quiet' }, 'On. This phone signs in and answers high-risk cards with your fingerprint.')]
     : (await canUseFingerprint())
-      ? [el('p', { class: 'quiet' }, 'Sign in with your fingerprint right here instead of going out to your passkey app. ' +
-          'When Android asks where to save it, pick Google Password Manager.'),
+      ? [el('p', { class: 'quiet' }, tried
+          ? 'This phone saved its fingerprint key in your passkey app, so you sign in through that app. ' +
+            'To sign in right here instead, try again and pick Google Password Manager when Android asks where to save it.'
+          : 'Sign in with your fingerprint right here instead of going out to your passkey app. ' +
+            'When Android asks where to save it, pick Google Password Manager.'),
         el('button', { class: 'primary', type: 'button', onclick: async () => {
           status.textContent = ''
           const k = await addFingerprint()
