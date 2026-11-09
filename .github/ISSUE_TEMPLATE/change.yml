@@ -1,0 +1,16 @@
+name: Something new
+description: A change or a new feature for the Bots, the decision app or the VM install.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What and why
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+    validations:
+      required: true

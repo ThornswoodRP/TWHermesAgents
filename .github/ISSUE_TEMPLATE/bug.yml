@@ -1,0 +1,18 @@
+name: Something is wrong
+description: The Bots, the decision app or the VM install does something it should not, or fails to do what it should.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you saw, when (Mountain time), and where you read it (a log line, the app, a pull request).
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: What is true once it is fixed.
+    validations:
+      required: true
