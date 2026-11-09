@@ -393,6 +393,10 @@ class PhoneFingerprint(unittest.TestCase):
                                           (out["passkey_id"],)).fetchone()
             self.assertEqual((row["phone_key"], row["revoked_at"]), (0, None))
             self.assertIn(name, row["label"])
+            # Listed as kept from a fingerprint try, so the Decisions list stops offering it on this phone.
+            listed = next(k for k in self.pk.list(self.p) if k["id"] == out["passkey_id"])
+            self.assertEqual((listed["fingerprint_try"], listed["phone_key"], listed["device_id"]),
+                             (True, False, self.p.device_id))
             # It signs in, and the phone's own key is left as it was.
             self.pk.sign_in(self.w.ws, key.get(self.pk.sign_in_options(self.w.ws)))
         mine = self.w.store.db.execute("SELECT phone_key, revoked_at FROM passkeys WHERE id = ?",
@@ -473,6 +477,25 @@ class PhoneKeyMigration(unittest.TestCase):
         rows = dict(con.execute("SELECT label, phone_key FROM passkeys").fetchall())
         self.assertEqual(rows, {"passkey": 0, "Fingerprint on this phone": 1, "One": 0})
         self.assertEqual(con.execute("SELECT count(*) FROM passkeys WHERE aaguid IS NOT NULL").fetchone()[0], 0)
+
+
+    def test_schema_18_marks_the_keys_kept_from_a_fingerprint_try(self):
+        con = sqlite3.connect(":memory:", isolation_level=None)
+        con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        from thornswood_decisions.store import _statements
+        for m in range(1, 18):
+            for stmt in _statements(MIGRATIONS[m - 1]):
+                con.execute(stmt)
+        con.execute("PRAGMA foreign_keys = OFF")
+        for i, (label, phone) in enumerate((("passkey", 0), ("Fingerprint on this phone", 1),
+                                            ("Passkey in Bitwarden", 0), ("This phone", 0))):
+            con.execute("INSERT INTO passkeys(id, workspace_id, principal_id, device_id, credential_id, public_key, "
+                        "label, created_at, phone_key) VALUES(?, 'ws', 'pr', 'dv', ?, x'00', ?, 'now', ?)",
+                        (f"pk{i}", f"c{i}", label, phone))
+        for stmt in _statements(MIGRATIONS[17]):
+            con.execute(stmt)
+        rows = dict(con.execute("SELECT label, fingerprint_try FROM passkeys").fetchall())
+        self.assertEqual(rows, {"passkey": 0, "Fingerprint on this phone": 0, "Passkey in Bitwarden": 1, "This phone": 0})
 
 
 class PasskeyWithoutLibraryOrOrigin(unittest.TestCase):
