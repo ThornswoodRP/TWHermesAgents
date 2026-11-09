@@ -157,7 +157,7 @@ class Apply(unittest.TestCase):
         self.assertEqual(script.read_bytes(), (REPO / "deploy" / "hermes-scripts" / "tw-owed-wake.py").read_bytes())
         jobs = self.hermes_state(home)["jobs"]
         self.assertEqual(list(jobs), ["bramble"], "only Bramble's profile gets a job")
-        (job,) = jobs["bramble"]
+        (job,) = [j for j in jobs["bramble"] if j["name"] == "tw-owed-wake"]
         self.assertEqual((job["name"], job["schedule"], job["script"], job["skills"], job["deliver"]),
                          ("tw-owed-wake", "every 5m", "tw-owed-wake.py", ["bramble-duties"], "local"))
         self.assertIn(owed_wake.OWED_WAKE_MARK, job["prompt"])
@@ -171,7 +171,7 @@ class Apply(unittest.TestCase):
         (home.parent / "hermes.json").write_text(json.dumps(state), encoding="utf-8")
         r = self.run_apply(home)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        (again,) = self.hermes_state(home)["jobs"]["bramble"]
+        (again,) = [j for j in self.hermes_state(home)["jobs"]["bramble"] if j["name"] == "tw-owed-wake"]
         self.assertEqual((again["id"], again["schedule"], again["prompt"]), (job["id"], "every 5m", job["prompt"]))
 
     def test_a_paused_owed_wake_job_stays_paused(self):
@@ -184,6 +184,39 @@ class Apply(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("Patrick paused it, so it stays paused", r.stdout)
         self.assertEqual(self.hermes_state(home)["jobs"]["bramble"][0]["state"], "paused")
+
+    def test_bramble_gets_its_two_weekly_reviews_at_the_guides_times(self):
+        # #51: on 9 Nov the VM's cron list held neither review; nothing made them.
+        home = self.home()
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        jobs = {j["name"]: j for j in self.hermes_state(home)["jobs"]["bramble"]}
+        self.assertEqual(sorted(jobs), ["tw-owed-wake", "tw-weekly-board-review", "tw-weekly-project-review"])
+        board, project = jobs["tw-weekly-board-review"], jobs["tw-weekly-project-review"]
+        # Sundays at 8:37 AM and 9:53 AM Mountain (thornswood-guide section 15).
+        self.assertEqual((board["schedule"], board["timezone"]), ("37 8 * * 0", "America/Denver"))
+        self.assertEqual((project["schedule"], project["timezone"]), ("53 9 * * 0", "America/Denver"))
+        guide = (REPO / "hermes" / "skills" / "thornswood" / "thornswood-guide" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("### Weekly board review: Sundays at 8:37 AM Mountain", guide)
+        self.assertIn("### Weekly project review: Sundays at 9:53 AM Mountain", guide)
+        for job in (board, project):
+            self.assertEqual((job["skills"], job["deliver"], job["script"]), (["thornswood-guide"], "local", ""))
+            self.assertIn("section 15", job["prompt"])
+            self.assertIn("Report only", job["prompt"])
+            self.assertNotIn("[Thornswood owed wake]", job["prompt"], "a review is not a sweep")
+            self.assertIn(f"{job['name']} job {job['id']} is active", r.stdout)
+        # A second apply edits the same two; a paused one stays paused.
+        state = self.hermes_state(home)
+        for j in state["jobs"]["bramble"]:
+            if j["name"] == "tw-weekly-board-review":
+                j.update(state="paused", schedule="0 0 * * *")
+        (home.parent / "hermes.json").write_text(json.dumps(state), encoding="utf-8")
+        r = self.run_apply(home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        again = {j["name"]: j for j in self.hermes_state(home)["jobs"]["bramble"]}
+        self.assertEqual(len(self.hermes_state(home)["jobs"]["bramble"]), 3)
+        self.assertEqual((again["tw-weekly-board-review"]["id"], again["tw-weekly-board-review"]["schedule"],
+                          again["tw-weekly-board-review"]["state"]), (board["id"], "37 8 * * 0", "paused"))
 
     def test_two_owed_wake_jobs_are_named_not_guessed_between(self):
         home = self.home()
