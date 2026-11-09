@@ -50,11 +50,15 @@ o = options(rest)
 if verb == "create":
     schedule, prompt = o["_"]
     jobs.append({"id": uuid.uuid4().hex[:12], "name": o["name"][0], "schedule": schedule, "prompt": prompt,
-                 "skills": o.get("skill", []), "script": o["script"][0], "deliver": o["deliver"][0]})
+                 "skills": o.get("skill", []), "script": o.get("script", [""])[0], "deliver": o["deliver"][0],
+                 "timezone": o.get("timezone", [None])[0]})
 elif verb == "edit":
     job = next(j for j in jobs if j["id"] == o["_"][0])
     job.update({"name": o["name"][0], "schedule": o["schedule"][0], "prompt": o["prompt"][0],
-                "skills": o.get("skill", []), "script": o["script"][0], "deliver": o["deliver"][0]})
+                "skills": o.get("skill", []), "deliver": o["deliver"][0]})
+    for key in ("script", "timezone"):
+        if key in o:
+            job[key] = o[key][0]
 else:
     sys.exit(2)
 state_file.write_text(json.dumps(state), encoding="utf-8")

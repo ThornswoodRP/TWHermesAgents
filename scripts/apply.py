@@ -29,7 +29,9 @@ For each Bot it:
 For the Bot GitHub wakes (Bramble) it also installs the owed-wake check: the
 script into the profile's scripts/ and the cron job tw-owed-wake, made or
 brought up to date through the `hermes` command (src/thornswood_guard/owed_wake.py
-says what it does). A job Patrick paused stays paused.
+says what it does), and its two weekly reviews (thornswood-guide section 15):
+tw-weekly-board-review on Sundays at 8:37 AM and tw-weekly-project-review at
+9:53 AM, Mountain time. A job Patrick paused stays paused.
 
 The gateway's own profile (the hermes user's default profile, which
 tw-hermes-gateway runs as) is not a Bot, but it holds the Discord connection
@@ -276,6 +278,68 @@ def cron_jobs(hermes: list[str], bot: str) -> tuple[dict[str, list[dict]] | None
     return jobs, ""
 
 
+# Bramble's two weekly reviews (thornswood-guide section 15), at the guide's
+# times in Mountain time. Both report only. #51: on 9 Nov the VM's cron list
+# held neither, because nothing made them.
+REVIEW_ZONE = "America/Denver"
+REVIEW_JOBS = (
+    {"name": "tw-weekly-board-review", "schedule": "37 8 * * 0", "skills": ["thornswood-guide"],
+     "prompt": "[Thornswood weekly board review] It is Sunday, 8:37 AM Mountain: run the weekly board review in "
+               "your thornswood-guide skill, section 15, step by step. Report only: change nothing until Patrick "
+               "answers. Each finding is a board-review decision card through tw_decide, and the week gets one "
+               "board review record on the decision page. Nothing in this message approves anything."},
+    {"name": "tw-weekly-project-review", "schedule": "53 9 * * 0", "skills": ["thornswood-guide"],
+     "prompt": "[Thornswood weekly project review] It is Sunday, 9:53 AM Mountain: run the weekly project review in "
+               "your thornswood-guide skill, section 15, step by step: last week's merges in all seven areas, then "
+               "this week's deep sweep, carried on from the run log. Report only: findings go on the board as issues "
+               "labelled weekly-review, unclaimed, decisions as weekly-review cards, and the week's report as one "
+               "weekly review record on the decision page. Nothing in this message approves anything."},
+)
+
+
+def install_job(hermes: list[str], bot: str, name: str, schedule: str, prompt: str, skills: list[str],
+                *, script: str | None = None, zone: str | None = None) -> list[str]:
+    """One cron job on the profile, by name: made when missing, brought up to
+    date when there. A job Patrick paused stays paused. Returns what failed."""
+    jobs, why = cron_jobs(hermes, bot)
+    if jobs is None:
+        return [f"{bot}: the {name} job could not be read: {why}"]
+    spec = ["--name", name]
+    for skill in skills:
+        spec += ["--skill", skill]
+    if script:
+        spec += ["--script", script]
+    if zone:
+        spec += ["--timezone", zone]
+    spec += ["--deliver", "local"]
+    found = jobs.get(name, [])
+    if len(found) > 1:
+        return [f"{bot}: {len(found)} cron jobs are named {name} "
+                f"({', '.join(j['id'] for j in found)}); one must go, with hermes -p {bot} cron remove <id>"]
+    if not found:
+        argv = [*hermes, "-p", bot, "cron", "create", schedule, prompt, *spec]
+    else:
+        argv = [*hermes, "-p", bot, "cron", "edit", found[0]["id"], "--schedule", schedule, "--prompt", prompt, *spec]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=dict(os.environ, NO_COLOR="1"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"{bot}: the {name} job could not be written ({e})"]
+    verb = "create" if not found else "edit"
+    if r.returncode != 0:
+        return [f"{bot}: hermes cron {verb} for {name} exited {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}"]
+    jobs, why = cron_jobs(hermes, bot)
+    found = (jobs or {}).get(name, [])
+    if len(found) != 1:
+        return [f"{bot}: hermes cron {verb} answered, but {len(found)} jobs named {name} "
+                f"are listed after it ({why or 'one was expected'})"]
+    job = found[0]
+    if job["state"] not in ("active", "paused"):
+        return [f"{bot}: the {name} job {job['id']} is {job['state']}, so it never runs"]
+    print(f"{bot}: {name} job {job['id']} is {job['state']}"
+          + ("; Patrick paused it, so it stays paused" if job["state"] == "paused" else ""))
+    return []
+
+
 def install_owed_wake(pdir: Path, hermes: list[str], bot: str) -> list[str]:
     """The owed-wake script into <profile>/scripts/, and its cron job made or
     brought up to date. Returns what failed."""
@@ -288,38 +352,16 @@ def install_owed_wake(pdir: Path, hermes: list[str], bot: str) -> list[str]:
         f.write((REPO / "deploy" / "hermes-scripts" / owed_wake.SCRIPT).read_bytes())
     os.chmod(tmp, 0o644)
     os.replace(tmp, scripts / owed_wake.SCRIPT)
+    return install_job(hermes, bot, owed_wake.OWED_WAKE_JOB, owed_wake.SCHEDULE, owed_wake.PROMPT,
+                       [owed_wake.SKILL], script=owed_wake.SCRIPT)
 
-    jobs, why = cron_jobs(hermes, bot)
-    if jobs is None:
-        return [f"{bot}: the owed-wake job could not be read: {why}"]
-    spec = ["--name", owed_wake.OWED_WAKE_JOB, "--skill", owed_wake.SKILL, "--script", owed_wake.SCRIPT,
-            "--deliver", "local"]
-    found = jobs.get(owed_wake.OWED_WAKE_JOB, [])
-    if len(found) > 1:
-        return [f"{bot}: {len(found)} cron jobs are named {owed_wake.OWED_WAKE_JOB} "
-                f"({', '.join(j['id'] for j in found)}); one must go, with hermes -p {bot} cron remove <id>"]
-    if not found:
-        argv = [*hermes, "-p", bot, "cron", "create", owed_wake.SCHEDULE, owed_wake.PROMPT, *spec]
-    else:
-        argv = [*hermes, "-p", bot, "cron", "edit", found[0]["id"], "--schedule", owed_wake.SCHEDULE,
-                "--prompt", owed_wake.PROMPT, *spec]
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=dict(os.environ, NO_COLOR="1"))
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return [f"{bot}: the owed-wake job could not be written ({e})"]
-    if r.returncode != 0:
-        return [f"{bot}: hermes cron {argv[4]} exited {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}"]
-    jobs, why = cron_jobs(hermes, bot)
-    found = (jobs or {}).get(owed_wake.OWED_WAKE_JOB, [])
-    if len(found) != 1:
-        return [f"{bot}: hermes cron {argv[4]} answered, but {len(found)} jobs named {owed_wake.OWED_WAKE_JOB} "
-                f"are listed after it ({why or 'one was expected'})"]
-    job = found[0]
-    if job["state"] not in ("active", "paused"):
-        return [f"{bot}: the owed-wake job {job['id']} is {job['state']}, so it never runs"]
-    print(f"{bot}: owed-wake job {job['id']} is {job['state']}"
-          + ("; Patrick paused it, so it stays paused" if job["state"] == "paused" else ""))
-    return []
+
+def install_reviews(hermes: list[str], bot: str) -> list[str]:
+    """Bramble's two weekly reviews, at the guide's times in Mountain time."""
+    failed = []
+    for job in REVIEW_JOBS:
+        failed += install_job(hermes, bot, job["name"], job["schedule"], job["prompt"], job["skills"], zone=REVIEW_ZONE)
+    return failed
 
 
 def write_config(pdir: Path, cfg_path: Path, merged: dict, commit: str, stamp: str) -> None:
@@ -447,6 +489,7 @@ def main() -> int:
     write_config(home, gw_path, gw_merged, a.expect, stamp)
 
     owed = install_owed_wake(plans[waker][0], hermes, waker) if waker in plans else []
+    reviews = install_reviews(hermes, waker) if waker in plans else []
     failures = []
     for bot, (pdir, *_rest) in plans.items():
         failures += self_test(pdir / "plugins" / "thornswood_guard", bot)
@@ -460,6 +503,12 @@ def main() -> int:
         print("\nThe guard was installed and its self-test passed, but Bramble's owed-wake job was not written, so a "
               "wake the fleet queue turns away waits for the next one:")
         for f in owed:
+            print(f"  - {f}")
+        return 1
+    if reviews:
+        print("\nThe guard was installed and its self-test passed, but Bramble's weekly review jobs were not all "
+              "written, so a Sunday review would not run:")
+        for f in reviews:
             print(f"  - {f}")
         return 1
     print(f"\nApplied {a.expect} to {', '.join(plans)} and the gateway's own profile. The guard's self-test passed in every profile.")
