@@ -381,6 +381,12 @@
       ".git-credentials"
     ]
   },
+  "board": {
+    "org": "ThornswoodRP",
+    "number": 1,
+    "status_field": "Status",
+    "order_field": "Order"
+  },
   "wake": {
     "app": "bramble",
     "port": 8644,
@@ -714,8 +720,8 @@
     "decide_python": "/opt/thornswood-hermes/decisions-venv/bin/python3",
     "pause_file": "/etc/thornswood/follow-main.paused",
     "report": {
-      "app": "workers",
-      "app_login": "thornswood-workers[bot]",
+      "app": "bramble",
+      "app_login": "thornswood-bramble[bot]",
       "ledger_repo": "ops",
       "ledger_issue": 249,
       "board_repo": "app"

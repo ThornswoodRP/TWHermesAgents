@@ -43,6 +43,7 @@ class FakeGitHub:
         self.comments: dict[tuple[str, int], list[dict]] = {}
         self.contents: dict[tuple[str, str, str], bytes] = {}
         self.runs: list[dict] = []
+        self.board_items: list[dict] = []   # the org project's items, as GraphQL gives them
         self.repo_labels: dict[tuple[str, str], dict] = {}   # (repo, lower-case name) -> label
         self.calls: list[tuple[str, str, dict | None]] = []
         self.tokens: list[dict] = []
@@ -54,6 +55,13 @@ class FakeGitHub:
         # (repo, branch) -> the status checks the branch's rules require
         self.branch_rules: dict[tuple[str, str], list[str]] = {}
         self.auto_merged: list[tuple[str, int, str, str | None]] = []  # (repo, number, head, method) put on auto-merge
+        # Where each App's installation is, as on GitHub (policy github_apps.<app>.repos):
+        # a token asked for any other repository gets GitHub's 422, as the VM's install
+        # reports did after the workers' App came off Ops (8 Nov 2026).
+        self.installed: dict[str, set[str]] = {
+            "177392923": {"Thornswood", "skymp", "Thornswood-Ops"},
+            "177393064": {"Thornswood", "skymp"},
+        }
         self._next_id = 1000
 
     # Repositories on disk
@@ -125,6 +133,10 @@ class FakeGitHub:
             return Response(status, {"message": msg}, {})
         if path.startswith("/app/installations/"):
             assert headers["Authorization"].startswith("Bearer ")
+            reach = self.installed.get(path.split("/")[3])
+            if reach is not None and not set((body or {}).get("repositories") or []) <= reach:
+                return Response(422, {"message": "There is at least one repository that does not exist or is "
+                                                 "not accessible to the parent installation."}, {})
             self.tokens.append({"installation": path.split("/")[3], **body})
             self.token_permissions[f"tok-{len(self.tokens)}"] = dict(body.get("permissions") or {})
             return Response(201, {"token": f"tok-{len(self.tokens)}", "expires_at": "x"}, {})
@@ -136,11 +148,23 @@ class FakeGitHub:
         refused = self._pr_write_refused(method, path, token)
         if refused:
             return refused
-        resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
+        if path == "/search/issues":
+            resp = self._search(query.get("q", ""))
+        else:
+            resp = self._graphql(body) if path == "/graphql" else self._route(method, path, query, body)
         if key in self.lose_answer:
             self.lose_answer.discard(key)
             raise Lost(f"connection reset after {key}")
         return resp
+
+    def _search(self, q: str) -> Response:
+        """Issues whose repo the query names and whose title holds every plain word."""
+        terms = q.split()
+        repos = [t.split(":", 1)[1] for t in terms if t.lower().startswith("repo:")]
+        words = [t.lower() for t in terms if ":" not in t]
+        items = [dict(i, repository_url=f"{API}/repos/{r}") for (r, _), i in self.issues.items()
+                 if r in repos and all(w in str(i.get("title", "")).lower() for w in words)]
+        return Response(200, {"total_count": len(items), "items": items}, {})
 
     def _pr_write_refused(self, method: str, path: str, token: str) -> Response | None:
         """GitHub's rule for a label or a comment on a pull request through the
@@ -162,6 +186,13 @@ class FakeGitHub:
     def _graphql(self, body) -> Response:
         """The GraphQL shapes tw-git sends: the queue state, the enqueue and auto-merge."""
         q, v = body["query"], body["variables"]
+        if "projectV2" in q:
+            start = int(v.get("after") or 0)
+            page = self.board_items[start:start + 100]
+            more = start + 100 < len(self.board_items)
+            return Response(200, {"data": {"organization": {"projectV2": {"items": {
+                "pageInfo": {"hasNextPage": more, "endCursor": str(start + 100) if more else None},
+                "nodes": page}}}}}, {})
         if "enablePullRequestAutoMerge" in q:
             repo, number = v["pr"].split("#")
             pr = self.prs[(repo, int(number))]
@@ -342,4 +373,7 @@ class FakeGitHub:
                 return Response(204, None, {})
             return Response(200, {"workflow_runs": [r for r in self.runs if r["workflow"] == wf
                                                     and r["head_sha"] == query.get("head_sha")]}, {})
+        if rest[0] == "actions" and rest[1] == "runs" and len(rest) == 3 and method == "GET":
+            run = next((r for r in self.runs if r["id"] == int(rest[2]) and r.get("repo", repo) == repo), None)
+            return Response(200, run, {}) if run else Response(404, {"message": "Not Found"}, {})
         return Response(404, {"message": f"the fake has no {method} {path}"}, {})

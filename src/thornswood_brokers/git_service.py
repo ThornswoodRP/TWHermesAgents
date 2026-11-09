@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,20 @@ from thornswood_guard.policy import Policy, Verdict
 
 from .github_api import GitHub, GitHubError, quote
 from .wire import Refused
+
+# The board through the workers' App (policy.yaml board).
+BOARD_READ = {"organization_projects": "read", "issues": "read", "metadata": "read"}
+BOARD_QUERY = """
+query($org: String!, $number: Int!, $after: String, $status: String!, $order: String!) {
+  organization(login: $org) { projectV2(number: $number) { items(first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      status: fieldValueByName(name: $status) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+      order: fieldValueByName(name: $order) { ... on ProjectV2ItemFieldNumberValue { number } }
+      content { __typename ... on Issue { number title state repository { nameWithOwner } author { login }
+        labels(first: 30) { nodes { name } } assignees(first: 10) { nodes { login } } } }
+    } } } }
+}"""
 
 logger = logging.getLogger(__name__)
 
@@ -770,6 +785,55 @@ class GitService:
         return self._guarded_write(bot, task, "close_pr", repo, f"pr/{number}", pr.head_sha,
                                    write=write, read_back=read_back)
 
+    def close_issue(self, caller: str, args: dict) -> dict:
+        """Bramble closes an issue as a duplicate (duplicate_of) or as done
+        (done_by_pr, or done_by_run in run_repo), with one plain comment saying
+        why. GitHub reads "Duplicate of #N" in that comment and links the two."""
+        bot, repo, task = self._bot(args), self._repo(args), self._task(args)
+        number, reason = int(args.get("number")), str(args.get("reason") or "")
+        body = str(args.get("body") or "")
+        if (no := self.rules._outside_app(bot, repo)) is not None:
+            raise Refused(no.reason)
+        issue = self._issue(repo, number)
+        duplicate = done_pr = done_run = None
+        if args.get("duplicate_of") is not None:
+            duplicate = self._issue(repo, int(args["duplicate_of"]))
+        if args.get("done_by_pr") is not None:
+            done_pr = self._pr(repo, int(args["done_by_pr"]))
+        if args.get("done_by_run") is not None:
+            run_repo = str(args.get("run_repo") or repo)
+            if self.policy.data["merge"]["base"].get(run_repo) is None:
+                raise Refused(f"{run_repo} is not a repo the Bots work in")
+            done_run = self.gh.get(self.policy.reader_for(run_repo), run_repo,
+                                   f"/repos/{run_repo}/actions/runs/{int(args['done_by_run'])}")
+        self._check(self.rules.close_issue(bot, issue, reason, body, duplicate=duplicate,
+                                           done_pr=done_pr, done_run=done_run))
+        app = "bramble"
+        text = f"Duplicate of #{duplicate.number}.\n\n{body}" if reason == "duplicate" else body
+        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        marker = f"<!-- tw:{digest} -->"
+
+        def write():
+            said = any(marker in (c.get("body") or "")
+                       for c in self.gh.get_all(app, repo, f"/repos/{repo}/issues/{number}/comments"))
+            if not said:
+                r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues/{number}/comments",
+                                 {"body": f"{text}\n\n{marker}"})
+                if r.status != 201:
+                    raise GitHubError(r.status, str(r.body))
+            r = self.gh.call(app, repo, WRITE["issues"], "PATCH", f"/repos/{repo}/issues/{number}",
+                             {"state": "closed", "state_reason": reason})
+            if r.status != 200:
+                raise GitHubError(r.status, str(r.body))
+            return {"closed": True}
+
+        def read_back():
+            now = self.gh.get(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{number}")
+            return {"closed": True, "state_reason": now.get("state_reason")} if now.get("state") == "closed" else None
+
+        return self._guarded_write(bot, task, "close_issue", repo, f"issue/{number}/close", "",
+                                   write=write, read_back=read_back)
+
     def start_run(self, caller: str, args: dict) -> dict:
         bot, task = self._bot(args), self._task(args)
         repo = self.policy.data["runs"]["repo"]
@@ -829,10 +893,73 @@ class GitService:
         # The repository itself (default_branch and its other fields), or
         # anything under it. 1 Nov: Bramble could not read default_branch.
         inside = path == root or path.startswith((root + "/", root + "?"))
+        if not inside and path.startswith("/search/issues?"):
+            inside = self._search_in(repo, path)
         if not inside or ".." in path:
-            raise Refused(f"reads stay inside {root}")
+            raise Refused(f"reads stay inside {root}, or search its issues with repo:{repo} in the query")
         self._check(self.rules.admin_call(bot, "GET", path))
         return {"body": self.gh.get(self.policy.reader_for(repo), repo, path)}
+
+    def board(self, caller: str, args: dict) -> dict:
+        """The board's open issues in do-order, for any Bot: each one's repo,
+        number, title, Status, Order, labels and assignees, read from the org
+        project through the workers' App (organization projects read).
+        eligible keeps only what a Bot may pick (the guide, section 3): Todo,
+        no claim label, assigned to nobody or to Patrick, not hands off.
+        limit (at most 100) bounds what comes back; the read itself is whole,
+        so the order is the board's."""
+        bot = self._bot(args)
+        cfg = self.policy.data["board"]
+        limit = max(1, min(int(args.get("limit") or 20), 100))
+        eligible = bool(args.get("eligible"))
+        repo = self.policy.data["repos"]["app"]
+        items, after = [], None
+        while True:
+            data = self.gh.graphql("workers", repo, BOARD_READ, BOARD_QUERY,
+                                   {"org": cfg["org"], "number": int(cfg["number"]), "after": after,
+                                    "status": cfg["status_field"], "order": cfg["order_field"]})
+            page = ((data.get("organization") or {}).get("projectV2") or {}).get("items") or {}
+            items.extend(page.get("nodes") or [])
+            if not (page.get("pageInfo") or {}).get("hasNextPage") or len(items) >= 20000:
+                break
+            after = page["pageInfo"]["endCursor"]
+        prefix = self.policy.data["claims"]["prefix"]
+        people = set(self.policy.data["hands_off"]["people"])
+        lane_labels = set(self.policy.data["hands_off"]["lanes"]["labels"])
+        patrick = self.policy.data["decisions"]["answered_by"]
+        out = []
+        for node in items:
+            c = node.get("content") or {}
+            if c.get("__typename") != "Issue" or c.get("state") != "OPEN":
+                continue
+            labels = [l["name"] for l in (c.get("labels") or {}).get("nodes") or []]
+            assignees = [a["login"] for a in (c.get("assignees") or {}).get("nodes") or []]
+            row = {"repo": (c.get("repository") or {}).get("nameWithOwner"), "number": c.get("number"),
+                   "title": c.get("title"), "author": (c.get("author") or {}).get("login"),
+                   "status": (node.get("status") or {}).get("name"),
+                   "order": (node.get("order") or {}).get("number"),
+                   "labels": labels, "assignees": assignees}
+            if eligible and (row["status"] != "Todo" or any(l.startswith(prefix) for l in labels)
+                             or set(labels) & lane_labels or row["author"] in people
+                             or set(assignees) & people or set(assignees) - {patrick}):
+                continue
+            out.append(row)
+        out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
+        return {"open": len(out), "issues": out[:limit]}
+
+    @staticmethod
+    def _search_in(repo: str, path: str) -> bool:
+        """A search of issues and pull requests in this one repo: the query
+        names repo:<repo> and no other repo, owner or org. Before filing, a Bot
+        looks for the same problem in open and closed issues (the guide,
+        sections 2 and 4); until 9 Nov 2026 only a repo's own paths could be
+        read, so the one way to look was paging through a thousand open
+        issues, and Bramble filed #5580 and #5585 for a failure #5547 held."""
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("q", [])
+        if len(query) != 1:
+            return False
+        scopes = [t.lower() for t in query[0].split() if re.match(r"(?i)-?(repo|org|user|owner):", t)]
+        return scopes == [f"repo:{repo}".lower()]
 
     def refused(self, caller: str, args: dict) -> dict:
         """Any other write a Bot asks for: named, and refused with the rule's reason."""
@@ -847,7 +974,8 @@ class GitService:
         return self.ask("ledger_event", {k: args.get(k) for k in ("repo", "issue", "event", "release", "note")})
 
     # Every op that changes something on GitHub.
-    WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr", "start_run")
+    WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
+              "close_issue", "start_run")
 
     def _executor_only(self, name: str, op: Callable[[str, dict], dict]) -> Callable[[str, dict], dict]:
         """One executor at a time (plan phases 4 and 5): until the cutover the
@@ -864,7 +992,7 @@ class GitService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-                 "start_run", "read", "refused", "ledger_event")
+                 "close_issue", "start_run", "read", "board", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
         # root's follower alone, never a Bot.

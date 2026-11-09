@@ -42,6 +42,7 @@ from . import reactions
 from .feeds import Feeds
 from .own_control import CONTROLS, MAX_WAIT as CONTROL_WAIT, wanted as control_wanted
 from .own_sessions import OwnSessions
+from .own_turns import ORDERS, answer_value, clean_asks, clean_order
 from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
 from .schema import OWN_GATEWAYS
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
@@ -425,7 +426,9 @@ class _Connectors:
                 info["turns"][t["id"]] = {"state": t["state"],
                                           "tool": tool if isinstance(tool, str) and TOOL_NAME.match(tool) else None,
                                           "admitted": t.get("admitted") is True,
-                                          **({"taken": t["taken"]} if t.get("taken") in ("steered", "redirected") else {})}
+                                          **({"taken": t["taken"]} if t.get("taken") in ("steered", "redirected") else {}),
+                                          **({"asks": a} if (a := clean_asks(t.get("asks"))) else {}),
+                                          **({"order": o} if (o := clean_order(t.get("order"))) else {})}
         with self.lock:
             self.said[(ws, gw)] = info
 
@@ -1108,6 +1111,47 @@ class OwnChat:
                              {"gateway": gw, "device": p.device_id, **want})
         return out
 
+    def turn_order(self, p: Principal, gw: str, body) -> dict:
+        """Stop a turn of his that is running, or answer a question or an approval it has open
+        (own_turns.py): an order for that Hermes's connector, carried out by the turn itself."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        body = body if isinstance(body, dict) else {}
+        mid, op = body.get("message_id"), body.get("op")
+        if op not in ("stop", "answer"):
+            raise CoreError(400, "bad_order", "an order is stop or answer")
+        if not isinstance(mid, str):
+            raise CoreError(400, "bad_order", "an order names the message whose turn it is for")
+        row = self.s.db.execute("SELECT status FROM own_messages WHERE id = ? AND workspace_id = ? AND gateway = ?",
+                                (mid, p.workspace_id, gw)).fetchone()
+        info = CONNECTORS.get(p.workspace_id, gw, self.s.clock())
+        turn = (info or {}).get("turns", {}).get(mid) if row and row["status"] == "leased" else None
+        if turn is None or not turn.get("admitted"):
+            raise CoreError(409, "not_running", f"that message's turn is not running in {NAMES[gw]} now")
+        if self.sign_in_until(p) is None:
+            raise CoreError(403, "passkey_needed", "stopping a turn or answering it runs with your Hermes's full "
+                            "power, so it needs a passkey sign-in from the last 30 minutes; sign in again")
+        pid, value = None, None
+        if op == "answer":
+            pid = body.get("prompt_id")
+            ask = next((a for a in turn.get("asks", []) if a["prompt_id"] == pid), None)
+            if ask is None:
+                raise CoreError(409, "not_open", "that question is no longer open")
+            value = answer_value(ask, body.get("value"))
+            if value is None:
+                raise CoreError(400, "bad_answer", "an approval takes one of the choices Hermes offered, and a "
+                                "question takes an answer of at most 4000 characters or some of its choices")
+        self.must_be_online(p.workspace_id, gw)
+        out = ORDERS.add(p.workspace_id, gw, mid, op, pid, value, self.s.clock())
+        with self.s.tx() as db:
+            # What was done, never the words of a question or an answer.
+            self.s.event(db, p.workspace_id, "own.order", out["order"], "patrick",
+                         {"gateway": gw, "message": mid, "op": op, "device": p.device_id}
+                         | ({"kind": ask["kind"]} if op == "answer" else {}))
+        return out
+
     def control_post(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
         """What the connector read for a chat, and for a change whether Hermes took it."""
         self._check_token(workspace_id, gw, token)
@@ -1200,7 +1244,8 @@ class OwnChat:
             sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
                 "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "sessions": sessions,
-                "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [], "release": RELEASE}
+                "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [],
+                "orders": ORDERS.hand(workspace_id, gw, self.s.clock()), "release": RELEASE}
 
     def reacted(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
         """What came of setting one reaction. An answer about an older wish than the newest is dropped,
