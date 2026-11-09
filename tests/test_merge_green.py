@@ -19,7 +19,7 @@ spec = importlib.util.spec_from_file_location("merge_green", REPO / "scripts" / 
 mg = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mg)
 
-R = "ThornswoodRP/Thornswood-Hermes"
+R = "ThornswoodRP/TWHermesAgents"
 OK = [{"name": n, "status": "completed", "conclusion": "success"} for n in mg.REQUIRED]
 
 

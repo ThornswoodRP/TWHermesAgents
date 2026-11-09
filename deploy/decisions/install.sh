@@ -2,7 +2,7 @@
 # Install the decision core on the Oracle VM, as root, from the root-owned
 # copy of the commit Patrick merged:
 #
-#   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> [--room <id>] [--origin <url>]
+#   sudo /opt/thornswood-hermes/releases/<commit>/deploy/decisions/install.sh <commit> [--room <id>] [--origin <url>] [--connector-later]
 #
 # tw-follow-main puts that copy there and points /opt/thornswood-hermes/current
 # at it once main reaches the VM; run this after it, at the same commit.
@@ -33,6 +33,8 @@
 # it makes my-hermes's connector token once, straight into that user's
 # ~/.config/thornswood/own-me.token (0600), and starts tw-decide-own as that
 # user, which does nothing and copies nothing while own_chat_write is off.
+# Each run checks the bound room seats exactly the Bots policy.yaml lists, and
+# stops when it does not.
 # It starts tw-decide-peers once a minute, which reads the tailnet's view of
 # One (`tailscale status --json`, read only) so the phone says One is off only
 # when Tailscale says so.
@@ -43,14 +45,15 @@
 set -euo pipefail
 umask 022
 
-commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>]}"
+commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>] [--connector-later]}"
 shift
-room=""; origin=""
+room=""; origin=""; connector_later=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --room) room="${2:-}"; shift 2 ;;
     --origin) origin="${2:-}"; shift 2 ;;
-    *) echo "STOP: the options are --room <id> and --origin <url>, not $1."; exit 1 ;;
+    --connector-later) connector_later=1; shift ;;
+    *) echo "STOP: the options are --room <id>, --origin <url> and --connector-later, not $1."; exit 1 ;;
   esac
 done
 opt=/opt/thornswood-hermes
@@ -116,6 +119,10 @@ getent group tw-decide-bots >/dev/null || stop "there is no tw-decide-bots group
 members="$(getent group tw-decide-bots | cut -d: -f4)"
 [[ "$members" == hermes ]] || stop "the tw-decide-bots group's members are '$members'; it must be hermes alone."
 ok "group tw-decide-bots: hermes alone"
+getent group tw-decide-git >/dev/null || stop "there is no tw-decide-git group; deploy/install.sh makes it, run that first."
+members="$(getent group tw-decide-git | cut -d: -f4)"
+[[ "$members" == tw-git ]] || stop "the tw-decide-git group's members are '$members'; it must be tw-git alone."
+ok "group tw-decide-git: tw-git alone"
 
 # 2. The store's folder: tw-decide's only. The settings file: root's, no secrets.
 install -d -m 0755 -o root -g root /srv/tw /etc/thornswood
@@ -130,6 +137,14 @@ room="${room:-$old_room}"; origin="${origin:-$old_origin}"
 printf 'TW_DECIDE_ROOM=%s\nTW_DECIDE_ORIGIN=%s\nTW_HERMES_BIN=%s\n' "$room" "$origin" "$hermes_bin" > "$envfile.new"
 chmod 0644 "$envfile.new"; mv "$envfile.new" "$envfile"
 ok "$state is 0700 tw-decide; room '${room:-not set}', origin '${origin:-not set}'"
+# The room's members are the policy's (policy.yaml bots.<bot>.rooms). Hermes keeps
+# them in its own room store, set when the room was made; read-only, as hermes.
+if [[ -n "$room" ]]; then
+  seated="$(runuser -u hermes -- python3 -I "$here/scripts/check-hermes-contract.py" \
+    --home "$(getent passwd hermes | cut -d: -f6)/.hermes" --room "$room" 2>&1)" \
+    || stop "the Workbench room does not match the policy: $(grep '^STOP' <<<"$seated" | head -1)"
+  ok "$(grep "^PASS" <<<"$seated" | head -1 | cut -c6-)"
+fi
 
 # 3. The venv, root's, from the exact hashes. Rebuilt only when the list changes.
 want="$(sha256sum "$here/deploy/decisions/requirements.txt" | cut -d' ' -f1)"
@@ -148,8 +163,9 @@ ok "venv at $venv, requirements $want"
 
 # 4. The launchers and units, from this copy.
 install -d -m 0755 "$opt/bin"
+# Each is a link to its file in current, like deploy/install.sh's own (step 6 there).
 for f in tw-decide tw-decide-feed tw-decide-live tw-decide-voice tw-decide-connector tw-decide-push tw-decide-own; do
-  install -m 0755 -o root -g root "$here/deploy/decisions/$f" "$opt/bin/$f"
+  ln -sfnT "$opt/current/deploy/decisions/$f" "$opt/bin/$f.new" && mv -T "$opt/bin/$f.new" "$opt/bin/$f"
 done
 for u in tw-decide.service tw-decide-bots.service tw-decide-feed.service tw-decide-feed.timer tw-decide-live.service \
          tw-decide-voice.service \
@@ -157,6 +173,16 @@ for u in tw-decide.service tw-decide-bots.service tw-decide-feed.service tw-deci
          tw-decide-push.service tw-decide-own.service tw-decide-peers.service tw-decide-peers.timer; do
   install -m 0644 -o root -g root "$here/deploy/decisions/$u" "/etc/systemd/system/$u"
 done
+# Patrick's own Hermes loads the plugin through $opt/plugins, which deploy/install.sh
+# points at this release's plugins folder. A link install-plugin.sh made into a folder
+# inside current is moved to it once, as its owner, in the owner's folder.
+plugin_home="$(getent passwd patrick-hermes | cut -d: -f6 || true)"
+plugin_link="$plugin_home/.hermes/plugins/thornswood-decisions"
+if [[ -n "$plugin_home" && -L "$plugin_link" && "$(readlink "$plugin_link")" == "$opt/current/plugins/thornswood-decisions" ]]; then
+  runuser -u patrick-hermes -- ln -sfnT "$opt/plugins/thornswood-decisions" "$plugin_link.new"
+  runuser -u patrick-hermes -- mv -T "$plugin_link.new" "$plugin_link"
+  ok "$plugin_link -> $opt/plugins/thornswood-decisions"
+fi
 # The connector finds the gateway's control socket where the gateway's own unit puts it.
 install -d -m 0755 /etc/systemd/system/tw-decide-connector.service.d
 printf '[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u hermes)" \
@@ -275,6 +301,10 @@ for _ in $(seq 1 20); do [[ -S /run/tw/decide-bots/bots.sock ]] && break; sleep 
 [[ "$(stat -c '%a %G' /run/tw/decide-bots/bots.sock)" == "660 tw-decide-bots" ]] \
   || stop "the Bots' route's socket is $(stat -c '%a %G' /run/tw/decide-bots/bots.sock), not 660 tw-decide-bots"
 ok "the Bots' route listens on /run/tw/decide-bots/bots.sock (660, tw-decide-bots)"
+[[ -S /run/tw/decide-git/git.sock ]] || stop "the Bots' route did not open tw-git's socket: journalctl -u tw-decide-bots -n 50"
+[[ "$(stat -c '%a %G' /run/tw/decide-git/git.sock)" == "660 tw-decide-git" ]] \
+  || stop "tw-git's socket is $(stat -c '%a %G' /run/tw/decide-git/git.sock), not 660 tw-decide-git"
+ok "tw-git's answers socket listens on /run/tw/decide-git/git.sock (660, tw-decide-git)"
 
 # 9. The feeds, once now and then once a minute, when the room is known.
 if [[ -n "$room" ]]; then
@@ -301,12 +331,20 @@ ok "the live Board runs"
 
 # 10. The connector. While connector_effects is off it asks the core every half
 # minute and does nothing else. Only Patrick changes connector_effects.
+# --connector-later (the VM's follower, thornswood_brokers/follow_main.py):
+# it stays stopped, as step 5b left it, and the follower starts it once
+# apply.py and tw-reload-bots have every Bot on this release, so no message
+# reaches a Bot still running the tools of the release before.
 systemctl enable --quiet tw-decide-connector.service
-systemctl reset-failed tw-decide-connector.service
-systemctl restart tw-decide-connector.service
-sleep 2
-systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
-ok "the connector runs (it waits while connector_effects is off)"
+if [[ -n "$connector_later" ]]; then
+  ok "the connector stays stopped until every Bot runs this release; the follower starts it"
+else
+  systemctl reset-failed tw-decide-connector.service
+  systemctl restart tw-decide-connector.service
+  sleep 2
+  systemctl is-active --quiet tw-decide-connector.service || stop "the connector did not start: journalctl -u tw-decide-connector -n 20"
+  ok "the connector runs (it waits while connector_effects is off)"
+fi
 
 # 11. The push worker, once the origin is known (it names it in every VAPID
 # header). While push_send is off it says its public keys to the core and then
@@ -380,7 +418,7 @@ start_voice() {
 # Asked as the core asks: Voice().check (which Whisper) or Voice().prepare (load its model).
 voice_ask() {
   runuser -u tw-decide -g tw-decide -G tw-decide-voice -- /usr/bin/python3 -I -c \
-    "import sys; sys.path.insert(0, '/opt/thornswood-hermes/current'); from thornswood_decisions.voice import Voice; print(Voice().$1() or '')"
+    "import sys; sys.path.insert(0, sys.argv[1]); from thornswood_decisions.voice import Voice; print(Voice().$1() or '')" "$here"
 }
 start_voice
 ok "dictation listens on /run/tw/decide-voice/voice.sock (660, tw-decide-voice)"

@@ -1,71 +1,76 @@
-# Thornswood-Hermes
+# TWHermesAgents
 
-The guard rails for Thornswood's six Hermes Bots: Bramble, Rift, Sprocket, Echo, Magpie and Wisp. No Bot can write here. Every change is Patrick's: written with Claude Code, and merged once its guard rail tests pass ("Merge rule here" below).
+The six AI agents that help run [Thornswood](https://github.com/ThornswoodRP/Thornswood), a co-op roleplay server for Skyrim Special Edition built on SkyMP, and the guard rails that keep them safe.
 
-What each rule is and how it's held (code now, code waiting for its broker, a GitHub setting, or text in the Bots' files) is in [RULES.md](RULES.md).
+The agents (the Bots) run on [Hermes Agent](https://github.com/NousResearch/hermes-agent) on one Linux VM. They triage the board, write fixes on their own branches, open pull requests and keep the release pipeline moving. This repository holds everything that decides what they may do and puts it on the VM: the policy, the guard plugin, the brokers that hold every credential, the decision app Patrick answers them from, and the install that keeps the VM on `main`.
 
-## What is here
+No Bot can write to this repository: the guard and the git broker both refuse it. Every change here comes from the team as a pull request and merges only once its tests pass.
 
-| Path | What it is |
+## The Bots
+
+| Bot | Role | Works on |
+|---|---|---|
+| **Bramble** | Router | Hands out work, merges what is green, starts releases and deploys |
+| **Rift** | Worker | The mod collection, load order and permissions |
+| **Sprocket** | Worker | The launcher, the installer and the update feed |
+| **Echo** | Worker | The website, the Discord bot, voice, and the lore and help text |
+| **Magpie** | Worker | GitHub, CI, runners and security |
+| **Wisp** | Worker | The gamemode, game systems and UI, and the engine fork |
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph VM["The Bots' VM"]
+        direction TB
+        H["Hermes gateway<br/>six Bot profiles"] -- every tool call --> G["Guard plugin<br/>thornswood_guard"]
+        G -- allowed calls --> B["Brokers<br/>tw-policy, tw-git, tw-files"]
+        H -- cards --> D["Decision core<br/>tw-decide"]
+        F["tw-follow-main"] -. installs each merge .-> H
+    end
+    B -- GitHub App tokens --> GH["GitHub"]
+    D -- passkey sign-in --> P["Patrick's phone and Desktop"]
+```
+
+- **The policy** (`thornswood_guard/policy.yaml`) is every rule as data: the six Bots, the two GitHub Apps, what each Bot may push, merge and start, the model routes, the claim labels and the host's limits.
+- **The guard** is a Hermes plugin in every Bot's profile. It checks each tool call before Hermes runs it and refuses anything the policy does not allow, with the reason. If it cannot read the policy, it refuses everything.
+- **The brokers** run as their own Linux users. The Bots hold no GitHub credential at all: every GitHub write goes through `tw-git`, which checks it against the policy again and holds the Apps' keys where the Bots cannot read them.
+- **The decision core** is where a Bot asks Patrick for a decision. He answers from an installable phone app or a Hermes Desktop pane, behind a passkey.
+- **The follower** (`tw-follow-main`) checks `main` every ten minutes, runs the whole test suite on the VM, installs the new version, and puts the previous one back if any step fails.
+
+[docs/architecture.md](docs/architecture.md) walks through each part.
+
+## Documentation
+
+| Read | For |
 |---|---|
-| `thornswood_guard/policy.yaml` | Every rule as data: the six Bots, the two Apps, the merge check, the paths that wait for Patrick, the runs Bramble may start, the claim labels, who is hands off, the model routes, what may sit on the Oracle box, and which cards push |
-| `thornswood_guard/policy.json` | The same data as JSON, which the guard reads: Hermes's own Python has no YAML library. After any change to `policy.yaml`, run `python scripts/render_profiles.py`; a test fails if the two differ |
-| `thornswood_guard/` | The guard itself. It is both a Python package the brokers will call and a Hermes plugin (`plugin.yaml`, `register()` in `__init__.py`) installed in each Bot's profile |
-| `thornswood_guard/tool_guard.py` | The `pre_tool_call` check Hermes runs before every tool a Bot calls |
-| `thornswood_guard/github.py` | What the git broker lets each Bot do on GitHub: pushes, pull requests, merges, claims, runs, and the settings nobody touches |
-| `thornswood_guard/gate_line.py` | Reads a deploy gate line exactly as `GateRules.ps1` on the box does |
-| `thornswood_guard/decisions.py` | Patrick's decision records: bound to one repo, PR, commit and card revision, used once |
-| `thornswood_guard/routes.py` | The model order, and the check that a config can't reach a paid route |
-| `thornswood_guard/secrets_check.py` | What may sit on the Oracle box, checked by name, never by value |
-| `thornswood_guard/notify.py` | Which cards may push to Patrick's phone, and what the push says |
-| `thornswood_guard/profile_config.py` | Each Bot's Hermes config, and the gateway's own profile's, built from the policy |
-| `profiles/<bot>.yaml`, `profiles/gateway.yaml` | That config as it will be set, for reading in review. Generated by `scripts/render_profiles.py`; a test fails if it's stale |
-| `scripts/apply.py` | Runs on the VM as `hermes`. Applies one merged commit to the six existing profiles and the gateway's own profile |
-| `scripts/send-to-oracle.sh` | The first install's half for the profiles, from a machine on the tailnet; since #2862 the VM applies each merge itself |
-| `thornswood_brokers/` | The brokers (`tw-policy`, `tw-git`, `tw-files`, the admission proxy), the boot limits check, the backups, the check helper and the live canary |
-| `thornswood_guard/brokers.py` | The gateway's side: the turn gate and the `tw_git` and `tw_files` tools |
-| `deploy/` | What `deploy/install.sh` puts on the VM: the units and slices (the slices rendered from the policy by `scripts/render_units.py`), the command wrappers, the check helper's socket and the SFTP jail |
-| `scripts/install-on-oracle.sh`, `scripts/restore-on-oracle.sh` | From a machine on the tailnet: the first install (the one that brings `tw-follow-main`), and a restore |
-| `thornswood_brokers/follow_main.py` | The VM follows main by itself: fetch, test, install, apply, restart, canary, and the earlier release put back on any failure |
-| `thornswood_brokers/offsite.py` | Both kinds of backup to Google Drive from the VM, and the game box's add-only drop |
-| `scripts/one/Pull-HermesBackup.ps1` | Runs on One until the VM's first Drive copy passes, then its task is unregistered: pulls the VM's encrypted backups, keeps them, copies them to Google Drive, and proves one opens |
-| `tests/` | One test for every rule held in code, and the attack tests from 08 section 8 that this version covers |
+| [Architecture](docs/architecture.md) | How the pieces fit together, and what runs as which user |
+| [Security model](docs/security.md) | Every rule, how it is enforced, and the attack tests that prove it |
+| [Setting up a VM](docs/setup.md) | A first install, the one-time settings, and the decision app |
+| [Running it](docs/operations.md) | Updates, pausing, rolling back, backups and restores |
+| [The decision app](docs/decision-app.md) | The decision core, the phone app and the Desktop pane |
+| [Fixes for Hermes](upstream/hermes/README.md) | Patches for Hermes itself, sent upstream |
+| [Contributing](CONTRIBUTING.md) | How a change is made, tested and merged |
+| [Reporting a vulnerability](SECURITY.md) | How to tell us about a security problem quietly |
 
-## How a new version reaches the VM
+## Repository layout
 
-The VM follows main by itself (Patrick's answer A on q-retire-hermes-one, 31 Oct, #2862). Every ten minutes `tw-follow-main.timer` runs `thornswood_brokers/follow_main.py` as root:
+| Path | What it holds |
+|---|---|
+| `thornswood_guard/` | The policy, and the guard plugin that enforces it inside Hermes |
+| `thornswood_brokers/` | The brokers, the follower, backups, the limits check and the live canary |
+| `thornswood_decisions/` | The decision core, its HTTP API and the phone app (`app/`) |
+| `thornswood_live/` | A small Hermes plugin that reports what each Bot's turn is doing, for the app's live Board |
+| `plugins/thornswood-decisions/` | The Hermes Desktop pane for the decision core |
+| `skills/` | The Bots' skills that this repository installs |
+| `profiles/` | Each Bot's Hermes config as it will be set, generated from the policy for review |
+| `deploy/` | What the VM install puts in place: systemd units and slices, command wrappers, the SSH jail and the decision core's install |
+| `scripts/` | `apply.py`, the generators, `merge_green.py`, and the scripts run by hand from a machine on the tailnet |
+| `tests/` | The test suite: one test for every rule held in code, plus the attack tests |
+| `upstream/hermes/` | Patches for Hermes itself |
+| `docs/` | Everything above, written out |
 
-1. It fetches `main` over ssh with the VM's own read-only deploy key, `/etc/thornswood/hermes-read-key` (root's alone, made by `install.sh`), checking GitHub's published host keys (`deploy/ssh/github_known_hosts`) and nothing else.
-2. When `main` is the commit already installed, it stops. When `main` is a commit that already failed here, it stops too: the failure was said once, and a new merge is the fix.
-3. It puts the commit in `/opt/thornswood-hermes/releases/<commit>`, root-owned.
-4. It runs the whole suite at that commit as `tw-ci`, with no network. One failing test and nothing is installed.
-5. It runs that release's `deploy/install.sh`, and once the decision core is installed on the VM (`/etc/thornswood/tw-decide.env` is there), that release's `deploy/decisions/install.sh` as well, so the core moves with the code its feeds and connector run. Then root bundles the commit from its release and hands it to `hermes` on stdin, and, as `hermes`, `apply.py --check` and `apply.py` run in `/home/hermes/thornswood-hermes/releases/<commit>`, fetched from that bundle (git refuses `hermes` a repository root owns, and no folder of root's is open to `hermes`), then `tw-reload-bots`, then the canary.
-6. If any step of 5 fails, it installs and applies the release that ran before the same way, and says both. When the failed release had already moved the decision core's store to a schema the earlier release does not know, it stops the core's units and runs the failed release's own `tw-decide downgrade --to <what the earlier one knows>` as `tw-decide` first. That changes nothing and refuses when the store holds what the older schema cannot; then nothing is put back, the core starts again on the newer release, and the fix is the next merge. Units of the core the earlier release does not ship are stopped and disabled before it goes back in.
-
-**Pausing it:** `sudo touch /etc/thornswood/follow-main.paused` on the VM, and `sudo rm /etc/thornswood/follow-main.paused` to go on. Not by stopping the timer: every install starts it again.
-
-What it did is in `/var/lib/thornswood/follow-main.json` and `journalctl -u tw-follow-main`.
-
-**Once, for the read key:** the install prints `the VM's read key for Thornswood-Hermes: ssh-ed25519 ... thornswood-bots-reads-hermes`. Patrick adds that line on GitHub: Thornswood-Hermes, **Settings**, **Deploy keys**, **Add deploy key**, title `thornswood-bots`, the line as the key, **Allow write access** left off, **Add key**. Until then each run says `GitHub refused the VM's read key` with the line.
-
-**The first install** that brings `tw-follow-main` still comes from a machine on the tailnet, the way every install did before: `scripts/install-on-oracle.sh <commit>`, then `scripts/send-to-oracle.sh <commit>`. After it, nothing is sent.
-
-After each apply the follower runs `tw-reload-bots` itself (`thornswood_brokers/reload.py`): every Bot process loads the plugin and config when it starts and keeps them, the `tw-hermes-gateway` system unit and the hermes user's login sessions alike, where Hermes Desktop's backends run the room's turns. So it ends the hermes user's login sessions (never `terminate-user`, which would stop the gateway too) and restarts the gateway; Desktop reconnects by itself. A gateway restart alone left Bramble's room turns on the old tool list (31 Oct). By hand it is `ssh -t thornswood-bots sudo /opt/thornswood-hermes/bin/tw-reload-bots`.
-
-What `apply.py` does, for each of the six profiles under `/home/hermes/.hermes/profiles/`:
-
-- checks the profile, its `SOUL.md` and its `thornswood-ops` and `thornswood-guide` skills are there (it never creates or deletes a profile), and installs the skills this repository owns (`skills/`; Bramble's `bramble-duties`: merging what is green, a pull request the merge queue dropped, and the Ops run notes);
-- builds the Bot's config from the policy and sets those keys in `config.yaml`, leaving every other key as Hermes has it (`model` and `fallback_providers` are replaced whole, so the old OpenRouter placeholder goes);
-- checks the result can reach no route the Bot may not use;
-- reads the names (never the values) in every `.env`, and looks for key and signing files by name;
-- makes sure Hermes's sandbox image is in the `hermes` user's podman store, pulling it first if not;
-- installs the guard into `plugins/thornswood_guard` and enables it;
-- makes the Bot's working folder, `/home/hermes/tw-work/<bot>`;
-- loads the installed guard and checks it refuses a push, a merge, a secret read, a config edit, a shared skill edit and code execution, and allows `git status`.
-
-It checks everything first and changes nothing if any check fails. It never touches `SOUL.md`, memories, sessions, `auth.json` or any `.env`. It records the applied commit in each profile's `local/thornswood-hermes/applied.json`.
-
-**Going back** to an earlier version: every applied version stays in `/home/hermes/thornswood-hermes/releases/`. On the VM, as `hermes`, inside the older release's folder, run `python3 scripts/apply.py --expect <older commit>`, then run `tw-reload-bots` the same way. The lasting fix is a new PR here, sent the normal way.
+The four Python packages sit at the top level on purpose. The VM's units, the installed Hermes plugins and the copy of the follower already running on the VM all import them by these names from a release's root.
 
 ## Running the tests
 
@@ -75,80 +80,8 @@ python -m pip install --require-hashes --only-binary :all: --no-deps -r deploy/d
 python -m unittest discover -s tests
 ```
 
-These are the libraries CI installs, at their pinned versions. `scripts/test-at-head.sh` stops before it sets any status unless the Python it runs on One (`TWH_ONE_PYTHON`) has every one of them.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rest.
 
-Every push to a PR, and every push to `main`, runs `.github/workflows/guard-rail-tests.yml` on runners of our own. Until 2 Nov 2026 they were GitHub's (Patrick's answer B on q-hermes-tests-without-one, 31 Oct). On 2 Nov the included minutes for private repositories ran out: Hermes used 476 Linux and 834 Windows minutes in two days, a Windows minute counts as two, and the spending limit stays at $0. Patrick will not pay, so his A on q-hermes-ci-free-runners (3 Nov) moved both checks:
+## License
 
-- **Guard rail tests (VM's Python)**: on the Oracle VM, label `tw-hermes-vm`, with Python 3.12, the VM's, PyYAML and the decision core's libraries. It runs as `tw-runner` (`deploy/runner`, `tw-runner.service`), a user in no group but its own, with no capability, the Bots' and brokers' folders and every home out of sight, in `tw-runner.slice`, and a network that reaches only GitHub's web, api, git and actions ranges and the package feeds, on port 443 (`tw-runner-egress`, the same guard as the box's runners). `tw-runner-register` registers it once with a token on standard input.
-- **Guard rail tests (One's Python)**: on the box, label `tw-hermes-box`, with Python 3.13, so the suite keeps working for a Windows checkout, under a runner account of its own with the box runners' guards.
-
-Only this repository's own branches run there: a fork's pull request runs no workflow in a private repository. Every library comes from a hash-pinned wheel (`tests/requirements-ci.txt`, `deploy/decisions/requirements.txt`). The job holds no secret, reads the repo only, and keeps no credential. `merge-green.yml` runs on the VM's runner too.
-
-`scripts/test-at-head.sh` and its **Guard rail tests (One and VM)** status are no longer the merge rule. The script stays for a run by hand from a machine with the VM's ssh key.
-
-**Merge rule here:** a PR merges once both **Guard rail tests** checks are a success on its exact head, with nobody touching it (Patrick, 2 Nov 2026: "I want automerge on for this shit too"). GitHub's own auto-merge needs a paid plan on a private repository, so `.github/workflows/merge-green.yml` does its job: each time the guard rail tests finish it runs main's `scripts/merge_green.py`, which merges every open PR into `main` that is green at its head and merges cleanly, with a merge commit at that head, and deletes its branch so a PR stacked on it is aimed at `main` and merges next. A new push runs the checks again. A failure is fixed at its cause, never re-run to get a pass.
-
-After a merge, `tw-follow-main` runs the whole suite again on the VM at `main`'s commit, as `tw-ci` with no network, and installs nothing that fails.
-
-## Which Python runs what on the VM
-
-- `apply.py` and the tests run with the system `python3` (3.12, which has PyYAML). `tw-follow-main` and `test-at-head.sh` call exactly that.
-- The guard plugin runs inside Hermes's own runtime: the Python under `/home/hermes/.hermes/tools/` with its environment under `/home/hermes/.hermes/installs/`. There is no `hermes-agent/venv`. That runtime has no YAML library, so the guard reads `policy.json` and needs nothing outside the standard library. `hermes plugins validate` loads it there, and passes.
-
-## The brokers on the VM (phase 2)
-
-`thornswood_brokers/` holds the four brokers, each running as its own user from a root-owned copy under `/opt/thornswood-hermes`, never from anything the `hermes` user can write:
-
-- `tw-policy`: the fleet admission queue, exactly-once receipts, Patrick's decision records, route and credit state, leases and the Dev ledger, in one SQLite store.
-- `tw-git`: every GitHub call, with the two Apps' installation tokens (thornswood-bramble 5547080, thornswood-workers 5547094), after `github.py`'s rules and a receipt.
-- `tw-files`: each worker's trees under `/srv/tw/work/<bot>`, and its checks through `tw-run-check` as the Bot's own user with no network.
-- The admission proxy (`127.0.0.1:8611`): routes 2 and 4 with the real keys, which only it can read.
-
-The gateway reaches them only through their sockets. `brokers.ready` is on since 31 Oct, after the install held and the canary passed: every Bot turn needs a ticket from the fleet queue (`tw-policy`), and the Bots have the `tw_git` and `tw_files` tools. Routes 2 and 4 stay out of every chain until `admission_proxy.ready` is true.
-
-**The first install**, the one that brings `tw-follow-main`, from a machine on the tailnet (sudo on the VM asks for its password if it needs one). After it the VM installs each merge itself:
-
-```bash
-scripts/install-on-oracle.sh <the full commit main is now at> --move-gateway --quotas
-```
-
-It refuses unless that commit is `main`'s tip, unpacks it as root into `/opt/thornswood-hermes/releases/<commit>`, and runs `deploy/install.sh` there: the broker users and groups, `/srv/tw`, the Apps' keys made `tw-git`'s alone, the Qwen address and token moved out of the `hermes` user's reach into `/etc/thornswood/proxy.env`, the units and slices, the check helper's socket (`tw-checks.socket`, so `tw-files` starts checks without sudo and keeps `NoNewPrivileges`), the SFTP jail for One's backup pull, each Bot's disk cap (`--quotas` turns group quotas on first), and the gateway moved into `tw-hermes.slice` (`--move-gateway`). Anything it can't do safely is a `STOP` line saying what is missing. Then `scripts/send-to-oracle.sh` with the same commit applies the profiles, as before.
-
-**Canary**, after each install, on the VM:
-
-```bash
-sudo /opt/thornswood-hermes/bin/tw-canary
-```
-
-It runs attacks 2, 3, 5 and 18 against the live box with planted canary files and prints a PASS or FAIL line for each. Every one must pass before a PR turns `brokers.ready` on.
-
-**Backups.** The VM writes one archive a night at 3:30 AM Mountain to `/srv/tw/backups`, encrypted to Patrick's age public key, with no sign-in, `.env` or key in it.
-
-**Off-site copies** (#2862, Patrick, 31 Oct). At 4:30 AM Mountain `tw-offsite.service` copies them to `thornswood-gdrive:Thornswood-Hermes-Backups`, and the game box's nightly to `thornswood-gdrive:Thornswood-Box-Backups`, kept on Drive 90 days and 30 days (the box's copies hold people's records, and the public privacy page promises 30), and fails when the newest of either is over 26 hours old. The box sends its nightly (already encrypted with its passphrase, and checked on the box) as `tw-boxdrop` into `/srv/tw/boxdrop/in`, an SFTP jail where it can add a file and do nothing else: no list, read, rename, overwrite or delete, and only from the box's address. Root's intake moves each finished one (its `.done` marker says its SHA-256 and size) to `/srv/tw/boxbackups`, kept 30 days there. A stolen box cannot reach any copy it sent, on the VM or on Drive. Neither the passphrase nor the age key is on the VM.
-
-The Drive sign-in is made once and is `tw-offsite`'s alone, in `/var/lib/tw-offsite/rclone.conf`, with rclone's own way for a machine with no browser ([rclone, remote setup](https://rclone.org/remote_setup/)). On the VM:
-
-```bash
-sudo -u tw-offsite rclone config --config /var/lib/tw-offsite/rclone.conf
-```
-
-Answer `n` for a new remote, name it `thornswood-gdrive`, pick Google Drive, leave the client id and secret empty, pick the scope `drive.file` (only files rclone made), leave the service account empty, `n` for advanced config, and `n` to "Use web browser to automatically authenticate". It prints an `rclone authorize "drive" "..."` line. Patrick runs that line on any computer with rclone and a browser, signs in to Google, and pastes the token it prints back where the VM asks; then `n` for a shared drive and `y` to keep it. Until then each run says `no Drive sign-in`. Once a run passes, One's **Thornswood Bots Hermes Backup Pull** and **Thornswood Fetch Backups** tasks are unregistered.
-
-The 28-day proof that an archive opens needs the age key, which stays off the VM: on Patrick's machine, `age -d -i <key> <archive from Drive> | tar -tz`. To restore one onto the VM, from a machine on the tailnet:
-
-```bash
-scripts/restore-on-oracle.sh <path to hermes-YYYYMMDD-HHMMSS.tar.gz.age>
-```
-
-It decrypts where the key is, stops the gateway and the brokers, puts the files back (refusing an archive with anything it should not hold), kills every Main, publish and cutover record, and starts them again.
-
-## What this version does not do yet
-
-- The brokers hold once installed, the canary passes and `brokers.ready` is on (31 Oct). No Bot holds a GitHub credential: every GitHub write goes through `tw-git`, which checks it again, and the guard refuses any other way with the reason.
-- Tier B checks: `sandbox_jobs` is 0 in the pilot stage, and `tw-files` keeps `NoNewPrivileges` until the PR that moves past the pilot lifts it for `tw-run-check`.
-- A disk cap inside a Tier A container: the VM's ext4 store can't enforce one in podman. The Bots' broker trees have theirs (group quotas).
-- Routes 2 and 4 enter the chains only when a PR sets `admission_proxy.ready`, after the install has made each Bot's proxy token.
-- Main's ruleset. Until the flip, nothing on GitHub stops the workers' App from pushing to `main`, because its contents write covers every branch. Until then the broker is the only stop, and no Bot can reach the Apps' keys (they are `tw-git`'s, mode 400). At the flip, Patrick adds a ruleset on `main` that only Bramble's App can bypass.
-- The board. Whether a GitHub App can read the Projects board owned by Patrick's personal account is untested. `scripts/check-board-access.sh`, run as `tw-git`, tests it read-only.
-- The decision core and the phone push: `decisions.py` and `notify.py` are the rules they will call.
-- Room membership: Hermes keeps it as profile metadata, set in Hermes Desktop (**Manage groups**). `policy.yaml` lists the rooms.
+MIT, the same as Thornswood. See [LICENSE](LICENSE).

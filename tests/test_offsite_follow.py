@@ -246,7 +246,17 @@ class FollowMain(unittest.TestCase):
     def follower(self, vm: FakeVM, installed: str | None = OLD) -> follow_main.Follower:
         self.root = Path(tempfile.mkdtemp())
         self.said: list[str] = []
-        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append)
+        # What tw-git is handed (vm_install); a test sets self.refuse_report to
+        # have it not answer.
+        self.reports: list[dict] = []
+        self.refuse_report = False
+
+        def report(args):
+            if self.refuse_report:
+                raise follow_main.wire.Refused("the broker at /run/tw/git/git.sock is not answering")
+            self.reports.append(json.loads(json.dumps(args)))
+            return {"ledger": 1, "board": None}
+        f = follow_main.Follower(policy(), run=vm, root=self.root, say=self.said.append, report=report)
         if installed:
             (f.opt / "releases" / installed).mkdir(parents=True)
             (f.opt / "current").symlink_to(f.opt / "releases" / installed)
@@ -357,14 +367,19 @@ class FollowMain(unittest.TestCase):
         f = self.follower(vm)
 
         def run(args, **kw):
-            if "fetch" in args and "git@github.com:ThornswoodRP/Thornswood-Hermes.git" in args:
+            if "fetch" in args and "git@github.com:ThornswoodRP/TWHermesAgents.git" in args:
                 return subprocess.CompletedProcess(args, 128, "", "Permission denied (publickey).")
             return vm(args, **kw)
 
         f.run_ = run
         self.assertEqual(f.follow(), 1)
-        self.assertIn("deploy key", self.said[-1])
-        self.assertIn("Allow write access left off", self.said[-1])
+        stop = [line for line in self.said if line.startswith("STOP")][-1]
+        self.assertIn("deploy key", stop)
+        self.assertIn("Allow write access left off", stop)
+        # GitHub hears the sentence, never the key itself.
+        self.assertEqual([(r["result"], r["step"]) for r in self.reports], [("fetch failed", "fetch")])
+        self.assertIn("Allow write access left off", self.reports[0]["reason"])
+        self.assertNotIn("ssh-", self.reports[0]["reason"])
 
     def test_a_red_suite_installs_nothing_and_is_not_tried_again(self):
         vm = FakeVM(NEW, fail={"systemd-run": 1})
@@ -423,6 +438,40 @@ class FollowMain(unittest.TestCase):
                  if k in " ".join(c)]
         self.assertEqual(len(order), 4, vm.calls)
         self.assertEqual(order, sorted(order))
+
+    def test_the_connector_starts_only_once_every_bot_runs_the_release(self):
+        # 2 Nov: answers put back in the queue by a migration of the core's install would reach a Bot
+        # still on the release before, without tw_git's open_issue, until apply.py and the reload.
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.core_installed(f, NEW)
+        core = f.opt / "releases" / NEW / "deploy" / "decisions" / "install.sh"
+        core.write_text("#!/usr/bin/env bash\n# --connector-later\n")
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(vm.ran("decisions/install.sh"),
+                         [f"bash {f.opt}/releases/{NEW}/deploy/decisions/install.sh {NEW} --connector-later"])
+        order = [i for i, c in enumerate(vm.calls) for k in ("decisions/install.sh", "runuser", "tw-reload-bots",
+                                                              "tw-canary", "systemctl start tw-decide-connector")
+                 if k in " ".join(c)]
+        self.assertEqual(len(order), 5, vm.calls)
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(len(vm.ran("is-active --quiet tw-decide-connector.service")), 1)
+
+    def test_a_release_whose_core_install_starts_the_connector_itself_gets_no_flag(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.core_installed(f, NEW)
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertNotIn("--connector-later", " ".join(vm.ran("decisions/install.sh")))
+        self.assertEqual(vm.ran("tw-decide-connector"), [])
+
+    def test_the_cores_install_leaves_the_connector_stopped_when_asked(self):
+        text = (follow_main.Path(follow_main.__file__).resolve().parents[1] / "deploy" / "decisions" /
+                "install.sh").read_text(encoding="utf-8")
+        self.assertIn("--connector-later) connector_later=1; shift ;;", text)
+        step = text[text.index("# 10. The connector."):text.index("# 11.")]
+        self.assertIn('if [[ -n "$connector_later" ]]; then', step)
+        self.assertLess(step.index("connector_later"), step.index("systemctl restart tw-decide-connector.service"))
 
     def test_no_decision_core_on_the_vm_means_no_core_install(self):
         vm = FakeVM(NEW)
@@ -637,6 +686,51 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(out["from"], str(rel))
         self.assertEqual(out["argv"], ["--db", str(f._at("/srv/tw/decide/core.db")), "downgrade", "--to", "5"])
 
+    def release_keeping_packages_in(self, packages: str) -> Path:
+        rel = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, rel, True)
+        pkg = rel / packages / "thornswood_decisions"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "schema.py").write_text("MIGRATIONS = [1, 2, 3]\n")
+        (pkg / "cli.py").write_text("import sys\ndef main(argv):\n    print(sys.path[0])\n    return 3\n")
+        (rel / "deploy").mkdir()
+        (rel / "deploy" / "layout.json").write_text(json.dumps({"packages": packages}))
+        return rel
+
+    def test_another_releases_code_is_read_where_its_layout_keeps_it(self):
+        # The copy of the follower that runs is the installed one; a release it
+        # puts back or downgrades from may keep its packages somewhere else.
+        f = self.follower(FakeVM(NEW))
+        rel = self.release_keeping_packages_in("src")
+        f.run_ = lambda args, **kw: subprocess.run([_sys.executable, *args[1:]], **kw)
+        self.assertEqual(f.known_schema(rel), 3)
+        f.run_ = lambda args, **kw: subprocess.run([_sys.executable, *args[5:]], **kw)
+        with self.assertRaises(follow_main.Stop) as e:
+            f.downgrade(rel, 2)
+        self.assertIn(str(rel / "src"), str(e.exception))
+
+    def test_a_release_made_before_the_layout_file_keeps_its_packages_at_its_root(self):
+        rel = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, rel, True)
+        self.assertEqual(follow_main.packages_in(rel), rel)
+
+    def test_a_layout_naming_no_folder_inside_the_release_stops(self):
+        for packages in ("../elsewhere", "/opt", 7):
+            rel = self.release_keeping_packages_in("src")
+            (rel / "deploy" / "layout.json").write_text(json.dumps({"packages": packages}))
+            with self.assertRaises(follow_main.Stop):
+                follow_main.packages_in(rel)
+        rel = self.release_keeping_packages_in("src")
+        (rel / "deploy" / "layout.json").write_text("{")
+        with self.assertRaises(follow_main.Stop):
+            follow_main.packages_in(rel)
+
+    def test_this_repositorys_layout_names_where_its_packages_are(self):
+        packages = follow_main.packages_in(REPO)
+        for name in ("thornswood_guard", "thornswood_brokers", "thornswood_decisions", "thornswood_live"):
+            self.assertTrue((packages / name / "__init__.py").is_file(), name)
+
     def test_a_pause_file_stops_everything_and_survives_an_install(self):
         vm = FakeVM(NEW)
         f = self.follower(vm)
@@ -648,6 +742,90 @@ class FollowMain(unittest.TestCase):
         self.assertIn("paused", self.said[-1])
         # The install starts the timer again; the pause is the file, which it leaves alone.
         self.assertNotIn(f.r["pause_file"], (REPO / "deploy" / "install.sh").read_text())
+
+class Reports(unittest.TestCase):
+    """Each new result goes to tw-git (ThornswoodRP/Thornswood#5564)."""
+
+    follower = FollowMain.follower
+
+    def test_an_install_is_reported_with_its_commit_and_what_ran_before(self):
+        f = self.follower(FakeVM(NEW))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(len(self.reports), 1)
+        r = self.reports[0]
+        self.assertEqual((r["result"], r["commit"], r["before"], r["step"]), ("installed", NEW, OLD, None))
+        self.assertEqual(r["installed"], f.installed())
+        self.assertRegex(r["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        st = json.loads(f.state_file.read_text())
+        self.assertIsNone(st["report_pending"])
+        self.assertEqual(st["reported"]["commit"], NEW)
+
+    def test_nothing_new_reports_nothing(self):
+        f = self.follower(FakeVM(OLD))
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(self.reports, [])
+
+    def test_a_red_suite_reports_its_step_and_count_but_none_of_the_output(self):
+        vm = FakeVM(NEW)
+
+        def run(args, **kw):
+            if args[0] == "systemd-run":
+                return subprocess.CompletedProcess(args, 1, "Ran 412 tests\nFAILED (failures=1)\nsecret line from 10.0.0.7\n", "")
+            return vm(args, **kw)
+        f = self.follower(vm)
+        f.run_ = run
+        self.assertEqual(f.follow(), 1)
+        r = self.reports[0]
+        self.assertEqual((r["result"], r["commit"], r["step"], r["installed"]), ("not installed", NEW, "tests", OLD))
+        self.assertIn("the suite fails at", r["reason"])
+        self.assertIn("Ran 412 tests", r["reason"])
+        self.assertNotIn("secret line", r["reason"])
+        # Not tried again, and not said again.
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(len(self.reports), 1)
+
+    def test_a_failed_canary_reports_the_put_back(self):
+        f = self.follower(FakeVM(NEW, fail={"tw-canary": 1}))
+        self.assertEqual(f.follow(), 1)
+        r = self.reports[0]
+        self.assertEqual((r["result"], r["step"]), ("failed", "canary"))
+        self.assertTrue(r["put_back"])
+
+    def test_a_result_tw_git_did_not_take_goes_first_at_the_next_run(self):
+        f = self.follower(FakeVM(NEW))
+        self.refuse_report = True
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(self.reports, [])
+        self.assertTrue(any(line.startswith("REPORT NOT SENT") for line in self.said))
+        self.assertEqual(json.loads(f.state_file.read_text())["report_pending"]["commit"], NEW)
+        # The install moved current, as deploy/install.sh does on the VM.
+        (f.opt / "releases" / NEW).mkdir(parents=True, exist_ok=True)
+        (f.opt / "current").unlink()
+        (f.opt / "current").symlink_to(f.opt / "releases" / NEW)
+        self.refuse_report = False
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual([r["commit"] for r in self.reports], [NEW])
+        self.assertIsNone(json.loads(f.state_file.read_text())["report_pending"])
+        # And once taken, nothing goes again.
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(len(self.reports), 1)
+
+    def test_a_fetch_that_fails_the_same_way_is_reported_once_and_its_end_too(self):
+        vm = FakeVM(OLD)
+        f = self.follower(vm)
+
+        def broken(args, **kw):
+            if "fetch" in args and args[-1].startswith("+refs/heads/main"):
+                return subprocess.CompletedProcess(args, 128, "", "Could not resolve host")
+            return vm(args, **kw)
+        f.run_ = broken
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual(f.follow(), 1)
+        self.assertEqual([r["result"] for r in self.reports], ["fetch failed"])
+        f.run_ = vm
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual([r["result"] for r in self.reports], ["fetch failed", "fetched"])
+
 
 @unittest.skipUnless(os.geteuid() == 0 and shutil.which("runuser"), "needs root, to hand the release to another user as the VM does")
 class ApplyAsAnotherUser(unittest.TestCase):

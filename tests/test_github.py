@@ -2,10 +2,14 @@
 the GitHub settings no Bot touches. Numbers in the test names point at the
 attack tests in 08-SECURITY_AND_GUARD_RAILS.md section 8."""
 
+import json
 import unittest
 
 from helpers import (APP, HEAD, OTHER, decide, green, issue, past, policy, pr, rules, store,
                      verb_lists)
+
+from thornswood_guard.github import Credit
+from thornswood_guard.policy import Policy
 
 BOX = "scripts/vps/gate/verbs.json"
 NEXUS = "scripts/release/nexus-verbs.json"
@@ -63,7 +67,7 @@ class Pushes(unittest.TestCase):
         self.assertFalse(self.r.push("wisp", fork, "refs/heads/thornswood/engine-changes").allowed)
 
     def test_no_bot_writes_to_thornswood_hermes(self):
-        self.assertFalse(self.r.push("bramble", "ThornswoodRP/Thornswood-Hermes", "refs/heads/bramble/1-x").allowed)
+        self.assertFalse(self.r.push("bramble", "ThornswoodRP/TWHermesAgents", "refs/heads/bramble/1-x").allowed)
 
     def test_grok_lane_branches_are_hands_off(self):
         self.assertFalse(self.r.push("bramble", APP, "refs/heads/codex/2618-thing").allowed)
@@ -71,6 +75,41 @@ class Pushes(unittest.TestCase):
 
     def test_unknown_bot_refused(self):
         self.assertFalse(self.r.push("ops", APP, "refs/heads/ops/1-x").allowed)
+
+
+class OpsIsBrambles(unittest.TestCase):
+    """Ops is private on GitHub Free, which keeps no rules there, so the
+    workers' App is not installed on it and no worker writes in it: only
+    Bramble's App can change Ops's main, and only by merging."""
+
+    OPS = "ThornswoodRP/Thornswood-Ops"
+
+    def setUp(self):
+        self.r = rules()
+
+    def test_a_worker_neither_pushes_nor_opens_a_pull_request_in_ops(self):
+        for bot in ("rift", "sprocket", "echo", "magpie", "wisp"):
+            with self.subTest(bot=bot):
+                v = self.r.push(bot, self.OPS, f"refs/heads/{bot}/12-x")
+                self.assertFalse(v.allowed)
+                self.assertIn("Bramble's alone", v.reason)
+                self.assertFalse(self.r.open_pr(bot, self.OPS, f"{bot}/12-x", "main").allowed)
+
+    def test_a_worker_neither_labels_nor_edits_in_ops(self):
+        self.assertFalse(self.r.add_label("rift", issue(repo=self.OPS), "claimed: Rift").allowed)
+        self.assertFalse(self.r.remove_label("rift", issue(repo=self.OPS, labels=["claimed: Rift"]), "claimed: Rift").allowed)
+        self.assertFalse(self.r.edit_pr("rift", pr(repo=self.OPS, head_ref="rift/12-x", author_bot="rift")).allowed)
+
+    def test_bramble_still_works_in_ops(self):
+        self.assertTrue(self.r.push("bramble", self.OPS, "refs/heads/bramble/12-x").allowed)
+        self.assertTrue(self.r.open_pr("bramble", self.OPS, "bramble/12-x", "main").allowed)
+        self.assertTrue(self.r.add_label("bramble", issue(repo=self.OPS), "claimed: Bramble").allowed)
+
+    def test_the_workers_app_is_on_the_two_public_repos_only(self):
+        p = policy()
+        self.assertEqual(sorted(p.data["github_apps"]["workers"]["repos"]), [APP, "ThornswoodRP/skymp"])
+        self.assertEqual(p.reader_for(self.OPS), "bramble")
+        self.assertEqual(p.reader_for(APP), "workers")
 
 
 class PullRequests(unittest.TestCase):
@@ -152,7 +191,7 @@ class Merges(unittest.TestCase):
         self.assertFalse(self.merge(p=pr(head_ref="codex/2618-x", author_bot=None)).allowed)
 
     def test_bramble_never_merges_in_thornswood_hermes(self):
-        self.assertFalse(self.merge(p=pr(repo="ThornswoodRP/Thornswood-Hermes")).allowed)
+        self.assertFalse(self.merge(p=pr(repo="ThornswoodRP/TWHermesAgents")).allowed)
 
 
 class AutoMerges(unittest.TestCase):
@@ -223,6 +262,98 @@ class AutoMerges(unittest.TestCase):
         self.assertTrue(self.merge(p=fork_pr, method="merge", branch_checks=FORK_RULES).allowed)
         self.assertFalse(self.merge(p=fork_pr, method="squash", branch_checks=FORK_RULES).allowed)
         self.assertFalse(self.merge(p=fork_pr, method="merge", branch_checks={"save-directory-linux"}).allowed)
+
+
+class OutsideWork(unittest.TestCase):
+    """Patrick, 8 Nov 2026, 1:30 PM: "don't ever let them auto merge tho
+    unless I saw that even if the PR is good unless I specficallyt say that I
+    want that person to automerge", and 1:31 PM: "currently that list is only
+    me and my team". Every commit's author and Co-authored-by line is read."""
+
+    RAHUL = Credit(commit=HEAD, name="Rahul", email="12345+rahul05ranjan@users.noreply.github.com", co_author=True)
+
+    def setUp(self):
+        self.p = policy()
+        self.r = rules(self.p, store(self.p))
+
+    def bot_commit(self, bot="sprocket"):
+        return Credit(commit=HEAD, name=f"{bot.title()} (Thornswood Bot)", email=f"{bot}@bots.thornswood.invalid")
+
+    def merge(self, p, repo=APP):
+        if repo == OPS:
+            return self.r.merge("bramble", p, HEAD, "squash", green(name="check"))
+        return self.r.merge("bramble", p, HEAD, "squash", [], branch_checks=APP_RULES)
+
+    def test_the_shipped_list_is_patrick_and_his_team(self):
+        self.assertEqual(self.p.data["merge"]["auto_merge_people"], ["EvilPatrick06", "WiccanDjinn"])
+        self.assertEqual(self.p.data["merge"]["outside_label"], "outside work")
+
+    def test_a_bots_own_commits_merge(self):
+        v = self.merge(pr(credits=[self.bot_commit()]))
+        self.assertTrue(v.allowed, v.reason)
+
+    def test_carried_outside_work_never_merges_even_when_green(self):
+        for repo in (APP, OPS):
+            p = pr(repo=repo, credits=[self.bot_commit(), self.RAHUL], labels=["outside work"])
+            v = self.merge(p, repo=repo)
+            self.assertFalse(v.allowed, repo)
+            self.assertIn("rahul05ranjan", v.reason)
+            self.assertIn("auto_merge_people", v.reason)
+
+    def test_an_outside_commit_author_never_merges(self):
+        # The account GitHub links the commit to, and an address nobody's
+        # account holds, are both outside.
+        for c in (Credit(commit=HEAD, name="Rahul", email="r@example.com", login="rahul05ranjan"),
+                  Credit(commit=HEAD, name="Someone", email="someone@example.com")):
+            v = self.merge(pr(credits=[self.bot_commit(), c]))
+            self.assertFalse(v.allowed, c)
+
+    def test_a_bot_address_names_only_the_six_bots(self):
+        c = Credit(commit=HEAD, name="x", email="rahul@bots.thornswood.invalid")
+        self.assertFalse(self.merge(pr(credits=[c])).allowed)
+
+    def test_patrick_djinn_the_robots_and_our_workflows_are_trusted(self):
+        for c in (Credit(commit=HEAD, name="P", email="187923600+EvilPatrick06@users.noreply.github.com", co_author=True),
+                  Credit(commit=HEAD, name="D", email="d@example.com", login="wicCANdjinn"),
+                  Credit(commit=HEAD, name="gha", email="41898282+github-actions[bot]@users.noreply.github.com"),
+                  Credit(commit=HEAD, name="dep", email="x@example.com", login="dependabot[bot]")):
+            v = self.merge(pr(credits=[self.bot_commit(), c]))
+            self.assertTrue(v.allowed, f"{c}: {v.reason}")
+
+    def test_the_pin_robots_pr_still_goes_on_auto_merge(self):
+        c = Credit(commit=HEAD, name="github-actions[bot]",
+                   email="41898282+github-actions[bot]@users.noreply.github.com", login="github-actions[bot]")
+        p = pr(head_ref="engine-pin/next", author_bot=None, author_login="thornswood-pin-robot[bot]", credits=[c])
+        v = self.merge(p)
+        self.assertTrue(v.allowed, v.reason)
+
+    def test_a_person_patrick_names_merges(self):
+        data = json.loads(json.dumps(self.p.data))
+        data["merge"]["auto_merge_people"].append("rahul05ranjan")
+        r = rules(Policy(data))
+        p = pr(credits=[self.bot_commit(), self.RAHUL], labels=["outside work"])
+        v = r.merge("bramble", p, HEAD, "squash", [], branch_checks=APP_RULES)
+        self.assertTrue(v.allowed, v.reason)
+
+    def test_the_label_without_a_credit_is_refused(self):
+        v = self.merge(pr(credits=[self.bot_commit()], labels=["outside work"]))
+        self.assertFalse(v.allowed)
+        self.assertIn("Co-authored-by", v.reason)
+
+    def test_an_outside_pr_is_never_merged_and_bramble_only_comments_on_it(self):
+        fork = pr(number=5517, head_ref="patch-1", author_bot=None, author_login="rahul05ranjan")
+        self.assertFalse(self.merge(fork).allowed)
+        self.assertTrue(self.r.outside_pr(fork))
+        self.assertTrue(self.r.comment_pr("bramble", fork).allowed)
+        self.assertFalse(self.r.comment_pr("sprocket", fork).allowed)
+        self.assertFalse(self.r.edit_pr("bramble", fork).allowed)
+
+    def test_team_and_hands_off_prs_are_not_outside(self):
+        for p in (pr(head_ref="claude/1-x", author_bot=None, author_login="EvilPatrick06"),
+                  pr(head_ref="x/1-x", author_bot=None, author_login="Jhinswife"),
+                  pr(head_ref="codex/2618-x", author_bot=None, author_login="EvilPatrick06")):
+            self.assertFalse(self.r.outside_pr(p), p.author_login)
+            self.assertFalse(self.r.comment_pr("bramble", p).allowed, p.author_login)
 
 
 class OpsMerges(unittest.TestCase):

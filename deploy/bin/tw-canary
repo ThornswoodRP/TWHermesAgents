@@ -1,6 +1,8 @@
 #!/usr/bin/python3 -I
 # The canary attacks on the live VM, as root, from the root-owned copy.
 import sys
-sys.path.insert(0, "/opt/thornswood-hermes/current")
+from pathlib import Path
+# The release this file is in: /opt/thornswood-hermes/bin links here through current.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from thornswood_brokers.canary import main  # noqa: E402
 sys.exit(main())

@@ -187,7 +187,7 @@ class Reload(unittest.TestCase):
     def test_the_install_puts_it_in_bin_and_the_docs_name_it(self):
         self.assertTrue((REPO / "deploy" / "bin" / "tw-reload-bots").exists())
         self.assertIn("deploy/bin/*", (REPO / "deploy" / "install.sh").read_text())
-        for f in ("README.md", "scripts/apply.py"):
+        for f in ("docs/operations.md", "scripts/apply.py"):
             text = (REPO / f).read_text()
             self.assertIn("sudo /opt/thornswood-hermes/bin/tw-reload-bots", text, f)
             self.assertNotIn("sudo systemctl restart tw-hermes-gateway", text, f)

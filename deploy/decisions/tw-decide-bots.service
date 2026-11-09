@@ -3,6 +3,9 @@
 # and hermes, the Bots' user, is that group's only member. Each call is
 # checked again by the caller's user from the socket's peer credentials. It
 # runs as the core's own user on the core's store, with no network at all.
+# It answers tw-git, alone, on a second socket (#132): Patrick's answers on
+# Bramble's outside pull request cards, read only. tw-git is the only member
+# of the tw-decide-git group.
 [Unit]
 Description=Thornswood decision core: the Bots' route
 After=tw-decide.service
@@ -13,12 +16,12 @@ StartLimitBurst=3
 Type=simple
 User=tw-decide
 Group=tw-decide
-SupplementaryGroups=tw-decide-bots
+SupplementaryGroups=tw-decide-bots tw-decide-git
 MemoryHigh=100M
 MemoryMax=150M
 TasksMax=32
-ExecStart=/opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db serve-bots --workspace thornswood --socket /run/tw/decide-bots/bots.sock --group tw-decide-bots
-RuntimeDirectory=tw/decide-bots
+ExecStart=/opt/thornswood-hermes/bin/tw-decide --db /srv/tw/decide/core.db serve-bots --workspace thornswood --socket /run/tw/decide-bots/bots.sock --group tw-decide-bots --git-socket /run/tw/decide-git/git.sock --git-group tw-decide-git
+RuntimeDirectory=tw/decide-bots tw/decide-git
 RuntimeDirectoryMode=0755
 ReadWritePaths=/srv/tw/decide
 PrivateNetwork=yes

@@ -41,6 +41,37 @@ DENY_COMMANDS = [
 
 WORK_ROOT = "/home/hermes/tw-work"
 
+# Hermes's built-in smart approvals (Patrick's answer A on
+# q-hermes-approval-mode-2, 2 Nov). Cause it answers: on manual, a command
+# Hermes flags in a room turn waits for a person, and when nobody is watching
+# it is refused after the timeout (Echo, 31 Oct, 4:23 PM, 300 s). Smart mode
+# has Hermes's own approval check read each flagged command and answer
+# APPROVE, DENY or ESCALATE; ESCALATE still asks a person. These rules go into
+# that check's system prompt, its trusted channel, never beside the command.
+# The deny list below and the guard plugin still refuse first, whatever the
+# check says.
+SMART_POLICY = """\
+You are judging a command from a Thornswood Bot. Each Bot works only in its own
+copy of a repository, mounted at /workspace in its own sandbox. Every write to
+GitHub, every merge, release, deploy and publish goes through Thornswood's
+brokers, never through a shell command.
+DENY a command that:
+- reads, prints, copies or sends a credential: a token, key, password, .env file,
+  auth.json, an SSH or GPG key, anything under /etc/thornswood or a .ssh folder;
+- pushes, merges, tags, releases, deploys or publishes, or writes to a remote
+  service (git push, gh with a write, curl or wget sending data, scp, rsync to a
+  remote, nc);
+- changes the machine: services, schedules, users, groups, sudo, the firewall,
+  Tailscale, podman or docker, packages outside /workspace;
+- deletes, moves or changes files outside /workspace and /tmp, or changes their
+  owner or permissions.
+APPROVE a command that only reads or inspects, or that builds, tests, lints or
+formats the repository under /workspace with the repository's own scripts and
+tools, or that runs local git commands which do not reach a remote (status,
+diff, log, show, add, commit, switch, branch, stash, restore).
+ESCALATE anything else, and anything you are not sure of: a person decides.
+"""
+
 # Hermes bounds each plugin hook by plugins.hook_callback_timeout (default 30,
 # at most 600) and skips a pre_llm_call that runs past it. Every turn waits
 # in that hook for its ticket (brokers.TURN_WAIT, 540 seconds), so
@@ -101,6 +132,7 @@ def build(policy: Policy, bot: str) -> dict:
             "free_only": True,
             "openrouter_model": "",
             "vision": {"provider": cfg["model"]["provider"], "model": cfg["model"]["default"]},
+            "approval": {"provider": cfg["model"]["provider"], "model": cfg["model"]["default"]},
             "title_generation": {"model_upgrade_enabled": False},
             "background_review": {"enabled": False},
         },
@@ -112,7 +144,9 @@ def build(policy: Policy, bot: str) -> dict:
             "project_discovery": False,
         },
         "approvals": {
-            "mode": "manual",
+            "mode": "smart",
+            "smart_policy": SMART_POLICY,
+            "timeout": 300,
             "cron_mode": "deny",
             "unattended_mode": "deny",
             "single_query_mode": "deny",
@@ -252,12 +286,15 @@ def build_gateway(policy: Policy) -> dict:
             "free_only": True,
             "openrouter_model": "",
             "vision": {"provider": route["provider"], "model": route["model"]},
+            "approval": {"provider": route["provider"], "model": route["model"]},
             "title_generation": {"model_upgrade_enabled": False},
             "background_review": {"enabled": False},
         },
         "curator": {"enabled": False},
         "approvals": {
-            "mode": "manual",
+            "mode": "smart",
+            "smart_policy": SMART_POLICY,
+            "timeout": 300,
             "cron_mode": "deny",
             "unattended_mode": "deny",
             "single_query_mode": "deny",

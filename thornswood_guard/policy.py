@@ -20,6 +20,11 @@ POLICY_FILE = Path(__file__).with_name("policy.json")
 EXECUTORS = ("patrick-hermes", "bramble")
 
 
+# A GitHub noreply address, with or without the account id in front:
+# 187923600+evilpatrick06@users.noreply.github.com.
+NOREPLY = re.compile(r"(?:\d+\+)?([a-z0-9][a-z0-9-]*(?:\[bot\])?)@users\.noreply\.github\.com")
+
+
 class PolicyError(Exception):
     """The policy file itself is wrong. Nothing is allowed until it is fixed."""
 
@@ -88,6 +93,13 @@ class Policy:
                     or not all(isinstance(n, str) and n for n in names)
                     or len(set(names)) != len(names)):
                 raise PolicyError(f"the merge rule names no required checks for {repo}")
+        apps = self.data.get("github_apps") or {}
+        for app in ("bramble", "workers"):
+            reach = (apps.get(app) or {}).get("repos")
+            if not isinstance(reach, list) or not set(reach) <= set(self.data.get("merge", {}).get("base", {})):
+                raise PolicyError(f"github_apps.{app}.repos lists the repos the App is installed on, each one the merge rule names")
+        if set((apps.get("bramble") or {}).get("repos") or []) != set(self.data.get("merge", {}).get("base", {})):
+            raise PolicyError("Bramble's App is installed on every repo the Bots work in")
         auto = self.data.get("merge", {}).get("auto_merge")
         if (not isinstance(auto, dict) or set(auto) != set(self.data.get("merge", {}).get("base", {}))
                 or not all(isinstance(v, list) and all(isinstance(n, str) and n for n in v) for v in auto.values())):
@@ -111,6 +123,15 @@ class Policy:
 
     def app_of(self, bot: str) -> str:
         return self.bots[bot]["app"]
+
+    def app_reaches(self, app: str, repo: str) -> bool:
+        """Whether the App is installed on the repo (github_apps.<app>.repos)."""
+        return repo in self.data["github_apps"][app]["repos"]
+
+    def reader_for(self, repo: str) -> str:
+        """The App that reads a repo for any Bot: the workers' where it is
+        installed, Bramble's where only Bramble's is (Ops)."""
+        return "workers" if self.app_reaches("workers", repo) else "bramble"
 
     def claim_labels(self) -> dict[str, str]:
         return {v["claim_label"]: bot for bot, v in self.bots.items()}
@@ -141,6 +162,40 @@ class Policy:
         """A robot's pull request (Dependabot, the pin robot): no person or
         thread owns it, so Bramble puts it on auto-merge like a Bot's."""
         return login in (self.data["merge"].get("robot_authors") or [])
+
+    def _trusted_logins(self) -> set[str]:
+        m = self.data["merge"]
+        names = (m.get("auto_merge_people") or []) + (m.get("robot_authors") or []) + (m.get("workflow_authors") or [])
+        return {n.lower() for n in names}
+
+    def trusted_login(self, login: str | None) -> bool:
+        """One of Patrick's list of people whose work may merge, a robot or
+        one of our own workflows (merge.auto_merge_people, robot_authors,
+        workflow_authors). GitHub logins ignore case."""
+        return bool(login) and login.lower() in self._trusted_logins()
+
+    def trusted_credit(self, login: str | None, email: str) -> bool:
+        """Whether a commit's author or a Co-authored-by line names someone
+        whose work may merge: by the GitHub account the commit is linked to,
+        a Bot's own commit address, or a GitHub noreply address of a trusted
+        login. Anything else is outside work (Patrick, 8 Nov 2026)."""
+        if self.trusted_login(login):
+            return True
+        email = (email or "").strip().lower()
+        pattern = self.data["brokers"]["files"]["commit_email"]
+        if email in {pattern.format(bot=b).lower() for b in self.bots}:
+            return True
+        m = NOREPLY.fullmatch(email)
+        return bool(m) and self.trusted_login(m.group(1))
+
+    @staticmethod
+    def credit_login(login: str | None, email: str) -> str | None:
+        """The GitHub login a credit names: the account GitHub links the
+        commit to, or the login in a GitHub noreply address."""
+        if login:
+            return login.lower()
+        m = NOREPLY.fullmatch((email or "").strip().lower())
+        return m.group(1) if m else None
 
     def rule_checks(self, repo: str) -> list[str]:
         """The checks GitHub's rules on the base branch must require before
