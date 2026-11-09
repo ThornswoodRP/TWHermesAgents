@@ -35,6 +35,7 @@ class Proc:
     def __init__(self):
         self.stdout = io.StringIO('{"type": "system", "session_id": "20261102_000000_abcdef"}\n'
                                   '{"type": "result", "exit_code": 0}\n')
+        self.stdin = io.StringIO()
 
     def wait(self, timeout=None):
         return 0

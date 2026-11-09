@@ -57,6 +57,7 @@ For every chat:
 - **History** pages back to a chat's first message, across Hermes's compression, held in the core's memory only, never in its store or a log.
 - **Markdown** is drawn node by node as text: nothing in a message is read as HTML, and only `http` and `https` links are links.
 - **Reactions** are Hermes's own, one per person on a message, set through Hermes's own session store.
+- **Questions, approvals and Stop**, in his own Hermes, as Desktop has them. Each message runs as a turn he is there to answer (`room_send.py attended-chat`), not a one-shot, so when Hermes asks a question (its clarify tool) or asks to run a flagged command, the question or the command shows under the live line with Hermes's own choices. A tap, or his own words for a question, answers it; Stop ends the turn. The turn makes Hermes's own `clarify.respond`, `approval.respond` or `session.interrupt` call, the ones `hermes chat`'s /answer, /approve and /stop make. Each needs the passkey sign-in a message needs, and the core keeps the order in memory only, with none of its words in the event chain (`own_turns.py`).
 - **Files and photos** go to his own Hermes only: up to 10 a message and 20 MB each, handed only to that gateway's connector, checked by size and SHA-256, and served back only as downloads.
 - **Rename, hide and delete** of his own chats use Hermes's own calls, behind `session_manage_write`. A delete needs a fresh passkey. His own Bot Chat is never renamed, hidden or deleted.
 
