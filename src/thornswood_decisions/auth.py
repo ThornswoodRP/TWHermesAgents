@@ -239,6 +239,12 @@ class Auth:
                        (workspace_id, method, self.s.now()))
             self.s.event(db, workspace_id, "sign_in.failed", method, "unknown", detail or {})
 
+    def _noted(self, workspace_id: str, method: str, detail: dict) -> None:
+        """A sign-in that failed before any key was checked: recorded for `tw-decide passkeys`, but not a
+        wrong try, so it does not count toward the 15-minute lock."""
+        with self.s.tx() as db:
+            self.s.event(db, workspace_id, "sign_in.failed", method, "unknown", detail)
+
     # ── recovery codes ────────────────────────────────────────────────────
 
     def new_recovery_codes(self, principal: Principal) -> list[str]:

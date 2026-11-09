@@ -193,6 +193,40 @@ class PasskeyCeremonies(unittest.TestCase):
         self.assertEqual(out["refused"][0]["credential"], offered["rawId"][:16])
         self.assertNotEqual(out["refused"][0]["credential"], key["credential"])
 
+    def test_a_sign_in_the_phone_never_answered_is_recorded_and_not_counted(self):
+        from thornswood_decisions import cli
+        self.enrol()
+        name = self.w.core.s.db.execute("SELECT name FROM workspaces WHERE id = ?", (self.w.ws,)).fetchone()["name"]
+        args = type("A", (), {"workspace": name, "last": 5})()
+        unanswered = self.pk.sign_in_options(self.w.ws)
+        [req] = cli.cmd_passkeys(self.w.core.s, args)["sign_in_requests"]
+        self.assertIsNone(req["used_at"])
+        self.pk.browser_failed(self.w.ws, {"challenge": unanswered["challenge"], "name": "NotAllowedError",
+                                           "message": "No passkeys available"})
+        out = cli.cmd_passkeys(self.w.core.s, args)
+        self.assertEqual(out["refused"][0], {**out["refused"][0], "why": "browser", "error": "NotAllowedError",
+                                             "message": "No passkeys available"})
+        self.assertIsNotNone(out["sign_in_requests"][0]["used_at"])
+        # Each request is noted once, and a note is no wrong try: the lock never closes on them.
+        with self.assertRaises(CoreError) as cm:
+            self.pk.browser_failed(self.w.ws, {"challenge": unanswered["challenge"], "name": "NotAllowedError"})
+        self.assertEqual(cm.exception.reason, "bad_challenge")
+        for _ in range(8):
+            self.pk.browser_failed(self.w.ws, {"challenge": self.pk.sign_in_options(self.w.ws)["challenge"]})
+        self.pk.sign_in(self.w.ws, self.key.get(self.pk.sign_in_options(self.w.ws)))
+
+    def test_a_used_sign_in_request_is_recorded_with_why(self):
+        from thornswood_decisions import cli
+        self.enrol()
+        answer = self.key.get(self.pk.sign_in_options(self.w.ws))
+        self.pk.sign_in(self.w.ws, answer)
+        with self.assertRaises(CoreError) as cm:
+            self.pk.sign_in(self.w.ws, answer)
+        self.assertEqual(cm.exception.reason, "bad_challenge")
+        name = self.w.core.s.db.execute("SELECT name FROM workspaces WHERE id = ?", (self.w.ws,)).fetchone()["name"]
+        out = cli.cmd_passkeys(self.w.core.s, type("A", (), {"workspace": name, "last": 5})())
+        self.assertEqual(out["refused"][0]["why"], "request_used")
+
     def test_revoking_the_device_stops_its_passkey(self):
         self.enrol()
         self.w.core.auth.revoke_device(self.p, self.dev)
@@ -526,7 +560,7 @@ class AppRoutes(unittest.TestCase):
 
     def test_passkey_routes_need_the_exact_origin(self):
         s = Served(self)
-        for path in ("/passkeys/sign-in/options", "/passkeys/sign-in", "/recovery-sign-in"):
+        for path in ("/passkeys/sign-in/options", "/passkeys/sign-in", "/passkeys/sign-in/failed", "/recovery-sign-in"):
             status, _, body = s.call("POST", path, headers={"Origin": "https://evil.example"})
             self.assertEqual((status, body["error"]), (403, "origin"), path)
             status, _, body = s.call("POST", path)

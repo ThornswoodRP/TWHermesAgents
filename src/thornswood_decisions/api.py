@@ -289,6 +289,10 @@ class Api:
             if key is not None and not isinstance(key, str):
                 raise CoreError(400, "bad_field", "phone_key is a credential id")
             return 200, self._passkeys(core).sign_in_options(self.ws, key)
+        if method == "POST" and route == ["passkeys", "sign-in", "failed"]:
+            self._exact_origin(headers)
+            self._passkeys(core).browser_failed(self.ws, data)
+            return 200, {}
         if method == "POST" and route == ["passkeys", "sign-in"]:
             self._exact_origin(headers)
             keys = self._passkeys(core)

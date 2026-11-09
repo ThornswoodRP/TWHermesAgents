@@ -142,7 +142,8 @@ class Passkeys:
         row = db.execute("SELECT * FROM webauthn_challenges WHERE challenge_hash = ? AND workspace_id = ? "
                          "AND purpose = ?", (sha256_hex(raw), workspace_id, purpose)).fetchone()
         if not row or row["used_at"] or self.s.clock() >= parse(row["expires_at"]):
-            raise CoreError(401, "bad_challenge", "that passkey request is used or expired; start again")
+            why = "unknown" if not row else "used" if row["used_at"] else "expired"
+            raise CoreError(401, "bad_challenge", "that passkey request is used or expired; start again", why=why)
         if purpose == "register" and row["session_hash"] != session_hash:
             raise CoreError(401, "bad_challenge", "that passkey request belongs to another session")
         db.execute("UPDATE webauthn_challenges SET used_at = ? WHERE id = ?", (self.s.now(), row["id"]))
@@ -287,9 +288,16 @@ class Passkeys:
         client_data = _field(credential, "response", "clientDataJSON")
         cred_id = (credential.get("rawId") or credential.get("id")) if isinstance(credential, dict) else None
         if not isinstance(cred_id, str):
+            self.auth._noted(workspace_id, "passkey", {"why": "not_an_answer"})
             raise CoreError(400, "bad_credential", "that is not a passkey answer")
-        with self.s.tx() as db:
-            challenge = self._take_challenge(db, workspace_id, "sign_in", client_data, None)
+        try:
+            with self.s.tx() as db:
+                challenge = self._take_challenge(db, workspace_id, "sign_in", client_data, None)
+        except CoreError as exc:
+            # 9 Nov: a refusal before the key is looked at left no record, so a failed sign-in could not
+            # be told from one that never reached the core. Noted, not counted as a wrong key.
+            self.auth._noted(workspace_id, "passkey", {"why": f"request_{exc.detail.get('why', exc.reason)}"})
+            raise
         row = self.s.db.execute(
             "SELECT k.*, d.revoked_at AS device_revoked FROM passkeys k LEFT JOIN devices d ON d.id = k.device_id "
             "WHERE k.credential_id = ? AND k.workspace_id = ?", (b64url(unb64url(cred_id)), workspace_id)).fetchone()
@@ -322,6 +330,28 @@ class Passkeys:
             self.s.event(db, workspace_id, "passkey.used", row["id"], "patrick", {"device": row["device_id"]})
             session = self.auth.issue_session(workspace_id, method="passkey", device_id=row["device_id"], db=db)
         return row["device_id"], session
+
+    def browser_failed(self, workspace_id: str, data: dict) -> None:
+        """The phone's own word that a sign-in this core asked for never came back: the browser or the passkey
+        app ended it (no key it holds was asked for, cancelled, timed out). 9 Nov: such a failure reached the
+        core as nothing at all, so "my key failed" could not be told apart from a refusal. It names the
+        request by its challenge, which it uses up, so each request is noted at most once; it is noted, not
+        counted as a wrong key, and no key is named because none was given."""
+        if not isinstance(data, dict) or not isinstance(data.get("challenge"), str):
+            raise CoreError(400, "bad_field", "challenge is the sign-in request's challenge")
+        try:
+            raw = unb64url(data["challenge"])
+        except ValueError:
+            raise CoreError(400, "bad_field", "challenge is the sign-in request's challenge") from None
+        name = str(data.get("name", ""))[:40]
+        message = str(data.get("message", ""))[:160]
+        with self.s.tx() as db:
+            row = db.execute("SELECT id FROM webauthn_challenges WHERE challenge_hash = ? AND workspace_id = ? "
+                             "AND purpose = 'sign_in' AND used_at IS NULL", (sha256_hex(raw), workspace_id)).fetchone()
+            if not row:
+                raise CoreError(401, "bad_challenge", "that passkey request is used or expired")
+            db.execute("UPDATE webauthn_challenges SET used_at = ? WHERE id = ?", (self.s.now(), row["id"]))
+        self.auth._noted(workspace_id, "passkey", {"why": "browser", "error": name, "message": message})
 
     def accepted(self, workspace_id: str, device_id: str) -> dict:
         """The passkeys the core takes now, for the app to tell his passkey app after a sign-in (WebAuthn
