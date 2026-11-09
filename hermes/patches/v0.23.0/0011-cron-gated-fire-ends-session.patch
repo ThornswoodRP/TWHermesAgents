@@ -1,0 +1,94 @@
+From eb11c6c535b06f5516242b1c143e682a19a21adf Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 07:09:03 +0000
+Subject: [PATCH] fix(cron): a gated fire ends the session its owner admitted
+
+On the canonical path the owner admits the fire's session row
+(gateway/session_cron._create) before run_job runs its pre-agent gates.
+Only _finalize_cron_session ends a cron row, and it runs after an agent
+turn. A fire stopped by a gate (wakeAgent: false, a monitor gate, an
+empty payload) runs no agent, so its row stayed open with no messages
+until the next start reaped it as startup_orphan_reap. A job whose
+script gates it every five minutes left one empty session per fire.
+
+run_job now ends that row when the gate returns, through the owner's
+already open store, so nothing new is opened; the gate's result is a
+completed run, so it is booked as cron_complete. A fire with no owner
+(a no_agent job) had no row admitted and ends nothing.
+---
+ cron/scheduler.py                      | 19 +++++++++++++++++++
+ tests/cron/test_sessiondb_init_hang.py | 24 ++++++++++++++++++++++++
+ 2 files changed, 43 insertions(+)
+
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index ff780ef6..5aa650d5 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -2539,6 +2539,23 @@ class _FireAudit:
+ 
+ 
+ 
++def _end_gated_owner_session(owner_execution, job_id: str) -> None:
++    """End the session row the owner admitted for a fire that a pre-agent gate stopped.
++
++    The canonical path admits the fire's session (``gateway/session_cron._create``) before
++    ``run_job`` runs the gates, and only ``_finalize_cron_session`` ends a cron row, after an
++    agent turn. A gated fire (``wakeAgent: false``, monitor gate, empty payload) runs no agent, so
++    its row stayed open with no messages until the next start reaped it as ``startup_orphan_reap``:
++    a five-minute wake-gate job left one orphan per fire. The owner's store is already open, so
++    this opens nothing (#96290 still holds); the gate's result is a completed run, so it is booked
++    the way a silent run is."""
++    authority, session_id = owner_execution[0], owner_execution[1]
++    try:
++        _BoundedCronSessionDB(authority.db, job_id).end_session(session_id, "cron_complete")
++    except (Exception, KeyboardInterrupt) as e:
++        logger.debug("Job '%s': could not end the gated fire's session %s: %s", job_id, session_id, e)
++
++
+ def run_job(
+     job: dict, *, defer_agent_teardown: Optional[list] = None, extra_prompt: Optional[str] = None,
+     cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
+@@ -2571,6 +2588,8 @@ def run_job(
+ 
+     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
+     if early is not None:
++        if owner_execution is not None:
++            _end_gated_owner_session(owner_execution, job_id)
+         return early
+     from run_agent import AIAgent
+ 
+diff --git a/tests/cron/test_sessiondb_init_hang.py b/tests/cron/test_sessiondb_init_hang.py
+index 64a409f5..3830a3f0 100644
+--- a/tests/cron/test_sessiondb_init_hang.py
++++ b/tests/cron/test_sessiondb_init_hang.py
+@@ -164,3 +164,27 @@ def test_wake_gate_false_never_opens_session_db(owner_run):
+     assert success and error is None
+     acquire.assert_not_called()
+     agent_cls.assert_not_called()
++
++
++def test_wake_gate_false_ends_the_admitted_session(owner_run):
++    """The owner admitted the fire's session before the gate ran; a gated fire ends it, or the
++    next start reaps it as an orphan with no messages."""
++    owner, job, execution_id, agent_cls = owner_run
++    job["script"] = "gate.py"
++    with patch("hermes_state_registry.acquire") as acquire, \
++         patch("cron.scheduler._run_job_script_with_claim_heartbeat", return_value=(True, '{"wakeAgent": false}')):
++        success, _, _, error = scheduler.run_job(job, execution_id=execution_id)
++    assert success and error is None
++    acquire.assert_not_called()
++    agent_cls.assert_not_called()
++    owner.db.end_session.assert_called_once_with("owner-session", "cron_complete")
++
++
++def test_a_gated_fire_outside_an_owner_ends_nothing(tmp_path, monkeypatch):
++    """A no_agent job runs outside the canonical path, so no owner admitted a session for it."""
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    with patch("cron.scheduler._end_gated_owner_session") as end, \
++         patch("cron.scheduler._prepare_job_prompt", return_value=((True, "doc", "[SILENT]", None), None)), \
++         patch.object(scheduler, "_reload_dotenv_and_publish_delivery_target", lambda *_: None):
++        scheduler.run_job({"id": "legacy", "name": "t", "prompt": "p", "no_agent": True}, execution_id="x")
++    end.assert_not_called()
+-- 
+2.43.0
+
