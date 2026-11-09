@@ -301,10 +301,12 @@ class OwedSweeps(unittest.TestCase):
     20 tickets this hour" and dropped. A sweep the queue turns away is owed in
     tw-policy; a sweep that runs to its end pays it."""
 
-    def full(self, f):
-        for i in range(20):
-            t = f.policy.admit("hermes", {"bot": "rift", "task": f"t{i}"})["ticket"]
-            f.policy.finish("hermes", {"bot": "rift", "ticket": t})
+    def full(self, f, *bots):
+        """Spend each Bot's hour of turns (50 per Bot, Patrick, 9 Nov 2026); Bramble's by default."""
+        for bot in bots or ("bramble",):
+            for i in range(50):
+                t = f.policy.admit("hermes", {"bot": bot, "task": f"t{i}"})["ticket"]
+                f.policy.finish("hermes", {"bot": bot, "ticket": t})
 
     def owed(self, f):
         return f.policy.wake_due("hermes", {"bot": "bramble"})
@@ -320,7 +322,7 @@ class OwedSweeps(unittest.TestCase):
         g.after_turn(session_id="w1")
         owed = self.owed(f)
         self.assertTrue(owed["owed"])
-        self.assertIn("20 an hour", owed["reason"])
+        self.assertIn("at most 50 an hour", owed["reason"])
 
     def test_a_wake_that_waited_out_its_time_is_owed_and_gives_its_ticket_back(self):
         f = Fleet()
@@ -411,7 +413,7 @@ class OwedSweeps(unittest.TestCase):
 
     def test_only_brambles_wakes_are_owed(self):
         f = Fleet()
-        self.full(f)
+        self.full(f, "bramble", "rift")
         for bot, platform in (("rift", "webhook"), ("bramble", "desktop"), ("bramble", "discord")):
             out = gate(f, bot).before_llm(session_id=f"{bot}-{platform}", platform=platform)
             self.assertIn("nothing starts it again", out["context"], (bot, platform))

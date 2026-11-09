@@ -631,7 +631,15 @@ admission:
   mutating_ops: 1
   room_round_turns: 6
   queue_max_waiting: 100
-  queue_new_per_hour: 20
+  # The burst guard (attack test 19): how many model turns one Bot may start
+  # in an hour. Patrick, 9 Nov 2026, on q-fleet-hour-cap: "let's do 50 turns
+  # per bot per hour and test runs don't count". Until then it was 20 new
+  # tickets an hour for the whole fleet, checks included; from 6 to 10 AM
+  # that day it was full every hour (Bramble's short sweeps took 7 to 12,
+  # checks 2 to 9), and 62 calls were refused, so the workers stalled. Per
+  # Bot, one Bot's busy hour no longer stops the others, and a looping Bot is
+  # still stopped. Checks have their own slots (sandbox_jobs) and the line.
+  queue_turns_per_bot_hour: 50
   admit:
     mem_available_gb: 3.0
     sandbox_mem_available_gb: 4.0

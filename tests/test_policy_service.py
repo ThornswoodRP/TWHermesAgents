@@ -166,13 +166,26 @@ class Queue(unittest.TestCase):
             s.admit("hermes", {"bot": "rift", "task": "one too many"})
         self.assertIn("at most 100", str(e.exception))
 
-    def test_19_a_burst_of_21_in_an_hour_is_refused(self):
+    def test_19_a_burst_of_51_turns_from_one_bot_in_an_hour_is_refused(self):
+        # Patrick, 9 Nov 2026: 50 turns per Bot per hour, and checks don't count.
         s = service()
-        for i in range(20):
-            s.admit("hermes", {"bot": "rift", "task": f"t{i}"})
+        for i in range(50):
+            t = s.admit("hermes", {"bot": "rift", "task": f"t{i}"})["ticket"]
+            s.finish("hermes", {"bot": "rift", "ticket": t})
         with self.assertRaises(Refused) as e:
-            s.admit("hermes", {"bot": "rift", "task": "t21"})
-        self.assertIn("20 an hour", str(e.exception))
+            s.admit("hermes", {"bot": "rift", "task": "t51"})
+        self.assertIn("rift started 50 turns in the last hour; each Bot starts at most 50 an hour", str(e.exception))
+        self.assertEqual(s.admit("hermes", {"bot": "wisp", "task": "w"})["state"], "admitted",
+                         "one Bot's busy hour does not stop another")
+
+    def test_19_checks_do_not_count_toward_a_bots_hour(self):
+        data = policy().data
+        s = service(data={**data, "admission": {**data["admission"], "stage": "after"}})
+        s.limits_record("root", {"ok": True})
+        for i in range(60):
+            t = s.admit("hermes", {"bot": "rift", "kind": "sandbox", "task": f"c{i}"})["ticket"]
+            s.finish("hermes", {"bot": "rift", "ticket": t})
+        self.assertEqual(s.admit("hermes", {"bot": "rift", "task": "turn"})["state"], "admitted")
 
     def test_19_memory_below_the_floor_waits(self):
         low = lambda: HostState(1.2, 0, 0, 0, 0.1, 80, 80)
@@ -272,10 +285,10 @@ class OwedWakes(unittest.TestCase):
     dropped, so Ops #205 and #206 sat green and unswept. A turned-away wake is
     owed here instead, and the owed-wake check asks when it can run."""
 
-    def burst(self, s, n=20):
+    def burst(self, s, n=50, bot="bramble"):
         for i in range(n):
-            t = s.admit("hermes", {"bot": "rift", "task": f"t{i}"})["ticket"]
-            s.finish("hermes", {"bot": "rift", "ticket": t})
+            t = s.admit("hermes", {"bot": bot, "task": f"t{i}"})["ticket"]
+            s.finish("hermes", {"bot": bot, "ticket": t})
 
     def test_nothing_is_owed_at_first(self):
         self.assertEqual(service().wake_due("hermes", {"bot": "bramble"}), {"owed": False, "due": False})
@@ -286,12 +299,12 @@ class OwedWakes(unittest.TestCase):
         self.burst(s)
         with self.assertRaises(Refused):
             s.admit("hermes", {"bot": "bramble", "task": "wake", "source": "webhook"})
-        s.owe_wake("hermes", {"bot": "bramble", "reason": "20 tickets were made in the last hour"})
+        s.owe_wake("hermes", {"bot": "bramble", "reason": "bramble started 50 turns in the last hour"})
         s.owe_wake("hermes", {"bot": "bramble", "reason": "again"})
         due = s.wake_due("hermes", {"bot": "bramble"})
         self.assertTrue(due["owed"])
         self.assertFalse(due["due"])
-        self.assertIn("20 an hour", due["why_not"])
+        self.assertIn("at most 50 an hour", due["why_not"])
         self.assertEqual((due["refused"], due["reason"]), (2, "again"))
         clock.advance(hours=1, seconds=1)
         due = s.wake_due("hermes", {"bot": "bramble"})
@@ -358,8 +371,11 @@ class OwedWakes(unittest.TestCase):
         self.assertEqual(got["wisp"], {"running": False, "last": None})
         self.assertEqual(s.ops()["bot_turns"][1], {s.policy.data["brokers"]["users"]["gateway"]})
 
-    def test_the_hours_cap_is_not_raised(self):
-        self.assertEqual(policy().data["admission"]["queue_new_per_hour"], 20)
+    def test_the_hours_cap_is_patricks_50_turns_per_bot(self):
+        # Patrick, 9 Nov 2026, on q-fleet-hour-cap. It changes only with his word.
+        admission = policy().data["admission"]
+        self.assertEqual(admission["queue_turns_per_bot_hour"], 50)
+        self.assertNotIn("queue_new_per_hour", admission)
 
 
 class OneSweepAtATime(unittest.TestCase):

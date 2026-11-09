@@ -598,7 +598,7 @@
     "mutating_ops": 1,
     "room_round_turns": 6,
     "queue_max_waiting": 100,
-    "queue_new_per_hour": 20,
+    "queue_turns_per_bot_hour": 50,
     "admit": {
       "mem_available_gb": 3.0,
       "sandbox_mem_available_gb": 4.0,
