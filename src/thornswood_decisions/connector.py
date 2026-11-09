@@ -120,6 +120,9 @@ HELPER_FAILED = "the connector's Hermes helper"  # how a helper failure's reason
 # and one whose turn was turned away all the same goes back in the queue, unspent, like a gateway that
 # was not ready.
 FLEET = "the fleet queue"
+# ...unless the turn gate kept the message in the core (brokers.TurnGate._keep), which then delivers it
+# once the queue has room: the message is handed over, and it is not put back a second time.
+KEPT = object()
 TURNED_AWAY_DIR = ("local", "thornswood-hermes", "turned-away")
 ROOM_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -220,10 +223,10 @@ class Hermes:
         # (fleet_room). None where the Bots have no queue (brokers.ready off): every turn runs.
         self.fleet = fleet
 
-    def turned_away(self, bot: str, since: float, sid: str | None = None) -> str | None:
+    def turned_away(self, bot: str, since: float, sid: str | None = None):
         """Why the queue turned away the turn that started at `since` (time.time()) in the Bot's Bot Chat,
-        or in session `sid`, from the note the Bots' turn gate left for that session; None when it ran. The
-        note is taken once read."""
+        or in session `sid`, from the note the Bots' turn gate left for that session; None when it ran, and
+        KEPT when the gate kept the message in the core. The note is taken once read."""
         sid = sid or bot_chat_id(self.home / ".hermes", bot)
         if sid is None:
             return None
@@ -236,6 +239,8 @@ class Hermes:
         if at < since:
             return None
         note.unlink(missing_ok=True)
+        if got.get("kept") is True:
+            return KEPT
         return str(got.get("reason") or "no reason given")[:150]
 
     def _helper(self, req: dict, timeout: float) -> dict | None:
@@ -369,6 +374,8 @@ class Hermes:
         if code == 0:
             if self.fleet is not None:
                 why = self.turned_away(bot, started)
+                if why is KEPT:
+                    return "confirmed", "kept by the turn gate; it goes once the queue has room", ""
                 if why is not None:
                     # The turn ran nothing: the message goes back in the queue as it was, and goes again
                     # once the queue has room (check, above).
@@ -454,6 +461,8 @@ class Hermes:
         if code == 0:
             if self.fleet is not None:
                 why = self.turned_away(bot, started, sid)
+                if why is KEPT:
+                    return "confirmed", "kept by the turn gate; it goes once the queue has room", ""
                 if why is not None:
                     return "not_ready", "", f"{FLEET} turned the turn away: {why}"
             return "confirmed", "turn finished", ""

@@ -114,6 +114,49 @@ class Gate(unittest.TestCase):
         b.before_llm(session_id="sess-3", platform="webhook")
         self.assertEqual(sorted(p.name for p in notes.iterdir()), ["sess-2.json"])
 
+    def test_a_bot_chat_message_the_queue_turned_away_is_kept_in_the_decision_core(self):
+        # 9 Nov 2026: a message another Bot sent with message_agent was turned away and gone.
+        import tempfile
+        from pathlib import Path
+        f = Fleet()
+        notes = Path(tempfile.mkdtemp()) / "turned-away"
+        rift = gate(f, "rift")
+        sprocket = TurnGate(ready_policy(), "sprocket", f.ask, wait_seconds=0, sleep=lambda s: None,
+                            turned_away_dir=notes)
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        out = sprocket.before_llm(session_id="sess-bc", task_id="sess-bc", platform="cli",
+                                  user_message="@Sprocket, why does the launcher not start?")
+        self.assertIn("The message is kept", out["context"])
+        kept = [a for b, op, a in f.seen if (b, op) == ("decide", "keep_turned_away")]
+        self.assertEqual(len(kept), 1)
+        self.assertEqual((kept[0]["bot"], kept[0]["text"], kept[0]["session"]),
+                         ("sprocket", "@Sprocket, why does the launcher not start?", "sess-bc"))
+        self.assertIn("running", kept[0]["reason"])
+        self.assertTrue(json.loads((notes / "sess-bc.json").read_text(encoding="utf-8"))["kept"],
+                        "the connector reads that it was kept and puts nothing back itself")
+        # A gateway turn (a room, a webhook) is not a Bot Chat message: nothing is kept.
+        f.seen.clear()
+        out = sprocket.before_llm(session_id="room-1", platform="raft", user_message="hello room")
+        self.assertIn("nothing starts it again", out["context"])
+        self.assertEqual([op for b, op, a in f.seen if b == "decide"], [])
+        self.assertFalse(json.loads((notes / "room-1.json").read_text(encoding="utf-8"))["kept"])
+
+    def test_a_message_the_core_would_not_keep_says_it_needs_asking_again(self):
+        f = Fleet()
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+
+        def ask(broker, op, args):
+            if broker == "decide":
+                raise BrokerRefused("the broker at /run/tw/decide.sock is not answering")
+            return f.ask(broker, op, args)
+        wisp = TurnGate(ready_policy(), "wisp", ask, wait_seconds=0, sleep=lambda s: None)
+        out = wisp.before_llm(session_id="w1", platform="cli", user_message="hi")
+        self.assertIn("nothing starts it again", out["context"])
+
+    def test_keeping_is_not_one_of_the_models_decide_ops(self):
+        self.assertNotIn("keep_turned_away", brokers.DECIDE_OPS)
+
     def test_registering_puts_the_notes_in_the_profile(self):
         from pathlib import Path
         g = brokers.register(Ctx("rift"), ready_policy(), "rift", Fleet().ask)

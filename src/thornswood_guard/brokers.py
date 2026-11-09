@@ -112,6 +112,15 @@ OWED_FILE = ("local", "thornswood-hermes", "owed-wake")
 # turn said it had not started, the connector saw it end and called it
 # sent, and nothing ever ran it).
 TURNED_AWAY_DIR = ("local", "thornswood-hermes", "turned-away")
+# A Bot Chat turn (platform "cli") the queue turns away has its message kept
+# in the decision core (tw-decide keep_turned_away), and the connector delivers
+# it once the queue has room. Before 9 Nov 2026 only the connector's own
+# messages went back in its queue; a message another Bot sent with Hermes's
+# message_agent was gone (Rift's asks to Sprocket on #5650 and Magpie on #5645
+# were turned away under the old fleet hour cap, and nothing sent them again).
+# The note says it was kept, so the connector does not put its own copy back
+# as well: one owner for each message.
+LOCAL_CHAT = ("cli",)
 SESSION_FILE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
@@ -165,7 +174,7 @@ class TurnGate:
             logger.error("a wake was turned away and could not be owed (%s, then %s); the next wake does its sweep",
                          failed, e)
 
-    def _note_turned_away(self, kwargs: dict, why: str) -> None:
+    def _note_turned_away(self, kwargs: dict, why: str, kept: bool = False) -> None:
         """Leave the note TURNED_AWAY_DIR describes for this session. Never raises: the turn still says it
         was not admitted, as before."""
         sid = str(kwargs.get("session_id") or "")
@@ -174,7 +183,7 @@ class TurnGate:
         try:
             self.turned_away_dir.mkdir(parents=True, exist_ok=True)
             tmp = self.turned_away_dir / f".{sid}.{os.getpid()}.tmp"
-            tmp.write_text(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "reason": why[:300]}),
+            tmp.write_text(json.dumps({"at": datetime.now(timezone.utc).isoformat(), "reason": why[:300], "kept": kept}),
                            encoding="utf-8")
             os.replace(tmp, self.turned_away_dir / f"{sid}.json")
         except OSError as e:
@@ -211,8 +220,9 @@ class TurnGate:
                     if sweep:
                         self._owe(why)
                         return {"context": self._owed(why)}
-                    self._note_turned_away(kwargs, why)
-                    return {"context": self._queued(why)}
+                    kept = self._keep(kwargs, why)
+                    self._note_turned_away(kwargs, why, kept)
+                    return {"context": self._kept(why) if kept else self._queued(why)}
                 self.sleep(pause)
                 pause = min(pause * 2, 5.0)
         except BrokerRefused as e:
@@ -221,8 +231,29 @@ class TurnGate:
             if sweep:
                 self._owe(str(e))
                 return {"context": self._owed(str(e))}
-            self._note_turned_away(kwargs, str(e))
-            return {"context": self._queued(str(e))}
+            kept = self._keep(kwargs, str(e))
+            self._note_turned_away(kwargs, str(e), kept)
+            return {"context": self._kept(str(e)) if kept else self._queued(str(e))}
+
+    def _keep(self, kwargs: dict, reason: str) -> bool:
+        """Keep a turned-away Bot Chat message in the decision core. Never raises: False when it is not one,
+        or could not be kept, and the turn says it needs asking again, as before."""
+        text = str(kwargs.get("user_message") or "").strip()
+        if str(kwargs.get("platform") or "") not in LOCAL_CHAT or not text:
+            return False
+        try:
+            self.ask("decide", "keep_turned_away", {"bot": self.bot, "text": text, "reason": reason,
+                                                     "session": self._key(kwargs)})
+            return True
+        except BrokerRefused as e:
+            logger.error("a Bot Chat message was turned away and could not be kept (%s)", e)
+            return False
+
+    def _kept(self, reason: str) -> str:
+        return ("[Thornswood queue] This turn was not admitted by the fleet queue: " + reason +
+                ". Every tool is refused for this turn. The message is kept, and the decision core delivers it to "
+                "you once the queue has room, so nobody needs to send it again. Reply in one short line that it "
+                "did not start yet, why, and that it is kept and comes to you once the fleet is free, then stop.")
 
     def _queued(self, reason: str) -> str:
         return ("[Thornswood queue] This turn was not admitted by the fleet queue: " + reason +

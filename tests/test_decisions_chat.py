@@ -349,6 +349,31 @@ class ConnectorSide(unittest.TestCase):
         self.assertEqual(self.chat.view(self.w.patrick(), "rift")["mine"][0]["waits"],
                          "the fleet queue has no room for a turn of rift's: x")
 
+    def test_a_message_the_turn_gate_kept_goes_to_that_bot_once_the_connector_claims(self):
+        # 9 Nov 2026: Rift's asks to Sprocket (#5650) and Magpie (#5645) were turned away by the fleet
+        # queue, each answered that it had not started, and nothing sent them again.
+        from thornswood_decisions.core import KEPT_HEAD
+        flags(self.w, "connector_effects")
+        sprocket = self.w.core.auth.ensure_service(self.w.ws, "specialist", "sprocket")
+        ask = "@Sprocket, why does the launcher not start after #5650?"
+        self.assertEqual(self.w.core.keep_turned_away(sprocket, ask, "1 turn already running", "sess-bc"),
+                         {"kept": True})
+        item = self.chat.claim(self.w.ws, self.tok)["items"][0]
+        self.assertEqual((item["kind"], item["target"]), ("bot.message", "sprocket"))
+        self.assertTrue(item["text"].startswith(KEPT_HEAD), item["text"])
+        self.assertIn("1 turn already running", item["text"])
+        self.assertIn("message_agent", item["text"])
+        self.assertTrue(item["text"].endswith("\n\n" + ask))
+        # Turned away again when it is delivered: kept again as it first was, not wrapped twice.
+        self.chat.result(self.w.ws, self.tok, item["id"], "confirmed", "kept by the turn gate")
+        self.w.core.keep_turned_away(sprocket, item["text"], "the Bots are being reloaded", "sess-bc")
+        again = self.chat.claim(self.w.ws, self.tok)["items"][0]
+        self.assertEqual(again["text"].count(KEPT_HEAD), 1)
+        self.assertTrue(again["text"].endswith("\n\n" + ask))
+        self.assertIn("the Bots are being reloaded", again["text"])
+        with self.assertRaises(CoreError):
+            self.w.core.keep_turned_away(sprocket, "  ", "x", "sess-bc")
+
     def test_migration_16_sends_each_named_answer_once_more_and_nothing_else(self):
         self.assertEqual(MIGRATIONS[15], _replay(REPLAY_16))
         self.assertEqual(len(REPLAY_16), 6)
