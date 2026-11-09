@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.parse
@@ -57,6 +58,9 @@ PROMPT = (
 # The Grok lanes work 11 PM to 6 AM Mountain; their comments wait for the
 # first sweep after this hour.
 MORNING_HOUR = 6
+# New work starts only in these hours, Mountain (Patrick, 9 Nov 2026); the
+# decision core holds briefs to the same hours (core.WORK_HOURS).
+WORK_HOURS = (6, 23)
 MOUNTAIN = "America/Denver"
 # How often the free worker wake reads the claims and the board.
 IDLE_EVERY = 3600.0
@@ -110,10 +114,15 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         why_no_morning = f"the {MOUNTAIN} time zone could not be read ({type(e).__name__})"
     today = local.date().isoformat() if local else None
     morning = local is not None and local.hour >= MORNING_HOUR and state.get("morning") != today
-    idle_due = now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
+    working = local is not None and WORK_HOURS[0] <= local.hour < WORK_HOURS[1]
+    idle_due = working and now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
     if not morning and not idle_due:
-        return ["the morning sweep has run and the free worker check is not due", SLEEP] if local else \
-            [why_no_morning, SLEEP]
+        if local is None:
+            return [why_no_morning, SLEEP]
+        if not working:
+            return [f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no new work starts from 11 PM "
+                    "to 6 AM, while the Grok lanes audit", SLEEP]
+        return ["the morning sweep has run and the free worker check is not due", SLEEP]
     try:
         room = ask("policy", "turn_room", {"bot": bot, "sweep": True})
     except BrokerRefused as e:
@@ -130,10 +139,12 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     workers = {name: b["claim_label"] for name, b in policy["bots"].items() if b.get("role") == "worker"}
     repo = policy["repos"]["app"]
     try:
-        free = [w for w in workers if not _count(bot, ask, repo, f'label:"{workers[w]}"')
-                and not (w == "wisp" and _count(bot, ask, policy["repos"]["fork"], f'label:"{workers[w]}"'))]
+        prs = _worked(bot, ask, repo)
+        free = [w for w in workers if not _active(bot, ask, repo, w, workers[w], prs)
+                and not (w == "wisp" and _active(bot, ask, policy["repos"]["fork"], w, workers[w],
+                                                 _worked(bot, ask, policy["repos"]["fork"])))]
         if not free:
-            return ["every worker holds a claimed issue", SLEEP]
+            return ["every worker is on an active issue", SLEEP]
         # Open, unclaimed, and nobody's whose work is hands off: the board's
         # eligible rule (bramble-duties, section 6) as one search can say it.
         # Bramble's own pick reads the board's Order and Status.
@@ -153,6 +164,31 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     except BrokerRefused as e:
         return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
     return [f"{', '.join(free)} hold no claimed issue, but no open unclaimed issue is theirs", SLEEP]
+
+
+def _worked(bot: str, ask: Caller, repo: str) -> set[tuple[str, int]]:
+    """(worker, issue) for each of the repo's 100 most recently updated pull
+    requests that is open or merged, from its <bot>/<issue>-<what> branch."""
+    pulls = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/repos/{repo}/pulls?state=all&sort=updated"
+                                 "&direction=desc&per_page=100"}) or {}).get("body") or []
+    out = set()
+    for p in pulls if isinstance(pulls, list) else []:
+        m = re.match(r"^([a-z]+)/(\d+)-", ((p.get("head") or {}).get("ref") or ""))
+        if m and (p.get("state") == "open" or p.get("merged_at")):
+            out.add((m.group(1), int(m.group(2))))
+    return out
+
+
+def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: set[tuple[str, int]]) -> bool:
+    """Whether the worker holds a claimed issue in repo that is not waiting.
+    Waiting is never a reason to sit idle (Patrick, 9 Nov 2026): an issue
+    with an open or merged pull request from the worker's branch waits on a
+    check, a review, a merge or a release. One waiting on Patrick or on an
+    update looks active here; Bramble's sweep tells them apart."""
+    q = urllib.parse.quote(f'repo:{repo} is:issue is:open label:"{label}"')
+    body = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/search/issues?q={q}&per_page=50"})
+            or {}).get("body") or {}
+    return any((worker, int(i.get("number") or 0)) not in prs for i in body.get("items") or [])
 
 
 def _count(bot: str, ask: Caller, repo: str, terms: str) -> int:
