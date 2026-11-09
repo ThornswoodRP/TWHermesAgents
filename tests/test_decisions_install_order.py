@@ -41,7 +41,7 @@ def worker_units() -> set[str]:
 
 
 def cli_commands() -> set[str]:
-    src = (REPO / "thornswood_decisions" / "cli.py").read_text(encoding="utf-8")
+    src = (REPO / "src" / "thornswood_decisions" / "cli.py").read_text(encoding="utf-8")
     return set(re.findall(r'sub\.add_parser\("([a-z-]+)"', src))
 
 

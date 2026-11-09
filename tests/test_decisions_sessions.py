@@ -30,7 +30,7 @@ from test_decisions_own import READY, SID, FakeCore, Gateways, on, passkey, stat
 from thornswood_decisions import own_connector
 from thornswood_decisions.store import CoreError
 
-HELPER = Path(__file__).resolve().parent.parent / "thornswood_decisions" / "room_send.py"
+HELPER = Path(__file__).resolve().parent.parent / "src" / "thornswood_decisions" / "room_send.py"
 
 
 class Requests(unittest.TestCase):

@@ -4,7 +4,7 @@
 # and makes the gateway's own helper calls, so it gets one route (the Max
 # login every Bot has first, no fallback), the helpers on it, and the guard,
 # which refuses every tool in a profile that is not one of the six Bots.
-# Generated from thornswood_guard/policy.yaml by scripts/render_profiles.py;
+# Generated from src/thornswood_guard/policy.yaml by scripts/render_profiles.py;
 # do not edit by hand. Every key not listed here stays as Hermes has it.
 # `model` and `fallback_providers` are replaced whole.
 model:

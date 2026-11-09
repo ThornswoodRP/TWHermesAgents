@@ -466,7 +466,7 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(vm.ran("tw-decide-connector"), [])
 
     def test_the_cores_install_leaves_the_connector_stopped_when_asked(self):
-        text = (follow_main.Path(follow_main.__file__).resolve().parents[1] / "deploy" / "decisions" /
+        text = (follow_main.Path(follow_main.__file__).resolve().parents[2] / "deploy" / "decisions" /
                 "install.sh").read_text(encoding="utf-8")
         self.assertIn("--connector-later) connector_later=1; shift ;;", text)
         step = text[text.index("# 10. The connector."):text.index("# 11.")]

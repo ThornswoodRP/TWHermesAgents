@@ -528,7 +528,7 @@ class AppFiles(unittest.TestCase):
         self.assertEqual((status, h["Location"]), (302, "/m/"))
 
     def test_the_app_never_writes_markup_from_the_core(self):
-        js = (Path(__file__).resolve().parent.parent / "thornswood_decisions" / "app" / "app.js").read_text(encoding="utf-8")
+        js = (Path(__file__).resolve().parent.parent / "src" / "thornswood_decisions" / "app" / "app.js").read_text(encoding="utf-8")
         for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
             self.assertNotIn(bad, js)
         # What this browser's storage keeps, each under its one key: the phone's copy of the chats it

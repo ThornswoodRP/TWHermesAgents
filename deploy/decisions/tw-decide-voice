@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 # The release this file is in: /opt/thornswood-hermes/bin links here through current.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from thornswood_decisions.own_connector import helper_command  # noqa: E402
 
 ap = argparse.ArgumentParser(prog="tw-decide-voice")
@@ -16,6 +16,6 @@ ap.add_argument("--hermes", required=True, help="the hermes command")
 ap.add_argument("--socket", default="/run/tw/decide-voice/voice.sock")
 ap.add_argument("--allow-user", default="tw-decide")
 a = ap.parse_args()
-worker = Path(__file__).resolve().parents[2] / "thornswood_decisions" / "voice_worker.py"
+worker = Path(__file__).resolve().parents[2] / "src" / "thornswood_decisions" / "voice_worker.py"
 cmd = helper_command(a.hermes, worker)
 os.execv(cmd[0], [*cmd, "--socket", a.socket, "--allow-user", a.allow_user])

@@ -50,7 +50,7 @@ print("stopped", flush=True)
 class CleanStop(unittest.TestCase):
     def start(self, drain=5.0):
         sock = Path(tempfile.mkdtemp()) / "b.sock"
-        proc = subprocess.Popen([_sys.executable, "-I", "-c", BROKER, str(REPO), str(sock), str(drain)],
+        proc = subprocess.Popen([_sys.executable, "-I", "-c", BROKER, str(REPO / "src"), str(sock), str(drain)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
         self.assertEqual(proc.stdout.readline().strip(), "ready")
@@ -92,7 +92,7 @@ class CleanStop(unittest.TestCase):
         self.assertIn("unanswered", err)
 
     def test_every_broker_stops_this_way(self):
-        text = (REPO / "thornswood_brokers" / "serve.py").read_text(encoding="utf-8")
+        text = (REPO / "src" / "thornswood_brokers" / "serve.py").read_text(encoding="utf-8")
         self.assertNotIn("server.shutdown(), sys.exit", text)
         self.assertEqual(text.count("  run_until_stopped(server, "), 2, "the socket brokers and tw-proxy")
 
@@ -170,7 +170,7 @@ class TwoSockets(unittest.TestCase):
     def test_each_socket_answers_only_its_own_ops_and_one_stop_stops_both(self):
         from thornswood_brokers import wire
         d = Path(tempfile.mkdtemp())
-        proc = subprocess.Popen([_sys.executable, "-I", "-c", TWO, str(REPO), str(d / "a.sock"), str(d / "b.sock")],
+        proc = subprocess.Popen([_sys.executable, "-I", "-c", TWO, str(REPO / "src"), str(d / "a.sock"), str(d / "b.sock")],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
         self.assertEqual(proc.stdout.readline().strip(), "ready")

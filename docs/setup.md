@@ -96,7 +96,7 @@ The decision core installs from the release the follower put in place. Once it i
    hermes plugins enable thornswood-decisions
    ```
 
-5. On the machine Hermes Desktop runs on, copy `plugins/thornswood-decisions/desktop/plugin.js` into `desktop-plugins/thornswood-decisions/`, then turn it on in **Capabilities**, **Plugins**.
+5. On the machine Hermes Desktop runs on, copy `hermes/plugins/thornswood-decisions/desktop/plugin.js` into `desktop-plugins/thornswood-decisions/`, then turn it on in **Capabilities**, **Plugins**.
 6. Make the first pairing code and type it into the pane within 10 minutes:
 
    ```bash
@@ -142,7 +142,7 @@ It has the VM make the connector's token over ssh straight into his own profile,
 
 ## Checking Hermes against the pinned contract
 
-`thornswood_decisions/contracts.json` records every fact the core relies on in Hermes, each with the file and line it was read from at the pinned Hermes commit. To check the VM's Hermes against it, on the VM:
+`src/thornswood_decisions/contracts.json` records every fact the core relies on in Hermes, each with the file and line it was read from at the pinned Hermes commit. To check the VM's Hermes against it, on the VM:
 
 ```bash
 sudo -u hermes bash -c 'cd /home/hermes/thornswood-hermes/current && python3 -I scripts/check-hermes-contract.py'
