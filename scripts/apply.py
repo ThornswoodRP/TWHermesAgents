@@ -52,7 +52,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -274,8 +274,45 @@ def cron_jobs(hermes: list[str], bot: str) -> tuple[dict[str, list[dict]] | None
             current = {"id": m.group(1), "state": m.group(2)}
         elif current and (m := re.fullmatch(r"    Name:\s*(.+?)\s*", line)):
             jobs.setdefault(m.group(1), []).append(current)
-            current = None
+        elif current and (m := re.fullmatch(r"    Schedule:\s*(.+?)\s*", line)):
+            current["schedule"] = m.group(1)
     return jobs, ""
+
+
+# A one-time job Hermes keeps after it ran: [completed], or a "once at" job
+# whose time is more than a day gone (9 Nov: Bramble still listed five 1 Nov
+# dry runs of the board review, one of them paused, and one that had failed).
+ONCE_AT = re.compile(r"once at (\d{4}-\d{2}-\d{2} \d{2}:\d{2})")
+
+
+def finished(job: dict, now: datetime) -> bool:
+    if job.get("state") == "completed":
+        return True
+    m = ONCE_AT.fullmatch(job.get("schedule", ""))
+    if not m:
+        return False
+    at = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+    return now - at > timedelta(days=1)
+
+
+def remove_finished(hermes: list[str], bot: str, now: datetime, keep: tuple[str, ...] = ()) -> list[str]:
+    """Removes the profile's finished one-time jobs. Returns what failed."""
+    jobs, why = cron_jobs(hermes, bot)
+    if jobs is None:
+        return [f"{bot}: its cron jobs could not be read: {why}"]
+    failed = []
+    for name, found in sorted(jobs.items()):
+        for job in found:
+            if name in keep or not finished(job, now):
+                continue
+            r = subprocess.run([*hermes, "-p", bot, "cron", "remove", job["id"]], capture_output=True, text=True,
+                               timeout=120, env=dict(os.environ, NO_COLOR="1"))
+            if r.returncode != 0:
+                failed.append(f"{bot}: hermes cron remove {job['id']} ({name}) exited {r.returncode}: "
+                              f"{(r.stderr or r.stdout).strip()[-300:]}")
+            else:
+                print(f"{bot}: removed the finished one-time job {job['id']} ({name}, {job.get('schedule', job['state'])})")
+    return failed
 
 
 # Bramble's two weekly reviews (thornswood-guide section 15), at the guide's
@@ -490,6 +527,10 @@ def main() -> int:
 
     owed = install_owed_wake(plans[waker][0], hermes, waker) if waker in plans else []
     reviews = install_reviews(hermes, waker) if waker in plans else []
+    managed = ("tw-owed-wake",) + tuple(j["name"] for j in REVIEW_JOBS)
+    now = datetime.now(timezone.utc)
+    for bot in plans:
+        reviews += remove_finished(hermes, bot, now, keep=managed)
     failures = []
     for bot, (pdir, *_rest) in plans.items():
         failures += self_test(pdir / "plugins" / "thornswood_guard", bot)
@@ -507,7 +548,7 @@ def main() -> int:
         return 1
     if reviews:
         print("\nThe guard was installed and its self-test passed, but Bramble's weekly review jobs were not all "
-              "written, so a Sunday review would not run:")
+              "written, or a finished one-time job could not be removed:")
         for f in reviews:
             print(f"  - {f}")
         return 1
