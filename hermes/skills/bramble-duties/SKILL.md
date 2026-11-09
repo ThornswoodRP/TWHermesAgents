@@ -275,7 +275,13 @@ nobody. On every sweep, after the sections above:
    `limit` 50, and take the first issue, lowest Order first, that is that
    worker's by the guide's section 1 table, is not covered by an open pull
    request (search `is:pr is:open <number>`), and whose decisions are
-   answered. Read it whole first (the guide, section 2).
+   answered. Read it whole first (the guide, section 2). The issue's
+   `area:` labels say whose it is: Launcher to Sprocket; Website, Discord
+   and Voice to Echo; Gamemode, Engine and In-game to Wisp; GitHub & CI,
+   Security, and Operations work on runners or the gate to Magpie; Mods and
+   Legal on mods to Rift. Release, and Operations on the box itself, are
+   yours, not a worker's. `area: triage` or Accessibility: read the issue
+   and pick by the part it names, and put the right `area:` label on it.
 3. Claim it: `tw_git label` add `claimed: <Bot>`. The card goes to In
    Progress by itself.
 4. `tw_decide assign_task` with `task` `<owner>/<repo>#<number>`,
