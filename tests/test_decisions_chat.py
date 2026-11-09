@@ -113,8 +113,10 @@ class ConnectorSide(unittest.TestCase):
     def at_schema(self, n):
         """The store as an older release left it at schema n: the stored version, and no column a later
         migration adds (13: own_messages.reply_to; 14: own_attachments; 15: passkeys.aaguid and phone_key;
-        18: passkeys.fingerprint_try; 19: chat_messages.session_id), so this release's migrations run on it as
+        18: passkeys.fingerprint_try; 19: chat_messages.session_id; 20: chat_alerts), so this release's migrations run on it as
         they would."""
+        if n < 20:
+            self.w.store.db.execute("DROP TABLE chat_alerts")
         if n < 19:
             self.w.store.db.execute("ALTER TABLE chat_messages DROP COLUMN session_id")
         if n < 18:

@@ -53,6 +53,7 @@ import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from . import alerts
 from .auth import Principal
 from .core import DecisionCore
 from .feeds import Feeds, room_events
@@ -671,6 +672,13 @@ class Chat:
                 db.execute("UPDATE chat_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ? "
                            "WHERE id = ?", (state, reason or None, self.s.now(), item_id))
                 self.s.event(db, workspace_id, f"chat.{state}", item_id, "connector", {"ref": ref})
+                # His message's turn ended in a Bot's chat: one line on his phone (alerts.py). A message steered
+                # into a Bot's running turn has no turn of its own, so its end is not his to hear about.
+                if (outcome == "confirmed" and ref == "turn finished"
+                        and row["target"] in self.bots(workspace_id)):
+                    sid = db.execute("SELECT session_id FROM chat_messages WHERE id = ?", (item_id,)).fetchone()[0]
+                    alerts.queue(self.s, db, workspace_id, "answered", item_id, row["target"].capitalize(),
+                                 alerts.bot_path(row["target"], sid))
             return {"id": item_id, "status": state}
         cx = self.s.db.execute("SELECT status FROM connector_outbox WHERE id = ? AND workspace_id = ?",
                                (item_id, workspace_id)).fetchone()

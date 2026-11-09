@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 from datetime import timedelta
 
+from . import alerts
 from .auth import Principal
 from .feeds import Feeds
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
@@ -48,6 +49,11 @@ LAPSED = ("the push service answered 404", "the push service answered 410", "pus
 def payload(row) -> dict:
     return {"v": 1, "event_id": row["id"], "decision_id": row["decision_id"],
             "attention_revision": row["attention_revision"], "path": f"/m/decisions/{row['decision_id']}"}
+
+
+def _table(outbox_id) -> str:
+    """Where a push the worker names lives: a chat alert's id starts pa_ (alerts.queue), a card's px_."""
+    return "chat_alerts" if isinstance(outbox_id, str) and outbox_id.startswith("pa_") else "push_outbox"
 
 
 class Push:
@@ -175,10 +181,11 @@ class Push:
         now = self.s.clock()
         items = []
         with self.s.tx() as db:
-            for r in db.execute("SELECT id, lease_until FROM push_outbox WHERE workspace_id = ? AND status = 'leased'",
-                                (workspace_id,)).fetchall():
-                if r["lease_until"] and now >= parse(r["lease_until"]):
-                    self._finish(db, workspace_id, r["id"], "uncertain", "the worker stopped before it said")
+            for table in ("push_outbox", "chat_alerts"):
+                for r in db.execute(f"SELECT id, lease_until FROM {table} WHERE workspace_id = ? AND status = 'leased'",
+                                    (workspace_id,)).fetchall():
+                    if r["lease_until"] and now >= parse(r["lease_until"]):
+                        self._finish(db, workspace_id, r["id"], "uncertain", "the worker stopped before it said")
             rows = db.execute("SELECT o.*, d.status AS card_status, d.attention_revision AS card_attention "
                               "FROM push_outbox o JOIN decisions d ON d.id = o.decision_id "
                               "WHERE o.workspace_id = ? AND o.status = 'queued' ORDER BY o.created_at, o.rowid",
@@ -205,14 +212,30 @@ class Push:
                 items.append({"id": r["id"], "payload": payload(r), "topic": r["decision_id"][-32:], "ttl": TTL,
                               "subscriptions": [{"id": s["id"], "sealed": base64.b64encode(bytes(s["sealed"])).decode()}
                                                 for s in subs]})
+            # Then the chat alerts (alerts.py): sent the same way, to the same phones.
+            for r in db.execute("SELECT * FROM chat_alerts WHERE workspace_id = ? AND status = 'queued' "
+                                "ORDER BY created_at, rowid", (workspace_id,)).fetchall():
+                if len(items) >= limit:
+                    break
+                if r["lease_until"] and now < parse(r["lease_until"]):
+                    continue  # waiting out a Retry-After
+                if not subs:
+                    self._finish(db, workspace_id, r["id"], "cancelled", "no phone has alerts on")
+                    continue
+                db.execute("UPDATE chat_alerts SET status = 'leased', lease_until = ?, attempts = attempts + 1, "
+                           "updated_at = ? WHERE id = ?", (until, self.s.now(), r["id"]))
+                items.append({"id": r["id"], "payload": alerts.payload(r), "topic": r["id"][-32:], "ttl": TTL,
+                              "subscriptions": [{"id": s["id"], "sealed": base64.b64encode(bytes(s["sealed"])).decode()}
+                                                for s in subs]})
         return {"items": items}
 
     def result(self, workspace_id: str, token: str | None, outbox_id: str, results) -> dict:
         Feeds(self.s).check_token(workspace_id, "push", token)
         if not isinstance(results, list) or not results:
             raise CoreError(400, "bad_results", "results are one entry per subscription")
+        table = _table(outbox_id)
         with self.s.tx() as db:
-            row = db.execute("SELECT status, attempts FROM push_outbox WHERE id = ? AND workspace_id = ?",
+            row = db.execute(f"SELECT status, attempts FROM {table} WHERE id = ? AND workspace_id = ?",
                              (outbox_id, workspace_id)).fetchone()
             if not row:
                 raise CoreError(404, "no_outbox_row", "no such push")
@@ -237,7 +260,7 @@ class Push:
                 state, why = "sent", "push service accepted"
             elif any(c == 0 or c == 429 or c >= 500 for c in codes) and row["attempts"] < MAX_ATTEMPTS:
                 when = (self.s.clock() + timedelta(seconds=retry_after)).isoformat()
-                db.execute("UPDATE push_outbox SET status = 'queued', lease_until = ?, reason = ?, updated_at = ? "
+                db.execute(f"UPDATE {table} SET status = 'queued', lease_until = ?, reason = ?, updated_at = ? "
                            "WHERE id = ?", (when, f"try again after {retry_after}s", self.s.now(), outbox_id))
                 self.s.event(db, workspace_id, "push.retry_later", outbox_id, "push worker", {"codes": codes})
                 return {"id": outbox_id, "status": "queued", "not_before": when}
@@ -247,8 +270,8 @@ class Push:
         return {"id": outbox_id, "status": state}
 
     def _finish(self, db, workspace_id: str, outbox_id: str, state: str, why: str, codes=None) -> None:
-        db.execute("UPDATE push_outbox SET status = ?, lease_until = NULL, reason = ?, updated_at = ? WHERE id = ?",
-                   (state, why, self.s.now(), outbox_id))
+        db.execute(f"UPDATE {_table(outbox_id)} SET status = ?, lease_until = NULL, reason = ?, updated_at = ? "
+                   "WHERE id = ?", (state, why, self.s.now(), outbox_id))
         outcome = {"sent": "confirmed", "dead": "failed", "uncertain": "uncertain"}.get(state)
         if outcome:
             db.execute("INSERT INTO effect_receipts(id, workspace_id, outbox, outbox_id, outcome, detail_json, at) "

@@ -84,7 +84,7 @@ def restore(src: Path | str, db_path: Path | str, *, clock=None, by: str = "oper
     try:
         counts = {}
         with store.tx() as db:
-            for table in ("push_outbox", "connector_outbox", "chat_messages", "own_messages"):
+            for table in ("push_outbox", "chat_alerts", "connector_outbox", "chat_messages", "own_messages"):
                 counts[table] = db.execute(
                     f"UPDATE {table} SET status = 'quarantined', reason = 'restored from a backup', updated_at = ? "
                     f"WHERE status IN {QUARANTINE_FROM}", (store.now(),)).rowcount

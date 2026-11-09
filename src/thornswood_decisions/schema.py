@@ -790,6 +790,26 @@ UPDATE passkeys SET fingerprint_try = 1 WHERE phone_key = 0 AND label LIKE 'Pass
     """
 ALTER TABLE chat_messages ADD COLUMN session_id TEXT CHECK (session_id IS NULL OR length(session_id) BETWEEN 1 AND 128);
 """,
+    # 20: an alert when a turn he started ends, or his own Hermes asks him something (alerts.py; #83 and #42,
+    # 9 Nov). Sent by the push worker like a card's alert, and as bare: who, and the chat to open.
+    f"""
+CREATE TABLE chat_alerts (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  kind TEXT NOT NULL CHECK (kind IN ('answered', 'asks')),
+  ref TEXT NOT NULL CHECK (length(ref) BETWEEN 1 AND 200),
+  who TEXT NOT NULL CHECK (length(who) BETWEEN 1 AND 40),
+  path TEXT NOT NULL CHECK (length(path) BETWEEN 4 AND 300),
+  status TEXT NOT NULL CHECK (status IN {_in(OUTBOX_STATES)}),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT,
+  UNIQUE (workspace_id, kind, ref)
+);
+CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
+""",
 ]
 
 
@@ -958,5 +978,9 @@ ALTER TABLE passkeys DROP COLUMN fingerprint_try;
     19: ([("SELECT count(*) FROM chat_messages WHERE session_id IS NOT NULL AND status IN ('queued', 'leased')",
            "messages on their way into a Bot's session")], """
 ALTER TABLE chat_messages DROP COLUMN session_id;
+""", ""),
+    # An alert still on its way would never reach the phone.
+    20: ([("SELECT count(*) FROM chat_alerts WHERE status IN ('queued', 'leased')", "chat alerts on their way")], """
+DROP TABLE chat_alerts;
 """, ""),
 }

@@ -42,6 +42,7 @@ from . import reactions
 from .feeds import Feeds
 from .own_control import CONTROLS, MAX_WAIT as CONTROL_WAIT, wanted as control_wanted
 from .own_sessions import OwnSessions
+from . import alerts
 from .own_turns import ORDERS, answer_value, clean_asks, clean_order
 from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
 from .schema import OWN_GATEWAYS
@@ -1211,6 +1212,7 @@ class OwnChat:
         self._seen(workspace_id, gw, ready, "" if ready else str(why)[:200], state if isinstance(state, str) else None,
                    tailnet_ip(forwarded_for))
         CONNECTORS.seen(workspace_id, gw, doing if isinstance(doing, dict) else {}, self.s.clock())
+        self._asks_alerts(workspace_id, gw)
         if not self.s.flag(workspace_id, "own_chat_write"):
             raise CoreError(423, "own_chat_off", "nothing goes to your own Hermes while own_chat_write is off")
         items = []
@@ -1267,6 +1269,23 @@ class OwnChat:
                 db.execute("UPDATE own_attachments SET body = NULL WHERE message_id = ?", (r["id"],))
                 self.s.event(db, workspace_id, "own.uncertain", r["id"], "core", {"reason": "lease ran out"})
 
+    def _asks_alerts(self, workspace_id: str, gw: str) -> None:
+        """A question or approval a turn of his opened, as the connector just said: one line on his phone for
+        each, once (alerts.py), opening the chat it waits in."""
+        info = CONNECTORS.get(workspace_id, gw, self.s.clock())
+        waiting = {mid: t["asks"] for mid, t in (info or {}).get("turns", {}).items() if t.get("asks")}
+        if not waiting:
+            return
+        with self.s.tx() as db:
+            for mid, asks in waiting.items():
+                row = db.execute("SELECT session_id, made_session_id FROM own_messages WHERE id = ? AND workspace_id = ? "
+                                 "AND gateway = ?", (mid, workspace_id, gw)).fetchone()
+                if not row:
+                    continue
+                for a in asks:
+                    alerts.queue(self.s, db, workspace_id, "asks", f"{mid}:{a['prompt_id']}", alerts.OWN_WHO[gw],
+                                 alerts.own_path(gw, row["session_id"] or row["made_session_id"]))
+
     def result(self, workspace_id: str, gw: str, token: str | None, item_id: str, outcome: str, ref: str = "",
                reason: str = "", session_id=None) -> dict:
         self._check_token(workspace_id, gw, token)
@@ -1292,6 +1311,10 @@ class OwnChat:
                        "made_session_id = coalesce(made_session_id, ?) WHERE id = ?",
                        (state, reason or None, self.s.now(), made if row["session_id"] is None else None, item_id))
             self.s.event(db, workspace_id, f"own.{state}", item_id, f"own connector ({gw})", {"ref": ref})
+            if outcome == "confirmed":
+                # The turn he started ended: one line on his phone (alerts.py), opening that chat.
+                alerts.queue(self.s, db, workspace_id, "answered", item_id, alerts.OWN_WHO[gw],
+                             alerts.own_path(gw, row["session_id"] or made))
             # The files are in that Hermes's own folders now, or the message did not go: either way the core
             # keeps only their names.
             db.execute("UPDATE own_attachments SET body = NULL WHERE message_id = ?", (item_id,))
