@@ -919,11 +919,17 @@ class GitService:
         eligible keeps only what a Bot may pick (the guide, section 3): Todo,
         no claim label, assigned to nobody or to Patrick, not hands off.
         limit (at most 100) bounds what comes back; the read itself is whole,
-        so the order is the board's."""
+        so the order is the board's. areas keeps only issues with one of
+        those `area:` labels, and not_areas leaves out any with one, so a
+        worker's field is read across the whole board: until 9 Nov 2026 a
+        pick read the first 100 eligible issues of every field, found none
+        of Wisp's (Gamemode, Engine, In-game) there, and Wisp sat idle with
+        181 open in its field."""
         bot = self._bot(args)
         cfg = self.policy.data["board"]
         limit = max(1, min(int(args.get("limit") or 20), 100))
         eligible = bool(args.get("eligible"))
+        areas, not_areas = (self._areas(args, k) for k in ("areas", "not_areas"))
         repo = self.policy.data["repos"]["app"]
         items, after = [], None
         while True:
@@ -955,9 +961,20 @@ class GitService:
                              or set(labels) & lane_labels or row["author"] in people
                              or set(assignees) & people or set(assignees) - {patrick}):
                 continue
+            mine = {l[len("area: "):] for l in labels if l.startswith("area: ")}
+            if (areas and not mine & areas) or mine & not_areas:
+                continue
             out.append(row)
         out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
         return {"open": len(out), "issues": out[:limit]}
+
+    @staticmethod
+    def _areas(args: dict, key: str) -> set[str]:
+        """An areas list: area names as the `area:` labels carry them, without the prefix."""
+        got = args.get(key) or []
+        if isinstance(got, str) or not isinstance(got, list) or not all(isinstance(a, str) and a.strip() for a in got):
+            raise Refused(f"{key} is a list of area names, e.g. [\"Gamemode\", \"Engine\"]")
+        return {a.strip().removeprefix("area: ") for a in got}
 
     @staticmethod
     def _search_in(repo: str, path: str) -> bool:

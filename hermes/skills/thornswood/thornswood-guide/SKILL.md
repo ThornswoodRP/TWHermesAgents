@@ -57,7 +57,7 @@ This comes before every other line here. It is word for word the rule every Clau
 
 ## 3. Picking and claiming (Bramble)
 
-- The do-order is the board's **Order** field. Read it with `tw_git` op `board` (`eligible` true keeps only what may be picked, lowest Order first; `limit` up to 100). `scripts/ops/Read-Board.ps1` is the same read for a person at a PowerShell prompt; no Bot runs it.
+- The do-order is the board's **Order** field. Read it with `tw_git` op `board` (`eligible` true keeps only what may be picked, lowest Order first; `areas` keeps only one field's issues, such as `["Gamemode", "Engine", "In-game"]`, and `not_areas` leaves a field out; `limit` up to 100). `scripts/ops/Read-Board.ps1` is the same read for a person at a PowerShell prompt; no Bot runs it.
 - Eligible: open, unassigned or assigned to Patrick, not Djinn's or Jhinswife's, not claimed by someone working it, not covered by an open PR, its decisions answered.
 - "It needs Patrick's decision", "it needs the box" and "it names a date" are not reasons to skip (Developer-Guide.md "What is not a reason to skip an issue"). Write the decision out in full on the decision page, or do the box part through the gate, or check the date against what really waits on it.
 - Admit only what the queue can take: model quota, the Oracle box's headroom, CI queue depth, and no overlap in files with running work. Start with one task at a time and raise it only from measurements.

@@ -27,8 +27,13 @@ IDLE_EVERY seconds, so a quiet fleet spends GitHub reads and no model turn.
 The same look finds a worker that holds an active issue but has run no
 model turn since the last look (tw-policy's bot_turns): its turn was turned
 away or ended mid-issue, and nothing else wakes it (9 Nov 2026: Sprocket
-from 9:23 AM, Magpie from 11:27 AM). It wakes Bramble once for each such
-stop, to tell the worker to carry on.
+from 9:23 AM, Magpie from 11:27 AM). It wakes Bramble to tell the worker to
+carry on, and says so again at every look while the worker stays stopped:
+the stop is what GitHub and tw-policy show now, not a note that it was said.
+Until 9 Nov 2026 each stop was said once, and kept as told when the line was
+printed; at 12:59 PM the queue turned that turn away (another sweep was
+running), the owed wake it left was paid by a sweep that never saw the line,
+and Sprocket and Magpie stayed stopped with nothing left to say so.
 Both ask tw-policy for room first and are taken only when it has some; what
 each saw last is kept in IDLE_FILE in the profile.
 
@@ -200,6 +205,7 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     """The free worker wake, 6 AM to 11 PM: its lines, the last SLEEP unless a free
     worker has work on the board."""
     state["idle_checked"] = now
+    state.pop("stopped", None)
     _save(path, state)
     workers = {name: b["claim_label"] for name, b in policy["bots"].items() if b.get("role") == "worker"}
     repo = policy["repos"]["app"]
@@ -210,36 +216,44 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
                 and not (w == "wisp" and _active(bot, ask, policy["repos"]["fork"], w, workers[w],
                                                  _worked(bot, ask, policy["repos"]["fork"]), asked))]
         stopped = _stopped(bot, ask, [w for w in workers if w not in free], now)
-        woken = state.get("stopped") or {}
-        new_stops = {w: last for w, last in stopped.items() if w not in woken or woken[w] != last}
-        state["stopped"] = stopped
-        _save(path, state)
-        if new_stops:
-            return [f"{', '.join(sorted(new_stops))} hold an active issue but have run no turn since "
-                    f"{', '.join(w + ' ' + (new_stops[w] or 'never') for w in sorted(new_stops))}: each stopped "
-                    "mid-issue and nothing wakes it by itself; tell each to carry on (bramble-duties, section 6, "
-                    "item 6)."]
+        said = []
+        if stopped:
+            said.append(f"{', '.join(sorted(stopped))} hold an active issue but have run no turn since "
+                        f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each stopped "
+                        "mid-issue and nothing wakes it by itself; tell each to carry on, or take its claim off "
+                        "if it is blocked (bramble-duties, section 6, items 5 and 6). This is said at every "
+                        "hourly look until it runs a turn or its claim comes off.")
         if not free:
-            return ["every worker is on an active issue", SLEEP]
+            return said or ["every worker is on an active issue", SLEEP]
         # Open, unclaimed, and nobody's whose work is hands off: the board's
         # eligible rule (bramble-duties, section 6) as one search can say it.
         # Bramble's own pick reads the board's Order and Status.
         rest = " ".join([*(f'-label:"{b["claim_label"]}"' for b in policy["bots"].values()),
                          *(f'-label:"{l}"' for l in policy["hands_off"]["lanes"]["labels"]),
                          *(f"-author:{p} -assignee:{p}" for p in policy["hands_off"]["people"])])
-        for worker in free:
-            areas = ",".join(f'"area: {a}"' for a in AREAS[worker])
-            if _count(bot, ask, repo, f"label:{areas} {rest}"):
-                return [f"{', '.join(free)} hold no claimed issue, and an open unclaimed issue is in "
-                        f"{worker}'s area: pick for the free workers (bramble-duties, section 6)."]
+        # Every free worker is looked at, not only the first with work: at
+        # 2:00 PM on 9 Nov 2026 the line named Rift's field alone, and Wisp's
+        # 181 issues went unsaid.
+        fed = [w for w in free if _count(bot, ask, repo, f"label:{_field(w)} {rest}")]
+        if fed:
+            return [*said, f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits), and "
+                    f"open unclaimed issues are in the field of {', '.join(fed)}: pick for each of them, reading "
+                    "the board by its area (bramble-duties, section 6)."]
         owned = " ".join(f'-label:"area: {a}"' for mine in AREAS.values() for a in (*mine,)) + " " + \
             " ".join(f'-label:"area: {a}"' for a in BRAMBLES_OWN)
         if _count(bot, ask, repo, f"{owned} {rest}"):
-            return [f"{', '.join(free)} hold no claimed issue, and open unclaimed issues are picked by the part "
-                    "they name: pick for the free workers (bramble-duties, section 6)."]
+            return [*said, f"{', '.join(free)} hold no active issue, and open unclaimed issues are picked by the "
+                    "part they name: pick for the free workers (bramble-duties, section 6)."]
+        if said:
+            return said
     except BrokerRefused as e:
         return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
-    return [f"{', '.join(free)} hold no claimed issue, but no open unclaimed issue is theirs", SLEEP]
+    return [f"{', '.join(free)} hold no active issue, but no open unclaimed issue is theirs", SLEEP]
+
+
+def _field(worker: str) -> str:
+    """The worker's area labels as one search's label: term (any of them)."""
+    return ",".join(f'"area: {a}"' for a in AREAS[worker])
 
 
 def _worked(bot: str, ask: Caller, repo: str) -> set[tuple[str, int]]:
