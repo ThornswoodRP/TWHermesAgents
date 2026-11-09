@@ -395,7 +395,8 @@ TW_FILES_SCHEMA = {
 }
 
 
-DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done"]
+DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
+              "ask_one", "one_answer"]
 
 TW_DECIDE_SCHEMA = {
     "name": "tw_decide",
@@ -405,7 +406,11 @@ TW_DECIDE_SCHEMA = {
         "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
         "(Bramble: give a task to a specialist; with brief, the brief goes to its chat and starts its turn), get_card (the card, its four states and, once "
         "Patrick answered, the answer and what to do with it), my_cards (your waiting cards and those answered in "
-        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card). A card holds what is "
+        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card), ask_one (text: a "
+        "step of the agreed plan that only Patrick's PC can run, such as the launcher, the game or a box step over "
+        "ssh, sent to One's Hermes, which runs it without asking him; its answer comes back to your Bot Chat. Never "
+        "a step that needs a secret, money or something destructive outside the plan: that is a card), one_answer "
+        "(message_id: how your message to One stands, and One's answer once it came). A card holds what is "
         "wrong, what was measured, each option and what it does, a recommendation, and the exact scope of a yes. A Main "
         "card (Bramble, kind main) is his yes for a publish, the cutover or a main run: one link of kind release, ref "
         "<main|publish|cutover>:<owner>/<repo>@<40-character commit>[#<pull request>], an option keyed authorize, "
@@ -434,6 +439,8 @@ TW_DECIDE_SCHEMA = {
             "expected_revision": {"type": "integer"},
             "status": {"type": "string", "enum": ["cancelled", "superseded"]},
             "reason": {"type": "string"}, "superseded_by": {"type": "string"}, "detail": {"type": "string"},
+            "text": {"type": "string", "description": "ask_one: the step for One's Hermes, in full"},
+            "message_id": {"type": "string", "description": "one_answer: the id ask_one gave"},
         },
         "required": ["op"],
         "additionalProperties": False,

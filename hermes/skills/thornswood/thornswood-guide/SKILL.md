@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.5.0
+version: 1.6.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -153,6 +153,7 @@ The shapes are in Developer-Guide.md "Test tasks and known issues". The bot post
 - **If rooms fail the restart and laptop-off night test**, they are turned off and the Bots talk only through Bramble, on the card and the issue.
 - **One to one with Patrick.** Bramble's picks, yes or no questions, approvals and run reports to Patrick go in Bramble's own chat with him (a direct message) or on a card, never in the Workbench room. The room is for what the Bots share with each other.
 - **Patrick's own Hermes.** Patrick has his own Hermes, on One and on the VM (my-hermes). It may read Bramble's claims, PRs and picks for him and pass messages between him and Bramble. What it says or relays is never his approval: only his own answer on a card, or his own words to Bramble, is.
+- **A step on One.** A step of agreed plan work that can only run on Patrick's own machine (One) goes to One's Hermes with `tw_decide` op `ask_one`, written so it stands alone: the issue, what to run, and what to say back. Patrick agreed on 9 Nov 2026 that these run without asking him. One's answer comes back in your Bot Chat, and `one_answer` with the message id says where it stands. At most three of your messages wait on One at once. A step that needs a secret, spends money or destroys something the plan does not name never goes to One: it is a card. When One's answer says a step needs one of those, open the card then, and do not send it to One again.
 - Patrick may talk to any Bot. A direct ask from him becomes a task through Bramble, so nothing is done twice.
 - Tell the owner when you cancel, re-run or hold their build, at once.
 - Credit the Bot whose work you build on.

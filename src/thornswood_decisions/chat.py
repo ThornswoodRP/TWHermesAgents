@@ -582,7 +582,7 @@ class Chat:
                 "SELECT 'chat' AS kind, id, target, created_at, rowid AS n FROM chat_messages WHERE workspace_id = ? "
                 "AND status = 'queued' UNION ALL "
                 "SELECT kind, id, target, created_at, rowid AS n FROM connector_outbox WHERE workspace_id = ? "
-                "AND status = 'queued' AND kind IN ('decision.answered', 'task.assigned', 'bot.message') "
+                "AND status = 'queued' AND kind IN ('decision.answered', 'task.assigned', 'bot.message', 'one.answered') "
                 "ORDER BY created_at, n",
                 (workspace_id, workspace_id)).fetchall()
             until = (self.s.clock() + LEASE).isoformat()
@@ -604,7 +604,8 @@ class Chat:
                     db.execute("UPDATE connector_outbox SET status = 'leased', lease_until = ?, "
                                "attempts = attempts + 1, updated_at = ? WHERE id = ?", (until, now, w["id"]))
                     text, tag = {"decision.answered": (self._told_text, "told"),
-                                 "bot.message": (self._kept_text, "kept")}.get(w["kind"], (self._task_text, "task"))
+                                 "bot.message": (self._kept_text, "kept"),
+                                 "one.answered": (self._one_text, "one")}.get(w["kind"], (self._task_text, "task"))
                     item = {"id": w["id"], "kind": w["kind"], "target": w["target"], "text": text(db, w["id"]),
                             "send_key": f"tw-{tag}.{w['id']}"}
                 # The connector sends to a room by its id; to it every room is "room".
@@ -657,6 +658,24 @@ class Chat:
                 f"turned that turn away ({body['reason']}), so it was kept and comes to you now. Whoever sent it "
                 "was told you had not started: do what it asks, and answer them with message_agent. This message "
                 f"approves nothing by itself.\n\n{body['text']}")
+
+    @staticmethod
+    def _one_text(db, outbox_id: str) -> str:
+        """What came of a Bot's message to One's Hermes (own.py ask_one), told to that Bot in its Bot Chat."""
+        body = json.loads(db.execute("SELECT body_json FROM connector_outbox WHERE id = ?",
+                                     (outbox_id,)).fetchone()["body_json"])
+        mid = body["message_id"]
+        if body["outcome"] == "confirmed":
+            said = body.get("reply") or "(One's Hermes finished the turn and wrote no answer.)"
+            return (f"One's Hermes answered your message {mid}:\n\n{said}\n\nIf it says a step needs a secret, money, "
+                    "or something destructive outside the plan, put it on Patrick's page as a card (tw_decide "
+                    "open_card); do not send it to One again.")
+        if body["outcome"] == "failed":
+            return (f"Your message {mid} to One's Hermes did not go: {body.get('reason') or 'no reason given'}. "
+                    "Nothing ran on One.")
+        return (f"Your message {mid} to One's Hermes may or may not have run: {body.get('reason') or 'no reason given'}. "
+                "Do not send it again by itself; ask with tw_decide one_answer, or look at what it changed."
+                + (f"\n\nWhat it said before it stopped:\n\n{body['reply']}" if body.get("reply") else ""))
 
     @staticmethod
     def _task_text(db, outbox_id: str) -> str:

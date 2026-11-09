@@ -82,6 +82,7 @@ from pathlib import Path, PurePosixPath
 LOCAL_CORE = "http://127.0.0.1:9135/api/v1"
 GATEWAYS = {"me": "my-hermes", "one": "One's Hermes"}
 POLL_SECONDS = 5
+BOT_REPLY = 8000       # the newest characters of One's answer to a Bot that go back to it
 WAIT_SECONDS = 15  # one wait on the core for new work, held open (under the posts' 20-second timeout)
 LIVE_SECONDS = 0.25  # while turns run, what each shows goes to the core this often when it changed
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -772,6 +773,7 @@ class LiveTurn:
         self.lock = threading.Lock()
         self.v = 0
         self.parts: list[dict] = []
+        self.reply: str | None = None  # the whole reply, as Hermes's result line says it (a Bot's message to One)
 
     def _add(self, part: dict) -> None:
         self.parts.append(part)
@@ -793,6 +795,9 @@ class LiveTurn:
         kind = ev.get("type")
         with self.lock:
             v = self.v
+            if kind == "result":
+                self.reply = ev.get("text") if isinstance(ev.get("text"), str) else ""
+                return
             if kind == "text":
                 self._words("text", ev.get("text"))
             elif kind == "thinking":
@@ -1029,7 +1034,7 @@ class Hermes:
         return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
 
     def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None,
-             started=None, live: LiveTurn | None = None) -> tuple[str, str, str, str | None]:
+             started=None, live: LiveTurn | None = None, bot_chat: bool = False) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
         tool by its name, and the questions and approvals it has open. `started(proc)` hears the turn's process,
@@ -1046,7 +1051,12 @@ class Hermes:
             argv = [*self.turn_cmd, "attended-chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
             if image is not None:
                 argv += ["--image", str(image)]
-            if session_id:
+            if bot_chat:
+                # A Bot's message (Patrick, 9 Nov, q-86): into this Hermes's own Bot Chat, found by its name and
+                # made when missing, as Hermes's own message_agent delivers one (tools/bot_mode_dm.py). Never
+                # --yolo: an approval Hermes asks for goes to Patrick's phone, as in any of his chats.
+                argv += ["--in", str(self.home_dir), "-c", BOT_CHAT, "--create-if-missing"]
+            elif session_id:
                 argv += ["--resume", session_id]
             else:
                 argv += ["--yolo", "--source", "cli", "--in", str(self.home_dir)]
@@ -1526,7 +1536,8 @@ class OwnConnector:
             refs = [file_ref(pth) for _, pth in paths if pth != image]
             text = "\n\n".join(x for x in (text, " ".join(refs)) if x) or f"[Patrick attached {image.name}]"
         try:
-            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image, started, live)
+            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image, started, live,
+                                                         **({"bot_chat": True} if item.get("bot_chat") else {}))
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
                                          item.get("session_id"))
@@ -1537,6 +1548,8 @@ class OwnConnector:
         r = {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
         if not item.get("session_id") and sid:
             r["session_id"] = sid
+        if item.get("bot_chat") and live is not None and live.reply:
+            r["reply"] = live.reply[-BOT_REPLY:]  # a Bot asked: its answer goes back to it (own.py ask_one)
         with self._lock:
             self.unsaid.append(r)
             self.feed_now = True
