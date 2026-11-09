@@ -1028,6 +1028,26 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     const list = await gone('decision:' + third, true)
     if (list.some(n => n.tag === 'decision:' + third)) throw new Error(JSON.stringify(list))
   })
+  await step('a chat alert says only who answered, and opens that chat', async () => {
+    // alerts.py, 9 Nov: Hermes Desktop notifies when a turn ends or Hermes asks; so does the app.
+    await cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId: reg.registrationId,
+      data: JSON.stringify({ v: 1, event_id: 'pa_1', kind: 'answered', who: 'Rift', path: '/m/bots/rift' }) })
+    const list = await gone('chat:/m/bots/rift', false)
+    const n = list.find(x => x.tag === 'chat:/m/bots/rift')
+    if (!n || n.title !== 'Rift answered' || n.body !== '' || n.path !== '/m/bots/rift' || n.actions) throw new Error(JSON.stringify(list))
+  })
+  await step('a chat alert with a path that is not a chat is only the plain line', async () => {
+    await cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId: reg.registrationId,
+      data: JSON.stringify({ v: 1, event_id: 'pa_2', kind: 'asks', who: 'Hermes', path: '/m/../api/v1/sign-out' }) })
+    const list = await gone('thornswood', false)
+    if (list.some(x => /asks you something/.test(x.title)) || !list.some(x => x.tag === 'thornswood' && x.path === '/m/decisions')) throw new Error(JSON.stringify(list))
+  })
+  await page.goto(base + '/m/bots/rift')
+  await step('opening the chat takes its alert off', async () => {
+    await page.getByLabel('Message to Rift').waitFor({ timeout: 5000 })
+    const list = await gone('chat:/m/bots/rift', true)
+    if (list.some(x => x.tag === 'chat:/m/bots/rift')) throw new Error(JSON.stringify(list))
+  })
   await step('the plan when the browser and the core differ about the subscription', async () => {
     const got = await page.evaluate(() => {
       const on = { vapid_public: 'K', consent: 'granted', subscribed: true, endpoint_sha256: 'a', lapsed: false, lapsed_endpoint_sha256: null }

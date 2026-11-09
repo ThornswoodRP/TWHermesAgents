@@ -11,10 +11,18 @@
 // The worker shows the alerts, so it takes them off too: the app tells it which
 // cards still need Patrick each time it reads Decisions, and which card was just
 // opened or answered (Patrick, 1 Nov: an answered card kept showing).
-const SHELL = 'tw-shell-v11'
+//
+// A chat alert (alerts.py, 9 Nov) is the same kind of line: "Rift answered" when a turn he started ended, or
+// "Hermes asks you something" when his own Hermes opened a question or an approval. Its payload is who and
+// the chat to open, checked before it becomes a path; never a word of the chat. None shows while that very
+// chat is open in front of him, and opening the chat takes its alert off.
+const SHELL = 'tw-shell-v12'
 const ALERTS = 'tw-alerts'  // when each card's alert reached this phone (push, below)
 const CARD_ID = /^[A-Za-z0-9_-]{1,64}$/
+const CHAT_PATH = /^\/m\/(bots\/[a-z0-9][a-z0-9_-]{0,63}(\/s\/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?|hermes\/(me|one)(\/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?)$/
 const APP_PATH = /^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/
+const WHO = /^[A-Za-z][A-Za-z ]{0,39}$/
+const CHAT_WORDS = { answered: who => who + ' answered', asks: who => who + ' asks you something' }
 const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/cinzel-latin.woff2',
   '/m/icon-192.png', '/m/icon-512.png', '/m/icon-maskable-512.png']
 
@@ -44,6 +52,10 @@ self.addEventListener('fetch', event => {
 self.addEventListener('push', event => {
   let data = {}
   try { data = event.data ? event.data.json() : {} } catch (err) { data = {} }
+  if (Object.prototype.hasOwnProperty.call(CHAT_WORDS, data.kind) && typeof data.path === 'string' && CHAT_PATH.test(data.path)) {
+    event.waitUntil(chatAlert(data.kind, typeof data.who === 'string' && WHO.test(data.who) ? data.who : 'Hermes', data.path))
+    return
+  }
   const id = typeof data.decision_id === 'string' && CARD_ID.test(data.decision_id) ? data.decision_id : null
   // When this phone got the alert, kept on the phone only, so the card can say how long it took, with which
   // of the card's alerts it was: a revised card is alerted again, and a time from its first alert beside the
@@ -60,10 +72,23 @@ self.addEventListener('push', event => {
   }))
 })
 
+// A chat alert, unless that chat is open in front of him now.
+async function chatAlert(kind, who, path) {
+  const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  if (list.some(c => c.visibilityState === 'visible' && c.focused && new URL(c.url).pathname === path)) return
+  return self.registration.showNotification(CHAT_WORDS[kind](who), {
+    tag: 'chat:' + path,
+    renotify: true,
+    silent: false,
+    icon: '/m/icon-192.png',
+    data: { path }
+  })
+}
+
 self.addEventListener('notificationclick', event => {
   event.notification.close()
   const want = event.notification.data && event.notification.data.path
-  const path = typeof want === 'string' && APP_PATH.test(want) ? want : '/m/decisions'
+  const path = typeof want === 'string' && (APP_PATH.test(want) || CHAT_PATH.test(want)) ? want : '/m/decisions'
   event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
     const open = list.find(c => new URL(c.url).origin === self.location.origin && new URL(c.url).pathname.startsWith('/m/'))
     if (open) return open.focus().then(c => (c || open).postMessage({ go: path }))
@@ -73,10 +98,15 @@ self.addEventListener('notificationclick', event => {
 
 // { pending: [ids] }: close every card alert not in the list, and the plain one.
 // { close: id }: close that card's alert.
+// { opened: path }: close that chat's alert.
 self.addEventListener('message', event => {
   const m = event.data || {}
   let keep = null
   let only = null
+  if (typeof m.opened === 'string' && CHAT_PATH.test(m.opened)) {
+    event.waitUntil(self.registration.getNotifications({ tag: 'chat:' + m.opened }).then(list => list.forEach(n => n.close())))
+    return
+  }
   if (Array.isArray(m.pending)) keep = new Set(m.pending.filter(id => typeof id === 'string' && CARD_ID.test(id)))
   else if (typeof m.close === 'string' && CARD_ID.test(m.close)) only = m.close
   else return

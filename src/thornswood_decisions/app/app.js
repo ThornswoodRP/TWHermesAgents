@@ -3093,7 +3093,8 @@ async function alertsPart(status) {
       'notifications for this app in the phone\'s settings, then tap Turn on alerts.'))
   } else {
     part.append(el('p', { class: 'quiet' }, 'Alerts are off. When on, a card that needs you shows ' +
-      '"Hermes needs you" on the lock screen, and nothing more.'))
+      '"Hermes needs you" on the lock screen; a chat shows who answered, or that your Hermes asks you ' +
+      'something; and nothing more.'))
   }
   if (!s.vapid_public) {
     part.append(el('p', { class: 'quiet' }, 'Alerts are not ready on the core yet.'))
@@ -3697,6 +3698,9 @@ function go(path) {
   route()
 }
 
+// A chat an alert can open (alerts.py PATH, sw.js CHAT_PATH): a Bot's chat or session, or one of his own.
+const CHAT_PATH = /^\/m\/(bots\/[a-z0-9][a-z0-9_-]{0,63}(\/s\/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?|hermes\/(me|one)(\/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?)$/
+
 async function route() {
   // Every route is a new view, so a page a chat asked for and gets back after
   // Patrick left it fills nothing (it once redrew a room over the Rooms list).
@@ -3722,6 +3726,8 @@ async function route() {
   document.getElementById('tabs').hidden = false
   document.getElementById('settings').hidden = false
   checkAlerts()
+  // A chat he opens takes its alert off the phone (alerts.py, sw.js).
+  if (CHAT_PATH.test(location.pathname)) toWorker({ opened: location.pathname })
   let path = location.pathname.replace(/^\/m\/?/, '').replace(/\/$/, '')
   // The tabs' first names, from an old alert or home screen link.
   const FIRST = { 'needs-you': 'decisions', work: 'board' }
@@ -3911,10 +3917,10 @@ window.addEventListener('beforeinstallprompt', event => {
 window.addEventListener('appinstalled', () => { installPrompt = null; installBar() })
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(() => {})
-  // A tapped alert, with the app already open: the worker says which card.
+  // A tapped alert, with the app already open: the worker says which card, or which chat.
   navigator.serviceWorker.addEventListener('message', event => {
     const p = event.data && event.data.go
-    if (typeof p === 'string' && /^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/.test(p)) go(p)
+    if (typeof p === 'string' && (/^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/.test(p) || CHAT_PATH.test(p))) go(p)
   })
 }
 pollTimer = setInterval(poll, POLL_MS)

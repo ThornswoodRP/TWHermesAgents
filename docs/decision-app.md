@@ -73,6 +73,7 @@ A card that needs Patrick puts one line on his phone, "Hermes needs you", with n
 - A phone subscribes only after a deliberate "Turn on alerts" tap, and a "no" is kept.
 - The worker checks again, right before sending, that the card still waits at that revision. A push service's answer is "accepted", never "shown". An expired subscription is retired, and the app renews its own when it next opens.
 - Answered cards' alerts are taken off the phone.
+- A chat has alerts too, as bare as a card's: "Rift answered" when a turn he started ends (a Bot Chat, a Bot's session, or his own Hermes or One), and "Hermes asks you something" when his own Hermes opens a question or an approval for him. A tap opens that chat. None shows while that chat is open in front of him, and opening it takes its alert off. A message steered into a Bot's running turn has no turn of its own, so it brings none. The payload is who and the chat's path, never a word of the chat (`alerts.py`).
 
 ## Voice
 
