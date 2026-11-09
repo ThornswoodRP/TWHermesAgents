@@ -368,6 +368,18 @@ class OwedSweeps(unittest.TestCase):
         g.after_turn(session_id="c")
         self.assertEqual(self.owed(f)["refused"], 2)
 
+    def test_the_wake_check_finds_no_room_for_a_sweep_while_one_runs(self):
+        """TWHermesAgents #47: the morning and free worker wakes ask for a
+        whole sweep, which waits for a running one as an owed wake does."""
+        f = Fleet()
+        g = gate(f, "bramble")
+        self.assertIsNone(g.before_llm(session_id="w1", platform="webhook"))
+        got = f.ask("policy", "turn_room", {"bot": "bramble", "sweep": True})
+        self.assertFalse(got["room"])
+        self.assertIn("one sweep runs at a time", got["why_not"])
+        g.after_turn(session_id="w1")
+        self.assertTrue(f.ask("policy", "turn_room", {"bot": "bramble", "sweep": True})["room"])
+
     def test_a_wake_during_a_sweep_is_owed_and_runs_after_it(self):
         """2 Nov, 3:57:55 and 3:58:00 PM: two of Bramble's webhook turns ran the
         whole sweep at once, and both revised #5458's card."""
