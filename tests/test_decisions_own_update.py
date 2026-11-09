@@ -59,6 +59,10 @@ class Ready:
     def ready(self):
         return "ready", ""
 
+    def tasks(self):
+        # The Tasks tab's read, which the connector starts on a thread of its own (test_decisions_tasks).
+        return {"state": "ready", "subagents": [], "processes": [], "jobs": []}
+
 
 class FakeUpdater:
     def __init__(self, answers):
