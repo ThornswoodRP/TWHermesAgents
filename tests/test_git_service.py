@@ -863,6 +863,82 @@ BRAMBLE_INSTALLATION = "177392923"
 SIX = ["claimed: Bramble", "claimed: Rift", "claimed: Sprocket", "claimed: Echo", "claimed: Magpie", "claimed: Wisp"]
 
 
+class CloseIssue(unittest.TestCase):
+    """Bramble closes an issue as a duplicate or as done, never as not
+    planned (Patrick, 9 Nov 2026: the Bots need the access their jobs take;
+    Bramble's duplicates #5580 and #5585 waited for a person to close them)."""
+
+    def close(self, w, **args):
+        base = {"bot": "bramble", "repo": APP, "task": "t", "number": 5585, "body": "Same failure, same shard."}
+        return w.git.close_issue("hermes", dict(base, **args))
+
+    def test_a_duplicate_closes_pointing_at_what_it_repeats(self):
+        w = World()
+        w.fake.add_issue(APP, 5585, author="thornswood-bramble[bot]")
+        w.fake.add_issue(APP, 5547)
+        out = self.close(w, reason="duplicate", duplicate_of=5547)
+        self.assertTrue(out["done"], out)
+        issue = w.fake.issues[(APP, 5585)]
+        self.assertEqual((issue["state"], issue["state_reason"]), ("closed", "duplicate"))
+        said = w.fake.comments[(APP, 5585)]
+        self.assertEqual(len(said), 1)
+        self.assertTrue(said[0]["body"].startswith("Duplicate of #5547."))
+        # The same ask again changes nothing more.
+        with self.assertRaises(Refused):
+            self.close(w, reason="duplicate", duplicate_of=5547)
+        self.assertEqual(len(w.fake.comments[(APP, 5585)]), 1)
+
+    def test_done_needs_a_merged_pull_request_or_a_successful_run(self):
+        w = World()
+        w.fake.add_issue(APP, 5585)
+        sha = w.green_pr(repo=APP)
+        with self.assertRaises(Refused) as e:
+            self.close(w, reason="completed", done_by_pr=42)
+        self.assertIn("has not merged", str(e.exception))
+        with self.assertRaises(Refused):
+            self.close(w, reason="completed")
+        w.fake.runs.append({"id": 7, "repo": OPS, "workflow": "box-run.yml", "head_sha": sha,
+                            "status": "completed", "conclusion": "failure"})
+        with self.assertRaises(Refused) as e:
+            self.close(w, reason="completed", done_by_run=7, run_repo=OPS)
+        self.assertIn("did not succeed", str(e.exception))
+        w.fake.runs[-1]["conclusion"] = "success"
+        out = self.close(w, reason="completed", done_by_run=7, run_repo=OPS, body="The box run finished it.")
+        self.assertTrue(out["done"], out)
+        self.assertEqual(w.fake.issues[(APP, 5585)]["state_reason"], "completed")
+
+    def test_a_merged_pull_request_finishes_it(self):
+        w = World()
+        w.fake.add_issue(APP, 5585)
+        w.green_pr(repo=APP)
+        w.fake.prs[(APP, 42)]["merged"] = True
+        self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
+
+    def test_what_is_refused(self):
+        w = World()
+        w.fake.add_issue(APP, 5585)
+        w.fake.add_issue(APP, 5547)
+        w.fake.add_issue(APP, 5600, author="WiccanDjinn")
+        w.green_pr(repo=APP)
+        for bad, why in (({"bot": "sprocket", "reason": "duplicate", "duplicate_of": 5547}, "only Bramble"),
+                         ({"reason": "not_planned"}, "dropping work is Patrick's"),
+                         ({"reason": "duplicate"}, "names the other issue"),
+                         ({"reason": "duplicate", "duplicate_of": 5585}, "names the other issue"),
+                         ({"reason": "duplicate", "duplicate_of": 5547, "body": " "}, "says why"),
+                         ({"reason": "duplicate", "duplicate_of": 5547, "body": "x\n---"}, "plain"),
+                         ({"reason": "duplicate", "duplicate_of": 5547, "number": 5600}, "hands off"),
+                         ({"reason": "duplicate", "duplicate_of": 5547, "number": 42}, "close_pr"),
+                         ({"reason": "duplicate", "duplicate_of": 5547, "repo": "ThornswoodRP/TWHermesAgents"}, "")):
+            with self.subTest(bad=bad), self.assertRaises(Refused) as e:
+                self.close(w, **bad)
+            self.assertIn(why, str(e.exception))
+        self.assertEqual(w.fake.writes("PATCH", "/issues/"), [])
+        w.fake.issues[(APP, 5585)]["state"] = "closed"
+        with self.assertRaises(Refused) as e:
+            self.close(w, reason="duplicate", duplicate_of=5547)
+        self.assertIn("not open", str(e.exception))
+
+
 class ClaimLabels(unittest.TestCase):
     """Phase 3: Bramble makes the six Bot claim labels and reads them back
     (04 section 6.1)."""
@@ -1058,6 +1134,8 @@ class OneExecutor(unittest.TestCase):
             "claim_labels": {"bot": "bramble", "repo": APP, "task": "t"},
             "merge": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "sha": sha},
             "close_pr": {"bot": "bramble", "repo": APP, "task": "t", "number": 42},
+            "close_issue": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "reason": "duplicate",
+                            "duplicate_of": 41, "body": "Same."},
             "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml",
                           "commit": main, "inputs": {}},
         }
