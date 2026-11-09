@@ -23,9 +23,10 @@ class Routes(unittest.TestCase):
     def ids(self, bot, **kw):
         return [r["id"] for r in chain_for(self.p, bot, **kw)]
 
-    def test_order_today_is_max_then_chatgpt_then_qwen(self):
-        """Qwen's route is ready (8 Nov 2026); the credits route is not."""
-        for bot in ("bramble",) + WORKERS:
+    def test_order_today_is_max_then_credits_for_bramble_then_chatgpt_then_qwen(self):
+        """Both proxy routes are ready (Qwen 8 Nov 2026, credits 9 Nov); only Bramble gets the credits."""
+        self.assertEqual(self.ids("bramble"), ["max", "credits", "chatgpt", "qwen"])
+        for bot in WORKERS:
             self.assertEqual(self.ids(bot), ["max", "chatgpt", "qwen"])
 
     def test_once_the_proxy_exists_only_bramble_gets_the_credits(self):
@@ -193,12 +194,13 @@ class Routes(unittest.TestCase):
         self.assertTrue(check_config(p, "bramble", cfg, set()))
 
     def test_a_route_not_ready_stays_out_while_the_other_is_in(self):
-        cfg = build(self.p, "bramble")
+        p = self.ready(credits=False, qwen=True)
+        cfg = build(p, "bramble")
         self.assertIn("http://127.0.0.1:8611/qwen/v1", str(cfg))
         self.assertNotIn("/credits", str(cfg))
         cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
                                              "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
-        self.assertTrue(check_config(self.p, "bramble", cfg, set()))
+        self.assertTrue(check_config(p, "bramble", cfg, set()))
 
     def test_anthropic_api_key_would_spend_the_credits_first(self):
         problems = check_config(self.p, "bramble", build(self.p, "bramble"), {"ANTHROPIC_API_KEY"})
