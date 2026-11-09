@@ -301,9 +301,11 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), "an answered card leaves the issue active")
 
-    def test_a_worker_that_stopped_mid_issue_wakes_bramble_once(self):
+    def test_a_worker_that_stopped_mid_issue_is_said_at_every_look_until_it_runs(self):
         # 9 Nov 2026: Sprocket's turn was turned away at 9:23 AM on #4329, its
-        # claim read as active work, and nothing woke it again.
+        # claim read as active work, and nothing woke it again. At 12:59 PM
+        # the line naming it was printed once and kept as told; the queue
+        # turned that turn away, and the 2:00 PM look stayed quiet.
         home = self.day()
         b = Idle(claimed=BUSY)
         an_hour_ago = datetime.fromtimestamp(NOON - owed_wake.IDLE_EVERY - 60, timezone.utc).isoformat()
@@ -315,17 +317,37 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(home, "bramble", b, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
         self.assertIn("magpie, sprocket hold an active issue", out[-1])
-        self.assertIn("section 6, item 6", out[-1])
+        self.assertIn("items 5 and 6", out[-1])
         for w in ("rift", "echo", "wisp"):
             self.assertNotIn(w, out[-1], "running, recently heard from, or unknown is not stopped")
         later = NOON + owed_wake.IDLE_EVERY + 1
-        b.turns["echo"] = {"running": True, "last": just_now}
         out = owed_wake.check(home, "bramble", b, now=later, policy=POLICY)
-        self.assertFalse(wakes("\n".join(out)), "the same stop wakes Bramble once")
-        b.turns["sprocket"] = {"running": False, "last": just_now}
-        out = owed_wake.check(home, "bramble", b, now=later + owed_wake.IDLE_EVERY + 1, policy=POLICY)
-        self.assertTrue(wakes("\n".join(out)), "a new stop after it ran again wakes Bramble again")
-        self.assertIn("sprocket", out[-1])
+        self.assertTrue(wakes("\n".join(out)), "a stop that is still there is said again an hour later")
+        self.assertIn("magpie, sprocket", out[-1])
+        self.assertNotIn("stopped", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)),
+                         "nothing is kept as told")
+        b.turns["sprocket"] = {"running": False, "last": datetime.fromtimestamp(later, timezone.utc).isoformat()}
+        b.turns["magpie"] = {"running": True, "last": None}
+        out = owed_wake.check(home, "bramble", b, now=later + owed_wake.IDLE_EVERY - 60, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "once each ran a turn, nothing is said")
+
+    def test_a_stop_and_a_free_worker_are_both_said(self):
+        claimed = dict(BUSY, **{"claimed: Wisp": 0})
+        b = Idle(claimed=claimed, open_={'"area: Gamemode","area: Engine","area: In-game"': 181})
+        b.turns = {"sprocket": {"running": False, "last": None}}
+        out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("sprocket hold an active issue", out[-2])
+        self.assertIn("in the field of wisp", out[-1])
+
+    def test_every_free_worker_with_work_in_its_field_is_named(self):
+        # 9 Nov 2026, 2:00 PM: the line named Rift's field alone, and Wisp got nothing.
+        claimed = dict(BUSY, **{"claimed: Rift": 0, "claimed: Wisp": 0})
+        b = Idle(claimed=claimed, open_={'"area: Mods","area: Load order"': 2,
+                                         '"area: Gamemode","area: Engine","area: In-game"': 181})
+        out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("in the field of rift, wisp", out[-1])
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}

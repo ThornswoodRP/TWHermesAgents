@@ -863,6 +863,30 @@ class PullRequestsAndIssues(unittest.TestCase):
         with self.assertRaises(Refused):
             w.git.board("hermes", {"bot": "patrick"})
 
+    def test_the_board_reads_one_field_across_the_whole_board(self):
+        # 9 Nov 2026: the first 100 eligible issues held none of Wisp's, 181 were open in its field.
+        w = World()
+
+        def item(n, labels=()):
+            return {"status": {"name": "Todo"}, "order": {"number": n},
+                    "content": {"__typename": "Issue", "number": n, "title": f"t{n}", "state": "OPEN",
+                                "repository": {"nameWithOwner": APP}, "author": {"login": "EvilPatrick06"},
+                                "labels": {"nodes": [{"name": l} for l in labels]}, "assignees": {"nodes": []}}}
+
+        w.fake.board_items = [item(i, ["area: Website"]) for i in range(1, 151)] + [
+            item(500, ["bug", "area: Gamemode"]), item(501, ["area: In-game", "area: Performance"]),
+            item(502, ["area: Docs"]), item(503)]
+        out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "areas": ["Gamemode", "Engine", "In-game"],
+                                     "limit": 20})
+        self.assertEqual([r["number"] for r in out["issues"]], [500, 501])
+        out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "limit": 20,
+                                     "not_areas": ["Website", "Gamemode", "Engine", "In-game", "Release"]})
+        self.assertEqual([r["number"] for r in out["issues"]], [502, 503])
+        self.assertEqual(w.git.board("hermes", {"bot": "bramble", "areas": ["area: Gamemode"]})["open"], 1)
+        for bad in ("Gamemode", [""], [3]):
+            with self.subTest(bad=bad), self.assertRaises(Refused):
+                w.git.board("hermes", {"bot": "bramble", "areas": bad})
+
     def test_reads_stay_in_the_repo(self):
         w = World()
         w.fake.add_issue(APP, 3150)
