@@ -658,6 +658,31 @@ class TheConnector(unittest.TestCase):
         self.assertEqual(clean(snap)["chats"][3]["title"], "")
         self.assertEqual([c.get("bot_chat", False) for c in clean(snap)["chats"]], [True, False, False, False])
 
+    def test_pinned_chats_head_the_list_however_old_and_hidden_ones_are_counted(self):
+        # #101 and #102. A store from before Hermes kept pins lists by time and pins nothing.
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        self.assertEqual(([c["id"] for c in snap["chats"]], snap["hidden"]), (["s_bot", "s_plan", "s_old2", "s_tg"], 1))
+        self.assertFalse(any("pinned" in c for c in snap["chats"]))
+        con = sqlite3.connect(self.db)
+        con.execute("ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        con.execute("UPDATE sessions SET pinned = 1 WHERE id IN ('s_tg', 's_arch')")
+        con.commit()
+        con.close()
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        self.assertEqual([(c["id"], c.get("pinned", False)) for c in snap["chats"]],
+                         [("s_bot", False), ("s_tg", True), ("s_plan", False), ("s_old2", False)])
+        self.assertEqual(snap["hidden"], 1, "a hidden chat stays hidden, pinned or not")
+        kept = clean(snap)
+        self.assertEqual(([c.get("pinned", False) for c in kept["chats"]], kept["hidden"]), ([False, True, False, False], 1))
+        page = own_connector.chats_page(self.db, None, "", n=3)
+        self.assertEqual(([c["id"] for c in page["chats"]], page["more"]), (["s_bot", "s_tg", "s_plan"], True))
+        later = own_connector.chats_page(self.db, page["chats"][-1]["last_at"], "", n=3)
+        self.assertEqual(([c["id"] for c in later["chats"]], later["more"]), (["s_old2"], False))
+        self.assertEqual([c["id"] for c in own_connector.chats_page(self.db, None, "", archived=True)["chats"]], ["s_arch"])
+        for bad in (-1, True, "3", 2_000_000):
+            with self.assertRaises(CoreError):
+                clean(snap | {"hidden": bad})
+
     def test_the_bot_chat_is_listed_first_by_the_id_it_goes_on_as(self):
         con = sqlite3.connect(self.db)
         # Hermes compressed it: the titled, hidden row ended with 'compression' and goes on as s_bot2.

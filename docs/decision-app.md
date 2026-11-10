@@ -64,7 +64,7 @@ For every chat:
 - **Reactions** are Hermes's own, one per person on a message, set through Hermes's own session store.
 - **Questions, approvals and Stop**, in his own Hermes, as Desktop has them. Each message runs as a turn he is there to answer (`room_send.py attended-chat`), not a one-shot, so when Hermes asks a question (its clarify tool) or asks to run a flagged command, the question or the command shows under the live line with Hermes's own choices. A tap, or his own words for a question, answers it; Stop ends the turn. The turn makes Hermes's own `clarify.respond`, `approval.respond` or `session.interrupt` call, the ones `hermes chat`'s /answer, /approve and /stop make. Each needs the passkey sign-in a message needs, and the core keeps the order in memory only, with none of its words in the event chain (`own_turns.py`).
 - **Files and photos** go to his own Hermes only: up to 10 a message and 20 MB each, handed only to that gateway's connector, checked by size and SHA-256, and served back only as downloads.
-- **Rename, hide and delete** of his own chats use Hermes's own calls, behind `session_manage_write`. A delete needs a fresh passkey. His own Bot Chat is never renamed, hidden or deleted.
+- **Rename, pin, hide and delete** of his own chats use Hermes's own calls, behind `session_manage_write`, from the open chat's ⋯ or the ⋯ on its row in the chat list. A delete needs a fresh passkey. His own Bot Chat is never renamed, pinned, hidden or deleted; it is always first. Pinned chats head the list under Pinned, however old, as Desktop shows Hermes's own pins (#101), and Hidden chats says how many there are (#102).
 
 ## The Board
 

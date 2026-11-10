@@ -413,7 +413,7 @@ def line_of(text: str) -> str:
 # ── reading Hermes's chats ────────────────────────────────────────────────
 
 LIST_SQL = f"""
-SELECT s.id, s.title, coalesce(s.last_activity_at, s.started_at) AS last_at FROM sessions s
+SELECT s.id, s.title, coalesce(s.last_activity_at, s.started_at) AS last_at, s.pinned AS pinned FROM sessions s
 WHERE s.archived = 0 AND s.hidden = 0
   AND s.source NOT IN ({",".join("?" * len(NOT_LISTED))})
   AND coalesce(s.end_reason, '') != 'compression'
@@ -423,6 +423,22 @@ ORDER BY last_at DESC LIMIT ?
 """
 # A compressed chat goes on in a new session whose parent ended with 'compression'; only the newest
 # is listed, as Hermes's pickers show one row for it (hermes_state_sessions.py _expand_compression_lineage_ids).
+# A pinned chat heads the list, newest first, however old it is, as Desktop lists it (#101; Hermes's list
+# endpoints back-fill pins past their limit, hermes_cli/web_routers/sessions.py include_pinned).
+# The chats Hermes hides (archived), as the Hidden chats page lists them (chats_page with archived).
+HIDDEN_SQL = LIST_SQL.replace("WHERE s.archived = 0", "WHERE s.archived = 1")
+HIDDEN_MAX = 1_000_000
+
+
+def _pins(con: sqlite3.Connection) -> bool:
+    """Whether this Hermes's store keeps pins (sessions.pinned): one from before it pins nothing."""
+    return "pinned" in _columns(con, "sessions")
+
+
+def _listing(con: sqlite3.Connection, sql: str) -> str:
+    """LIST_SQL as this Hermes's store can run it."""
+    return sql if _pins(con) else sql.replace("s.pinned", "0")
+
 
 # His Bot Chat, the chat Bot Mode and every Bot's message to him land in. Hermes keeps it hidden from
 # its pickers, and its name is its identity: the canonical one is the hidden, unarchived row titled
@@ -451,9 +467,12 @@ def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = M
     con = _ro(state_db)
     try:
         bot = bot_chat(con)
-        rows = [r for r in con.execute(LIST_SQL, (*NOT_LISTED, CHATS)).fetchall() if not bot or r["id"] != bot["id"]]
+        rows = [r for r in con.execute(_listing(con, LIST_SQL.replace("ORDER BY last_at", "ORDER BY pinned DESC, last_at")),
+                                       (*NOT_LISTED, CHATS)).fetchall() if not bot or r["id"] != bot["id"]]
         chats = [bot] if bot else []
         chats += [_row(con, r) for r in rows[:CHATS - len(chats)]]
+        # How many chats the Hidden chats page lists, for the chat list's "Hidden chats (3)" (#102).
+        hidden = con.execute(f"SELECT count(*) FROM ({_listing(con, HIDDEN_SQL)})", (*NOT_LISTED, HIDDEN_MAX)).fetchone()[0]
         open_ids = [c["id"] for c in chats[:OPEN_RECENT]]
         open_ids += [w for w in wanted if w not in open_ids]
         opened = []
@@ -463,7 +482,7 @@ def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = M
                                                     "at": _iso(m["timestamp"])} for m in reversed(msgs)]})
     finally:
         con.close()
-    return {"source_time": now.isoformat(), "chats": chats, "open": opened}
+    return {"source_time": now.isoformat(), "chats": chats, "open": opened, "hidden": hidden}
 
 
 # A chat's compression lineage, as Hermes's own hermes_state_sessions.py _LINEAGE_CTE_SQL walks it: the
@@ -517,6 +536,8 @@ def _row(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
     names it (chat-runtime.ts sessionTitle: the title, else the preview, the first message Patrick wrote);
     `first` goes only with an untitled chat, so a rename still starts from Hermes's own title."""
     row = {"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]), "preview": _line(con, [r["id"]])}
+    if "pinned" in r.keys() and r["pinned"]:
+        row["pinned"] = True
     if not row["title"]:
         for m in con.execute(FIRST_SQL, (r["id"], 5)):
             first = line_of(_text(m["content"]))
@@ -598,18 +619,28 @@ def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, 
     if before:
         where.append("coalesce(s.last_activity_at, s.started_at) < ?")
         args.append(datetime.fromisoformat(before).timestamp())
+    # The chat list's pinned chats head its first page, after his Bot Chat, and are left out of every page,
+    # so paging by time never lists one twice. A hidden chat is listed by time, pinned or not.
+    pins = None if archived else sql.rstrip() + "\n  AND s.pinned = 1\nORDER BY last_at DESC, s.id LIMIT ?"
+    if not archived:
+        where.append("s.pinned = 0")
     sql = sql.rstrip() + "".join(f"\n  AND {w}" for w in where) + "\nORDER BY last_at DESC, s.id LIMIT ?"
     con = _ro(state_db)
     try:
         # It heads the first page of the chat list. It is never archived (BOT_CHAT_SQL takes only the
         # unarchived one), so a page of hidden chats never lists it.
         bot = None if archived else bot_chat(con)
-        rows = [r for r in con.execute(sql, (*args, n + 1)).fetchall() if not bot or r["id"] != bot["id"]]
         chats = [bot] if bot and not before else []
-        chats += [_row(con, r) for r in rows[:n - len(chats)]]
+        if pins and not before and _pins(con):
+            chats += [_row(con, r) for r in con.execute(pins, (*NOT_LISTED, n - len(chats))).fetchall()
+                      if not bot or r["id"] != bot["id"]]
+        room = n - len(chats)
+        rows = [r for r in con.execute(_listing(con, sql), (*args, room + 1)).fetchall()
+                if not bot or r["id"] != bot["id"]]
+        chats += [_row(con, r) for r in rows[:room]]
     finally:
         con.close()
-    return {"chats": chats, "more": len(rows) > n - (1 if chats and chats[0].get("bot_chat") else 0)}
+    return {"chats": chats, "more": len(rows) > room}
 
 
 def found_page(state_db: Path, found: list[dict], q: str, n: int = PAGE_CHATS) -> dict:
@@ -627,7 +658,8 @@ def found_page(state_db: Path, found: list[dict], q: str, n: int = PAGE_CHATS) -
             lineage = {r["id"] for r in con.execute(LINEAGE_SQL + "SELECT id FROM ancestors UNION SELECT id FROM "
                                                     "descendants", (bot["id"], bot["id"])).fetchall()}
         ids = [i for i in snippets if i not in lineage][:PAGE_CHATS]
-        rows = con.execute(sql + f"\n  AND s.id IN ({','.join('?' * len(ids))})", (*NOT_LISTED, *ids)).fetchall()
+        rows = con.execute(_listing(con, sql) + f"\n  AND s.id IN ({','.join('?' * len(ids))})",
+                           (*NOT_LISTED, *ids)).fetchall()
         chats = []
         hit = next((snippets[i] for i in snippets if i in lineage), "" if q.lower() in BOT_CHAT.lower() else None)
         if bot and hit is not None:

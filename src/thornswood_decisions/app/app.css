@@ -93,6 +93,10 @@ main { padding: 0 16px 12px; max-width: 720px; margin: 0 auto; }
 .row .w { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: 12px; color: var(--faint);
   flex: 0 0 auto; max-width: 40%; text-align: right; }
 .row.pinned { background: var(--card); }
+/* A chat's row with its own ⋯ menu beside it (#102). */
+.chat-line { display: flex; align-items: center; margin: 0 -16px 0 0; }
+.chat-line > .row { flex: 1; min-width: 0; width: auto; margin-right: 0; }
+.row .t > strong svg { vertical-align: -1px; color: var(--accent); }
 .row .what { color: var(--accent); margin-top: 1px; }
 .row .quiet { color: var(--muted); }
 .rec { font-size: 12px; color: var(--one-text); border: 1px solid var(--one); border-radius: 10px; padding: 0 7px;
