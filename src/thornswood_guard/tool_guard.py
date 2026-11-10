@@ -54,6 +54,51 @@ SECRET_PLACES = [
     (re.compile(r"(^|[\s;&|(])(ssh|scp|sftp|rsync)\s"), "a Bot reaches no other machine"),
 ]
 
+# The one part of Hermes's home a Bot may open (Patrick, 10 Nov 11:24 PM, "Go ahead with #99": the guard may
+# let the Bots read only Hermes's staged attachments, images and cache folders, with every other .hermes
+# path still blocked). Hermes mounts those folders into the Bot's sandbox at /root/.hermes (~/.hermes on an
+# ssh backend) and names a file there to the Bot by that path (Hermes 0.23.0, tools/credential_files.py
+# _CACHE_DIRS and to_agent_visible_cache_path; agent/context_references.py _binary_reference_block). A photo
+# already reaches the model and a text file is inlined; this is for a PDF or another file the Bot opens with
+# a tool. Only something inside one of them, named whole: no `..` or `.` part, no glob or brace, and in a
+# shell command no expansion anywhere and no shell character in its word, so the path the guard reads is the
+# path that is opened. A file tool only reads there. Every other .hermes path stays refused.
+STAGED_ROOTS = ("attachments", "images", "cache/documents", "cache/images", "cache/audio", "cache/videos")
+STAGED_HOMES = ("/root/.hermes/", "~/.hermes/")
+EXPANDS = re.compile(r"[$`\\\n\r]")
+STAGED_PART = re.compile(r"^[^\x00-\x1f/<>|;&$`\\*?\[\]{}'\"]+$")
+
+
+def staged_file(path: str) -> bool:
+    """True when `path` names something inside one of Hermes's staged-file folders, read as written."""
+    if not isinstance(path, str):
+        return False
+    home = next((h for h in STAGED_HOMES if path.startswith(h)), None)
+    if home is None:
+        return False
+    rest = path[len(home):].rstrip("/")
+    root = next((r for r in STAGED_ROOTS if rest.startswith(r + "/")), None)
+    if root is None:
+        return False
+    parts = rest[len(root) + 1:].split("/")
+    return all(p not in ("", ".", "..") and STAGED_PART.match(p) for p in parts)
+
+
+def _past_staged(command: str) -> str:
+    """The command as the secret check reads it: each word that names a staged file (staged_file) taken out.
+    A command with any expansion, or one the guard cannot split, is read as written, so it is refused as
+    before if it names .hermes at all."""
+    if ".hermes" not in command or EXPANDS.search(command):
+        return command
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:
+        return command
+    return " ".join(w for w in words if not staged_file(w))
+
+
 CHAINING = re.compile(r"[;&|`\n]|\$\(|\b(eval|exec|source)\b|\b(bash|sh|zsh|python3?|node|pwsh|perl|ruby)\s+-[a-zA-Z]*c\b")
 
 GH_READ = {
@@ -108,8 +153,9 @@ def _git_verdict(words: list[str]) -> Verdict:
 
 
 def check_shell(command: str) -> Verdict:
+    readable = _past_staged(command)
     for pattern, reason in SECRET_PLACES:
-        if pattern.search(command):
+        if pattern.search(readable):
             return Verdict.no(reason)
     githubish = re.search(r"(^|[^\w.-])(gh|git)\s|api\.github\.com|github\.com/.+/(pulls|merges|dispatches)", command)
     may_write = re.search(r"(^|[^\w.-])gh\s|\bgit\b.*\b(push|remote|config|submodule)\b|api\.github\.com", command, re.S)
@@ -136,7 +182,9 @@ def check_shell(command: str) -> Verdict:
     return Verdict.yes()
 
 
-def check_path(path: str) -> Verdict:
+def check_path(path: str, *, reading: bool = False) -> Verdict:
+    if reading and staged_file(path):
+        return Verdict.yes("a file Hermes staged for this Bot")
     for pattern, reason in SECRET_PLACES[:6]:
         if pattern.search(" " + path):
             return Verdict.no(reason)
@@ -179,7 +227,7 @@ def check_tool(policy: Policy, bot: str, tool_name: str, args: dict) -> Verdict:
             if not re.search(r"path|file|dir|root|target", key, re.I):
                 continue
             for s in _strings(value):
-                v = check_path(s)
+                v = check_path(s, reading=tool_name in FILE_READ_TOOLS)
                 if not v.allowed:
                     return v
         return Verdict.yes()
