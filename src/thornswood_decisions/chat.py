@@ -56,7 +56,7 @@ from zoneinfo import ZoneInfo
 from . import alerts
 from .auth import Principal
 from .core import KEPT_HEAD, DecisionCore
-from .feeds import Feeds, room_events
+from .feeds import THREAD_ID, Feeds, room_events, room_threads
 from . import live_turns
 from .live_turns import LIVE
 from .wakes import BOTS_GW, WAKES
@@ -114,8 +114,9 @@ ROOM_FILE_BYTES = 15_000_000
 ROOM_MESSAGE_BYTES = 25_000_000
 
 
-def clean_room_page(body) -> dict:
-    """Only what the phone shows of one page of a room, oldest first by the room's own sequence."""
+def clean_room_page(body, thread: str | None = None) -> dict:
+    """Only what the phone shows of one page of a room, oldest first by the room's own sequence. A page of one
+    thread (#108) holds only that thread's messages."""
     if not isinstance(body, dict) or not isinstance(body.get("more"), bool):
         raise CoreError(400, "bad_page", "a page is a JSON object with more true or false")
     events = body.get("events")
@@ -129,8 +130,13 @@ def clean_room_page(body) -> dict:
         last = seq
         if e.get("kind") not in ROOM_KINDS:
             raise CoreError(400, "bad_page", "a page of a room holds only its messages")
+        t = e.get("thread") or ""
+        if not isinstance(t, str) or (t and not THREAD_ID.fullmatch(t)):
+            raise CoreError(400, "bad_page", "a message's thread is Hermes's thread id")
+        if thread is not None and t != thread:
+            raise CoreError(400, "bad_page", "a page of a thread holds only that thread's messages")
         out.append({"seq": seq, "kind": e["kind"], "actor": str(e.get("actor") or "")[:80],
-                    "text": str(e.get("text") or "")[:PAGE_TEXT], "at": str(e.get("at") or "")[:40]})
+                    "text": str(e.get("text") or "")[:PAGE_TEXT], "at": str(e.get("at") or "")[:40], "thread": t})
     return {"events": out, "more": body["more"]}
 
 
@@ -269,7 +275,7 @@ class Chat:
         return session
 
     def send(self, p: Principal, target: str, text, idempotency_key, answer=None, session=None,
-             attachments=None, rewind=None, rewind_to=None) -> dict:
+             attachments=None, rewind=None, rewind_to=None, thread=None) -> dict:
         """One message to a Bot or a room. With `answer` (a card this Bot asked, the option, and the
         revision, attention revision and artifact SHA-256 the phone showed), the message is also
         Patrick's answer to that card: it is taken first, by DecisionCore.answer with all its checks, and
@@ -281,7 +287,10 @@ class Chat:
         A retry or an edit (rewinds.py) first takes the Bot's chat back to before one of his turns (rewind_to,
         by Hermes's own id): a retry sends that turn's own words again, as Hermes keeps them, and an edit sends
         these words in its place. Its text is what the phone shows meanwhile. A room has no turns to take
-        back, and neither carries an answer to a card or a file."""
+        back, and neither carries an answer to a card or a file.
+
+        With `thread`, a message to a room goes into that thread of the room (#108: "Reply in this thread"),
+        by Hermes's own thread id; without it, it starts a thread of its own, as before."""
         self._patrick(p)
         rewind, rewind_to = rewind_of(rewind, rewind_to)
         if not self.s.flag(p.workspace_id, "mobile_chat_write"):
@@ -291,6 +300,9 @@ class Chat:
         files = _wanted_files(attachments)
         if rewind is not None and (target not in self.bots(p.workspace_id) or answer is not None or files):
             raise CoreError(400, "bad_rewind", "a retry or an edit goes to a Bot's chat as words, and answers no card")
+        if thread is not None and (target in self.bots(p.workspace_id) or not isinstance(thread, str)
+                                   or not THREAD_ID.fullmatch(thread)):
+            raise CoreError(400, "bad_thread", "a thread is one of a room's own thread ids, and only a room has threads")
         if not isinstance(text, str) or not (text.strip() or files):
             raise CoreError(400, "bad_text", "a message has some text or a file")
         text = text.strip()
@@ -307,7 +319,8 @@ class Chat:
                                         | ({"answer": receipt["response_id"]} if receipt else {})
                                         | ({"session": session} if session else {})
                                         | ({"attachments": files} if files else {})
-                                        | ({"rewind": rewind, "rewind_to": rewind_to} if rewind else {})))
+                                        | ({"rewind": rewind, "rewind_to": rewind_to} if rewind else {})
+                                        | ({"thread": thread} if thread else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -319,10 +332,10 @@ class Chat:
             now = self.s.now()
             mid = new_id("msg")
             db.execute("INSERT INTO chat_messages(id, workspace_id, target, text, send_key, principal_id, device_id, "
-                       "status, created_at, updated_at, session_id, rewind, rewind_to) "
-                       "VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                       "status, created_at, updated_at, session_id, rewind, rewind_to, thread_id) "
+                       "VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                        (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now, session,
-                        rewind, rewind_to))
+                        rewind, rewind_to, thread))
             self._bind_files(db, p, target, mid, files)
             self.s.wake(p.workspace_id, PAGES_GW)
             self.s.event(db, p.workspace_id, "chat.queued", mid, "patrick", {"target": target, "device": p.device_id}
@@ -482,8 +495,8 @@ class Chat:
     def _mine(self, workspace_id: str, target: str, session: str | None = None) -> list[dict]:
         """His newest messages in one chat: a Bot's Bot Chat (session None), one session of the Bot, or a room."""
         targets = self._targets(workspace_id, target)
-        rows = self.s.db.execute("SELECT id, text, status, reason, created_at, updated_at, rewind, rewind_to "
-                                 "FROM chat_messages "
+        rows = self.s.db.execute("SELECT id, text, status, reason, created_at, updated_at, rewind, rewind_to, "
+                                 "thread_id AS thread FROM chat_messages "
                                  f"WHERE workspace_id = ? AND target IN ({','.join('?' * len(targets))}) "
                                  "AND session_id IS ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                                  (workspace_id, *targets, session, MINE)).fetchall()
@@ -491,6 +504,8 @@ class Chat:
         files = self._files(workspace_id, [m["id"] for m in mine])
         now = self.s.clock()
         for m in mine:
+            if m["thread"] is None:
+                del m["thread"]  # only a room message sent into a thread has one (#108)
             if m["id"] in files:
                 m["files"] = files[m["id"]]
             if m["status"] == "queued" and (m["reason"] or "").startswith((WAITS, HELPER_FAILED, FLEET)):
@@ -526,7 +541,7 @@ class Chat:
     @staticmethod
     def _room_history(events: list[dict]) -> list[dict]:
         return [{"who": e["actor"] or "someone", "role": "user" if e["kind"] == "message.user" else "member",
-                 "text": e["text"], "at": e["at"]} for e in events]
+                 "text": e["text"], "at": e["at"], "thread": e.get("thread") or ""} for e in events]
 
     def view(self, p: Principal, target: str, session=None) -> dict:
         """A chat as the phone opens it. With `session`, that one session of a Bot (the one a Board row
@@ -540,6 +555,7 @@ class Chat:
         if target in rooms:
             snap = feeds.get(p.workspace_id, "room")
             history = self._room_history(room_events(snap["room"], target))
+            threads = room_threads(snap["room"], target)
             kind, name = "room", rooms[target]
         else:
             snap = feeds.get(p.workspace_id, "bots")
@@ -548,6 +564,7 @@ class Chat:
                 {"who": "Patrick" if m["role"] == "user" else target.capitalize(), "role": m["role"],
                  "text": m["text"], "at": m["at"]} for m in (chat or {}).get("messages", [])]
             kind, name = "bot", target.capitalize()
+            threads = None
         return ({"target": target, "kind": kind, "name": name, "as_of": snap["as_of"], "history": history,
                 "cards": DecisionCore(self.s).asked_by(p, target) if kind == "bot" else [],
                 "mine": self._mine(p.workspace_id, target, session),
@@ -557,7 +574,9 @@ class Chat:
                 if kind == "bot" and not session else [],
                 "rewinds": Rewinds(self.s).shown(p.workspace_id, PAGES_GW, target, session) if kind == "bot" else [],
                 "live": self.live_states(p.workspace_id).get(target) if kind == "bot" else None}
-                | ({"session": session} if session else {}))
+                | ({"session": session} if session else {})
+                # A room's newest threads, each with its count (#108); the feed sends them once a minute.
+                | ({"threads": threads} if threads is not None else {}))
 
     def summary(self, p: Principal) -> dict:
         self._patrick(p)
@@ -672,14 +691,20 @@ class Chat:
 
     # ── full history: pages (step 2, plan Part 4) ─────────────────────────
 
-    def page(self, p: Principal, target: str, before=None, wait=0, session=None) -> dict:
+    def page(self, p: Principal, target: str, before=None, wait=0, session=None, thread=None) -> dict:
         """One page of a Bot's Bot Chat (`before` Hermes's own message id) or of a room (`before` the room's
         sequence number), read by the Bots' connector and held in the core's memory only. With `session`, a
         page of that one session of the Bot instead: the one the Board shows it working in (Patrick, 9 Nov:
-        "clicking a working agent should open that exact session")."""
+        "clicking a working agent should open that exact session"). With `thread`, a page of that one thread of
+        a room (#108)."""
         self._patrick(p)
         target = self._target(p.workspace_id, target)
         kind = "room" if target in {r["room_id"] for r in self.rooms(p.workspace_id)} else "bot"
+        if thread is not None:
+            if kind != "room" or not isinstance(thread, str) or not THREAD_ID.fullmatch(thread):
+                raise CoreError(400, "bad_thread", "a thread is one of a room's own thread ids")
+            return fetch_page((p.workspace_id, PAGES_GW, "room_thread", target, _page_mid(before), thread), wait,
+                              self.s.clock())
         if session is not None:
             if kind != "bot" or not isinstance(session, str) or not SESSION_ID.match(session):
                 raise CoreError(400, "bad_session", "a session is one of a Bot's own session ids")
@@ -707,7 +732,8 @@ class Chat:
         if body.get("target") != key[3]:
             raise CoreError(409, "not_that_chat", "the page is of another Bot or room than the one asked for")
         page = body.get("page")
-        clean = clean_room_page(page) if key[2] == "room" else clean_page("messages", page)
+        clean = clean_room_page(page) if key[2] == "room" else clean_room_page(page, key[5]) \
+            if key[2] == "room_thread" else clean_page("messages", page)
         PAGES.answer(workspace_id, PAGES_GW, body["id"], clean, self.s.clock())
         if key[2] == "bot" and key[4] is None:
             said = [m for m in clean.get("messages", []) if m.get("role") in ("user", "assistant")]
@@ -762,7 +788,7 @@ class Chat:
                     rewinds.append(Rewinds(self.s).lease(db, w["row"]) | {"bot": w["target"]})
                     continue
                 if w["kind"] == "chat":
-                    row = db.execute("SELECT text, send_key, session_id, rewind, rewind_to FROM chat_messages "
+                    row = db.execute("SELECT text, send_key, session_id, rewind, rewind_to, thread_id FROM chat_messages "
                                      "WHERE id = ?", (w["id"],)).fetchone()
                     db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ?, attempts = attempts + 1, "
                                "updated_at = ? WHERE id = ?", (until, now, w["id"]))
@@ -777,6 +803,8 @@ class Chat:
                         item["session"] = row["session_id"]  # into that session of the Bot, not its Bot Chat
                     if row["rewind"]:
                         item["rewind"], item["rewind_to"] = row["rewind"], row["rewind_to"]
+                    if row["thread_id"]:
+                        item["thread"] = row["thread_id"]  # into that thread of the room (#108)
                 else:
                     db.execute("UPDATE connector_outbox SET status = 'leased', lease_until = ?, "
                                "attempts = attempts + 1, updated_at = ? WHERE id = ?", (until, now, w["id"]))
@@ -957,7 +985,7 @@ class Chat:
                 raise CoreError(409, "not_leased", f"that message is {row['status']}, not leased")
             # The turn is over and the Bot's answer is in its Bot Chat or the session (or the message in the
             # room): that chat's newest page is read again, not shown from memory for up to PAGE_FRESH without it.
-            PAGES.forget(workspace_id, PAGES_GW, ("bot", "bot_session", "room"), row["target"])
+            PAGES.forget(workspace_id, PAGES_GW, ("bot", "bot_session", "room", "room_thread"), row["target"])
             LIVE.done(workspace_id, item_id)
             with self.s.tx() as db:
                 db.execute("UPDATE chat_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ? "

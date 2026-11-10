@@ -146,6 +146,7 @@ TURNED_AWAY_DIR = ("local", "thornswood-hermes", "turned-away")
 ROOM_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")  # own.SESSION_ID
+THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # feeds.THREAD_ID: a room's thread, as Hermes takes one
 
 
 def bot_chat_id(hermes_home: Path, bot: str) -> str | None:
@@ -195,11 +196,11 @@ def bot_page(hermes_home: Path, bot: str, before: int | None, session: str | Non
         n //= 2
 
 
-def room_page(shared_db: Path, room_id: str, before: int | None) -> dict:
+def room_page(shared_db: Path, room_id: str, before: int | None, thread: str | None = None) -> dict:
     from .feed_reader import room_page as read
     n = 50
     while True:
-        page = read(shared_db, room_id, before, n)
+        page = read(shared_db, room_id, before, n, thread=thread)
         if len(json.dumps(page, ensure_ascii=False).encode("utf-8")) <= PAGE_BYTES or n <= 1:
             return page
         n //= 2
@@ -336,10 +337,13 @@ class Hermes:
             return {"why": str(got.get("reason") or "the tasks helper gave no tasks")[:200]}
         return {"tasks": {k: v for k, v in tasks.items() if k in profiles and isinstance(v, dict)}}
 
-    def to_room(self, room_id: str, send_key: str, text: str, files: list | None = None) -> tuple[str, str, str]:
+    def to_room(self, room_id: str, send_key: str, text: str, files: list | None = None,
+                thread: str | None = None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message to a room. `files` are (file, bytes) for each file on it,
-        uploaded into the room's own store by the helper before the message goes (room_send.py _send)."""
-        req = {"op": "send", "room_id": room_id, "event_id": send_key, "text": text}
+        uploaded into the room's own store by the helper before the message goes (room_send.py _send). With
+        `thread`, it goes into that thread of the room (#108); without, it starts a thread of its own."""
+        req = {"op": "send", "room_id": room_id, "event_id": send_key, "text": text} | (
+            {"thread_id": thread} if thread else {})
         if files:
             req["files"] = [{"id": f["id"], "name": f["name"], "mime": f["mime"],
                              "data_base64": base64.b64encode(body).decode("ascii")} for f, body in files]
@@ -647,7 +651,8 @@ class Connector:
             # Nothing was handed to Hermes, so the message did not go: Patrick sees why and can send again.
             return {"id": item["id"], "outcome": "failed", "ref": "", "reason": str(exc)[:200]}
         if item["target"] == "room":
-            outcome, ref, reason = self.hermes.to_room(item["room_id"], item["send_key"], item["text"], got)
+            outcome, ref, reason = self.hermes.to_room(item["room_id"], item["send_key"], item["text"], got,
+                                                       thread=item.get("thread"))
         else:
             def doing(state, tool):
                 with self._lock:
@@ -971,6 +976,9 @@ class Connector:
                     page = bot_page(self.hermes_home, target, before, session=req["q"])
                 elif req.get("kind") == "room" and isinstance(target, str) and ROOM_ID.match(target):
                     page = room_page(self.hermes_home / "shared-state.db", target, before)
+                elif (req.get("kind") == "room_thread" and isinstance(target, str) and ROOM_ID.match(target)
+                      and isinstance(req.get("q"), str) and THREAD_ID.fullmatch(req["q"])):
+                    page = room_page(self.hermes_home / "shared-state.db", target, before, thread=req["q"])
                 else:
                     continue
             except (sqlite3.Error, OSError) as exc:

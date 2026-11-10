@@ -37,13 +37,18 @@ MAX_FEED_BYTES = 512 * 1024
 MAX_EVENTS = 200
 MAX_ROOMS = 8
 MAX_BOT_MESSAGES = 40
-EVENT_FIELDS = {"event_id": 128, "kind": 32, "actor": 80, "text": 2000, "at": 40}
+EVENT_FIELDS = {"event_id": 128, "kind": 32, "actor": 80, "text": 2000, "at": 40, "thread": 128}
+# A room's newest threads (feed_reader.room_threads, TWHermesAgents #108).
+MAX_THREADS = 20
+THREAD_FIELDS = {"thread": 128, "by": 80, "title": 200, "at": 40}
 BOT_MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
 ROLES = ("user", "assistant")
 # The live Board (live_reader.py): one row for each turn running now.
 MAX_DOING = 60
 DOING_FIELDS = {"bot": 64, "title": 200, "since": 40, "platform": 32}
-SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")  # own.SESSION_ID: the row opens that session
+SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+# A room thread's id, as Hermes takes one (gateway/hosted_rooms_common.py IDENTIFIER_RE, 128 characters at most).
+THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # own.SESSION_ID: the row opens that session
 LIVE_FOR = 90
 TOOL = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
@@ -123,7 +128,29 @@ def _room(r) -> dict:
         if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
             raise CoreError(400, "bad_feed", "each event has its room seq")
         kept.append({"seq": seq, **{k: _text(e.get(k), n) for k, n in EVENT_FIELDS.items()}})
-    return {"room_id": _text(r.get("room_id"), 64), "events": kept}
+    # A feed reader from before #108 sends no threads: the room then shows none.
+    threads = r.get("threads", [])
+    if not isinstance(threads, list) or len(threads) > MAX_THREADS:
+        raise CoreError(400, "bad_feed", f"each room's threads is a list of at most {MAX_THREADS}")
+    listed = []
+    for t in threads:
+        if not isinstance(t, dict):
+            raise CoreError(400, "bad_feed", "each thread is a JSON object")
+        row = {k: _text(t.get(k), n) for k, n in THREAD_FIELDS.items()}
+        count, last = t.get("count"), t.get("last_seq")
+        if not THREAD_ID.fullmatch(row["thread"]) or any(
+                not isinstance(v, int) or isinstance(v, bool) or v < 1 for v in (count, last)):
+            raise CoreError(400, "bad_feed", "each thread has Hermes's thread id, its count and its last seq")
+        listed.append(row | {"count": count, "last_seq": last})
+    return {"room_id": _text(r.get("room_id"), 64), "events": kept, "threads": listed}
+
+
+def room_threads(body: dict | None, room_id: str) -> list[dict]:
+    """One room's newest threads from a stored room snapshot; none from a snapshot that has them not."""
+    if not body:
+        return []
+    rooms = body.get("rooms") if "rooms" in body else [body]
+    return next((r.get("threads", []) for r in rooms if r.get("room_id") == room_id), [])
 
 
 def room_events(body: dict | None, room_id: str) -> list[dict]:

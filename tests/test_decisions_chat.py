@@ -679,7 +679,8 @@ class Rooms(unittest.TestCase):
 
     def test_the_feed_takes_both_shapes_and_only_bound_rooms(self):
         self.put({"source_time": "2026-11-01T18:00:00+00:00", "room_id": ROOM, "events": []})
-        self.assertEqual(self.f.get(self.w.ws, "room")["room"]["rooms"], [{"room_id": ROOM, "events": []}])
+        self.assertEqual(self.f.get(self.w.ws, "room")["room"]["rooms"], [{"room_id": ROOM, "events": [], "threads": []}],
+                         "a feed reader from before #108 sends no threads, and the room shows none")
         for bad in ({"source_time": "2026-11-01T18:00:00+00:00", "rooms": [{"room_id": "elsewhere", "events": []}]},
                     {"source_time": "2026-11-01T18:00:00+00:00", "room_id": "elsewhere", "events": []}):
             with self.assertRaises(CoreError) as e:

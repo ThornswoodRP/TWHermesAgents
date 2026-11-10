@@ -992,6 +992,13 @@ CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway,
     """
 ALTER TABLE own_messages ADD COLUMN folder TEXT CHECK (folder IS NULL OR length(folder) BETWEEN 1 AND 300);
 """,
+    # 28: a message Patrick sends into one thread of a room (TWHermesAgents #108, 10 Nov: the mock-up's Workbench
+    # room has its threads along the top, and a message's menu has "Reply in this thread"). Hermes keeps a room's
+    # threads by the thread_id on each message (gateway/hosted_room_discussion.py); NULL starts a thread of its
+    # own, as every room message did until now (room_send.py: its own event id).
+    """
+ALTER TABLE chat_messages ADD COLUMN thread_id TEXT CHECK (thread_id IS NULL OR length(thread_id) BETWEEN 1 AND 128);
+""",
 ]
 
 
@@ -1308,5 +1315,10 @@ CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway,
     27: ([("SELECT count(*) FROM own_messages WHERE folder IS NOT NULL AND status IN ('queued', 'leased')",
            "new chats on their way to start in a project")], """
 ALTER TABLE own_messages DROP COLUMN folder;
+""", ""),
+    # A message still on its way into a room's thread would start a thread of its own instead.
+    28: ([("SELECT count(*) FROM chat_messages WHERE thread_id IS NOT NULL AND status IN ('queued', 'leased')",
+           "messages on their way into a room's thread")], """
+ALTER TABLE chat_messages DROP COLUMN thread_id;
 """, ""),
 }

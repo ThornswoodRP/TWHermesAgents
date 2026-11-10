@@ -60,7 +60,12 @@ ROOM_MD = ("@bramble it'll show up on #5367, and it'll run, not skip.\n- **Why i
            "`Launcher builds` has `needs: pick` and [the guide](https://example.invalid/g) says so.\n\n## Next\n1. merge it")
 f.put(w.ws, "room", tr, {"source_time": "2026-11-01T18:00:00+00:00", "rooms": [
     {"room_id": "54b3ad46-3419-4adb-b60d-c79cb347fcee", "events": [{"seq": 1, "kind": "message.member", "actor": "Bramble", "text": "<script>alert(1)</script> hello", "at": "2026-11-01T17:59:00+00:00"}]},
-    {"room_id": "00000000-0000-4000-8000-000000000002", "events": [{"seq": 1, "kind": "message.member", "actor": "magpie", "text": ROOM_MD, "at": "2026-11-01T17:58:00+00:00"}]}]})
+    {"room_id": "00000000-0000-4000-8000-000000000002", "events": [{"seq": 1, "kind": "message.member", "actor": "magpie", "text": ROOM_MD, "at": "2026-11-01T17:58:00+00:00"}],
+     # Its threads (#108), as feed_reader.room_threads reads them from the room's store below.
+     "threads": [{"thread": "desk-2", "count": 1, "by": "Magpie", "title": "CI is green", "last_seq": 5,
+                  "at": "2026-11-01T18:03:00+00:00"},
+                 {"thread": "tw-chat.msg_t1", "count": 3, "by": "Patrick", "title": "Which night for the rehearsal?",
+                  "last_seq": 4, "at": "2026-11-01T18:02:00+00:00"}]}]})
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from thornswood_decisions import push_worker, webpush
 from thornswood_decisions.push import Push
@@ -440,6 +445,15 @@ con.execute("CREATE TABLE hosted_room_events (room_id TEXT, seq INTEGER, event_i
 con.execute("INSERT INTO hosted_room_events VALUES('54b3ad46-3419-4adb-b60d-c79cb347fcee', 1, 'e1', 'message.member', "
             "?, 1, ?, ?)", (json.dumps({"display_name": "Bramble"}), json.dumps({"text": "<script>alert(1)</script> hello"}),
                             epoch("2026-11-01T17:59:00+00:00")))
+# The second room's two threads (#108): Patrick's question with two answers, and Magpie's own.
+for seq, who, text, thread in ((2, "Patrick", "Which night for the rehearsal?", "tw-chat.msg_t1"),
+                               (3, "Bramble", "Thursday works.", "tw-chat.msg_t1"),
+                               (4, "Echo", "Also Thursday for me.", "tw-chat.msg_t1"),
+                               (5, "Magpie", "CI is green", "desk-2")):
+    con.execute("INSERT INTO hosted_room_events VALUES('00000000-0000-4000-8000-000000000002', ?, ?, ?, ?, 1, ?, ?)",
+                (seq, f"r2e{seq}", "message.user" if who == "Patrick" else "message.member",
+                 json.dumps({"display_name": who}), json.dumps({"text": text, "thread_id": thread}),
+                 epoch(f"2026-11-01T18:0{seq - 2}:00+00:00")))
 con.commit()
 con.close()
 tc = f.new_token(w.ws, "connector", by="t")

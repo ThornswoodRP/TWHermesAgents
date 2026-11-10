@@ -171,6 +171,18 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
    to 1; a link on either 8.6 to 1 or more. */
 :root { --mine: #2A2615; --mine-line: #4A3F1E; --theirs: #161B12; --tabs-h: 56px; }
 .chat { display: flex; flex-direction: column; min-height: calc(100vh - 140px); }
+/* A room's threads along the top (#108): All, then the newest threads, each with its count. */
+.threads { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 10px; margin: 0 0 4px; scrollbar-width: none;
+  border-bottom: 1px solid var(--line); }
+.threads::-webkit-scrollbar { display: none; }
+.thread-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; max-width: 220px; min-height: 36px;
+  padding: 4px 12px; border: 1px solid var(--line2); border-radius: 18px; background: var(--card); color: var(--fg);
+  font: inherit; font-size: 14px; cursor: pointer; }
+.thread-chip[aria-current="true"] { border-color: var(--accent); color: var(--accent-hot); background: var(--raised); }
+.thread-chip .thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.thread-chip .thread-title .snip { display: inline; -webkit-line-clamp: unset; }
+.thread-count { flex: 0 0 auto; font: 600 12px/1 var(--mono); color: var(--muted); background: var(--raised);
+  border-radius: 9px; padding: 3px 6px; }
 .chat .bar { position: sticky; top: var(--top-h); z-index: 2; }
 .chat .msgs { flex: 1 0 auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 0 8px; }
 .chat .older { width: auto; align-self: center; margin: 0 0 6px; }

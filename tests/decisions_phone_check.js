@@ -1205,6 +1205,47 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.getByLabel('Message to Second test room').waitFor({ timeout: 5000 })
     if (!page.url().endsWith('/m/rooms/00000000-0000-4000-8000-000000000002')) throw new Error('url ' + page.url())
   })
+  await step("a room's threads go along the top, newest first, each with its count", async () => {
+    const strip = page.getByRole('navigation', { name: 'Threads in Second test room' })
+    await strip.waitFor({ timeout: 5000 })
+    const chips = (await strip.locator('.thread-chip').allTextContents()).map(t => t.replace(/\s+/g, ' ').trim())
+    if (JSON.stringify(chips) !== JSON.stringify(['All', 'CI is green1', 'Which night for the rehearsal?3'])) throw new Error(JSON.stringify(chips))
+    if ((await strip.locator('.thread-chip[aria-current="true"]').textContent()) !== 'All') throw new Error('All is not the one open')
+  })
+  await step('Reply in this thread on a message opens its thread with the box ready', async () => {
+    const msg = page.locator('#view .msg', { hasText: 'Thursday works.' })
+    await msg.waitFor({ timeout: 8000 })
+    await msg.locator('.bub').click({ button: 'right' })
+    await page.getByRole('dialog', { name: 'Message actions' }).getByRole('button', { name: 'Reply in this thread' }).click()
+    await page.waitForURL(/\/m\/rooms\/00000000-0000-4000-8000-000000000002\/t\/tw-chat\.msg_t1$/, { timeout: 5000 })
+    const box = page.getByLabel('Reply in this thread')
+    await box.waitFor({ timeout: 5000 })
+    await page.waitForFunction(() => document.activeElement && document.activeElement.matches('#view .dock .composer textarea'),
+      null, { timeout: 5000 })
+  })
+  await step("a thread shows only its own messages, and its chip is the one open", async () => {
+    for (const t of ['Which night for the rehearsal?', 'Thursday works.', 'Also Thursday for me.']) {
+      await page.locator('#view .msg', { hasText: t }).waitFor({ timeout: 8000 })
+    }
+    if (await page.locator('#view .msg', { hasText: 'CI is green' }).count()) throw new Error("another thread's message")
+    const on = page.locator('.threads .thread-chip[aria-current="true"]')
+    if ((await on.getAttribute('data-thread')) !== 'tw-chat.msg_t1') throw new Error('the open chip')
+  })
+  await step('a reply sent in a thread goes into that thread', async () => {
+    const sent = page.waitForRequest(q => q.method() === 'POST' && /\/chat\/00000000-0000-4000-8000-000000000002$/.test(q.url()))
+    await page.getByLabel('Reply in this thread').fill('Thursday at 8 PM then.')
+    await page.getByRole('button', { name: 'Send to this thread' }).click()
+    const body = JSON.parse((await sent).postData())
+    if (body.thread !== 'tw-chat.msg_t1' || body.text !== 'Thursday at 8 PM then.') throw new Error('send body ' + JSON.stringify(body))
+    await page.getByText('Thursday at 8 PM then.').waitFor({ timeout: 5000 })
+  })
+  await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-thread.png', fullPage: true })
+  await step('All goes back to the whole room, where the reply waits too', async () => {
+    await page.locator('.threads .thread-chip', { hasText: 'All' }).click()
+    await page.waitForURL(/\/m\/rooms\/00000000-0000-4000-8000-000000000002$/, { timeout: 5000 })
+    await page.locator('#view .msg', { hasText: 'CI is green' }).waitFor({ timeout: 8000 })
+    await page.getByText('Thursday at 8 PM then.').waitFor({ timeout: 5000 })
+  })
   await page.getByRole('link', { name: 'Rooms' }).click()
   await page.getByText('Thornswood Workbench', { exact: true }).click()
   await step('the Workbench room, as text', () => page.getByText('<script>alert(1)</script> hello').waitFor({ timeout: 5000 }))
