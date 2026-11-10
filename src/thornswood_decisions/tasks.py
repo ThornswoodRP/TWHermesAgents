@@ -113,3 +113,12 @@ class Tasks:
             else:
                 out.append({"id": agent, "heard": True, "at": got["at"].isoformat(), **got["report"]})
         return {"agents": out}
+
+    def job(self, workspace_id: str, agent: str, job_id: str) -> dict | None:
+        """That Hermes's job with this id, as its last report listed it; None when the report is stale, could
+        not read its jobs, or did not list it (own_jobs.py: a change names a job Hermes listed)."""
+        with _LOCK:
+            got = _TASKS.get((workspace_id, agent))
+        if got is None or self.s.clock() - got["at"] > TASKS_STALE or "report" not in got:
+            return None
+        return next((j for j in got["report"].get("jobs") or [] if j["id"] == job_id), None)
