@@ -2979,8 +2979,10 @@ async function ownChatView(gw, sid) {
 // ── a chat's model and thinking: its details (own_control.py) ──────────────
 //
 // What Hermes holds for one of his own chats, read through that Hermes's connector: the model, the
-// thinking level, whether approvals are skipped in it, and what a message sent while it works does. The
-// model and the thinking level change for that chat only, never Hermes's default. Only models his
+// thinking level, whether approvals are skipped in it, what a message sent while it works does, and that
+// Hermes's approval mode. The model, the thinking level and the busy setting change for that chat only,
+// never Hermes's default; the approval mode is the whole Hermes's, as Desktop's approval chip is, and Off
+// takes a fresh passkey or fingerprint sign-in first (#104). Only models his
 // sign-ins, a free model or a local one covers are offered (plan Part 6, decision 4 A). On a wide screen
 // the details sit on the right in place of Decisions; on a phone they open in a sheet.
 
@@ -2992,14 +2994,22 @@ const BUSY_WORDS = {
   queue: 'wait until the running turn ends',
   interrupt: 'stop the running turn and start on them'
 }
+const BUSY_PICK = { steer: 'Steer the running turn', queue: 'Wait for it to finish', interrupt: 'Interrupt it' }
+const MODE_WORDS = {
+  manual: 'Manual: asks you before a command its rules flag',
+  smart: 'Smart: Hermes judges a flagged command and asks you only when it is unsure',
+  off: 'Off: runs commands without asking (weakens security)'
+}
 const WHY_WORDS = { subscription: 'Covered by your sign-ins', free: 'Free', local: 'On this machine' }
 const LEVEL_WORDS = { none: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High',
   xhigh: 'Extra high', max: 'Max', ultra: 'Ultra' }
 
 function changeLine(c, name) {
   if (!c) return null
-  const what = [c.set && c.set.model ? 'model' : null, c.set && c.set.reasoning ? 'thinking' : null]
-    .filter(Boolean).join(' and ')
+  const set = c.set || {}
+  const parts = [set.model ? 'model' : null, set.reasoning ? 'thinking' : null,
+    set.busy ? 'busy setting' : null, set.approvals ? 'approval mode' : null].filter(Boolean)
+  const what = parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0] || 'settings'
   if (c.status === 'queued') {
     return el('p', { class: 'receipt', role: 'status' }, `Changing its ${what}. ${name} does it the next time it checks in.`)
   }
@@ -3052,6 +3062,20 @@ async function detailsPart(gw, sid, close, again) {
       if (lv === st.reasoning) opt.selected = true
       return opt
     }))
+  const busyPick = el('select', { 'aria-label': 'What a message sent while it works does', 'data-detail': 'busy-pick' },
+    Object.entries(BUSY_PICK).map(([k, words]) => {
+      const opt = el('option', { value: k }, words)
+      if (k === st.busy) opt.selected = true
+      return opt
+    }))
+  if (!st.busy) busyPick.prepend(el('option', { value: '', selected: '' }, 'Not known'))
+  const approvalPick = el('select', { 'aria-label': `${name}'s approval mode`, 'data-detail': 'approvals-pick' },
+    Object.entries(MODE_WORDS).map(([k, words]) => {
+      const opt = el('option', { value: k }, words)
+      if (k === st.approvals) opt.selected = true
+      return opt
+    }))
+  if (!st.approvals) approvalPick.prepend(el('option', { value: '', selected: '' }, 'Not known'))
   async function save() {
     const body = {}
     if (pick.value) {
@@ -3059,8 +3083,15 @@ async function detailsPart(gw, sid, close, again) {
       if (model !== st.model || provider !== st.provider) body.model = { provider, model }
     }
     if (level.value && level.value !== st.reasoning) body.reasoning = level.value
-    if (!body.model && !body.reasoning) { note.textContent = 'Nothing is different from what the chat has now.'; return }
-    if (!v.can_change) {
+    if (busyPick.value && busyPick.value !== st.busy) body.busy = busyPick.value
+    if (approvalPick.value && approvalPick.value !== st.approvals) body.approvals = approvalPick.value
+    if (!Object.keys(body).length) { note.textContent = 'Nothing is different from what the chat has now.'; return }
+    if (body.approvals === 'off') {
+      // Off lets commands run without asking him: a fresh sign-in is the yes, every time.
+      note.textContent = `Turning ${name}'s approvals off. Your ${signInWord()} confirms it.`
+      const s = await passkeySignIn()
+      if (s.status !== 200) { note.textContent = said(s.body); return }
+    } else if (!v.can_change) {
       const s = await passkeySignIn()
       if (s.status !== 200) { note.textContent = said(s.body); return }
     }
@@ -3074,12 +3105,14 @@ async function detailsPart(gw, sid, close, again) {
       ? 'Could not reach the core. Asking again sends the same change, never a second one.'
       : (c.body.message || said(c.body))
   }
-  for (const box of [pick, level]) box.addEventListener('change', () => { box.dataset.dirty = '' })
+  for (const box of [pick, level, busyPick, approvalPick]) box.addEventListener('change', () => { box.dataset.dirty = '' })
   const row = (label, ...nodes) => el('label', { class: 'detail' }, el('span', {}, label), ...nodes)
   return [head,
     el('div', { class: 'details' },
       row('Model', pick),
       row('Thinking', level),
+      row('Sent while it works', busyPick),
+      row(`Approvals (all of ${name})`, approvalPick),
       el('button', { class: 'primary', type: 'button', 'data-detail': 'save', disabled: busy ? '' : null, onclick: save },
         v.can_change ? 'Change' : `Change (with your ${signInWord()})`),
       changeLine(v.change, name),
@@ -3088,6 +3121,10 @@ async function detailsPart(gw, sid, close, again) {
         ? 'Approvals: skipped in this chat. Commands run without asking you.'
         : 'Approvals: it asks you before a command its rules flag.'),
       st.busy ? el('p', { 'data-detail': 'busy' }, `Messages sent while it works ${BUSY_WORDS[st.busy]}.`) : null,
+      st.approvals === 'off' ? el('p', { class: 'warn', 'data-detail': 'approvals-off' },
+        `${name}'s approvals are off: commands run without asking you, in every chat.`) : null,
+      el('p', { 'data-detail': 'this-chat' }, chatSizeWords(st)),
+      st.folder ? el('p', { 'data-detail': 'folder' }, 'Folder: ' + st.folder) : null,
       el('p', { 'data-detail': 'context' }, contextWords(st)),
       el('p', { 'data-detail': 'tokens' }, tokenWords(st)))]
 }
@@ -3098,6 +3135,12 @@ function bigNumber(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M'
   if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K'
   return String(n)
+}
+// "This chat: 42 messages, started 9 Nov 2026, 3:12 PM", from Hermes's own row for it.
+function chatSizeWords(st) {
+  const n = Number.isInteger(st.messages) ? `${st.messages.toLocaleString()} message${st.messages === 1 ? '' : 's'}` : null
+  const at = typeof st.started === 'number' ? 'started ' + when(new Date(st.started * 1000).toISOString()) : null
+  return 'This chat: ' + ([n, at].filter(Boolean).join(', ') || 'not known yet') + '.'
 }
 function contextWords(st) {
   const c = st.context

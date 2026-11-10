@@ -1277,7 +1277,8 @@ class OwnChat:
         return {"pending": got["state"] is None, **got, "can_change": self.sign_in_until(p) is not None}
 
     def control_set(self, p: Principal, gw: str, chat, body) -> dict:
-        """Change one chat's model, thinking level or both; that chat only, never Hermes's default."""
+        """Change one chat's model, thinking level or busy setting (that chat only, never Hermes's default),
+        or that Hermes's approval mode (the whole Hermes's, as Desktop's approval chip changes it)."""
         self._patrick(p)
         gw = self._gateway(gw)
         if not self.s.flag(p.workspace_id, "own_chat_write"):
@@ -1286,13 +1287,17 @@ class OwnChat:
         if not self._listed(p.workspace_id, gw, chat):
             raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
         if self.sign_in_until(p) is None:
-            raise CoreError(403, "passkey_needed", "changing a chat's model or thinking needs a passkey sign-in "
+            raise CoreError(403, "passkey_needed", "changing a chat's settings needs a passkey sign-in "
                             "from the last 30 minutes, as a message does; sign in with your passkey again")
         idem = body.get("idempotency_key") if isinstance(body, dict) else None
         if not isinstance(idem, str) or not 8 <= len(idem) <= 200:
             raise CoreError(400, "bad_key", "a change carries an idempotency key of 8 to 200 characters")
         key = (p.workspace_id, gw, chat)
         want = control_wanted(CONTROLS.state(key, self.s.clock())["state"], body)
+        if want.get("approvals") == "off" and not p.fresh:
+            # Off lets commands run without asking him: a fresh sign-in, as a high-risk card takes.
+            raise CoreError(403, "sign_in_again", f"turning {NAMES[gw]}'s approvals off lets commands run without "
+                            "asking you, so it needs a passkey sign-in from the last 5 minutes")
         self.must_be_online(p.workspace_id, gw)
         out = CONTROLS.change(key, want, idem, self.s.clock())
         if not out.get("replayed"):

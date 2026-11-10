@@ -445,6 +445,19 @@ def _offered(options: dict) -> list:
     return out[:80]
 
 
+def _chat_facts(sid: str) -> dict:
+    """The chat's size and start, from Hermes's own SessionDB row (message_count, started_at), as Desktop's
+    session list shows them; nothing when Hermes has no row for it."""
+    from hermes_state_registry import acquire, release_or_close
+
+    db = acquire(None)
+    try:
+        row = db.get_session(sid) or {}
+    finally:
+        release_or_close(db)
+    return {"messages": row.get("message_count"), "started": row.get("started_at")}
+
+
 async def _control_read(client, sid: str) -> dict:
     """What Hermes holds for one chat, read the way Desktop's details and pickers read it."""
     from agent.reasoning_effort import route_supported_efforts
@@ -453,11 +466,14 @@ async def _control_read(client, sid: str) -> dict:
     reasoning = (await client.rpc("config.get", session_id=sid, key="reasoning") or {}).get("value")
     busy = (await client.rpc("config.get", session_id=sid, key="busy") or {}).get("value")
     yolo = (await client.rpc("config.get", session_id=sid, key="yolo") or {}).get("value")
+    # The approval mode is the whole profile's, read as Desktop's approval chip reads it (no session).
+    approvals = (await client.rpc("config.get", key="approvals.mode") or {}).get("value")
     options = await client.rpc("model.options", session_id=sid) or {}
     model = info.get("model") or options.get("model")
     provider = info.get("provider") or options.get("provider")
     return {"model": model, "provider": provider, "reasoning": reasoning,
             "levels": list(route_supported_efforts(provider, model)), "yolo": yolo == "1", "busy": busy,
+            "approvals": approvals, "folder": info.get("cwd"), **await asyncio.to_thread(_chat_facts, sid),
             "offered": await asyncio.to_thread(_offered, options), **await _usage_read(client, sid)}
 
 
@@ -491,8 +507,11 @@ async def _usage_read(client, sid: str) -> dict:
 async def _control(endpoint, sid: str, want) -> dict:
     """One chat's settings, changed first when `want` asks: a model (session.mutate model) and a thinking
     level (session.mutate reasoning), each fenced to the chat's revision and generation by Hermes's own
-    PreparedMutations, as its ACP and TUI clients send them. A model Hermes's selection guard holds for a
-    confirmation is not switched: no confirmation is given from here."""
+    PreparedMutations, as its ACP and TUI clients send them; what a message sent while it works does
+    (config.set busy for that chat, as Desktop's busy picker sends it); and that Hermes's approval mode
+    (config.set approvals.mode, the whole profile's, as Desktop's approval chip and `/approvals` write it).
+    A model Hermes's selection guard holds for a confirmation is not switched: no confirmation is given
+    from here."""
     from hermes_cli.gateway_client import GatewayClientError, connect_gateway
     from hermes_cli.gateway_mutations import PreparedMutations
 
@@ -516,6 +535,10 @@ async def _control(endpoint, sid: str, want) -> dict:
                         reason = "a turn is running; Hermes switches this chat when it ends"
                 if want.get("reasoning"):
                     await mutations.apply(client, sid, "reasoning", {"effort": want["reasoning"]})
+                if want.get("busy"):
+                    await client.rpc("config.set", session_id=sid, key="busy", value=want["busy"])
+                if want.get("approvals"):
+                    await client.rpc("config.set", key="approvals.mode", value=want["approvals"])
                 applied = True
             except GatewayClientError as exc:
                 reason = str(exc)
@@ -531,7 +554,10 @@ def _control_op(req: dict) -> dict:
         return {"state": None, "applied": False, "reason": "bad request"}
     if want is not None:
         pick, level = want.get("model"), want.get("reasoning")
-        if set(want) - {"model", "reasoning"} or not (pick or level) or not (
+        busy, approvals = want.get("busy"), want.get("approvals")
+        if set(want) - {"model", "reasoning", "busy", "approvals"} or not (pick or level or busy or approvals) or not (
+                busy is None or busy in ("steer", "queue", "interrupt")) or not (
+                approvals is None or approvals in ("manual", "smart", "off")) or not (
                 pick is None or (isinstance(pick, dict) and isinstance(pick.get("model"), str)
                                  and isinstance(pick.get("provider"), str))) or not (
                 level is None or isinstance(level, str)):
