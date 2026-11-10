@@ -18,7 +18,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -141,8 +141,13 @@ class ConnectorSide(unittest.TestCase):
     def at_schema(self, n):
         """The store as an older release left it at schema n: the stored version, and no column a later
         migration adds (13: own_messages.reply_to; 14: own_attachments; 15: passkeys.aaguid and phone_key;
-        18: passkeys.fingerprint_try; 19: chat_messages.session_id; 20: chat_alerts; 21: chat_attachments), so this release's migrations run on it as
-        they would."""
+        18: passkeys.fingerprint_try; 19: chat_messages.session_id; 20: chat_alerts; 21: chat_attachments; 24:
+        chat_rewinds and the messages' rewind and rewind_to), so this release's migrations run on it as they would."""
+        if n < 24:
+            self.w.store.db.execute("DROP TABLE chat_rewinds")
+            for table in ("chat_messages", "own_messages"):
+                self.w.store.db.execute(f"ALTER TABLE {table} DROP COLUMN rewind_to")
+                self.w.store.db.execute(f"ALTER TABLE {table} DROP COLUMN rewind")
         if n < 21:
             self.w.store.db.execute("DROP TABLE chat_attachments")
         if n < 20:
@@ -508,8 +513,11 @@ class ConnectorSide(unittest.TestCase):
         with mock.patch.object(store_mod, "MIGRATIONS", MIGRATIONS[:11]):
             self.assertEqual(migrate(self.w.store.db), 11)
         self.assertEqual(self.outbox(cx)["status"], "queued")
-        items = self.chat.claim(self.w.ws, self.tok)["items"]
-        self.assertEqual([i["id"] for i in items], [cx])
+        # That release's claim leased it at schema 11 (this release's claim reads tables from after 11, so
+        # the lease it made is written here as it made it).
+        with self.w.store.tx() as db:
+            db.execute("UPDATE connector_outbox SET status = 'leased', lease_until = ?, attempts = attempts + 1 "
+                       "WHERE id = ?", ((self.w.store.clock() + timedelta(minutes=2)).isoformat(), cx))
         self.chat.result(self.w.ws, self.tok, cx, "failed", reason="could not check the Bots' gateway")
         row = self.outbox(cx)
         self.assertEqual((row["status"], row["attempts"]), ("dead", 1))

@@ -976,6 +976,9 @@ def follow_turn(stream, seen: dict, tell, live: LiveTurn | None = None) -> None:
     tool's name when it is a plain name (else None); `tell` never hears the words, a tool's input or its
     output. The Bots' connector reads its Bot Chat turns with this too (connector.py).
 
+    A retry or an edit (room_send.py --tw-rewind) says first how taking the chat back went ({"type": "rewind"}),
+    kept in `seen["rewind"]`: when Hermes refused it, nothing was sent.
+
     room_send.py's turn adds one line saying how Hermes took the message ({"type": "admission"}): "queued" (behind
     the turn already running, in Hermes's own queue), "steered" or "redirected" (into the running turn), or
     "started" (also said when a queued one leaves the queue to run). From then on `seen["admitted"]` is true:
@@ -1005,6 +1008,10 @@ def follow_turn(stream, seen: dict, tell, live: LiveTurn | None = None) -> None:
             live.hear(ev)
         state = {"system": ("thinking", None), "tool_result": ("thinking", None), "thinking": ("thinking", None),
                  "text": ("writing", None)}.get(kind)
+        if kind == "rewind" and ev.get("status") in ("done", "refused"):
+            # A retry or an edit took the chat back first (room_send.py --tw-rewind), or Hermes refused that.
+            seen["rewind"] = {"status": ev["status"], "reason": str(ev.get("reason") or "")[:200]}
+            continue
         if kind == "admission" and ev.get("status") in ADMISSIONS:
             seen["admitted"] = True
             sid = ev.get("session_id")
@@ -1126,6 +1133,31 @@ class Hermes:
         reason = got.get("reason") if isinstance(got, dict) else None
         return "failed", str(reason or "not done")[:200]
 
+    def rewind(self, action: str, session_id: str, message_id: int) -> tuple[str, str, str | None]:
+        """(outcome, reason, new chat) for an undo or a branch (room_send.py op `rewind`), with Hermes's own
+        session.mutate on this Hermes's running gateway, through the same helper and Python as the readiness
+        check. The outcome is done, failed, uncertain (Hermes did not answer; it may be done) or not_ready
+        (the gateway is not running; nothing was done)."""
+        req = json.dumps({"op": "rewind", "profile": "", "action": action, "session_id": session_id,
+                          "message_id": message_id}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
+                                 timeout=CHECK_SECONDS + 30, cwd=str(self.home_dir), check=False, env=probe_env())
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            return "uncertain", "Hermes did not answer in 90 seconds; it may be done", None
+        except (OSError, IndexError, json.JSONDecodeError):
+            return "not_ready", "could not run the helper with Hermes's Python", None
+        if not isinstance(got, dict):
+            return "not_ready", "the helper did not answer in JSON", None
+        reason = str(got.get("reason") or "")[:200]
+        if got.get("done") is True:
+            child = got.get("session_id")
+            return "done", "", child if isinstance(child, str) and SESSION_ID.match(child) else None
+        if got.get("done") is None and "done" in got:
+            return "uncertain", reason, None
+        return ("not_ready" if got.get("ready") is False else "failed"), reason or "not done", None
+
     def tasks(self) -> dict:
         """This Hermes's subagents, background commands and scheduled jobs (room_send.py op `tasks`), as the
         helper read them; {"why": ...} when the helper itself could not say."""
@@ -1183,9 +1215,12 @@ class Hermes:
         return got.get("done") is True, str(got.get("reason") or "")[:200]
 
     def turn(self, session_id: str | None, text: str, doing=None, files: list[str] | None = None,
-             started=None, live: LiveTurn | None = None, bot_chat: bool = False) -> tuple[str, str, str, str | None]:
+             started=None, live: LiveTurn | None = None, bot_chat: bool = False,
+             rewind: tuple[str, int] | None = None) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message. `files` are the arguments that hand the turn
         the photos Patrick attached and say it carries files (hand_over), if any.
+        `rewind` ("retry" or "edit", and his turn's id): the turn first takes the chat back to before that
+        turn (room_send.py --tw-rewind); when Hermes refuses that, nothing is sent and the outcome is failed.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
         tool by its name, and the questions and approvals it has open. `started(proc)` hears the turn's process,
         whose stdin takes Patrick's orders for it (room_send.py `attended-chat`: Stop, and his answers)."""
@@ -1198,8 +1233,9 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.turn_cmd, "attended-chat", "-Q", "--format", "stream-json", "--query-file", str(path),
-                    *(files or [])]
+            argv = [*self.turn_cmd, "attended-chat",
+                    *(["--tw-rewind", rewind[0], str(rewind[1])] if rewind else []),
+                    "-Q", "--format", "stream-json", "--query-file", str(path), *(files or [])]
             if bot_chat:
                 # A Bot's message (Patrick, 9 Nov, q-86): into this Hermes's own Bot Chat, found by its name and
                 # made when missing, as Hermes's own message_agent delivers one (tools/bot_mode_dm.py). Never
@@ -1265,6 +1301,9 @@ class Hermes:
         _close(proc.stdin)
         result = seen.get("result")
         sid = self._sid(seen, session_id)
+        if (seen.get("rewind") or {}).get("status") == "refused":
+            # Hermes kept the chat as it was, and the message never went in.
+            return "failed", "", seen["rewind"]["reason"] or "Hermes did not take the chat back", sid
         if code == 0 and result and result.get("exit_code") == 0:
             return "confirmed", "turn finished", "", sid
         why = (result or {}).get("error") or f"hermes stopped with exit code {code}"
@@ -1676,6 +1715,16 @@ class OwnConnector:
                 else:
                     keep.append(r)
                 continue
+            if "rewind_id" in r:
+                # An undo or a branch: the core changes nothing for one it already has an answer to.
+                status, _ = self.core.post("rewound", {"id": r["rewind_id"], "outcome": r["outcome"],
+                                                       "reason": r["reason"],
+                                                       **({"session_id": r["session_id"]} if "session_id" in r else {})})
+                if status in (200, 404):
+                    self.say(f"{'PASS' if r['outcome'] == 'done' else 'NOTE'} chat {r['op']}: {r['outcome']}")
+                else:
+                    keep.append(r)
+                continue
             if "version" in r:
                 # A reaction: the core drops an answer about an older wish by itself.
                 status, _ = self.core.post("reacted", r)
@@ -1740,8 +1789,11 @@ class OwnConnector:
                     self.feed_now = True
                 return
         try:
+            rewind = ((item["rewind"], item["rewind_to"]) if item.get("rewind") in ("retry", "edit")
+                      and type(item.get("rewind_to")) is int else None)
             outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, extra, started, live,
-                                                         **({"bot_chat": True} if item.get("bot_chat") else {}))
+                                                         **({"bot_chat": True} if item.get("bot_chat") else {}),
+                                                         **({"rewind": rewind} if rewind else {}))
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
                                          item.get("session_id"))
@@ -1794,6 +1846,27 @@ class OwnConnector:
                 self.feed_now = True  # the chat list shows the new title, or loses the chat, at once
             with self._lock:
                 self.unsaid.append({"op_id": r["id"], "action": r["op"], "outcome": outcome, "reason": reason})
+        if tried:
+            self._report()
+        return done
+
+    def rewinds(self, wanted: list) -> int:
+        """The undos and branches the core handed over (rewinds.py), done one after another with Hermes's own
+        session.mutate, and what came of each told to the core. Returns how many were done."""
+        done = tried = 0
+        for r in wanted[:5]:
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str) and r.get("op") in ("undo", "branch")
+                    and isinstance(r.get("session_id"), str) and SESSION_ID.match(r["session_id"])
+                    and type(r.get("message_id")) is int):
+                continue
+            outcome, reason, child = self.hermes.rewind(r["op"], r["session_id"], r["message_id"])
+            done += outcome == "done"
+            tried += 1
+            if outcome == "done":
+                self.feed_now = True  # the chat list shows the chat as it is now, and a branch's new chat
+            with self._lock:
+                self.unsaid.append({"rewind_id": r["id"], "op": r["op"], "outcome": outcome, "reason": reason,
+                                    **({"session_id": child} if child else {})})
         if tried:
             self._report()
         return done
@@ -1982,6 +2055,9 @@ class OwnConnector:
         ops = body.get("sessions", [])
         if isinstance(ops, list):
             self.sessions(ops)
+        rewinds = body.get("rewinds", [])
+        if isinstance(rewinds, list) and rewinds:
+            self.rewinds(rewinds)
         controls = body.get("controls", [])
         if isinstance(controls, list) and controls:
             self.controls(controls)

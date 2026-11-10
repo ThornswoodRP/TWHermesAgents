@@ -251,7 +251,7 @@ class TheAttendedTurn(unittest.TestCase):
 class TheConnector(unittest.TestCase):
     def test_every_turn_is_attended(self):
         src = Path(own_connector.__file__).read_text(encoding="utf-8")
-        self.assertIn('argv = [*self.turn_cmd, "attended-chat", "-Q"', src)
+        self.assertIn('argv = [*self.turn_cmd, "attended-chat",', src)
         self.assertIn("stdin=subprocess.PIPE", src)
 
     def test_the_open_questions_are_kept_with_what_the_turn_is_doing(self):

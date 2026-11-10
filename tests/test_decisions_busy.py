@@ -213,7 +213,8 @@ class TheConnector(unittest.TestCase):
         self.assertEqual(own_connector.Hermes(["hermes"], ready, Path("."), "One", turn_cmd=ready).turn_cmd, ready)
         src = Path(own_connector.__file__).read_text(encoding="utf-8")
         self.assertIn("turn_cmd=ready", src)
-        self.assertIn('argv = [*self.turn_cmd, "attended-chat", "-Q", "--format", "stream-json"', src)
+        self.assertIn('argv = [*self.turn_cmd, "attended-chat",', src)
+        self.assertIn('"-Q", "--format", "stream-json", "--query-file", str(path), *(files or [])]', src)
         self.assertEqual(own_connector.UPDATE_FILES, ("own_connector.py", "room_send.py"))
 
     def test_the_connector_says_what_each_turn_is_doing_and_whether_hermes_has_it(self):
@@ -319,7 +320,7 @@ class TheApp(unittest.TestCase):
     def test_in_queue_and_the_steer_words_like_desktop(self):
         self.assertIn("queued: 'In queue', steered: 'Steered into the running turn', "
                       "redirected: 'Interrupted the running turn'", APP)
-        self.assertIn("note: mineNote(m)", APP)
+        self.assertIn("note: (REWOUND[m.rewind] || '') + mineNote(m)", APP)
         self.assertNotIn("Waiting for the turn already running", APP)
 
     def test_the_live_line_follows_only_the_turn_being_answered(self):

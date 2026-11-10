@@ -904,6 +904,38 @@ INSERT INTO chat_alerts SELECT id, workspace_id, kind, ref, who, path, status, a
 DROP TABLE chat_alerts_23;
 CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
 """,
+    # 24: retry, undo, edit and resend, and branch on a message, as Hermes Desktop has them (TWHermesAgents #80,
+    # 10 Nov; rewinds.py). A retry or an edit is a message that first takes the chat back to before one of his
+    # turns (`rewind_to`, Hermes's own id of it): a retry sends that turn's own words again, an edit sends the
+    # new words. Its `text` is what the phone shows meanwhile; a retry's words come from Hermes. An undo or a
+    # branch runs no turn, so it is a row of `chat_rewinds`, one per request, done by that gateway's connector
+    # with Hermes's own session.mutate. The chat is a session id on `me` and `one`, and the Bot's profile id on
+    # `bots`, with `session_id` the Bot's session a Board row opened (NULL is its Bot Chat).
+    """
+ALTER TABLE own_messages ADD COLUMN rewind TEXT CHECK (rewind IS NULL OR rewind IN ('retry', 'edit'));
+ALTER TABLE own_messages ADD COLUMN rewind_to INTEGER CHECK (rewind_to IS NULL OR rewind_to >= 1);
+ALTER TABLE chat_messages ADD COLUMN rewind TEXT CHECK (rewind IS NULL OR rewind IN ('retry', 'edit'));
+ALTER TABLE chat_messages ADD COLUMN rewind_to INTEGER CHECK (rewind_to IS NULL OR rewind_to >= 1);
+
+CREATE TABLE chat_rewinds (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one', 'bots')),
+  chat TEXT NOT NULL CHECK (length(chat) BETWEEN 1 AND 128),
+  session_id TEXT CHECK (session_id IS NULL OR (gateway = 'bots' AND length(session_id) BETWEEN 1 AND 128)),
+  op TEXT NOT NULL CHECK (op IN ('undo', 'branch')),
+  message_id INTEGER NOT NULL CHECK (message_id >= 1),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed', 'uncertain')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  made_session_id TEXT CHECK (made_session_id IS NULL OR (op = 'branch' AND length(made_session_id) BETWEEN 1 AND 128)),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX chat_rewinds_by_status ON chat_rewinds(workspace_id, gateway, status, created_at);
+""",
 ]
 
 
@@ -1154,5 +1186,19 @@ INSERT INTO chat_alerts SELECT id, workspace_id, kind, ref, who, path, status, a
   updated_at, reason FROM chat_alerts_23;
 DROP TABLE chat_alerts_23;
 CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
+""", ""),
+    # An undo or a branch already done lives in Hermes itself; one still on its way would be lost. A retry or an
+    # edit still on its way would go as a plain message after the turn it should take the place of.
+    24: ([("SELECT count(*) FROM chat_rewinds WHERE status IN ('queued', 'leased')",
+           "undos and branches on their way to Hermes"),
+          ("SELECT count(*) FROM own_messages WHERE rewind IS NOT NULL AND status IN ('queued', 'leased')",
+           "retries and edits on their way to his own Hermes"),
+          ("SELECT count(*) FROM chat_messages WHERE rewind IS NOT NULL AND status IN ('queued', 'leased')",
+           "retries and edits on their way to a Bot")], """
+DROP TABLE chat_rewinds;
+ALTER TABLE chat_messages DROP COLUMN rewind_to;
+ALTER TABLE chat_messages DROP COLUMN rewind;
+ALTER TABLE own_messages DROP COLUMN rewind_to;
+ALTER TABLE own_messages DROP COLUMN rewind;
 """, ""),
 }

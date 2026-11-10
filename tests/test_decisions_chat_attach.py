@@ -409,7 +409,8 @@ class TheHelper(unittest.TestCase):
 class TheApp(unittest.TestCase):
     def test_the_plus_goes_to_each_chats_own_route(self):
         self.assertIn("status, null, '/chat/' + encodeURIComponent(target), v.cards)", APP)
-        self.assertIn("...(files.length ? { attachments: files } : {}) }),\n          status, null, '/chat/'", APP)
+        self.assertIn("...(files.length ? { attachments: files } : {}),\n              ...(edit ? { rewind: 'edit', "
+                      "rewind_to: edit.mid } : {}) })", APP)
         self.assertIn("status, gw, '/own/' + gw)", APP)
         self.assertIn("`${API}${base}/attach?name=", APP)
         self.assertNotIn("/own/${gw}/attach", APP)

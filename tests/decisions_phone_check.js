@@ -962,12 +962,81 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.locator(`#view .msg.flash[data-mid="${lastMid}"]`).waitFor({ timeout: 3000 })
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-reply.png' })
+  // Retry, Undo, Edit and resend, and Branch from here (rewinds.py, TWHermesAgents #80), as Hermes Desktop offers them.
+  const rwBody = []
+  page.on('request', q => { if (q.method() === 'POST' && /\/(own\/one\/(rewind|send)|chat\/bramble\/rewind)$/.test(q.url())) rwBody.push(JSON.parse(q.postData())) })
+  const actions = page.getByRole('dialog', { name: 'Message actions' })
+  await page.goto(base + '/m/hermes/one/s_rw')
+  const fork = page.locator('#view .msg.theirs[data-mid]', { hasText: 'The fork is green too.' })
+  await fork.waitFor({ timeout: 15000 })
+  const forkMid = Number(await fork.getAttribute('data-mid'))
+  await fork.locator('.bub').click({ button: 'right' })
+  await step('a reply offers Retry and Branch from here, and no Undo or Edit and resend', async () => {
+    await actions.getByRole('button', { name: 'Retry' }).waitFor({ timeout: 3000 })
+    await actions.getByRole('button', { name: 'Branch from here' }).waitFor({ timeout: 1000 })
+    if (await actions.getByRole('button', { name: 'Undo' }).count()) throw new Error('Undo on a reply')
+    if (await actions.getByRole('button', { name: 'Edit and resend' }).count()) throw new Error('Edit on a reply')
+  })
+  await actions.getByRole('button', { name: 'Branch from here' }).click()
+  await step('Branch from here asks for a new chat through that message, and opens it once One made it', async () => {
+    await page.waitForURL(/\/m\/hermes\/one\/s_rw_branch$/, { timeout: 20000 })
+    const b = rwBody.find(x => x.op === 'branch') || {}
+    if (b.session_id !== 's_rw' || b.message_id !== forkMid) throw new Error(JSON.stringify(b))
+    await page.locator('#view .msg.theirs', { hasText: 'The fork is green too.' }).waitFor({ timeout: 15000 })
+  })
+  await page.goto(base + '/m/hermes/one/s_rw')
+  const second = page.locator('#view .msg.mine[data-mid]', { hasText: 'And the fork?' })
+  await second.waitFor({ timeout: 15000 })
+  const secondMid = Number(await second.getAttribute('data-mid'))
+  await second.locator('.bub').click({ button: 'right' })
+  await step('his own message offers Edit and resend, Undo and Branch from here, and no Retry', async () => {
+    for (const n of ['Edit and resend', 'Undo', 'Branch from here']) await actions.getByRole('button', { name: n }).waitFor({ timeout: 3000 })
+    if (await actions.getByRole('button', { name: 'Retry' }).count()) throw new Error('Retry on his own message')
+  })
+  await actions.getByRole('button', { name: 'Undo' }).click()
+  await step('Undo takes his message and the reply after it out of the chat, and puts his words back in the box', async () => {
+    await page.locator('#view .msg', { hasText: 'The fork is green too.' }).waitFor({ state: 'detached', timeout: 20000 })
+    await page.locator('#view .msg', { hasText: 'main is green.' }).waitFor({ timeout: 1000 })
+    const b = rwBody.find(x => x.op === 'undo') || {}
+    if (b.session_id !== 's_rw' || b.message_id !== secondMid) throw new Error(JSON.stringify(b))
+    const words = await page.getByLabel('Message to One').inputValue()
+    if (words !== 'And the fork?') throw new Error('the box has ' + JSON.stringify(words))
+    await page.getByLabel('Message to One').fill('')
+  })
+  const first = page.locator('#view .msg.mine[data-mid]', { hasText: 'Which branch is green?' })
+  const firstMid = Number(await first.getAttribute('data-mid'))
+  await first.locator('.bub').click({ button: 'right' })
+  await actions.getByRole('button', { name: 'Edit and resend' }).click()
+  await step('Edit and resend puts his words in the box under Editing your message, and sends the new words in its place', async () => {
+    await page.locator('#view .replying[data-edit]', { hasText: 'Editing your message' }).waitFor({ timeout: 8000 })
+    const box = page.getByLabel('Message to One')
+    if (await box.inputValue() !== 'Which branch is green?') throw new Error('the box has ' + await box.inputValue())
+    await box.fill('Which branches are green?')
+    await page.getByRole('button', { name: 'Send to One' }).click()
+    await page.locator('#view .replying[data-edit]').waitFor({ state: 'detached', timeout: 8000 })
+    const b = rwBody.filter(x => x.rewind === 'edit').pop() || {}
+    if (b.session_id !== 's_rw' || b.rewind_to !== firstMid || b.text !== 'Which branches are green?' || b.reply_to) throw new Error(JSON.stringify(b))
+    await page.locator('#view .msg.mine .meta', { hasText: /^Edited\. / }).first().waitFor({ timeout: 5000 })
+  })
+  const main = page.locator('#view .msg.theirs[data-mid]', { hasText: 'main is green.' })
+  await main.locator('.bub').click({ button: 'right' })
+  await actions.getByRole('button', { name: 'Retry' }).click()
+  await step('Retry sends again the message the reply answers, taking the chat back to it first', async () => {
+    await page.locator('#view .msg.mine .meta', { hasText: /^Retry\. / }).first().waitFor({ timeout: 8000 })
+    const b = rwBody.filter(x => x.rewind === 'retry').pop() || {}
+    if (b.session_id !== 's_rw' || b.rewind_to !== firstMid || b.text !== 'Which branch is green?') throw new Error(JSON.stringify(b))
+  })
   await page.goto(base + '/m/bots/bramble')
   await page.locator('#view .msg[data-mid="70"] .bub').click({ button: 'right' })
   await step('a Bot Chat offers no reply: Hermes has none there', async () => {
     await page.getByRole('dialog', { name: 'Message actions' }).waitFor({ timeout: 3000 })
     if (await page.getByRole('dialog').getByRole('button', { name: 'Reply' }).count()) throw new Error('Reply in a Bot Chat')
-    await page.keyboard.press('Escape')
+  })
+  await step("a Bot Chat's message branches as his own chats' do, and says so while the Bots' connector has it to do", async () => {
+    await actions.getByRole('button', { name: 'Branch from here' }).click()
+    await page.getByText('Branching a new chat from a message. Bramble does it once nothing is running in the chat.').waitFor({ timeout: 8000 })
+    const b = rwBody.filter(x => x.op === 'branch').pop() || {}
+    if (b.message_id !== 70 || b.session) throw new Error(JSON.stringify(b))
   })
   await page.goto(base + '/m/bots/bramble')
   await step('a Bot Chat has no chat actions', async () => {

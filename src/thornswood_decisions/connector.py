@@ -205,6 +205,13 @@ def room_page(shared_db: Path, room_id: str, before: int | None) -> dict:
         n //= 2
 
 
+def _rewind_args(rewind) -> list[str]:
+    """room_send.py's own arguments for a retry or an edit, before `hermes chat`'s (rewinds.py)."""
+    if not rewind:
+        return []
+    return ["--tw-rewind", rewind[0], str(rewind[1])]
+
+
 def read_token(path: Path) -> str:
     st = path.stat()
     if stat.S_IMODE(st.st_mode) & 0o077:
@@ -362,14 +369,48 @@ class Hermes:
             return "set", ""
         return "failed", str(got.get("reason") or "not set")[:200]
 
-    def to_bot(self, bot: str, text: str, doing=None, live=None, files: list[str] | None = None) -> tuple[str, str, str]:
+    def rewind(self, bot: str, session: str | None, action: str, message_id: int) -> tuple[str, str, str | None]:
+        """(outcome, reason, new chat) for an undo or a branch (rewinds.py) in a Bot's Bot Chat, or in the session
+        of it a Board row opened when it is one of that Bot's own: room_send.py op `rewind`, Hermes's own
+        session.mutate on that Bot's running gateway. The outcome is done, failed, uncertain (Hermes did not
+        answer; it may be done) or not_ready (the gateway is not running, or the helper failed: nothing done)."""
+        try:
+            if session is None:
+                sid = bot_chat_id(self.home / ".hermes", bot)
+                if sid is None:
+                    return "failed", f"{bot} has no Bot Chat", None
+            elif SESSION_ID.match(session) and bot_session(self.home / ".hermes", bot, session):
+                sid = session
+            else:
+                return "failed", f"that session is not one of {bot}'s", None
+        except (sqlite3.Error, OSError) as exc:
+            return "not_ready", f"could not read {bot}'s store ({type(exc).__name__})", None
+        got = self._helper({"op": "rewind", "profile": bot, "action": action, "session_id": sid,
+                            "message_id": message_id}, CHECK_SECONDS + 30)
+        if got is None:
+            return "uncertain", "Hermes did not answer in 90 seconds; it may be done", None
+        reason = str(got.get("reason") or "")[:200]
+        if got.get("helper_failed"):
+            return "not_ready", reason, None
+        if got.get("done") is True:
+            child = got.get("session_id")
+            return "done", "", child if isinstance(child, str) and SESSION_ID.match(child) else None
+        if got.get("done") is None and "done" in got:
+            return "uncertain", reason, None
+        return ("not_ready" if got.get("ready") is False else "failed"), reason or "not done", None
+
+    def to_bot(self, bot: str, text: str, doing=None, live=None, files: list[str] | None = None,
+               rewind=None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message to a Bot's Bot Chat. `doing(state, tool)` hears what the
         turn is doing as Hermes's stream says it (own_connector.follow_turn): thinking, writing, or a tool.
         `live` (own_connector.LiveTurn) keeps the turn as Desktop draws it.
 
         It runs as room_send.py `chat`, Hermes's own `hermes chat` with the gateway's live events said too
         (room_send.py live_line): `hermes chat`'s own stream-json carries only the reply and the tools, so a
-        Bot's thinking, its subagents and its status lines never reached the phone (Patrick, 9 Nov)."""
+        Bot's thinking, its subagents and its status lines never reached the phone (Patrick, 9 Nov).
+
+        `rewind` ("retry" or "edit", and his turn's id) takes the Bot Chat back to before that turn first
+        (room_send.py --tw-rewind, rewinds.py)."""
         state, why = self.check(bot)
         if state != "ready":
             # Nothing was sent: the message waits, with why (the gateway, or the helper's own failure).
@@ -380,7 +421,7 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.helper_cmd, "chat", "-p", bot, "--in", str(self.home), "-c", BOT_CHAT,
+            argv = [*self.helper_cmd, "chat", *_rewind_args(rewind), "-p", bot, "--in", str(self.home), "-c", BOT_CHAT,
                     "--create-if-missing", "-Q", "--format", "stream-json", "--query-file", str(path), *(files or [])]
             # The Bot's own home, named before any of Hermes is imported, as in to_session.
             env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
@@ -391,7 +432,8 @@ class Hermes:
                                         encoding="utf-8", errors="replace", env=env)
             except OSError:
                 return "failed", "", "could not start the hermes command"
-            reader = threading.Thread(target=follow_turn, args=(proc.stdout, {}, doing or (lambda s, t: None), live),
+            seen: dict = {}
+            reader = threading.Thread(target=follow_turn, args=(proc.stdout, seen, doing or (lambda s, t: None), live),
                                       daemon=True)
             reader.start()
             try:
@@ -403,11 +445,25 @@ class Hermes:
             finally:
                 reader.join(30)
                 proc.stdout.close()
+        return self._ended(bot, None, code, started, seen)
+
+    def _ended(self, bot: str, sid: str | None, code: int, started: float, seen: dict) -> tuple[str, str, str]:
+        """What came of a turn that ran to its end, from its exit code, how a retry's or an edit's rewind went,
+        and the turn gate's note."""
+        rewound = seen.get("rewind") or {}
+        if rewound.get("status") == "refused":
+            # Hermes kept the chat as it was, and the message never went in.
+            return "failed", "", rewound.get("reason") or "Hermes did not take the chat back"
         if code == 0:
             if self.fleet is not None:
-                why = self.turned_away(bot, started)
+                why = self.turned_away(bot, started, sid)
                 if why is KEPT:
                     return "confirmed", "kept by the turn gate; it goes once the queue has room", ""
+                if why is not None and rewound.get("status") == "done":
+                    # The chat was taken back, but the turn after it ran nothing: sending it again as it was
+                    # would take back a turn that is gone, so it is not put back in the queue.
+                    return "failed", "", (f"the chat was taken back, but {FLEET} turned the turn away: {why}; "
+                                          "send it again")[:200]
                 if why is not None:
                     # The turn ran nothing: the message goes back in the queue as it was, and goes again
                     # once the queue has room (check, above).
@@ -416,7 +472,7 @@ class Hermes:
         return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
 
     def to_session(self, bot: str, sid: str, text: str, doing=None, live=None,
-                   files: list[str] | None = None) -> tuple[str, str, str]:
+                   files: list[str] | None = None, rewind=None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message into one session of a Bot: the one a Board row opens,
         where the Bot may be working right now (Patrick, 9 Nov). It goes the way Desktop's message box
         sends into an open chat: room_send.py `chat --resume`, through the Bot's running gateway, which
@@ -444,7 +500,7 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.helper_cmd, "chat", "-p", bot, "-Q", "--format", "stream-json", "--query-file", str(path),
+            argv = [*self.helper_cmd, "chat", *_rewind_args(rewind), "-p", bot, "-Q", "--format", "stream-json", "--query-file", str(path),
                     "--resume", sid, *(files or [])]
             # The Bot's own home, named before any of Hermes is imported (room_send.py loads Hermes's chat
             # view before Hermes reads -p), so every part of the turn is that profile's.
@@ -491,15 +547,7 @@ class Hermes:
             proc.stdout.close()
         if seen.get("taken"):
             return "confirmed", f"{seen['taken']} into the running turn", ""
-        if code == 0:
-            if self.fleet is not None:
-                why = self.turned_away(bot, started, sid)
-                if why is KEPT:
-                    return "confirmed", "kept by the turn gate; it goes once the queue has room", ""
-                if why is not None:
-                    return "not_ready", "", f"{FLEET} turned the turn away: {why}"
-            return "confirmed", "turn finished", ""
-        return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
+        return self._ended(bot, sid, code, started, seen)
 
 
 def fleet_room(policy_file: Path | None = None):
@@ -607,8 +655,10 @@ class Connector:
             live = LiveTurn()
             with self._lock:
                 self.lives[item["id"]] = live
+            rewind = ((item["rewind"], item["rewind_to"]) if item.get("rewind") in ("retry", "edit")
+                      and type(item.get("rewind_to")) is int else None)
+            more = ({"files": extra} if extra else {}) | ({"rewind": rewind} if rewind else {})
             try:
-                more = {"files": extra} if extra else {}
                 if item.get("session"):
                     outcome, ref, reason = self.hermes.to_session(item["target"], item["session"], text,
                                                                   doing, live, **more)
@@ -692,6 +742,17 @@ class Connector:
     def _offer(self, pending: list[dict]) -> list[dict]:
         keep = []
         for r in pending:
+            if "rewind_id" in r:
+                # An undo or a branch: the core changes nothing for one it already has an answer to.
+                status, _ = self.core.post("/connector/rewound", {
+                    "id": r["rewind_id"], "outcome": r["outcome"], "reason": r["reason"],
+                    **({"session_id": r["session_id"]} if "session_id" in r else {})})
+                if status in (200, 404):
+                    self.say(f"{'PASS' if r['outcome'] == 'done' else 'NOTE'} {r['op']} in {r['bot']}'s chat: "
+                             f"{r['outcome']}")
+                else:
+                    keep.append(r)
+                continue
             if "version" in r:
                 # A reaction: the core drops an answer about an older wish by itself.
                 status, _ = self.core.post("/connector/reacted", r)
@@ -729,6 +790,24 @@ class Connector:
             with self._lock:
                 self.unsaid.append({"bot": r["bot"], "message_id": r["message_id"], "version": r["version"],
                                     "outcome": outcome, "reason": reason})
+        return done
+
+    def rewinds(self, wanted: list) -> int:
+        """The undos and branches the core handed over (rewinds.py), each done in that Bot's chat one after
+        another (each is one session.mutate). Returns how many were done; what came of each goes to the core
+        with the report."""
+        done = 0
+        for r in wanted[:5]:
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("bot"), str)
+                    and PROFILE_ID.match(r["bot"]) and r.get("op") in ("undo", "branch")
+                    and type(r.get("message_id")) is int
+                    and (r.get("session") is None or isinstance(r.get("session"), str))):
+                continue
+            outcome, reason, child = self.hermes.rewind(r["bot"], r.get("session"), r["op"], r["message_id"])
+            done += outcome == "done"
+            with self._lock:
+                self.unsaid.append({"rewind_id": r["id"], "op": r["op"], "bot": r["bot"], "outcome": outcome,
+                                    "reason": reason, **({"session_id": child} if child else {})})
         return done
 
     def _still_waiting(self) -> bool:
@@ -770,6 +849,7 @@ class Connector:
             return 0
         items = body.get("items", [])[:free]
         self.react(body.get("reactions", []))
+        self.rewinds(body.get("rewinds", []))
         for item in items:
             t = threading.Thread(target=self._turn, args=(item,), name=f"turn {item['id']}", daemon=True)
             t.start()

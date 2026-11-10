@@ -1759,7 +1759,8 @@ function closeSheet() {
 }
 
 // A message's actions: a reaction (Hermes keeps one per person, so a new one
-// replaces yours and the same one again takes it off), and Copy text.
+// replaces yours and the same one again takes it off), Reply, Retry, Edit and resend, Undo and Branch from
+// here where the chat offers them (offerRewinds), and Copy text.
 function messageSheet(m) {
   closeSheet()
   const mineNow = ((m.reactions || []).find(r => r.by === 'patrick') || {}).emoji || null
@@ -1784,6 +1785,17 @@ function messageSheet(m) {
       m.react && mineNow ? el('button', { class: 'secondary', type: 'button', onclick: () => choose(null) },
         'Take my reaction off') : null,
       m.reply ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); m.reply() } }, 'Reply') : null,
+      m.retry ? el('button', { class: 'secondary', type: 'button', 'data-rewind': 'retry', onclick: () => { closeSheet(); m.retry() } },
+        'Retry') : null,
+      m.edit ? el('button', { class: 'secondary', type: 'button', 'data-rewind': 'edit', onclick: () => { closeSheet(); m.edit() } },
+        'Edit and resend') : null,
+      m.undo ? el('button', { class: 'secondary', type: 'button', 'data-rewind': 'undo', onclick: () => { closeSheet(); m.undo() } },
+        'Undo') : null,
+      m.branch ? el('button', { class: 'secondary', type: 'button', 'data-rewind': 'branch', onclick: () => { closeSheet(); m.branch() } },
+        'Branch from here') : null,
+      m.undo || m.retry ? el('p', { class: 'quiet' }, (m.undo ? 'Undo takes this message and everything after it out of the ' +
+        'chat and puts your words back in the box. ' : 'Retry takes the chat back to the message this answers and sends ' +
+        'it again, so the reply is written again. ') + 'It waits until nothing is running in the chat.') : null,
       canSpeak() && spoken(m) ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); readAloud(m) } },
         'Read aloud') : null,
       copy,
@@ -1794,6 +1806,125 @@ function messageSheet(m) {
   document.body.append(back)
   const first = back.querySelector('button')
   if (first) first.focus()
+}
+
+// ── Retry, Undo, Edit and resend, and Branch from here (rewinds.py, TWHermesAgents #80) ──
+//
+// Hermes Desktop offers four things on a message, and so does this, in his own Hermes and One and in a Bot's
+// Bot Chat or a session a Board row opened. Each is Hermes's own session.mutate, made by that chat's
+// connector once nothing runs in the chat, in the order he asked it among what he sent there:
+// - Undo, on a message of his: it and everything after it leave the chat, and his words go back in the box;
+// - Edit and resend, on a message of his: the same, then the words he changes it to are sent in its place;
+// - Retry, on a reply: the chat goes back to the message the reply answers, which is sent again;
+// - Branch from here, on any message: a new chat with every message up to that one, opened once Hermes made it.
+// Only a message read from Hermes takes them, since each names it by Hermes's own id.
+const REWOUND = { retry: 'Retry. ', edit: 'Edited. ' }
+const rewindKeys = {}          // the idempotency key of each ask, so asking again after no answer is the same ask
+const branchAsked = new Set()  // branches asked from this phone: each opens once Hermes has made it
+
+// chat: { name, status, draftKey, ask(op, mid, key), retry(words, mid, key), taken(), refused(r) }
+function offerRewinds(items, chat) {
+  let turn = null
+  for (const it of items) {
+    if (!Number.isInteger(it.mid) || it.user === undefined) continue
+    if (it.user) {
+      turn = it
+      const words = it.mine ? authored(it.text).words : ''
+      it.undo = () => rewindAsk(chat, 'undo', it.mid, () => {
+        if (words) drafts[chat.draftKey] = { text: words, key: newKey() }
+      })
+      if (it.mine) {
+        it.edit = () => {
+          drafts[chat.draftKey] = { text: words, key: newKey(), edit: { mid: it.mid } }
+          route().then(() => { const b = document.querySelector('#view .composer textarea'); if (b) b.focus() })
+        }
+      }
+    } else if (turn) {
+      const asked = turn
+      it.retry = () => rewindRetry(chat, asked)
+    }
+    it.branch = () => rewindAsk(chat, 'branch', it.mid)
+  }
+}
+
+async function rewindAsk(chat, op, mid, then) {
+  const k = op + ':' + mid
+  rewindKeys[k] = rewindKeys[k] || newKey()
+  sayAgain(chat.status, op === 'branch' ? 'Asking for a new chat from that message...' : 'Asking to take the chat back...')
+  const r = await chat.ask(op, mid, rewindKeys[k])
+  if (r.status !== 200) return chat.refused(r)
+  delete rewindKeys[k]
+  chat.status.textContent = ''
+  if (op === 'branch') branchAsked.add(r.body.id)
+  else chat.taken()
+  if (then) then()
+  return route()
+}
+
+async function rewindRetry(chat, turn) {
+  const words = authored(turn.text).words || String(turn.text || '').trim()
+  if (!words) { sayAgain(chat.status, 'That message has no words to send again.'); return }
+  const k = 'retry:' + turn.mid
+  rewindKeys[k] = rewindKeys[k] || newKey()
+  sayAgain(chat.status, 'Asking to write the reply again...')
+  const r = await chat.retry(clip(words, MAX_TEXT), turn.mid, rewindKeys[k])
+  if (r.status !== 200) return chat.refused(r)
+  delete rewindKeys[k]
+  chat.status.textContent = ''
+  chat.taken()
+  chatPlace.toEnd = true
+  return route()
+}
+
+// How the newest undo or branch of a chat stands: while it waits, when it did not go, and a branch just made.
+const REWIND_OLD = 60 * 60 * 1000
+function rewindLine(rows, name, open) {
+  const r = rows && rows.length ? rows[rows.length - 1] : null
+  if (!r) return null
+  const age = Date.now() - new Date(r.updated_at)
+  const what = r.op === 'branch' ? 'Branch' : 'Undo'
+  if (inFlight(r)) {
+    return el('p', { class: 'receipt', role: 'status', 'data-rewind': r.op }, (r.op === 'branch'
+      ? 'Branching a new chat from a message.' : 'Taking the chat back to before your message.') +
+      ` ${name} does it once nothing is running in the chat.`)
+  }
+  if (age > REWIND_OLD) return null
+  if (r.status === 'failed') {
+    return el('p', { class: 'warn', role: 'status', 'data-rewind': r.op }, `${what} did not go: ${r.reason || 'no reason given'}`)
+  }
+  if (r.status === 'uncertain') {
+    return el('p', { class: 'warn', role: 'status', 'data-rewind': r.op }, `${what} may or may not have happened: ` +
+      `${r.reason || 'no reason given'}. Look at the chat${r.op === 'branch' ? ' list' : ''} before asking again.`)
+  }
+  if (r.status === 'done' && r.made_session_id) {
+    return el('p', { class: 'receipt', role: 'status', 'data-rewind': r.op }, 'Branched into a new chat. ',
+      el('button', { class: 'secondary', type: 'button', onclick: () => open(r.made_session_id) }, 'Open it'))
+  }
+  return null
+}
+
+// A branch asked from this phone opens once Hermes has made it, as Desktop opens the new chat.
+function branchMade(rows) {
+  const r = (rows || []).find(x => x.status === 'done' && x.made_session_id && branchAsked.has(x.id))
+  if (r) branchAsked.delete(r.id)
+  return r ? r.made_session_id : null
+}
+
+// While an undo or a branch waits, the chat is read again every two seconds, and drawn again once it is done.
+let rewindWatch = null
+function watchRewind(path, seqNow, id) {
+  clearTimeout(rewindWatch)
+  rewindWatch = setTimeout(async () => {
+    if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
+    const r = await call('GET', path)
+    if (seqNow !== viewSeq || r.status !== 200) return
+    const row = (r.body.rewinds || []).find(x => x.id === id)
+    if (!row || !inFlight(row)) {
+      const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+      if (!typing) return route()
+    }
+    watchRewind(path, seqNow, id)
+  }, 2000)
 }
 
 // The bar on top of a chat: back, then the chat's name and where it lives.
@@ -1857,6 +1988,15 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
       draft.key = newKey()
       route()
     } }, icon('x'))) : null
+  // A message being edited (offerRewinds): the words it replaces, and the x that leaves it as it is.
+  const editing = draft.edit ? el('div', { class: 'replying', 'data-edit': String(draft.edit.mid) },
+    el('div', { class: 'rq' },
+      el('strong', {}, 'Editing your message'),
+      el('div', { class: 'qtext' }, 'Sending takes the chat back to before it and sends these words in its place.')),
+    el('button', { class: 'back', type: 'button', 'aria-label': 'Cancel the edit', onclick: () => {
+      drafts[key] = null
+      route()
+    } }, icon('x'))) : null
   const box = el('textarea', { rows: '1', 'aria-label': label, placeholder: label,
     enterkeyhint: KEYBOARD.matches ? 'send' : 'enter' })
   box.value = draft.text
@@ -1889,7 +2029,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
   const answering = el('div', { class: 'answering', role: 'status', hidden: true })
   const paint = () => {
     if (!box.value.trim()) draft.noAnswer = false
-    const m = draft.noAnswer ? null : cardMatch(box.value, cards)
+    const m = draft.noAnswer || draft.edit ? null : cardMatch(box.value, cards)
     const was = draft.answer ? draft.answer.c.id + ':' + draft.answer.o.key : ''
     if ((m ? m.c.id + ':' + m.o.key : '') !== was) draft.key = newKey()
     draft.answer = m && m.c ? m : null
@@ -1909,6 +2049,10 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
     const ready = draft.files.filter(f => f.id)
     if (draft.files.some(f => f.state === 'up')) { status.textContent = 'Wait for the files to finish uploading.'; return }
     if (!text && !ready.length) { sayAgain(status, 'Type a message first.'); return }
+    if (draft.edit && (!text || ready.length)) {
+      sayAgain(status, 'An edit sends words only, as Hermes Desktop\'s does. Take the files off, or cancel the edit.')
+      return
+    }
     if (text.length > MAX_TEXT) {
       sayAgain(status, `The box holds ${text.length.toLocaleString()} characters, and a message takes ` +
         `${MAX_TEXT.toLocaleString()}.` + (attach ? ' Paste long text instead of typing it, and it goes as a ' +
@@ -1920,7 +2064,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
     const a = draft.answer
     const s = await send(text, draft.key, draft.reply, ready.map(f => f.id), a ? { decision_id: a.c.id,
       option_key: a.o.key, revision: a.c.revision, attention_revision: a.c.attention_revision,
-      artifact_sha256: a.c.artifact_sha256 } : undefined)
+      artifact_sha256: a.c.artifact_sha256 } : undefined, draft.edit)
     button.disabled = false
     if (s.status === 200) {
       if (a) { toWorker({ close: a.c.id }); badgeNow() }
@@ -1949,6 +2093,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
   const speak = canRecord() ? el('button', { class: 'mic', type: 'button', 'aria-label': 'Speak instead of typing',
     'aria-pressed': String(voice.mode === 'dictate' && voice.key === key), onclick: () => dictate(comp.voice) }, icon('mic')) : null
   const comp = el('div', { class: 'composer', 'data-reply': draft.reply ? String(draft.reply.mid) : '',
+    'data-edit': draft.edit ? String(draft.edit.mid) : '',
     'data-files': draft.files.map(f => f.local + ':' + f.state).join(' '),
     'data-cards': (cards || []).map(c => c.id + ':' + c.revision + ':' + c.attention_revision).join(' ') },
   plus, box, speak, button)
@@ -1963,7 +2108,7 @@ function chatComposer(key, label, buttonLabel, send, status, gw, attach, cards) 
       if (draft.answer) return 'card'
       return (await sendIt()) === true
     } }
-  return [replying, answering, attach ? attachStrip(attach, draft, status) : null, comp]
+  return [replying, editing, answering, attach ? attachStrip(attach, draft, status) : null, comp]
 }
 
 // Which card and option his words answer: the words start with an option's label or key, as a whole
@@ -2423,8 +2568,8 @@ function historyPart(gw, sid, t, name, feed) {
       route()
     } }, 'Older messages'), olderNote)
   }
-  const items = msgs.map(m => fromBot({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid,
-    reactions: m.reactions || [], tools: m.tools, toolsMore: m.tools_more }))
+  const items = msgs.map(m => fromBot({ mine: m.role === 'user', user: m.role === 'user', who: name, at: m.at, text: m.text,
+    mid: m.mid, reactions: m.reactions || [], tools: m.tools, toolsMore: m.tools_more }))
   if (!items.length) notes.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
   return { notes, items, gone: false }
 }
@@ -2664,7 +2809,7 @@ function pendingItems(mine, readAt, who) {
       // A Bot's step for One (own.py ask_one): drawn as that Bot's message, not as one he sent.
       const bot = m.from_bot ? { mine: false, bot: true, who: m.from_bot.charAt(0).toUpperCase() + m.from_bot.slice(1), agent: m.from_bot } : {}
       const item = { mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files, ...bot,
-        note: mineNote(m) + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
+        note: (REWOUND[m.rewind] || '') + mineNote(m) + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
           + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
         warn: m.status === 'dead' || m.status === 'uncertain' }
       // The reply its turn wrote, as it showed live, until the chat's own read from Hermes has it.
@@ -2749,6 +2894,21 @@ async function ownChatView(gw, sid) {
     const ended = o && o.status === 'done' && (o.op === 'delete' || o.op === 'archive') ? o.op : null
     // His Bot Chat is kept as it is, so it offers no Rename, Hide or Delete (the core refuses them too).
     const manage = manageable(v, v.chat, o) && !h.gone && !t.error && !ended
+    const rewindChat = { name, status, draftKey,
+      ask: (op, mid, k) => call('POST', `/own/${gw}/rewind`, { session_id: sid, op, message_id: mid, idempotency_key: k }),
+      retry: (text, mid, k) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
+        rewind: 'retry', rewind_to: mid }),
+      // Older pages read before the chat was taken back may hold messages it no longer has.
+      taken: () => { t.older = []; t.olderMore = false; keepThread('own:' + key, t) },
+      refused: r => {
+        if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+        const d = r.body.detail || {}
+        sayAgain(status, r.status === 0 ? 'Could not reach the core. Asking again is the same ask, never a second one.'
+          : (d.state ? stateWords({ gateway: gw, ...d })[1] : (r.body.message || said(r.body))))
+      } }
+    if (canReact && v.sign_in_until && !ended) offerRewinds(h.items, rewindChat)
+    const branched = branchMade(v.rewinds)
+    if (branched && seqNow === viewSeq) return go(`/m/hermes/${gw}/${branched}`)
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
         undefined, gw, name,
@@ -2758,6 +2918,7 @@ async function ownChatView(gw, sid) {
       ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
         el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats')) : null,
       opLine(o, name),
+      rewindLine(v.rewinds, name, s2 => go(`/m/hermes/${gw}/${s2}`)),
       h.notes
     ]
     const dock = []
@@ -2766,9 +2927,11 @@ async function ownChatView(gw, sid) {
     } else if (v.can_send && v.online && !h.gone && !t.error) {
       if (v.sign_in_until) {
         dock.push(signInPart(v, status), chatComposer(draftKey, 'Message to ' + name, 'Send to ' + name,
-          (text, k, reply, files) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
-            ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}),
-            ...(files.length ? { attachments: files } : {}) }), status, gw, '/own/' + gw), status)
+          (text, k, reply, files, answer, edit) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
+            ...(reply && !edit ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}),
+            ...(files.length ? { attachments: files } : {}),
+            ...(edit ? { rewind: 'edit', rewind_to: edit.mid } : {}) })
+            .then(s => { if (edit && s.status === 200) rewindChat.taken(); return s }), status, gw, '/own/' + gw), status)
       } else {
         dock.push(signInPart(v, status), status)
       }
@@ -2785,6 +2948,8 @@ async function ownChatView(gw, sid) {
       const waits = turn || v.mine.find(inQueue) || v.mine.find(m => m.status === 'queued')
       if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status, inQueue(waits),
         waits === turn ? askSig(turn.doing) : '')
+      const rw = (v.rewinds || []).find(inFlight)
+      if (rw) watchRewind(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, rw.id)
     }
   }
   render()
@@ -3222,10 +3387,10 @@ async function chatView(target, tab, sid) {
     const noSession = `A reaction goes on ${name}'s Bot Chat only.`
     const items = raw.map(m => room
       ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom }
-      : sid ? { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, noReact: noSession,
-          tools: m.tools, toolsMore: m.tools_more }
-        : { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, reactions: m.reactions,
-          tools: m.tools, toolsMore: m.tools_more })
+      : sid ? { mine: m.role === 'user', user: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
+        noReact: noSession, tools: m.tools, toolsMore: m.tools_more }
+        : { mine: m.role === 'user', user: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
+          reactions: m.reactions, tools: m.tools, toolsMore: m.tools_more })
     if (!room && !sid) {
       withReactions(items, v.reactions, t.newest.handed_at ? new Date(t.newest.handed_at) : null, v.can_send
         ? (mid, emoji) => reactTo(`/chat/${encodeURIComponent(v.target)}/react`, {}, mid, emoji, status) : null,
@@ -3233,24 +3398,44 @@ async function chatView(target, tab, sid) {
     }
     return { notes, items, keyed: true }
   }
+  const chatPath = '/chat/' + encodeURIComponent(v.target)
+  const openSession = s2 => go(`/m/bots/${v.target}/s/${encodeURIComponent(s2)}`)
+  const rewindChat = { name, status, draftKey: sid ? key : target,
+    ask: (op, mid, k) => call('POST', chatPath + '/rewind', { op, message_id: mid, idempotency_key: k, ...(sid ? { session: sid } : {}) }),
+    retry: (text, mid, k) => call('POST', chatPath, { text, idempotency_key: k, rewind: 'retry', rewind_to: mid,
+      ...(sid ? { session: sid } : {}) }),
+    // Older pages read before the chat was taken back may hold messages it no longer has.
+    taken: () => { t.older = []; t.olderMore = false; keepThread(key, t) },
+    refused: r => {
+      if (r.status === 401) { csrf = null; return signInView(said(r.body)) }
+      sayAgain(status, r.status === 0 ? 'Could not reach the core. Asking again is the same ask, never a second one.'
+        : (r.body.message || said(r.body)))
+    } }
   function render() {
     const readAt = v.as_of ? new Date(v.as_of) : null
     const h = history()
+    // His own Bot Chats and Board sessions only: a room's messages are not Hermes's turns to take back.
+    if (!room && v.can_send && h.keyed) offerRewinds(h.items, rewindChat)
+    const branched = branchMade(v.rewinds)
+    if (branched && seqNow === viewSeq) return openSession(branched)
     const items = h.items.concat(pendingItems(v.mine, readAt, room ? null : name))
     const top = [
       sid ? chatBar(() => go('/m/board'), 'Board', name, work && work.title ? work.title : 'Session', v.target, name,
         null, botLive(v.live))
         : chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, undefined,
           room ? null : v.target, name, null, room ? null : botLive(v.live)),
+      room ? null : rewindLine(v.rewinds, name, openSession),
       h.notes
     ]
     if (sid && !t.newest) top.push(el('p', { class: 'quiet', role: 'status' }, 'Reading this session from Hermes...'))
     else if (!items.length && !(sid && t.newest && t.newest.gone)) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
     const dock = v.can_send
       ? [chatComposer(sid ? key : target, 'Message to ' + name, 'Send to ' + name,
-          (text, k, reply, files, answer) => call('POST', '/chat/' + encodeURIComponent(target),
+          (text, k, reply, files, answer, edit) => call('POST', '/chat/' + encodeURIComponent(target),
             { text, idempotency_key: k, ...(answer ? { answer } : {}), ...(sid ? { session: sid } : {}),
-              ...(files.length ? { attachments: files } : {}) }),
+              ...(files.length ? { attachments: files } : {}),
+              ...(edit ? { rewind: 'edit', rewind_to: edit.mid } : {}) })
+            .then(s => { if (edit && s.status === 200) rewindChat.taken(); return s }),
           status, null, '/chat/' + encodeURIComponent(target), v.cards), status]
       : [el('p', { class: 'quiet' }, said({ error: 'chat_write_off' }))]
     // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs. In a
@@ -3263,6 +3448,8 @@ async function chatView(target, tab, sid) {
       if (turn && !room) watchLive(turn.id, seqNow)
       const waits = room ? null : turn || v.mine.find(m => m.status === 'queued')
       if (waits) watchTurn('/chat/' + encodeURIComponent(v.target) + inSession, seqNow, waits.id, name, waits.status)
+      const rw = room ? null : (v.rewinds || []).find(inFlight)
+      if (rw) watchRewind(chatPath + inSession, seqNow, rw.id)
     }
   }
   render()
