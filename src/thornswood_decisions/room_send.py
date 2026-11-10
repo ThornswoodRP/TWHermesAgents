@@ -145,6 +145,12 @@ It prints {"tasks": {"<profile>": {"state", "subagents", "processes", "jobs", ..
 A part it could not read is null, with its reason beside it, never an empty list.
 Commands and errors are the ones Hermes already redacts for Desktop, cut short.
 
+`tail` reads one subagent's transcript so far, for the app's Tasks tab (profile ""
+only; own_tails.py): Hermes's own `subagent.tail` for that chat and subagent, the
+call Desktop's status stack polls every 2 seconds while a subagent is open
+(gateway/session_ancillary.py, apps/desktop .../status-stack/subagent-transcript.tsx).
+It prints {"available", "text", "truncated"}, or why it could not read it.
+
 `job` pauses, resumes, runs now or removes one of his own Hermes's scheduled
 jobs (profile "" only; a Bot's jobs are not changed from the app), with Hermes's
 own cron.jobs calls under its home, the ones Hermes's dashboard makes for
@@ -395,6 +401,44 @@ def _job(req: dict) -> dict:
 
 
 CONTROL_SECONDS = 60  # one read, or one change and its read back, answers in this
+SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")  # own.py SESSION_ID: a chat id Hermes gives
+SUBAGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+TAIL_SECONDS = 20     # one transcript read answers in this
+TAIL_TEXT = 16384     # Desktop shows the newest 16384 characters
+
+
+async def _tail_read(endpoint, sid: str, sub: str) -> dict:
+    from hermes_cli.gateway_client import connect_gateway
+
+    async with connect_gateway(endpoint=endpoint) as client:
+        got = await client.rpc("subagent.tail", session_id=sid, subagent_id=sub) or {}
+    text = got.get("text") if isinstance(got.get("text"), str) else ""
+    return {"available": got.get("available") is True, "text": text[-TAIL_TEXT:],
+            "truncated": got.get("truncated") is True or len(text) > TAIL_TEXT}
+
+
+def _tail(req: dict) -> dict:
+    from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
+
+    sid, sub = req.get("session_id"), req.get("subagent_id")
+    if not (isinstance(sid, str) and SESSION.match(sid) and isinstance(sub, str) and SUBAGENT.match(sub)):
+        return {"available": False, "reason": "bad request"}
+    endpoint, state = _found("")
+    if endpoint is None:
+        name = req.get("name") if isinstance(req.get("name"), str) else "Hermes"
+        return {"available": False, "reason": f"{name[:40]}'s gateway is {state}"}
+    try:
+        return asyncio.run(asyncio.wait_for(_tail_read(endpoint, sid, sub), TAIL_SECONDS))
+    except (TimeoutError, asyncio.TimeoutError):
+        return {"available": False, "reason": f"Hermes did not answer in {TAIL_SECONDS} seconds"}
+    except GatewayRPCError as exc:
+        # not_found: the chat closed, or the subagent is gone from it.
+        return {"available": False, "reason": "that subagent has ended" if str(exc) == "not_found"
+                else f"Hermes refused it ({str(exc)[:120]})"}
+    except GatewayClientError as exc:
+        return {"available": False, "reason": f"Hermes refused it ({str(exc)[:120]})"}
+    except OSError as exc:
+        return {"available": False, "reason": f"could not reach the gateway ({type(exc).__name__})"}
 # Sign-ins that cost nothing per message (Hermes's registry, hermes_cli/auth.py PROVIDER_REGISTRY): ChatGPT
 # (openai-codex), Grok's and Qwen's own logins and MiniMax's. Nous Portal is a sign-in too, but it spends
 # the plan's credits, so only its free models are offered. Anthropic is a sign-in only when its route
@@ -855,6 +899,11 @@ def main() -> int:
         # His own Hermes only: a Bot's chat settings are not changed from the app.
         print(json.dumps(_control_op(req) if not profile else
                          {"state": None, "applied": False, "reason": "a Bot's chat settings are not changed from here"}))
+        return 0
+    if op == "tail":
+        # His own Hermes's subagents only: a Bot's chats stay with its own Board session.
+        print(json.dumps(_tail(req) if not profile else
+                         {"available": False, "reason": "a Bot's subagents are not read from here"}))
         return 0
     if op == "job":
         # His own Hermes's jobs only: a Bot's scheduled jobs are not changed from the app.

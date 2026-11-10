@@ -42,6 +42,7 @@ from . import reactions
 from .feeds import Feeds
 from .own_control import CONTROLS, MAX_WAIT as CONTROL_WAIT, wanted as control_wanted
 from .own_jobs import DO as JOB_DO, JOB_ID, JOBS
+from .own_tails import MAX_WAIT as TAIL_WAIT, TAILS
 from .own_sessions import OwnSessions
 from .rewinds import Rewinds, rewind_of
 from . import alerts
@@ -86,6 +87,7 @@ MAX_WANTED = 3
 MINE = 50
 # A chat's id goes on Hermes's command line after --resume, so it never starts with "-".
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+SUBAGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")   # room_send.py _live cuts an id to 64
 OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
 CHAT_FIELDS = {"id": 128, "title": 120, "last_at": 40, "preview": 200}
 FIRST = 120   # a chat Hermes has not titled: its first message, which names it (own_connector._row)
@@ -1392,6 +1394,40 @@ class OwnChat:
             raise CoreError(423, "own_chat_off", "the core takes no job answer while own_chat_write is off")
         return JOBS.answer(workspace_id, gw, body, self.s.clock())
 
+    # ── a subagent's transcript, opened from the Tasks tab (own_tails.py) ──
+
+    def subagent_tail(self, p: Principal, gw: str, chat, sub, wait=0) -> dict:
+        """What one of his subagents has said so far, as Desktop's status stack shows it: from memory, or
+        read through that Hermes's connector, waiting at most `wait` seconds; "pending" while no read is in."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        chat = _sid(chat)
+        if not isinstance(sub, str) or not SUBAGENT_ID.match(sub):
+            raise CoreError(400, "bad_subagent", "a subagent is named by the id Hermes gave it")
+        from .tasks import Tasks
+        row = Tasks(self.s).subagent(p.workspace_id, gw, chat, sub)
+        if row is None:
+            raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that subagent lately; open Tasks again")
+        try:
+            wait = min(max(float(wait or 0), 0.0), TAIL_WAIT)
+        except (TypeError, ValueError):
+            raise CoreError(400, "bad_wait", f"wait is 0 to {TAIL_WAIT} seconds") from None
+        key = (p.workspace_id, gw, chat, sub)
+        TAILS.ask(key, self.s.clock())
+        if wait:
+            TAILS.wait(key, wait)
+        got = TAILS.state(key)
+        return {"pending": got is None, "tail": got, "subagent": row}
+
+    def tail_post(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """A subagent's transcript, as the connector read it."""
+        self._check_token(workspace_id, gw, token)
+        if not self.s.flag(workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "the core takes no transcript while own_chat_write is off")
+        return TAILS.answer(workspace_id, gw, body, self.s.clock())
+
     # ── the connector's side ──────────────────────────────────────────────
 
     def feed(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
@@ -1507,6 +1543,7 @@ class OwnChat:
                 "rewinds": rewinds,
                 "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "jobs": JOBS.hand(workspace_id, gw, self.s.clock()) if ready else [],
+                "tails": TAILS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "orders": ORDERS.hand(workspace_id, gw, self.s.clock()), "release": RELEASE}
 
     def _made(self, db, workspace_id: str, gw: str) -> None:

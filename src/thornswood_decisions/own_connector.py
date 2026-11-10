@@ -54,6 +54,9 @@ phone asked for), and every few seconds whatever happens, it:
    when Patrick asks in the Tasks tab (own_jobs.py), with Hermes's own cron
    calls (room_send.py op `job`), says whether it was done
    (`POST /own/<gateway>/job_done`), and reads the jobs again at once.
+7. reads a subagent's transcript while Patrick has it open on the Tasks tab
+   (own_tails.py), with Hermes's own subagent.tail (room_send.py op `tail`), and
+   posts it (`POST /own/<gateway>/tail`).
 
 While own_chat_write is off the core answers 423 to all of it; this waits and
 copies nothing. It logs no message text, no chat title and no token.
@@ -148,6 +151,7 @@ def printed(data: bytes | None, n: int = 120) -> str:
 
 # The core's own rule for a chat id (own.py), checked again before it goes after --resume.
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+SUBAGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")  # own.py SUBAGENT_ID
 
 
 LOG = "connector.log"     # One's record, beside this file, for a connector that has no stdout
@@ -1198,6 +1202,21 @@ class Hermes:
         state = got.get("state") if isinstance(got.get("state"), dict) else None
         return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
 
+    def tail(self, session_id: str, subagent_id: str) -> dict:
+        """One subagent's transcript so far, with Hermes's own subagent.tail, as Desktop's status stack reads
+        it, through the same helper and Python as the readiness check (room_send.py "tail")."""
+        req = json.dumps({"op": "tail", "profile": "", "session_id": session_id,
+                          "subagent_id": subagent_id}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
+                                 timeout=CHECK_SECONDS, cwd=str(self.home_dir), check=False, env=probe_env())
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            return {"available": False, "reason": f"Hermes did not answer in {CHECK_SECONDS} seconds"}
+        except (OSError, IndexError, json.JSONDecodeError):
+            return {"available": False, "reason": "could not run the helper with Hermes's Python"}
+        return got if isinstance(got, dict) else {"available": False, "reason": "the helper said nothing"}
+
     def job(self, job_id: str, do: str) -> tuple[bool, str]:
         """(done, why not): pause, resume, run now or remove one of this Hermes's scheduled jobs, with Hermes's
         own cron calls, through the same helper and Python as the readiness check (room_send.py "job")."""
@@ -1890,6 +1909,26 @@ class OwnConnector:
                 self.say(f"FAIL control: the core answered {status}")
         return sent
 
+    def tails(self, wanted: list) -> int:
+        """The subagent transcripts Patrick has open on the Tasks tab (own_tails.py), each read and posted.
+        Returns how many were posted."""
+        sent = 0
+        for r in wanted[:3]:
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("session_id"), str)
+                    and SESSION_ID.match(r["session_id"]) and isinstance(r.get("subagent_id"), str)
+                    and SUBAGENT_ID.match(r["subagent_id"])):
+                continue
+            got = self.hermes.tail(r["session_id"], r["subagent_id"])
+            status, _ = self.core.post("tail", {"id": r["id"], "available": got.get("available") is True,
+                                                "text": got.get("text") if isinstance(got.get("text"), str) else "",
+                                                "truncated": got.get("truncated") is True,
+                                                "reason": str(got.get("reason") or "")[:200]})
+            if status == 200:
+                sent += 1
+            elif status not in (409, 423):
+                self.say(f"FAIL tail: the core answered {status}")
+        return sent
+
     def jobs(self, wanted: list) -> int:
         """Patrick's changes to this Hermes's scheduled jobs (own_jobs.py), made one after another and
         answered, then the jobs read again at once so the Tasks tab shows what Hermes now holds. Returns how
@@ -2067,6 +2106,9 @@ class OwnConnector:
         jobs = body.get("jobs", [])
         if isinstance(jobs, list) and jobs:
             self.jobs(jobs)
+        tails = body.get("tails", [])
+        if isinstance(tails, list) and tails:
+            self.tails(tails)
         items = body.get("items", [])
         for item in items:
             with self._lock:

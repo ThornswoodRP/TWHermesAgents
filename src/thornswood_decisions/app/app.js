@@ -942,6 +942,57 @@ function jobSheet(j, until) {
   fill(main())
 }
 
+// A subagent of his own Hermes or One, read only, with what Hermes Desktop's status stack shows for it: its
+// own transcript so far (Hermes's subagent.tail), read again every 2 seconds while the sheet is open and the
+// app is in front, as Desktop polls it (#111, own_tails.py).
+function subagentSheet(t) {
+  closeSheet()
+  const gw = t.agent, name = agentName(gw)
+  const sheet = el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Subagent' })
+  const back = el('div', { class: 'sheet-back' }, sheet)
+  const path = `/own/${gw}/chats/${encodeURIComponent(t.chat)}/subagents/${encodeURIComponent(t.id)}`
+  const text = el('pre', { class: 'transcript', 'data-subagent': 'transcript', tabindex: '0' })
+  const state = el('p', { class: 'quiet', role: 'status' }, `Reading from ${name}...`)
+  const cut = el('p', { class: 'quiet', hidden: '' }, 'Only its newest part is shown.')
+  let first = true
+  async function read() {
+    if (!back.isConnected) return
+    if (document.visibilityState === 'visible') {
+      const r = await call('GET', path + (first ? '?wait=8' : ''))
+      first = false
+      if (!back.isConnected) return
+      if (r.status === 401) { csrf = null; closeSheet(); return signInView(said(r.body)) }
+      if (r.status !== 200) {
+        state.textContent = r.status === 0 ? 'Could not reach the core. Trying again.' : (r.body.message || said(r.body))
+      } else if (r.body.pending) {
+        state.textContent = `${name} has not said yet.`
+      } else if (!r.body.tail.available) {
+        state.textContent = r.body.tail.why ? `Not shown: ${r.body.tail.why}.` : 'Hermes has nothing of its transcript yet.'
+      } else {
+        const end = text.scrollHeight - text.scrollTop - text.clientHeight < 24
+        if (text.textContent !== r.body.tail.text) text.textContent = r.body.tail.text
+        if (end) text.scrollTop = text.scrollHeight
+        cut.hidden = !r.body.tail.truncated
+        const sa = r.body.subagent || {}
+        state.textContent = sa.status && sa.status !== 'running' ? statusWords(sa.status) + '.' :
+          sa.last_tool ? toolWords(sa.last_tool) : 'Running.'
+      }
+    }
+    setTimeout(read, 2000)
+  }
+  sheet.append(el('p', {}, el('strong', {}, t.goal || 'A subagent')),
+    el('p', { class: 'quiet' }, `${t.chat_title ? name + ' · ' + t.chat_title : name}. Read only.`),
+    state, cut, text,
+    el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); go(taskChat(gw, t.chat)) } },
+      'Open the chat it works for'),
+    el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close'))
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  sheet.querySelector('button').focus()
+  read()
+}
+
 function taskRows(agents) {
   const subs = [], procs = [], jobs = [], unheard = [], silent = []
   for (const a of agents) {
@@ -980,7 +1031,8 @@ async function tasksView() {
   const live = (cls, words) => liveLine({ cls, words })
   show(screenBar({ title: 'Tasks', heading: true }), pick,
     subs.length ? [el('h2', { class: 'section' }, 'Subagents'), subs.map(t => listRow(
-      { 'data-task': 'subagent', onclick: () => go(taskChat(t.agent, t.chat)) }, {
+      // His own Hermes's and One's open the subagent's own transcript; a Bot's open the chat it works for.
+      { 'data-task': 'subagent', onclick: () => GATEWAY[t.agent] ? subagentSheet(t) : go(taskChat(t.agent, t.chat)) }, {
         agent: t.agent, title: t.goal || 'A subagent', lines: [el('span', { class: 'quiet' }, where(t)),
           t.last_tool ? el('span', { class: 'what' }, toolWords(t.last_tool)) : null],
         right: [t.status === 'running' || !t.status
