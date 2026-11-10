@@ -1,4 +1,4 @@
-"""Renaming, hiding, bringing back and deleting one of Patrick's own chats (redesign step 3, plan Part 11).
+"""Renaming, hiding, bringing back, pinning and deleting one of Patrick's own chats (redesign step 3, plan Part 11).
 
 The phone asks; the core keeps the request in `own_session_ops` (migration 10), in the same commit as
 its command record, so a retry with the same key gets the same receipt and never a second request. That
@@ -9,6 +9,8 @@ calls, as `hermes sessions rename` and `hermes sessions delete` and Hermes's ses
 - rename: Hermes's set_session_title, which cleans the title and refuses one another chat holds;
 - archive and unarchive: Hermes's set_session_archived, which hides or brings back the whole chat
   (every compressed part of it) and keeps its messages;
+- pin and unpin: Hermes's set_session_pinned, as Desktop pins a chat (#101), for the whole chat; a
+  pinned chat heads the chat list here and in Desktop;
 - delete: Hermes's delete_session, refused while a turn is running or unfinished (in the chat or a
   side task of it); it removes that chat with its messages, the earlier parts Hermes compressed it
   from and the side tasks (delegate chats) Hermes ran for it. A chat branched off it is kept, and
@@ -33,7 +35,7 @@ from datetime import timedelta
 from .auth import Principal
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
-OPS = ("rename", "archive", "unarchive", "delete")
+OPS = ("rename", "archive", "unarchive", "pin", "unpin", "delete")
 MAX_TITLE = 100            # Hermes's own SessionDB.MAX_TITLE_LENGTH
 LEASE = timedelta(minutes=2)
 MAX_CLAIM = 5
@@ -61,7 +63,7 @@ class OwnSessions:
         if not self.s.flag(p.workspace_id, "session_manage_write"):
             raise CoreError(423, "session_manage_off", "renaming, hiding and deleting chats from the phone is off for now")
         if op not in OPS:
-            raise CoreError(400, "bad_op", "a chat is renamed, archived, unarchived or deleted")
+            raise CoreError(400, "bad_op", "a chat is renamed, archived, unarchived, pinned, unpinned or deleted")
         title = _title(title) if op == "rename" else None
         if op != "rename" and title is not None:
             raise CoreError(400, "bad_title", "only a rename carries a title")
@@ -80,7 +82,8 @@ class OwnSessions:
                 raise CoreError(404, "not_listed", f"{own.name(gw)} has not listed that chat")
             if own.is_bot_chat(p.workspace_id, gw, sid):
                 raise CoreError(409, "bot_chat_kept", "your Bot Chat is kept as it is: Bot Mode and every Bot's "
-                                "message to you find it by its name, so it is not renamed, hidden or deleted")
+                                "message to you find it by its name, so it is not renamed, hidden, pinned or "
+                                "deleted; it is always first in the list")
             if op == "delete" and own.sign_in_until(p) is None:
                 raise CoreError(403, "passkey_needed", "deleting a chat cannot be undone, so it needs a passkey "
                                 "sign-in from the last 30 minutes; sign in with your passkey again")

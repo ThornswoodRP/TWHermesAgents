@@ -855,12 +855,35 @@ CREATE TABLE chat_attachments (
 CREATE INDEX chat_attachments_by_message ON chat_attachments(message_id);
 CREATE INDEX chat_attachments_by_owner ON chat_attachments(workspace_id, principal_id, message_id, created_at);
 """,
-    # 22: an alert when a turn he started stops without an answer (TWHermesAgents #109, 10 Nov: "a long turn
+    # 22: a chat of his own is pinned and unpinned from the app as Desktop does it (#101): own_session_ops
+    # takes the two new requests.
+    """
+CREATE TABLE own_session_ops_22 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT NOT NULL CHECK (length(session_id) BETWEEN 1 AND 128),
+  op TEXT NOT NULL CHECK (op IN ('rename', 'archive', 'unarchive', 'pin', 'unpin', 'delete')),
+  title TEXT CHECK ((op = 'rename') = (title IS NOT NULL) AND (title IS NULL OR length(title) BETWEEN 1 AND 100)),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO own_session_ops_22 SELECT id, workspace_id, gateway, session_id, op, title, status, lease_until, reason, principal_id, device_id, created_at, updated_at FROM own_session_ops;
+DROP TABLE own_session_ops;
+ALTER TABLE own_session_ops_22 RENAME TO own_session_ops;
+CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
+""",
+    # 23: an alert when a turn he started stops without an answer (TWHermesAgents #109, 10 Nov: "a long turn
     # started from the phone has to be checked by hand"). Until now only a turn that answered was alerted, so
     # one that failed, or whose end the connector could not confirm, said nothing. SQLite cannot widen a CHECK
     # in place, so the table is made again under its own name with the rows it had.
     f"""
-ALTER TABLE chat_alerts RENAME TO chat_alerts_22;
+ALTER TABLE chat_alerts RENAME TO chat_alerts_23;
 CREATE TABLE chat_alerts (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
@@ -877,8 +900,8 @@ CREATE TABLE chat_alerts (
   UNIQUE (workspace_id, kind, ref)
 );
 INSERT INTO chat_alerts SELECT id, workspace_id, kind, ref, who, path, status, attempts, lease_until, created_at,
-  updated_at, reason FROM chat_alerts_22;
-DROP TABLE chat_alerts_22;
+  updated_at, reason FROM chat_alerts_23;
+DROP TABLE chat_alerts_23;
 CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
 """,
 ]
@@ -1082,12 +1105,36 @@ INSERT INTO chat_messages SELECT id, workspace_id, target, text, send_key, princ
 DROP TABLE chat_messages_21;
 CREATE INDEX chat_messages_by_target ON chat_messages(workspace_id, target, created_at);
 """, ""),
+    # A pin or unpin still on its way would never reach Hermes. One already done stays in Hermes; its request
+    # leaves own_session_ops, and the event chain keeps it (own.session_pin, own.session_unpin).
+    22: ([("SELECT count(*) FROM own_session_ops WHERE op IN ('pin', 'unpin') AND status IN ('queued', 'leased')",
+           "requests to pin or unpin a chat on their way")], """
+CREATE TABLE own_session_ops_21 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT NOT NULL CHECK (length(session_id) BETWEEN 1 AND 128),
+  op TEXT NOT NULL CHECK (op IN ('rename', 'archive', 'unarchive', 'delete')),
+  title TEXT CHECK ((op = 'rename') = (title IS NOT NULL) AND (title IS NULL OR length(title) BETWEEN 1 AND 100)),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO own_session_ops_21 SELECT id, workspace_id, gateway, session_id, op, title, status, lease_until, reason, principal_id, device_id, created_at, updated_at FROM own_session_ops WHERE op NOT IN ('pin', 'unpin');
+DROP TABLE own_session_ops;
+ALTER TABLE own_session_ops_21 RENAME TO own_session_ops;
+CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
+""", "Requests to pin or unpin a chat that were already done are left out of own_session_ops; the pins stay in Hermes."),
     # An alert of a stopped turn still on its way would never reach the phone; one already sent is history the
     # older release has no kind for, so it goes.
-    22: ([("SELECT count(*) FROM chat_alerts WHERE kind = 'stopped' AND status IN ('queued', 'leased')",
+    23: ([("SELECT count(*) FROM chat_alerts WHERE kind = 'stopped' AND status IN ('queued', 'leased')",
            "alerts of a stopped turn on their way")], f"""
 DELETE FROM chat_alerts WHERE kind = 'stopped';
-ALTER TABLE chat_alerts RENAME TO chat_alerts_22;
+ALTER TABLE chat_alerts RENAME TO chat_alerts_23;
 CREATE TABLE chat_alerts (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),
@@ -1104,8 +1151,8 @@ CREATE TABLE chat_alerts (
   UNIQUE (workspace_id, kind, ref)
 );
 INSERT INTO chat_alerts SELECT id, workspace_id, kind, ref, who, path, status, attempts, lease_until, created_at,
-  updated_at, reason FROM chat_alerts_22;
-DROP TABLE chat_alerts_22;
+  updated_at, reason FROM chat_alerts_23;
+DROP TABLE chat_alerts_23;
 CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
 """, ""),
 }

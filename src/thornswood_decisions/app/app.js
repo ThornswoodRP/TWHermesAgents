@@ -102,7 +102,8 @@ const ICON = {
   pr: 'M6 3v12M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9v3a3 3 0 0 1-3 3H9',
   issue: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
   web: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18',
-  phone: 'M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z'
+  phone: 'M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z',
+  pin: 'M12 17v5M9 3h6l-1 6 3 3v2H7v-2l3-3z'
 }
 function icon(name, size = 20) {
   const ns = 'http://www.w3.org/2000/svg'
@@ -146,8 +147,8 @@ const SAID = {
   decision_write_off: 'Answering is off for now. The report page is still where you answer.',
   chat_write_off: 'Chat from the phone is off for now.',
   own_chat_off: 'Chat with your own Hermes from the phone is off for now.',
-  session_manage_off: 'Renaming, hiding and deleting chats from the phone is off for now.',
-  bot_chat_kept: 'Your Bot Chat is kept as it is: Bot Mode and every Bot\'s message to you find it by its name, so it is not renamed, hidden or deleted.',
+  session_manage_off: 'Renaming, pinning, hiding and deleting chats from the phone is off for now.',
+  bot_chat_kept: 'Your Bot Chat is kept as it is: Bot Mode and every Bot\'s message to you find it by its name, so it is not renamed, pinned, hidden or deleted. It is always first in the list.',
   removed_passkey: 'That passkey was removed here, so your phone was told to drop it. Sign in again and pick your other passkey.',
   passkey_needed: () => `This runs with full power on your own Hermes, so it needs a sign-in with your ${signInWord()} from the last 30 minutes.`,
   one_off: 'One is off',
@@ -2173,12 +2174,23 @@ async function ownPage(path) {
   return r
 }
 
-function chatRow(gw, c, ops) {
-  const o = ops ? lastOp(ops, c.id) : null
-  return listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
-    title: chatName(c),
+// One chat of the list, with its own ⋯ menu (Rename, Pin, Hide, Delete) beside it when the chat can be
+// changed from here (#102): the same sheet the open chat's ⋯ opens, without opening the chat first.
+function chatRow(gw, c, v) {
+  const o = v && v.ops ? lastOp(v.ops, c.id) : null
+  const row = listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
+    title: c.pinned ? [icon('pin', 13), ' ', chatName(c)] : chatName(c),
     lines: [snippet(c.preview), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
     right: at(c.last_at) || when(c.last_at) })
+  if (!v || !manageable(v, c, o)) return row
+  return el('div', { class: 'chat-line' }, row,
+    el('button', { class: 'ib', type: 'button', 'aria-label': `Actions for ${chatName(c)}`, 'data-chat-menu': c.id,
+      onclick: () => chatSheet(gw, c.id, c.title, v, !!c.pinned) }, icon('more')))
+}
+
+// Whether a chat can be renamed, pinned, hidden or deleted from here now. His Bot Chat is kept as it is.
+function manageable(v, chat, o) {
+  return v.can_manage && v.online && !(o && inFlight(o)) && !(chat && chat.bot_chat)
 }
 
 // A new chat Patrick just started here: the app goes into it as soon as Hermes has made it, while its first
@@ -2269,7 +2281,14 @@ async function gatewayView(gw, into = 'view') {
   const searching = pick.results !== null
   const shown = (searching ? pick.results : v.chats).concat(pick.extra)
   const hasMore = (searching || pick.extra.length) ? pick.more : v.chats.length >= 50
-  parts.push(el('h2', { class: 'section' }, searching ? `Chats that say "${pick.q.trim()}"` : 'Chats'),
+  // Pinned chats head the list in a section of their own, as in Desktop (#101); a search lists them in place.
+  const pinned = searching ? [] : shown.filter(c => c.pinned)
+  const rest = searching ? shown : shown.filter(c => !c.pinned)
+  // Older chats go on from the oldest unpinned one: a pin can be any age.
+  const last = rest.filter(c => !c.bot_chat).pop() || shown[shown.length - 1]
+  const hidden = typeof v.hidden === 'number' ? `Hidden chats (${v.hidden})` : 'Hidden chats'
+  if (pinned.length) parts.push(el('h2', { class: 'section' }, 'Pinned'), pinned.map(c => chatRow(gw, c, v)))
+  parts.push(el('h2', { class: 'section' }, searching ? `Chats that say "${pick.q.trim()}"` : pinned.length ? 'Recent' : 'Chats'),
     el('div', { class: 'search' }, search,
       el('button', { class: 'secondary', type: 'button', onclick: () => {
         if (!pick.q.trim()) { pick.results = null; pick.extra = []; return route() }
@@ -2279,10 +2298,10 @@ async function gatewayView(gw, into = 'view') {
     searching ? el('button', { class: 'secondary', type: 'button', onclick: () => {
       pick.q = ''; pick.results = null; pick.extra = []; route()
     } }, 'Show every chat') : null,
-    shown.length ? shown.map(c => chatRow(gw, c, v.ops)) : (searching && pick.why ? el('p', { class: 'warn' }, pick.why) : el('p', { class: 'quiet' }, searching ? 'No chat says that.' : 'No chats yet.')),
-    hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(shown[shown.length - 1].last_at) }, 'Older chats') : null,
+    rest.length ? rest.map(c => chatRow(gw, c, v)) : (searching && pick.why ? el('p', { class: 'warn' }, pick.why) : el('p', { class: 'quiet' }, searching ? 'No chat says that.' : pinned.length ? 'No other chats.' : 'No chats yet.')),
+    hasMore ? el('button', { class: 'secondary', type: 'button', onclick: () => more(last.last_at) }, 'Older chats') : null,
     note,
-    el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, 'Hidden chats'))
+    el('button', { class: 'secondary', type: 'button', onclick: () => go(`/m/hidden/${gw}`) }, hidden))
   if (seqNow === viewSeq) showIn(into, parts)
 }
 
@@ -2661,11 +2680,11 @@ async function ownChatView(gw, sid) {
     const o = lastOp(v.ops, sid)
     const ended = o && o.status === 'done' && (o.op === 'delete' || o.op === 'archive') ? o.op : null
     // His Bot Chat is kept as it is, so it offers no Rename, Hide or Delete (the core refuses them too).
-    const manage = v.can_manage && v.online && !h.gone && !t.error && !ended && !(o && inFlight(o)) && !v.chat.bot_chat
+    const manage = manageable(v, v.chat, o) && !h.gone && !t.error && !ended
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
         undefined, gw, name,
-        manage ? () => chatSheet(gw, sid, v.chat.title, v) : null, gatewayLive(v),
+        manage ? () => chatSheet(gw, sid, v.chat.title, v, !!v.chat.pinned) : null, gatewayLive(v),
         v.can_send && v.online && !h.gone && !t.error && !ended ? () => openDetails(gw, sid) : null),
       ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
       ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
@@ -2903,6 +2922,8 @@ const OP_WORDS = {
   rename: ['Renaming', 'Not renamed'],
   archive: ['Hiding this chat', 'Not hidden'],
   unarchive: ['Bringing it back', 'Not brought back'],
+  pin: ['Pinning this chat to the top', 'Not pinned'],
+  unpin: ['Unpinning this chat', 'Not unpinned'],
   delete: ['Deleting this chat', 'Not deleted']
 }
 
@@ -2955,8 +2976,8 @@ function deleteWords(title, name) {
   ]
 }
 
-// The chat's actions: Rename, Hide and Delete for good, in a sheet like a message's.
-function chatSheet(gw, sid, title, v) {
+// The chat's actions: Rename, Pin or Unpin, Hide and Delete for good, in a sheet like a message's.
+function chatSheet(gw, sid, title, v, pinned) {
   closeSheet()
   const name = GATEWAY[gw]
   const keys = {}
@@ -2993,6 +3014,10 @@ function chatSheet(gw, sid, title, v) {
       const r = await askSession(gw, sid, 'rename', box.value.trim(), keys, note)
       if (r.status === 200) done()
     } }, 'Rename')),
+    el('button', { class: 'secondary', type: 'button', 'data-op': pinned ? 'unpin' : 'pin', onclick: async () => {
+      const r = await askSession(gw, sid, pinned ? 'unpin' : 'pin', null, keys, note)
+      if (r.status === 200) done()
+    } }, pinned ? 'Unpin' : 'Pin to the top'),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       const r = await askSession(gw, sid, 'archive', null, keys, note)
       if (r.status === 200) done()
@@ -3362,6 +3387,24 @@ async function alertsPart(status) {
   return part
 }
 
+// Where a key is kept, in his words: the phone itself (its fingerprint) or the passkey app that holds it.
+function keptIn(k) {
+  if (k.phone_key) return 'this phone\'s fingerprint'
+  return k.maker ? `kept in ${k.maker}` : 'kept in a passkey app'
+}
+
+// One recent sign-in, said whole (10 Nov: a new chat asked for the passkey through Bitwarden instead of the
+// fingerprint, and only the core's database said which way it had asked).
+function signInSaid(s) {
+  const asked = s.asked === 'fingerprint' ? 'Asked for the fingerprint' : 'Asked for any passkey'
+  if (s.outcome === 'signed_in') return `${asked}; signed in with ${s.key ? `${s.key.label} (${keptIn(s.key)})` : 'a key since removed'}`
+  if (s.outcome === 'no_phone_key') return 'Asked for the fingerprint, but the core no longer had this phone\'s key, so it asked for any passkey'
+  if (s.outcome === 'phone_key_in_app') return 'Asked for the fingerprint, but that key was kept in a passkey app, so it asked for any passkey'
+  if (s.outcome === 'ended') return `${asked}; ended on the phone (${s.why})`
+  if (s.outcome === 'refused') return `${asked}; refused (${s.why})`
+  return `${asked}; no answer came back`
+}
+
 async function settingsView(note) {
   setTab('')
   const status = el('p', { class: 'quiet', role: 'status' }, note || '')
@@ -3370,9 +3413,17 @@ async function settingsView(note) {
   if (r.status === 401) return signInView(said(r.body))
   if (r.status === 200) {
     list.append(...(r.body.passkeys.length ? r.body.passkeys.map(k => el('div', { class: 'option' },
-      el('strong', {}, k.label), el('div', { class: 'quiet' }, `Added ${when(k.created_at)}`)))
+      el('strong', {}, k.label),
+      el('div', { class: 'quiet' }, [keptIn(k), `added ${when(k.created_at)}`,
+        k.last_used_at ? `last signed in ${when(k.last_used_at)}` : 'never signed in'].join(' · '))))
       : [el('p', { class: 'quiet' }, 'No passkey yet. Add one so this phone can sign in again.')]))
   }
+  const recent = r.status === 200 && (r.body.sign_ins || []).length
+    ? [el('h2', {}, 'Recent sign-ins'),
+       el('p', { class: 'quiet' }, 'What the app asked for each time, and which key answered.'),
+       ...r.body.sign_ins.map(s => el('div', { class: 'option' },
+         el('strong', {}, signInSaid(s)), el('div', { class: 'quiet' }, when(s.at))))]
+    : null
   const name = el('input', { autocomplete: 'off', placeholder: 'This phone', 'aria-label': 'Passkey name' })
   const alerts = await alertsPart(status)
   // This phone's fingerprint key: kept only while the core still lists it.
@@ -3403,7 +3454,7 @@ async function settingsView(note) {
     el('h2', {}, 'Alerts'), alerts,
     finger ? [el('h2', {}, 'Fingerprint'), finger] : null,
     el('h2', {}, 'Voice'), wakeSetting(),
-    el('h2', {}, 'Passkeys'), list, name,
+    el('h2', {}, 'Passkeys'), list, recent, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
       const k = await addPasskey(name.value.trim())

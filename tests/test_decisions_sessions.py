@@ -61,6 +61,14 @@ class Requests(unittest.TestCase):
             self.ask(**kw)
         self.assertEqual(e.exception.reason, reason)
 
+    def test_a_pin_and_an_unpin_go_to_the_connector_like_any_request(self):
+        for op in ("pin", "unpin"):
+            r = self.ask(op=op)
+            self.assertEqual((r["op"], r["status"]), (op, "queued"))
+            (c,) = self.claim()
+            self.assertEqual((c["op"], c["session_id"], c["title"]), (op, SID, None))
+            self.assertEqual(self.answer(c), {"status": "done"})
+
     def test_off_until_session_manage_write_and_own_chat_write(self):
         self.w.store.set_flag(self.w.ws, "session_manage_write", False, by="tests")
         self.refused("session_manage_off")
@@ -89,7 +97,7 @@ class Requests(unittest.TestCase):
         bot = {"id": "s_bot", "title": "Bot Chat", "last_at": self.w.clock().isoformat(), "preview": "", "bot_chat": True}
         self.g.feed("one", chats=[bot, {"id": SID, "title": "Plan the week", "last_at": self.w.clock().isoformat(),
                                         "preview": "ok"}])
-        for op in ("rename", "archive", "delete"):
+        for op in ("rename", "archive", "pin", "unpin", "delete"):
             self.refused("bot_chat_kept", op=op, sid="s_bot")
         self.assertEqual(self.ask()["status"], "queued")
         self.assertEqual(self.w.store.db.execute("SELECT count(*) FROM own_session_ops WHERE session_id = 's_bot'")
@@ -132,7 +140,7 @@ class Requests(unittest.TestCase):
         self.assertEqual(e.exception.reason, "not_listed")
         self.w.clock.advance(minutes=3)
         self.refused("gateway_off")
-        self.refused("bad_op", op="pin")
+        self.refused("bad_op", op="star")
 
     def test_one_at_a_time_in_each_chat_and_a_lapsed_lease_goes_out_again(self):
         self.ask(title="First")
@@ -278,6 +286,12 @@ FAKE_HERMES = {
                 self.data["sessions"][sid]["archived"] = archived
                 self._save()
                 return True
+            def set_session_pinned(self, sid, pinned):
+                self.data["sessions"][sid]["pinned"] = pinned
+                if pinned:
+                    self.data["sessions"][sid]["hidden"] = False
+                self._save()
+                return True
             def delete_session(self, sid, sessions_dir=None, exclude_active_write_guards=False):
                 if sid == "s_busy":
                     raise SessionActiveWriteGuardError("an active turn lease")
@@ -339,6 +353,17 @@ class TheHelper(unittest.TestCase):
         (self.dir / "sessions.json").write_text(json.dumps(s))
         self.assertEqual(self.ask("archive", sid="s_bot2"), {"done": True})
 
+    def test_pin_and_unpin_as_desktop_does(self):
+        # #101: Hermes's own pin, the call Desktop's PATCH /api/sessions/<id> pinned makes.
+        self.assertEqual(self.ask("pin"), {"done": True})
+        self.assertTrue(self.store()["sessions"]["s_plan"]["pinned"])
+        self.assertEqual(self.ask("pin"), {"done": True}, "already pinned is done")
+        self.assertEqual(self.ask("unpin"), {"done": True})
+        self.assertFalse(self.store()["sessions"]["s_plan"]["pinned"])
+        kept = {"done": False, "reason": "his Bot Chat is kept as it is: it is not renamed, hidden or deleted"}
+        self.assertEqual(self.ask("pin", sid="s_bot2"), kept)
+        self.assertNotIn("pinned", self.store()["sessions"]["s_bot2"])
+
     def test_archive_and_bring_back_keep_the_chat(self):
         self.assertEqual(self.ask("archive"), {"done": True})
         self.assertTrue(self.store()["sessions"]["s_plan"]["archived"])
@@ -359,7 +384,7 @@ class TheHelper(unittest.TestCase):
 
     def test_never_for_a_bot_and_a_bad_request_changes_nothing(self):
         self.assertEqual(self.ask("delete", profile="bramble")["done"], False)
-        self.assertEqual(self.ask("pin")["done"], False)
+        self.assertEqual(self.ask("star")["done"], False)
         self.assertEqual(self.ask("rename")["done"], False)  # no title
         self.assertIn("s_plan", self.store()["sessions"])
         self.assertNotIn("writes", self.store())
@@ -441,6 +466,34 @@ class Migration10(unittest.TestCase):
         g.feed("one")
         g.own.session(w.patrick(), "one", SID, "archive", None, "mig-key-0001")
         self.assertEqual(count(), [1, 1])
+
+
+class Migration22(unittest.TestCase):
+    def test_pins_and_their_way_back(self):
+        from thornswood_decisions.schema import DOWNS
+        w = World()
+        self.addCleanup(w.close)
+        g = Gateways(w)
+        on(w, "session_manage_write")
+        g.hello("one")
+        g.feed("one")
+        g.own.session(w.patrick(), "one", SID, "rename", "Kept", "mig22-key-0001")
+        checks = DOWNS[22][0]
+        count = lambda: [w.store.db.execute(q).fetchone()[0] for q, _ in checks]
+        self.assertEqual(count(), [0])
+        (r,) = g.own.claim(w.ws, "one", g.tok["one"], 0, True)["sessions"]
+        g.own.session_done(w.ws, "one", g.tok["one"], {"id": r["id"], "outcome": "done"})
+        g.own.session(w.patrick(), "one", SID, "pin", None, "mig22-key-0003")
+        self.assertEqual(count(), [1])
+        (r,) = g.own.claim(w.ws, "one", g.tok["one"], 0, True)["sessions"]
+        g.own.session_done(w.ws, "one", g.tok["one"], {"id": r["id"], "outcome": "done"})
+        self.assertEqual(count(), [0])
+        # The way back keeps every other request and leaves out the pins already done.
+        w.store.db.executescript(DOWNS[22][1])
+        self.assertEqual([r[0] for r in w.store.db.execute("SELECT op FROM own_session_ops ORDER BY created_at")],
+                         ["rename"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            w.store.db.execute("UPDATE own_session_ops SET op = 'pin'")
 
 
 if __name__ == "__main__":

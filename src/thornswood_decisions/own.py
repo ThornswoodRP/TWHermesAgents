@@ -177,6 +177,8 @@ def _chat_row(c: dict) -> dict:
         row["first"] = first
     if c.get("bot_chat") is True:
         row["bot_chat"] = True
+    if c.get("pinned") is True:
+        row["pinned"] = True
     return row
 
 
@@ -327,7 +329,14 @@ def clean(body) -> dict:
         out_open.append({"id": _sid(o.get("id")), "messages": kept})
     if len({o["id"] for o in out_open}) != len(out_open):
         raise CoreError(400, "bad_feed", "the feed opens a chat twice")
-    return {"source_time": source_time, "chats": out_chats, "open": out_open}
+    out = {"source_time": source_time, "chats": out_chats, "open": out_open}
+    # How many chats Hermes hides (archived), for the chat list's "Hidden chats (3)" (#102).
+    hidden = body.get("hidden")
+    if hidden is not None:
+        if not isinstance(hidden, int) or isinstance(hidden, bool) or not 0 <= hidden <= 1_000_000:
+            raise CoreError(400, "bad_feed", "hidden is how many chats Hermes hides")
+        out["hidden"] = hidden
+    return out
 
 
 def bot_words(text: str) -> str:
@@ -809,7 +818,7 @@ class OwnChat:
         starting = [dict(r) for r in rows if r["made_session_id"] not in listed]
         # Which chat each one made, listed or not: the app goes into the chat it just started (10 Nov).
         made = {r["id"]: r["made_session_id"] for r in rows if r["made_session_id"]}
-        return st | {"chats": snap.get("chats", []), "starting": starting, "made": made,
+        return st | {"chats": snap.get("chats", []), "hidden": snap.get("hidden"), "starting": starting, "made": made,
                      "ops": OwnSessions(self.s).shown(p.workspace_id, gw), **self._can(p)}
 
     def _connector(self, workspace_id: str, gw: str) -> dict | None:
