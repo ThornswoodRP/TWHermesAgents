@@ -1,5 +1,5 @@
-"""Chat alerts: one line on his phone when a turn he started ends, or when his own Hermes asks him something
-(TWHermesAgents #83 and #42, 9 Nov: the switch from Hermes Desktop, which notifies for both).
+"""Chat alerts: one line on his phone when a turn he started ends, answered or not, or when his own Hermes asks
+him something (TWHermesAgents #83 and #42, 9 Nov: the switch from Hermes Desktop, which notifies for both; #109).
 
 A card's alert stays as it was (push.py): "Hermes needs you", for a card. A chat alert is the same kind of
 line, sent the same way by the same worker, and as bare: who it is ("Rift", "Hermes", "One") and the chat to
@@ -9,6 +9,9 @@ cards' `push_outbox`; Push.claim hands both to the worker, and the worker cannot
 - "answered": a message he sent ended its turn: a Bot Chat or one session of a Bot (chat.py result, a turn
   that finished, never one steered into a Bot's running turn, whose own end is not his) or a chat of his own
   Hermes (own.py result).
+- "stopped": a message he sent did not get its answer: its turn failed, or its connector could not confirm how
+  it ended (TWHermesAgents #109, 10 Nov), in his own Hermes, One or a Bot's chat, so a long turn that dies is
+  not checked by hand. Never for a room, where a message starts no turn of his.
 - "asks": a turn of his own Hermes opened a question or an approval for him (own.py claim, from what the
   connector says the turn has open). Once for each, by its prompt id.
 
@@ -21,7 +24,7 @@ import re
 
 from .store import new_id
 
-KINDS = ("answered", "asks")
+KINDS = ("answered", "asks", "stopped")
 WHO = re.compile(r"^[A-Za-z][A-Za-z ]{0,39}$")
 PATH = re.compile(r"^/m/(bots/[a-z0-9][a-z0-9_-]{0,63}(/s/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?"
                   r"|hermes/(me|one)(/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?)$")

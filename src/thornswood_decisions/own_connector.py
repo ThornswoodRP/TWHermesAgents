@@ -700,12 +700,105 @@ def messages_page(state_db: Path, session_id: str, before: int | None, n: int = 
             "AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL AND m.content != '' " + summary +
             "AND (? IS NULL OR m.id < ?) ORDER BY m.id DESC LIMIT ?",
             (session_id, session_id, before, before, n + 1)).fetchall()
+        shown = list(reversed(rows[:n]))
+        ran = turn_tools(con, session_id, rows[n]["id"] if len(rows) > n else 0, shown, cols) if shown else {}
     finally:
         con.close()
-    msgs = [{"mid": r["id"], "role": r["role"], "text": _text(r["content"])[:PAGE_TEXT], "at": _iso(r["timestamp"]),
-             "reactions": reactions(r["meta"])} for r in reversed(rows[:n])]
+    msgs = []
+    for r in shown:
+        m = {"mid": r["id"], "role": r["role"], "text": _text(r["content"])[:PAGE_TEXT], "at": _iso(r["timestamp"]),
+             "reactions": reactions(r["meta"])}
+        if r["id"] in ran:
+            m["tools"], more = ran[r["id"]][-TOOLS_SHOWN:], len(ran[r["id"]]) - TOOLS_SHOWN
+            if more > 0:
+                m["tools_more"] = more
+        msgs.append(m)
     return {"messages": msgs, "more": len(rows) > n, "gone": False,
             "continued_as": tip if tip != session_id else None, "read_at": datetime.now(timezone.utc).isoformat()}
+
+
+# The tools a reply ran, kept in the reply as Desktop keeps them (TWHermesAgents #106): one line each, and
+# Show opens what the tool was given and what it returned. Hermes keeps a turn's tool calls on its
+# assistant rows (tool_calls, OpenAI's shape: [{id, function: {name, arguments}}]) and each result on a
+# row of role tool (tool_call_id, tool_name, content), between his message and the reply's words.
+TOOLS_SHOWN = 24          # the newest of one reply's tools; the rest are counted
+TOOL_ARGS = 600           # characters of what a tool was given
+TOOL_RESULT = 1500        # characters of what it returned
+TOOL_PREVIEW = 160
+TOOL_ROWS = 2000          # tool rows read for one page at most
+PREVIEW_KEYS = ("command", "cmd", "path", "file_path", "query", "url", "pattern", "goal", "name", "prompt")
+
+
+def _tool_args(raw) -> tuple[str, str]:
+    """What a tool was given, as its arguments read (pretty JSON when they are JSON), and a one-line preview."""
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        args = raw
+    if isinstance(args, dict):
+        first = next((args[k] for k in PREVIEW_KEYS if isinstance(args.get(k), str) and args[k].strip()),
+                     next((v for v in args.values() if isinstance(v, str) and v.strip()), ""))
+        given = json.dumps(args, ensure_ascii=False, indent=1)
+    else:
+        first = given = "" if args is None else str(args)
+    return given[:TOOL_ARGS], " ".join(str(first).split())[:TOOL_PREVIEW]
+
+
+def _tool_failed(content) -> bool:
+    """A result Hermes wrote as failing: a JSON object with an error, success false, or a non-zero exit code."""
+    try:
+        out = json.loads(content) if isinstance(content, str) and content.startswith("{") else None
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(out, dict):
+        return False
+    code = out.get("exit_code", out.get("returncode"))
+    return bool(out.get("error")) or out.get("success") is False or (
+        isinstance(code, int) and not isinstance(code, bool) and code != 0)
+
+
+def turn_tools(con: sqlite3.Connection, session_id: str, lo: int, shown, cols: set[str]) -> dict[int, list[dict]]:
+    """The tools each reply on a page ran, by its row id. A tool called after one shown message belongs to the
+    next shown message when that is a reply; a turn that ran tools and wrote no words shows none (its own
+    message says what came of it). `lo` is the shown message before this page (0 for none), so a reply at
+    the top of a page finds the tools it ran before it."""
+    if not {"tool_calls", "tool_call_id"} <= cols:
+        return {}
+    hi = shown[-1]["id"]
+    rows = con.execute(
+        LINEAGE_SQL + "SELECT m.id, m.role, m.tool_calls, m.tool_call_id, substr(m.content, 1, ?) AS content "
+        "FROM messages m WHERE m.session_id IN (SELECT id FROM ancestors UNION SELECT id FROM descendants) "
+        "AND m.active = 1 AND m.id >= ? AND m.id < ? AND ((m.role = 'assistant' AND m.tool_calls IS NOT NULL "
+        "AND m.tool_calls NOT IN ('', '[]', 'null')) OR m.role = 'tool') ORDER BY m.id LIMIT ?",
+        (session_id, session_id, TOOL_RESULT + 1, lo, hi, TOOL_ROWS)).fetchall()
+    calls: dict[str, dict] = {}
+    order: list[tuple[int, dict]] = []
+    for r in rows:
+        if r["role"] == "assistant":
+            try:
+                listed = json.loads(r["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for c in listed if isinstance(listed, list) else []:
+                fn = c.get("function") if isinstance(c, dict) else None
+                name = fn.get("name") if isinstance(fn, dict) else None
+                if not isinstance(name, str) or not TOOL_NAME.match(name):
+                    continue
+                given, preview = _tool_args(fn.get("arguments"))
+                tool = {"name": name, "preview": preview, "args": given, "result": None, "error": False}
+                if isinstance(c.get("id"), str):
+                    calls[c["id"]] = tool
+                order.append((r["id"], tool))
+        elif isinstance(r["tool_call_id"], str) and r["tool_call_id"] in calls:
+            tool = calls[r["tool_call_id"]]
+            tool["result"] = (r["content"] or "")[:TOOL_RESULT]
+            tool["error"] = _tool_failed(r["content"])
+    out: dict[int, list[dict]] = {}
+    for at, tool in order:
+        nxt = next((m for m in shown if m["id"] > at), None)
+        if nxt is not None and nxt["role"] == "assistant":
+            out.setdefault(nxt["id"], []).append(tool)
+    return out
 
 
 REACTION_BY = {"user": "patrick", "agent": "hermes"}

@@ -904,14 +904,16 @@ class Chat:
                 self.s.event(db, workspace_id, f"chat.{state}", item_id, "connector", {"ref": ref})
                 # His message's turn ended in a Bot's chat: one line on his phone (alerts.py). A message steered
                 # into a Bot's running turn has no turn of its own, so its end is not his to hear about.
-                if (outcome == "confirmed" and ref == "turn finished"
+                # One that failed, or whose end the connector could not confirm, is alerted as stopped.
+                stopped = outcome in ("failed", "uncertain")
+                if ((stopped or (outcome == "confirmed" and ref == "turn finished"))
                         and row["target"] in self.bots(workspace_id)):
                     sid = db.execute("SELECT session_id FROM chat_messages WHERE id = ?", (item_id,)).fetchone()[0]
-                    alerts.queue(self.s, db, workspace_id, "answered", item_id, row["target"].capitalize(),
-                                 alerts.bot_path(row["target"], sid))
+                    alerts.queue(self.s, db, workspace_id, "stopped" if stopped else "answered", item_id,
+                                 row["target"].capitalize(), alerts.bot_path(row["target"], sid))
                     # The Bot's answer is in its Bot Chat now: its newest page is asked for at once, so the
                     # Bots list has the answer within seconds and not at the feed's next run, up to a minute on.
-                    if sid is None:
+                    if sid is None and not stopped:
                         PAGES.ask((workspace_id, PAGES_GW, "bot", row["target"], None, ""), self.s.clock())
             return {"id": item_id, "status": state}
         cx = self.s.db.execute("SELECT status FROM connector_outbox WHERE id = ? AND workspace_id = ?",

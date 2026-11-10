@@ -1583,6 +1583,7 @@ function bubbles(items) {
         el('div', { class: 'qwho' }, ptr[1] ? 'Replying to ' + (m.agent || m.who || 'Hermes') : 'Replying to your message'),
         el('div', { class: 'qtext' }, snippet(ptr[2], 3))) : null,
       (m.sent || []).map(f => el('div', { class: 'att' }, el('span', {}, `${f.name} · ${sizeWords(f.size)}`))),
+      !m.mine && m.tools && m.tools.length ? toolLines(m.tools, m.toolsMore) : null,
       own ? [fileChips(own.files), own.words ? markdown(own.words) : null] : markdown(m.text))
     if (ptr && m.replyTo) replyLink(bub, m.replyTo)
     if (m.mid !== undefined && m.mid !== null && !m.status) {
@@ -1613,6 +1614,40 @@ function bubbles(items) {
     last = { by }
   }
   return out
+}
+
+// The tools a reply ran, kept in it as Desktop keeps them (TWHermesAgents #106): one line each, what it did
+// and on what, with a cross when it failed; Show opens what the tool was given and what it returned, as
+// Hermes keeps them (own_connector.turn_tools), cut to the first part when long.
+const DONE_WORDS = {
+  terminal: 'Ran a command', process_manage: 'Ran a command', read_terminal: 'Read a command\'s output',
+  close_terminal: 'Closed a command', execute_code: 'Ran code', read_file: 'Read a file',
+  write_file: 'Wrote a file', patch: 'Edited a file', search_files: 'Searched files',
+  web_search: 'Searched the web', x_search: 'Searched X', web_extract: 'Read a web page',
+  delegate_task: 'Handed work to a subagent', memory: 'Updated its memory', todo_list: 'Updated its to-do list',
+  skill_view: 'Read a skill', skills_list: 'Looked through its skills', skill_manage: 'Updated a skill',
+  session_search: 'Searched past chats', clarify: 'Asked you something', cronjob_manage: 'Set up a scheduled job',
+  vision_analyze: 'Looked at an image', image_generate: 'Made an image', video_analyze: 'Watched a video',
+  video_generate: 'Made a video', text_to_speech: 'Made audio', computer_use: 'Used the computer',
+  react_to_message: 'Reacted to a message', tw_git: 'Worked on GitHub', tw_files: 'Worked in its folder',
+  tw_decide: 'Asked you on a card', send_message: 'Sent a message'
+}
+function doneWords(name) {
+  return DONE_WORDS[name] || (name.startsWith('browser') ? 'Used the browser' : 'Used ' + name.replace(/_/g, ' '))
+}
+function toolLines(tools, more) {
+  return el('div', { class: 'tools' },
+    tools.map(t => el('details', { class: 'tool' + (t.error ? ' failed' : '') },
+      el('summary', {},
+        el('span', { class: 'lv-mark', role: 'img', 'aria-label': t.error ? 'Failed' : 'Done' }, t.error ? '\u2715' : '\u2713'),
+        el('span', { class: 'tool-name' }, doneWords(t.name)),
+        t.preview ? el('code', { class: 'lv-preview' }, t.preview) : null,
+        el('span', { class: 'tool-show', 'aria-hidden': 'true' })),
+      el('div', { class: 'tool-body' },
+        el('div', { class: 'tool-label' }, 'Given'), el('pre', {}, t.args || 'Nothing'),
+        el('div', { class: 'tool-label' }, 'Returned'),
+        el('pre', {}, t.result === null || t.result === undefined ? 'Nothing came back' : t.result || 'Nothing')))),
+    more ? el('p', { class: 'tool-more' }, `and ${more} more before ${more === 1 ? 'it' : 'them'}`) : null)
 }
 
 // Hermes's own reply pointer, the line its gateway puts at the top of a message that replies to another
@@ -2389,7 +2424,7 @@ function historyPart(gw, sid, t, name, feed) {
     } }, 'Older messages'), olderNote)
   }
   const items = msgs.map(m => fromBot({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid,
-    reactions: m.reactions || [] }))
+    reactions: m.reactions || [], tools: m.tools, toolsMore: m.tools_more }))
   if (!items.length) notes.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
   return { notes, items, gone: false }
 }
@@ -3187,8 +3222,10 @@ async function chatView(target, tab, sid) {
     const noSession = `A reaction goes on ${name}'s Bot Chat only.`
     const items = raw.map(m => room
       ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom }
-      : sid ? { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, noReact: noSession }
-        : { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, reactions: m.reactions })
+      : sid ? { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, noReact: noSession,
+          tools: m.tools, toolsMore: m.tools_more }
+        : { mine: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid, reactions: m.reactions,
+          tools: m.tools, toolsMore: m.tools_more })
     if (!room && !sid) {
       withReactions(items, v.reactions, t.newest.handed_at ? new Date(t.newest.handed_at) : null, v.can_send
         ? (mid, emoji) => reactTo(`/chat/${encodeURIComponent(v.target)}/react`, {}, mid, emoji, status) : null,

@@ -142,6 +142,33 @@ def _text(value, limit: int) -> str:
     return str(value)[:limit]
 
 
+# The tools a reply ran (own_connector.turn_tools, TWHermesAgents #106): one line each in the reply, and
+# Show opens what each was given and returned.
+PAGE_TOOLS = 24
+PAGE_TOOL_ARGS = 600
+PAGE_TOOL_RESULT = 1500
+PAGE_TOOL_PREVIEW = 160
+
+
+def _page_tools(tools, more) -> dict:
+    if not isinstance(tools, list) or len(tools) > PAGE_TOOLS:
+        raise CoreError(400, "bad_page", f"a reply's tools are a list of at most {PAGE_TOOLS}")
+    if not isinstance(more, int) or isinstance(more, bool) or more < 0:
+        raise CoreError(400, "bad_page", "tools_more is a count")
+    out = []
+    for t in tools:
+        if not isinstance(t, dict) or not isinstance(t.get("name"), str) or not TOOL_NAME.match(t["name"]):
+            raise CoreError(400, "bad_page", "each tool has the name Hermes gave it")
+        if not isinstance(t.get("error", False), bool):
+            raise CoreError(400, "bad_page", "a tool's error is true or false")
+        result = t.get("result")
+        out.append({"name": t["name"], "preview": _text(t.get("preview"), PAGE_TOOL_PREVIEW),
+                    "args": _text(t.get("args"), PAGE_TOOL_ARGS),
+                    "result": None if result is None else _text(result, PAGE_TOOL_RESULT),
+                    "error": t.get("error", False)})
+    return {"tools": out} | ({"tools_more": more} if more else {})
+
+
 def _chat_row(c: dict) -> dict:
     """One chat as a connector sends it, kept to its fields and their lengths."""
     row = {k: _text(c.get(k), n) for k, n in CHAT_FIELDS.items()}
@@ -588,6 +615,8 @@ def clean_page(kind: str, body) -> dict:
         row["reactions"] = [{"emoji": _text(r.get("emoji"), 16), "by": r.get("by")}
                             for r in reactions[:PAGE_REACTIONS]
                             if isinstance(r, dict) and r.get("by") in REACTION_BY.values() and r.get("emoji")]
+        if row["role"] == "assistant" and m.get("tools"):
+            row.update(_page_tools(m.get("tools"), m.get("tools_more", 0)))
         out.append(row)
     cont = body.get("continued_as")
     try:
@@ -1514,10 +1543,11 @@ class OwnChat:
                                        "reply": reply[-BOT_REPLY:] if isinstance(reply, str) else None}),
                             f"one:{item_id}", self.s.now(), self.s.now()))
                 self.s.wake(workspace_id, "bots")
-            elif outcome == "confirmed":
-                # The turn he started ended: one line on his phone (alerts.py), opening that chat.
-                alerts.queue(self.s, db, workspace_id, "answered", item_id, alerts.OWN_WHO[gw],
-                             alerts.own_path(gw, row["session_id"] or made))
+            else:
+                # The turn he started ended, with its answer or without one: one line on his phone (alerts.py),
+                # opening that chat.
+                alerts.queue(self.s, db, workspace_id, "answered" if outcome == "confirmed" else "stopped", item_id,
+                             alerts.OWN_WHO[gw], alerts.own_path(gw, row["session_id"] or made))
             # The files are in that Hermes's own folders now, or the message did not go: either way the core
             # keeps only their names.
             db.execute("UPDATE own_attachments SET body = NULL WHERE message_id = ?", (item_id,))
