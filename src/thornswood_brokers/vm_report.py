@@ -14,6 +14,9 @@ App, the one App on the ops repository (policy follow_main.report):
     by the first stop, a comment for each stop after it, and closed by the next
     good install.
 
+An installed result also carries, when the install wrote it, Patrick's own
+Hermes's way into the box (deploy/install.sh 6b): the public half of its key,
+its bridge token's SHA-256 and a login check, all public, each held to its form.
 Only those fields go out, each held to its form, and the reason is one line
 with any address taken out: every step's output stays in the VM's own log.
 Every write is found before it is made (a marker in its text), so a report the
@@ -29,6 +32,11 @@ from .github_api import GitHub, GitHubError
 from .wire import Refused
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# Patrick's own Hermes's way into the box (deploy/install.sh 6b): only public
+# things, each in its one form. Its private half and token never leave the VM.
+BOX_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+BOX_PUBLIC = re.compile(r"^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$")
+BOX_SHA = re.compile(r"^[0-9a-f]{64}$")
 RESULTS = {
     "installed": "installed",
     "not installed": "not installed: the tests or the release stopped it before anything changed",
@@ -98,7 +106,23 @@ class VmReport:
         }
         if result in STOPS and not out["reason"]:
             raise Refused("a stop says why")
+        out["box"] = self._box(args.get("box"))
         return out
+
+    @staticmethod
+    def _box(v) -> dict | None:
+        if v in (None, {}):
+            return None
+        if not isinstance(v, dict):
+            raise Refused("box is the public half of a box key, its token's sha256 and a login check")
+        name, public, sha = v.get("name"), v.get("public"), v.get("token_sha256")
+        if not (isinstance(name, str) and BOX_NAME.match(name)):
+            raise Refused("box name is one lower case word")
+        if not (isinstance(public, str) and BOX_PUBLIC.match(public)):
+            raise Refused("box public is an ed25519 public key line with no comment")
+        if not (isinstance(sha, str) and BOX_SHA.match(sha)):
+            raise Refused("box token_sha256 is 64 lower case hex characters, never the token")
+        return {"name": name, "public": public, "token_sha256": sha, "login": one_line(v.get("login"), 200)}
 
     # -- the words
     @staticmethod
@@ -116,6 +140,10 @@ class VmReport:
         if r["put_back"]:
             line += f" {r['put_back'][0].upper()}{r['put_back'][1:]}."
         line += f" The VM runs `{self._short(r['installed'])}`."
+        if r.get("box"):
+            b = r["box"]
+            line += (f" Box key for {b['name']}: `{b['public']}`, token sha256 `{b['token_sha256']}`;"
+                     f" login: {b['login'] or 'not tried'}.")
         return line
 
     def _marker(self, r: dict) -> str:

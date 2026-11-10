@@ -281,6 +281,66 @@ link_in "$here" "$opt/current"
 link_in "$here/hermes/plugins" "$opt/plugins"
 ok "$opt/current is $commit"
 
+# 6b. Patrick's own Hermes reaches the box (Patrick, 10 Nov 2026: B on the
+# report page's q-oracle-box-access, an Administrator key, made on the VM).
+# As patrick-hermes, once: an ed25519 key with no passphrase and a bridge
+# token (32 random bytes, base64url, what Grant-BoxAccess.ps1 makes), each
+# 0600 in its ~/.ssh and never printed or copied anywhere. ssh to
+# play.thornswood.net goes through the bridge (wss://thornswood.net/box/) with
+# this release's copy of the Thornswood bridge client, deploy/box/connect.js,
+# and takes the box's host key only from the pins in deploy/box/host-keys
+# (KnownHostsCommand). What leaves the VM is public: the key's public half and
+# the token's SHA-256, the only form the box keeps a token in (bridge.js), in
+# box_file, which the follower puts on the ledger with the install's result,
+# beside a login check. The box takes the key once Thornswood's main carries
+# it (scripts/vps/box-keys/oracle-hermes.json) and its gate verb Grant-BoxKey
+# has run; until then the check says the bridge refused the token.
+box_user=patrick-hermes
+box_file="$(pol follow_main.box_file)"
+if id "$box_user" >/dev/null 2>&1; then
+  command -v node >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs >/dev/null
+  command -v node >/dev/null || stop "node could not be installed, and the box's bridge client is node."
+  # KnownHostsCommand, which holds the box's key to the pins, is OpenSSH 8.5 and later.
+  ssh -G -o 'KnownHostsCommand=/bin/true' localhost >/dev/null 2>&1 || stop "this VM's ssh does not take KnownHostsCommand (OpenSSH 8.5), which holds the box's host key to its pins."
+  bh="$(getent passwd "$box_user" | cut -d: -f6)"
+  runuser -u "$box_user" -- sh -c 'umask 077; mkdir -p "$1/.ssh"' _ "$bh"
+  if ! runuser -u "$box_user" -- test -f "$bh/.ssh/thornswood_ed25519"; then
+    runuser -u "$box_user" -- ssh-keygen -q -t ed25519 -N '' -C thornswood-oracle-hermes -f "$bh/.ssh/thornswood_ed25519"
+  fi
+  if ! runuser -u "$box_user" -- test -s "$bh/.ssh/thornswood-box-token"; then
+    head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '=' | runuser -u "$box_user" -- sh -c 'umask 077; cat > "$1"' _ "$bh/.ssh/thornswood-box-token"
+  fi
+  runuser -u "$box_user" -- chmod 600 "$bh/.ssh/thornswood_ed25519" "$bh/.ssh/thornswood-box-token"
+  # The Host block between its two marker lines, the rest of the file as it was.
+  block="# thornswood box begin (TWHermesAgents deploy/install.sh 6b; changed by the next install)
+Host play.thornswood.net
+  User Administrator
+  IdentityFile ~/.ssh/thornswood_ed25519
+  IdentitiesOnly yes
+  BatchMode yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /dev/null
+  KnownHostsCommand $opt/current/deploy/box/known-host %H %t %K
+  ProxyCommand env THORNSWOOD_BOX_TOKEN_FILE=$bh/.ssh/thornswood-box-token node $opt/current/deploy/box/connect.js
+# thornswood box end"
+  runuser -u "$box_user" -- sh -c 'umask 077; c="$1/.ssh/config"; touch "$c"
+    awk "/^# thornswood box begin/{skip=1} !skip{print} /^# thornswood box end/{skip=0}" "$c" > "$c.new"
+    printf "%s\n" "$2" >> "$c.new"; chmod 600 "$c.new"; mv -f "$c.new" "$c"' _ "$bh" "$block"
+  pub="$(cut -d' ' -f1,2 "$bh/.ssh/thornswood_ed25519.pub")"
+  sha="$(tr -d '\n' < "$bh/.ssh/thornswood-box-token" | sha256sum | cut -d' ' -f1)"
+  [[ "$pub" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ && "$sha" =~ ^[0-9a-f]{64}$ ]] || stop "$box_user's box key or token is not the shape the box takes."
+  # A login, which changes nothing on the box: the bridge, the key and the pin.
+  said="$(runuser -u "$box_user" -- timeout 60 ssh -n play.thornswood.net 'echo THORNSWOOD_OK' 2>&1 || true)"
+  if [[ "$said" == *THORNSWOOD_OK* ]]; then login="ok"; else login="refused: $(printf '%s\n' "$said" | awk 'NF{l=$0} END{print l}' | tr -dc '[:print:]' | cut -c1-200)"; fi
+  python3 -I -c 'import json,sys; json.dump({"name": "oracle-hermes", "user": sys.argv[1], "public": sys.argv[2], "token_sha256": sys.argv[3], "login": sys.argv[4]}, open(sys.argv[5] + ".new", "w")); print()' \
+    "$box_user" "$pub" "$sha" "$login" "$box_file" >/dev/null
+  chmod 0644 "$box_file.new"; mv -f "$box_file.new" "$box_file"
+  ok "$box_user reaches the box with its own key ($(ssh-keygen -l -E sha256 -f "$bh/.ssh/thornswood_ed25519.pub" | cut -d' ' -f2)); login: $login"
+else
+  rm -f "$box_file"
+  echo "SKIP the box for Patrick's Hermes: there is no $box_user user"
+fi
+
 # 7. Checks start through tw-checks.socket (step 8), never sudo: the sudoers
 # line an earlier install made for tw-files goes, and the tw-checks group
 # holds tw-files alone.

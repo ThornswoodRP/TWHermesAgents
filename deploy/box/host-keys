@@ -1,0 +1,6 @@
+# The box's host keys, as ThornswoodRP/Thornswood's scripts/vps/vps.json pins
+# them (hostKeys): ssh to the box takes a key only when its SHA-256 is one of
+# these (deploy/box/known-host). A new pin there is a change here too.
+SHA256:aC85Oem9TJgw8L6QbHzxL8w1xcGJz7uJNnqpPKCGZ94
+SHA256:6CefSkhvTdDDENb3B3ypF55pJnO0YdEPU5WEBl8FE1U
+SHA256:gtwjZ17NIbxqvqIsKlnZ2EIpe+6YSDwpxv8+fbAsCuY

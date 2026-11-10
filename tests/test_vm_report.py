@@ -133,6 +133,22 @@ class VmInstall(unittest.TestCase):
                 self.ask(**bad)
         self.assertEqual(self.ledger(), [])
 
+    def test_the_box_keys_public_half_goes_on_the_ledger_line(self):
+        box = {"name": "oracle-hermes", "public": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + "B" * 43,
+               "token_sha256": "f" * 64, "login": "refused: box bridge: 401 from 10.0.0.1"}
+        self.ask(box=box)
+        line = self.ledger()[0]
+        self.assertIn("Box key for oracle-hermes: `" + box["public"] + "`, token sha256 `" + "f" * 64 + "`", line)
+        self.assertIn("login: refused: box bridge: 401 from <address>.", line)
+
+    def test_a_box_field_out_of_its_form_is_refused_and_nothing_is_written(self):
+        good = {"name": "oracle-hermes", "public": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + "B" * 43, "token_sha256": "f" * 64}
+        for bad in ({**good, "public": "-----BEGIN " + "OPENSSH PRIVATE KEY-----"}, {**good, "token_sha256": "x" * 43},
+                    {**good, "name": "Oracle Hermes"}, "a string"):
+            with self.assertRaises(Refused, msg=bad):
+                self.ask(box=bad)
+        self.assertEqual(self.ledger(), [])
+
     def test_the_reason_goes_out_as_one_line_with_no_address(self):
         self.assertEqual(one_line("ssh to 100.64.1.2 failed\n  and fe80::1:2:3:4 too"), "ssh to <address> failed and <address> too")
         self.assertTrue(len(one_line("x" * 900)) <= 300)

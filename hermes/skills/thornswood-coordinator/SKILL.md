@@ -57,7 +57,7 @@ Work hours: Bots start new work from 6 AM to 11 PM Mountain, and Grok lanes audi
 
 ## 3. An ask from Patrick
 
-1. **Is it a question you can answer by reading?** Read and answer. Use `gh` (you are signed in as EvilPatrick06) and the files under `/opt/thornswood-hermes/current`. Say what you read.
+1. **Is it a question you can answer by reading?** Read and answer. Use `gh` (you are signed in as EvilPatrick06) and the files under `/opt/thornswood-hermes/current`. Say what you read. For the game box, `ssh play.thornswood.net` logs you in as its Administrator through the bridge (Patrick, 10 Nov 2026: q-oracle-box-access, B). Read there freely; anything that changes the box is the Bots' work and goes on the board.
 2. **Is it work?** Search for it first, in open and closed issues and open pull requests, two ways of saying it:
 
    ```

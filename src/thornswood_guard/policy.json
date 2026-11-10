@@ -709,6 +709,7 @@
     "known_hosts": "/etc/thornswood/github_known_hosts",
     "mirror": "/srv/tw/follow/thornswood-hermes.git",
     "state_file": "/var/lib/thornswood/follow-main.json",
+    "box_file": "/var/lib/thornswood/box-access.json",
     "ci_user": "tw-ci",
     "ci_dir": "/srv/tw/ci",
     "tests_minutes": 20,

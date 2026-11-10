@@ -205,11 +205,25 @@ class Follower:
     def report(self, result: str, *, commit: str | None, step: str | None = None, reason: str | None = None,
                put_back: str | None = None, before: str | None = None) -> None:
         """Hands one new result to tw-git, or holds it for the next run."""
-        self.record(report_pending={
+        pending = {
             "result": result, "commit": commit, "step": step, "reason": reason, "put_back": put_back,
             "installed": self.installed(), "before": before,
-            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        box = self.box_access() if result == "installed" else None
+        if box:
+            pending["box"] = box
+        self.record(report_pending=pending)
         self.send_report()
+
+    def box_access(self) -> dict | None:
+        """What this install wrote of Patrick's own Hermes's way into the box (deploy/install.sh 6b):
+        the public half of its key, its bridge token's SHA-256 and a login check, all public. None
+        when the file is not there or not JSON; tw-git holds each field to its form."""
+        try:
+            data = json.loads(self._at(self.r["box_file"]).read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
 
     def send_report(self) -> None:
         pending = self.state().get("report_pending")
