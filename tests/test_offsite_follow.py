@@ -825,6 +825,66 @@ class Reports(unittest.TestCase):
         self.assertIsNone(st["report_pending"])
         self.assertEqual(st["reported"]["commit"], NEW)
 
+    def test_an_install_puts_the_box_keys_public_half_and_its_login_check_in_its_report(self):
+        # deploy/install.sh 6b writes box_file; the report carries it as it is,
+        # and tw-git holds each field to its form (test_vm_report).
+        f = self.follower(FakeVM(NEW))
+        box = {"name": "oracle-hermes", "user": "patrick-hermes", "public": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 43,
+               "token_sha256": "0" * 64, "login": "refused: box bridge: the bridge refused this token (401)"}
+        at = f._at(f.r["box_file"])
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text(json.dumps(box))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.reports[0]["box"], box)
+
+    def test_a_report_with_no_box_file_or_a_broken_one_carries_no_box(self):
+        f = self.follower(FakeVM(NEW))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertNotIn("box", self.reports[0])
+        at = f._at(f.r["box_file"])
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text("{not json")
+        self.assertIsNone(f.box_access())
+
+    def test_install_makes_the_box_key_on_the_vm_and_sends_only_its_public_half(self):
+        src = (REPO / "deploy" / "install.sh").read_text()
+        block = src[src.index("# 6b. "):src.index("# 7. ")]
+        # Made as patrick-hermes, in its own ~/.ssh, 0600, and never printed.
+        self.assertIn('runuser -u "$box_user" -- ssh-keygen -q -t ed25519', block)
+        self.assertIn("umask 077; cat > \"$1\"' _ \"$bh/.ssh/thornswood-box-token\"", block)
+        self.assertIn('chmod 600 "$bh/.ssh/thornswood_ed25519" "$bh/.ssh/thornswood-box-token"', block)
+        self.assertNotIn("cat \"$bh/.ssh/thornswood_ed25519\"", block)
+        self.assertNotIn("thornswood_ed25519 >", block)
+        # What goes out is the public line and the token's SHA-256.
+        self.assertIn('pub="$(cut -d\' \' -f1,2 "$bh/.ssh/thornswood_ed25519.pub")"', block)
+        self.assertIn('sha="$(tr -d \'\\n\' < "$bh/.ssh/thornswood-box-token" | sha256sum | cut -d\' \' -f1)"', block)
+        # The box's host key comes from the pins alone, through the bridge.
+        self.assertIn("StrictHostKeyChecking yes", block)
+        self.assertIn("UserKnownHostsFile /dev/null", block)
+        self.assertIn("KnownHostsCommand $opt/current/deploy/box/known-host %H %t %K", block)
+        self.assertIn("ProxyCommand env THORNSWOOD_BOX_TOKEN_FILE=$bh/.ssh/thornswood-box-token node $opt/current/deploy/box/connect.js", block)
+        # After current points at this release, whose files the config names.
+        self.assertGreater(src.index("# 6b. "), src.index('ok "$opt/current is $commit"'))
+
+    def test_the_box_host_key_is_taken_only_when_pinned(self):
+        import shutil
+        import subprocess
+        if not shutil.which("ssh-keygen"):
+            self.skipTest("no ssh-keygen here")
+        d = Path(tempfile.mkdtemp())
+        shutil.copy(REPO / "deploy" / "box" / "known-host", d / "known-host")
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / "k")], check=True)
+        t, k = (d / "k.pub").read_text().split()[:2]
+        fp = subprocess.run(["ssh-keygen", "-l", "-E", "sha256", "-f", str(d / "k.pub")], capture_output=True, text=True).stdout.split()[1]
+        (d / "host-keys").write_text("# pins\nSHA256:notthisone\n")
+        run = lambda: subprocess.run(["bash", str(d / "known-host"), "play.thornswood.net", t, k], capture_output=True, text=True)
+        self.assertEqual(run().stdout, "")
+        (d / "host-keys").write_text(f"# pins\n{fp}\n")
+        self.assertEqual(run().stdout, f"play.thornswood.net {t} {k}\n")
+        # The pins here are the ones Thornswood's scripts/vps/vps.json holds.
+        pins = [l for l in (REPO / "deploy" / "box" / "host-keys").read_text().splitlines() if l.startswith("SHA256:")]
+        self.assertEqual(len(pins), 3)
+
     def test_nothing_new_reports_nothing(self):
         f = self.follower(FakeVM(OLD))
         self.assertEqual(f.follow(), 0)

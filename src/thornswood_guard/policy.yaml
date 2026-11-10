@@ -766,6 +766,10 @@ follow_main:
   known_hosts: /etc/thornswood/github_known_hosts
   mirror: /srv/tw/follow/thornswood-hermes.git
   state_file: /var/lib/thornswood/follow-main.json
+  # Patrick's own Hermes's way into the box (deploy/install.sh 6b): the public
+  # half of its key, its bridge token's SHA-256 and a login check, written by
+  # each install and put on the ledger with an installed result. Never a secret.
+  box_file: /var/lib/thornswood/box-access.json
   ci_user: tw-ci
   ci_dir: /srv/tw/ci
   tests_minutes: 20

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# ssh's KnownHostsCommand for the box (deploy/install.sh, section 5e):
+#
+#   KnownHostsCommand /opt/thornswood-hermes/current/deploy/box/known-host %H %t %K
+#
+# ssh hands it the host key the box shows, and it answers with that key as a
+# known_hosts line only when the key's SHA-256 is one host-keys beside it pins,
+# so ssh takes the box's key from the pin and from nothing else: no scan, no
+# first-use trust, and a changed key is refused. It prints nothing otherwise.
+set -euo pipefail
+host="${1:?}" type="${2:?}" key="${3:?}"
+[[ "$type" =~ ^[a-z0-9@.-]+$ && "$key" =~ ^[A-Za-z0-9+/=]+$ ]] || exit 0
+fp="$(printf '%s %s\n' "$type" "$key" | ssh-keygen -l -E sha256 -f - 2>/dev/null | grep -o 'SHA256:[A-Za-z0-9+/=]*' || true)"
+[[ -n "$fp" ]] || exit 0
+if grep -qxF -- "$fp" "$(dirname "$0")/host-keys"; then printf '%s %s %s\n' "$host" "$type" "$key"; fi
