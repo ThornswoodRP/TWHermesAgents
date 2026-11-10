@@ -763,6 +763,24 @@ class PullRequestsAndIssues(unittest.TestCase):
         self.assertTrue(out["done"], out)
         self.assertEqual(w.fake.tokens[-1]["permissions"], {"pull_requests": "write", "metadata": "read"})
 
+    def test_bramble_comments_on_a_robots_pull_request_and_cannot_edit_it(self):
+        # Ops #281: the red-check note on Dependabot's #5708 and the pin
+        # robot's #5715 was refused with "Bramble edits only its own pull requests".
+        w = World()
+        w.fake.add_pr(APP, 5708, head_ref="dependabot/nuget/launcher/x-1.2", head_sha="d" * 40, files=["a"],
+                      author="dependabot[bot]")
+        w.fake.add_pr(APP, 5715, head_ref="engine-pin/next", head_sha="c" * 40, files=["a"],
+                      author="thornswood-pin-robot[bot]")
+        for n in (5708, 5715):
+            out = w.git.comment("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": n,
+                                           "body": "Build check result is red."})
+            self.assertTrue(out["done"], out)
+            self.assertEqual(len(w.fake.comments[(APP, n)]), 1)
+            with self.assertRaises(Refused):
+                w.git.edit_pr("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": n, "title": "x"})
+            with self.assertRaises(Refused):
+                w.git.comment("hermes", {"bot": "wisp", "repo": APP, "task": "t", "number": n, "body": "x"})
+
     def test_a_label_on_a_pull_request_is_sent_with_pull_requests_write(self):
         w = World()
         w.green_pr(repo=APP)
