@@ -448,7 +448,9 @@ class _Connectors:
                                           "admitted": t.get("admitted") is True,
                                           **({"taken": t["taken"]} if t.get("taken") in ("steered", "redirected") else {}),
                                           **({"asks": a} if (a := clean_asks(t.get("asks"))) else {}),
-                                          **({"order": o} if (o := clean_order(t.get("order"))) else {})}
+                                          **({"order": o} if (o := clean_order(t.get("order"))) else {}),
+                                          **({"session": t["session"]} if isinstance(t.get("session"), str)
+                                             and SESSION_ID.match(t["session"]) else {})}
         with self.lock:
             self.said[(ws, gw)] = info
 
@@ -761,7 +763,9 @@ class OwnChat:
             "ORDER BY created_at DESC, rowid DESC LIMIT 10", (p.workspace_id, gw)).fetchall()
         listed = {c["id"] for c in snap.get("chats", [])}
         starting = [dict(r) for r in rows if r["made_session_id"] not in listed]
-        return st | {"chats": snap.get("chats", []), "starting": starting,
+        # Which chat each one made, listed or not: the app goes into the chat it just started (10 Nov).
+        made = {r["id"]: r["made_session_id"] for r in rows if r["made_session_id"]}
+        return st | {"chats": snap.get("chats", []), "starting": starting, "made": made,
                      "ops": OwnSessions(self.s).shown(p.workspace_id, gw), **self._can(p)}
 
     def _connector(self, workspace_id: str, gw: str) -> dict | None:
@@ -1313,6 +1317,7 @@ class OwnChat:
         items = []
         with self.s.tx() as db:
             self._lapse(db, workspace_id, gw)
+            self._made(db, workspace_id, gw)
             rows = db.execute("SELECT m.id, m.session_id, m.text, m.send_key, m.status, p.bot FROM own_messages m "
                               "JOIN principals p ON p.id = m.principal_id "
                               "WHERE m.workspace_id = ? AND m.gateway = ? AND m.status IN ('queued', 'leased') "
@@ -1347,6 +1352,18 @@ class OwnChat:
                 "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "sessions": sessions,
                 "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "orders": ORDERS.hand(workspace_id, gw, self.s.clock()), "release": RELEASE}
+
+    def _made(self, db, workspace_id: str, gw: str) -> None:
+        """A new chat's id, as the connector says it the moment Hermes made the chat, is kept on its first
+        message while that first turn still runs: the app goes into the chat at once, as Desktop does, and the
+        turn shows there as it happens. 10 Nov: the id came only with the turn's result, so a long first turn
+        sat under Starting on "Sending" with no chat to open until it ended."""
+        info = CONNECTORS.get(workspace_id, gw, self.s.clock())
+        for mid, t in ((info or {}).get("turns") or {}).items():
+            if t.get("session"):
+                db.execute("UPDATE own_messages SET made_session_id = ? WHERE id = ? AND workspace_id = ? "
+                           "AND gateway = ? AND status = 'leased' AND session_id IS NULL AND made_session_id IS NULL",
+                           (t["session"], mid, workspace_id, gw))
 
     def reacted(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
         """What came of setting one reaction. An answer about an older wish than the newest is dropped,

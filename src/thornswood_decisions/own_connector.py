@@ -877,6 +877,9 @@ def follow_turn(stream, seen: dict, tell, live: LiveTurn | None = None) -> None:
                  "text": ("writing", None)}.get(kind)
         if kind == "admission" and ev.get("status") in ADMISSIONS:
             seen["admitted"] = True
+            sid = ev.get("session_id")
+            if isinstance(sid, str) and SESSION_ID.match(sid):
+                seen["session"] = sid  # the chat's id, a new chat's too, while its first turn runs
             if ev["status"] in ("steered", "redirected"):
                 seen["taken"] = ev["status"]
             state = (ADMISSIONS[ev["status"]], None)
@@ -1065,7 +1068,7 @@ class Hermes:
     def _run(self, argv: list[str], session_id: str | None, doing=None,
              started=None, live: LiveTurn | None = None) -> tuple[str, str, str, str | None]:
         seen: dict = {}
-        tell = doing or (lambda state, tool, admitted=False, taken=None: None)
+        tell = doing or (lambda *said, **more: None)
         began = time.time()
         moved = threading.Event()  # the turn said more than its start: it has the chat's turn
 
@@ -1073,7 +1076,8 @@ class Hermes:
             if seen.get("events", 0) > 1:
                 moved.set()
             asks, order = list((seen.get("asks") or {}).values()), seen.get("order")
-            tell(state, tool, bool(seen.get("admitted")), seen.get("taken"), *((asks, order) if asks or order else ()))
+            tell(state, tool, bool(seen.get("admitted")), seen.get("taken"), *((asks, order) if asks or order else ()),
+                 **({"session": seen["session"]} if seen.get("session") else {}))
 
         def read(stream):
             follow_turn(stream, seen, heard, live)
@@ -1500,7 +1504,7 @@ class OwnConnector:
                 self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": "that chat is gone"})
                 self.feed_now = True
             return
-        def doing(state, tool, admitted=False, taken=None, asks=None, order=None):
+        def doing(state, tool, admitted=False, taken=None, asks=None, order=None, session=None):
             # `admitted`: Hermes has the message (room_send.py's turn said how it took it). The core hands this
             # connector the chat's next message only once each before it is in Hermes, so they keep order.
             # `taken`: steered or redirected into the turn already running, kept while that turn goes on.
@@ -1510,8 +1514,11 @@ class OwnConnector:
                 self.doing[item["id"]] = now = {
                     "id": item["id"], "state": state, "tool": tool, "admitted": admitted,
                     **({"taken": taken} if taken else {}), **({"asks": asks} if asks else {}),
-                    **({"order": order} if order else {})}
-            if any(was.get(k) != now.get(k) for k in ("admitted", "taken", "asks", "order")):
+                    **({"order": order} if order else {}),
+                    # A new chat's id, said as soon as Hermes made it: the app goes into the chat while its first
+                    # turn runs (10 Nov: a long first turn sat on "Sending" with no chat to open).
+                    **({"session": session} if session and not item.get("session_id") else {})}
+            if any(was.get(k) != now.get(k) for k in ("admitted", "taken", "asks", "order", "session")):
                 # Hermes took the message (the chat's next one can go), or a question, an approval or how
                 # an order went: the core has it now, by the claim this wakes, not on the next round.
                 self.wakeup.set()

@@ -291,6 +291,34 @@ class Connecting(unittest.TestCase):
         self.assertEqual(self.own.chats(p, "one")["starting"], [])
         self.assertEqual(self.own.view(p, "one", "made_1")["mine"][0]["id"], mid)
 
+    def test_a_new_chat_is_known_by_its_id_while_its_first_turn_still_runs(self):
+        # 10 Nov: a long first turn sat on "Sending" under Starting, with no chat to open until it ended.
+        mid = self.send(sid=None)
+        other = self.send(sid="other_chat", key="own-key-0002")
+        self.claim()
+        p = passkey(self.w)
+        busy = {"turns": [{"id": mid, "state": "tool", "tool": "terminal", "admitted": True, "session": "made_2"},
+                          {"id": other, "state": "writing", "admitted": True, "session": "made_x"}]}
+        self.own.claim(self.w.ws, "one", self.g.tok["one"], 3, True, doing=busy)
+        self.assertEqual(tuple(self.status(mid)), ("leased", None, "made_2"))
+        self.assertIsNone(self.status(other)["made_session_id"], "a message to a chat it has never makes one")
+        view = self.own.chats(p, "one")
+        self.assertEqual((view["starting"][0]["made_session_id"], view["made"]), ("made_2", {mid: "made_2"}))
+        self.assertEqual(self.own.view(p, "one", "made_2")["mine"][0]["id"], mid, "the chat opens while it runs")
+        self.g.feed("one", chats=[{"id": "made_2", "title": "New", "last_at": "", "preview": ""}], opened=[])
+        self.assertEqual((self.own.chats(p, "one")["starting"], self.own.chats(p, "one")["made"]),
+                         ([], {mid: "made_2"}), "listed, the app still finds the chat it started")
+        self.own.result(self.w.ws, "one", self.g.tok["one"], mid, "confirmed", session_id="made_2")
+        self.assertEqual(tuple(self.status(mid)), ("sent", None, "made_2"))
+
+    def test_a_bad_chat_id_from_the_connector_is_not_kept(self):
+        mid = self.send(sid=None)
+        self.claim()
+        for bad in ("../etc", "--yolo", "x" * 129, 7):
+            self.own.claim(self.w.ws, "one", self.g.tok["one"], 3, True,
+                           doing={"turns": [{"id": mid, "state": "thinking", "admitted": True, "session": bad}]})
+            self.assertIsNone(self.status(mid)["made_session_id"])
+
     def test_outcomes(self):
         a, b, c = self.send(key="own-key-0001"), self.send(sid="c2", key="own-key-0002"), self.send(sid="c3",
                                                                                                 key="own-key-0003")

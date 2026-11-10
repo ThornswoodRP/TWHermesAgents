@@ -251,6 +251,27 @@ def one_replies(o):
         # The core's clock here stands still; let the 20 seconds pass after which the core asks One for
         # the chat's newest page again, as they would while One answers.
         w.clock.advance(seconds=21)
+def one_new_chats(o):
+    """A new chat whose first message starts "Plan a trip" is taken as One's connector takes one: Hermes makes
+    the chat (s_trip) and its long first turn runs on, and each claim says the chat's id with that turn, as
+    One's connector does from the turn's admission line (room_send.py announce). No result comes: the app goes
+    into the chat while the turn still runs (10 Nov)."""
+    from datetime import timedelta
+    rows = o.s.db.execute("SELECT id, text FROM own_messages WHERE gateway = 'one' AND session_id IS NULL "
+                          "AND status = 'queued' AND text LIKE 'Plan a trip%'").fetchall()
+    for r in rows:
+        with o.s.tx() as db:
+            db.execute("UPDATE own_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                       ((w.clock() + timedelta(minutes=10)).isoformat(), r["id"]))
+        c = sqlite3.connect(sdb)
+        c.execute("INSERT INTO sessions VALUES('s_trip', 'cli', NULL, ?, ?, NULL, NULL, NULL, 0, 0)",
+                  (epoch("2026-11-01T17:50:00+00:00"), epoch("2026-11-01T17:50:00+00:00")))
+        c.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_trip', 'user', ?, ?)",
+                  (r["text"], epoch("2026-11-01T17:50:00+00:00")))
+        c.commit()
+        c.close()
+        TURNS["turns"].append({"id": r["id"], "state": "tool", "tool": "terminal", "admitted": True,
+                               "session": "s_trip"})
 # One's chat settings, as its connector reads and changes them (room_send.py op control): a ChatGPT
 # sign-in model now, and a local model it can move to.
 CTL = {"model": "gpt-5.5", "provider": "openai-codex", "reasoning": "medium", "levels": ["low", "medium", "high", "xhigh"],
@@ -304,6 +325,7 @@ def one_pages():
                     TURNS["turns"][0]["asks"] = []
                     TURNS["turns"][0]["order"] = {"op": "answer", "prompt_id": r["prompt_id"], "status": "sent"}
             one_replies(o)
+            one_new_chats(o)
             for r in got.get("reactions", []):
                 o.reacted(w.ws, "one", to, {"session_id": r["session_id"], "message_id": r["message_id"],
                                             "version": r["version"], "outcome": set_reaction(r)})

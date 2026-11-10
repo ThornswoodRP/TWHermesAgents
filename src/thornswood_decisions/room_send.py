@@ -78,7 +78,8 @@ Hermes's own fd 0 is the null device in an attended turn, so nothing in Hermes e
 A steered or redirected message has no turn of its own: the running turn answers it, so this follows
 that turn to its end and reports its result, as `hermes chat` reports its own. Besides Hermes's
 stream-json lines it prints how Hermes took the message, once it has, and again when a queued one starts:
-{"type": "admission", "status": "started" | "queued" | "steered" | "redirected"}. Before this, a message
+{"type": "admission", "status": "started" | "queued" | "steered" | "redirected", "session_id"}, the
+session_id the chat's id (for a new chat, the one Hermes just made). Before this, a message
 always went in with prompt.submit and waited behind the running turn, however the chat was set. This is
 in room_send.py, not a file of its own, because One's connector updates itself with the files its
 running copy names (own_connector.py UPDATE_FILES).
@@ -670,8 +671,11 @@ def say(line) -> None:
         sys.stdout.flush()
 
 
-def announce(status: str) -> None:
-    say({"type": "admission", "status": status})
+def announce(status: str, session_id=None) -> None:
+    # With the chat's id: a new chat has none until Hermes makes it, and the app goes into it from here, while
+    # its first turn runs, not once that turn ends (10 Nov: a long first turn sat on "Sending" with no chat).
+    say({"type": "admission", "status": status,
+         **({"session_id": session_id[:128]} if isinstance(session_id, str) and session_id else {})})
 
 
 def steerable(text, has_file: bool) -> bool:
@@ -895,12 +899,12 @@ def follow_busy_setting(has_file: bool, orders=None) -> None:
                     if got.get("voice_stopped") is True:
                         return got
                     if got.get("status") in ("queued", "redirected"):
-                        announce("steered" if mode == "steer" else "redirected")
+                        announce("steered" if mode == "steer" else "redirected", self.session_id)
                         return {"admission_id": running}
             receipt = await super().submit(text)
             status = (receipt or {}).get("status")
             if status in ("started", "queued"):
-                announce(status)
+                announce(status, self.session_id)
                 self._queued = (receipt.get("admission_id") if status == "queued" else None)
             return receipt
 
@@ -911,7 +915,7 @@ def follow_busy_setting(has_file: bool, orders=None) -> None:
             if mine and any(isinstance(r, dict) and r.get("admission_id") == mine and r.get("status") == "started"
                             for r in self.pending):
                 self._queued = None
-                announce("started")
+                announce("started", self.session_id)
 
     gateway_chat_view.GatewayChatView = BusyAware
 

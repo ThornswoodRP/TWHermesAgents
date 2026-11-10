@@ -2144,6 +2144,36 @@ function chatRow(gw, c, ops) {
     right: at(c.last_at) || when(c.last_at) })
 }
 
+// A new chat Patrick just started here: the app goes into it as soon as Hermes has made it, while its first
+// turn runs, and he follows that turn there (10 Nov: a long first turn sat under Starting on "Sending", with
+// no chat to open until it ended). Read again every two seconds until then; a message that failed stays
+// under Starting with its reason.
+const started = {}
+let startWatch = null
+function followStart(gw, v, seqNow) {
+  const mid = started[gw]
+  if (!mid) return false
+  const sid = (v.made || {})[mid]
+  if (sid) {
+    delete started[gw]
+    go(`/m/hermes/${gw}/${sid}`)
+    return true
+  }
+  const m = v.starting.find(x => x.id === mid)
+  if (!m || (m.status !== 'queued' && m.status !== 'leased')) {
+    delete started[gw]
+    return false
+  }
+  clearTimeout(startWatch)
+  startWatch = setTimeout(() => {
+    if (seqNow !== viewSeq || document.visibilityState !== 'visible' || started[gw] !== mid) return
+    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
+    if (typing) return followStart(gw, v, seqNow)
+    route()
+  }, 2000)
+  return false
+}
+
 async function gatewayView(gw, into = 'view') {
   // In the desktop's chat list it goes with the chat beside it, so it takes that view's number, not a new one.
   if (into === 'view') setTab('bots')
@@ -2152,6 +2182,7 @@ async function gatewayView(gw, into = 'view') {
   if (refused(r, into)) return
   const v = r.body
   const name = GATEWAY[gw]
+  if (followStart(gw, v, seqNow)) return
   const pick = pickers[gw] || (pickers[gw] = { q: '', results: null, more: false, extra: [] })
   const status = el('p', { class: 'warn', role: 'status' })
   const parts = [
@@ -2161,8 +2192,11 @@ async function gatewayView(gw, into = 'view') {
   if (v.can_send && v.online) {
     parts.push(signInPart(v, status))
     if (v.sign_in_until) {
-      parts.push(composer('new:' + gw, 'Start a new chat',
-          (text, key) => call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key }), status, gw), status)
+      parts.push(composer('new:' + gw, 'Start a new chat', async (text, key) => {
+        const s = await call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key })
+        if (s.status === 200 && s.body.message_id) started[gw] = s.body.message_id
+        return s
+      }, status, gw), status)
     }
   } else if (!v.can_send) {
     parts.push(el('p', { class: 'quiet' }, said({ error: 'own_chat_off' })))
