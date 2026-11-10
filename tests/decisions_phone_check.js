@@ -4,7 +4,8 @@ const { chromium } = require('playwright')
 // screen), a deep link, adding a passkey, signing in with it,
 // answering a card (it leaves Decisions for good), a high-risk card's own
 // check screen, the five tabs, the Thornswood Bots list (the one last written in
-// first) and a chat with Patrick's own Hermes on One (as text, a new chat,
+// first) and a chat with Patrick's own Hermes on One (as text, a new chat and
+// going into it while its first turn runs,
 // Hermes on the VM with no connector yet, and reactions: Hermes's own, setting
 // one from a message's actions and taking it off), the Rooms
 // list and a room (as text), the Tasks tab (subagents, background commands and
@@ -345,6 +346,16 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.getByRole('heading', { name: 'Starting' }).waitFor({ timeout: 5000 })
     await page.getByText('Start a list for the weekend.').waitFor({ timeout: 3000 })
     await page.getByText('Waiting to send').waitFor({ timeout: 3000 })
+  })
+  await step('a new chat opens as soon as Hermes has made it, while its first turn still runs', async () => {
+    await page.getByLabel('Start a new chat').fill('Plan a trip for Saturday.')
+    await page.getByRole('button', { name: 'Start a new chat' }).click()
+    await page.waitForURL(/\/m\/hermes\/one\/s_trip$/, { timeout: 15000 })
+    await page.locator('#view .msg.working').waitFor({ timeout: 5000 })
+    await page.getByText('Plan a trip for Saturday.').first().waitFor({ timeout: 3000 })
+    await page.goto(base + '/m/hermes/one')
+    await page.getByText('Plan the week', { exact: true }).waitFor({ timeout: 5000 })
+    if (!page.url().endsWith('/m/hermes/one')) throw new Error('it went into the chat again: ' + page.url())
   })
   await page.getByText('Plan the week', { exact: true }).click()
   await step('a chat on One, as text, on its own deep link', async () => {

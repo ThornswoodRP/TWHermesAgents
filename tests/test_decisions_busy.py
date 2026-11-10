@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import textwrap
 import unittest
 from pathlib import Path
@@ -127,7 +128,7 @@ class TheTurn(unittest.TestCase):
                               "--format", "stream-json", "--query-file", str(query), *extra, "--resume", "s1"],
                              capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
-        lines = [json.loads(ln) for ln in out.stdout.splitlines()]
+        lines = self.lines = [json.loads(ln) for ln in out.stdout.splitlines()]
         calls = [json.loads(ln) for ln in self.calls.read_text(encoding="utf-8").splitlines()]
         return [c[0] for c in calls], calls, [ln["status"] for ln in lines if ln["type"] == "admission"], lines[-1]
 
@@ -163,6 +164,14 @@ class TheTurn(unittest.TestCase):
         self.assertEqual(methods, ["config.get", "session.redirect", "prompt.submit"])
         self.assertEqual((said, result["admission"]), (["queued", "started"], "a2"))
 
+    def test_the_admission_says_the_chats_id(self):
+        # A new chat's id reaches the core while its first turn runs, from this line (10 Nov).
+        for busy, running in (("queue", False), ("queue", True), ("steer", True), ("interrupt", True)):
+            self.run_turn(busy=busy, running=running)
+            said = [ln for ln in self.lines if ln["type"] == "admission"]
+            self.assertTrue(said)
+            self.assertTrue(all(ln["session_id"] == "s1" for ln in said), said)
+
     def test_other_ops_still_read_their_request_on_stdin(self):
         out = subprocess.run([sys.executable, "-I", str(ROOM_SEND), "--hermes-root", str(self.root)],
                              input='{"op": "nothing"}', capture_output=True, text=True, timeout=60)
@@ -182,6 +191,17 @@ class TheConnector(unittest.TestCase):
         own_connector.follow_turn(iter(['{"type": "admission", "status": "steered"}', '{"type": "text"}']), seen,
                                   lambda s, t: said.append(s))
         self.assertEqual((said, seen["taken"]), (["steered", "writing"], "steered"))
+
+    def test_the_admission_line_gives_the_chats_id(self):
+        seen = {}
+        own_connector.follow_turn(iter(['{"type": "admission", "status": "started", "session_id": "20261110_x1"}']),
+                                  seen, lambda s, t: None)
+        self.assertEqual(seen["session"], "20261110_x1")
+        for bad in ('"../x"', '"--yolo"', '7', '""'):
+            seen = {}
+            own_connector.follow_turn(iter(['{"type": "admission", "status": "started", "session_id": %s}' % bad]),
+                                      seen, lambda s, t: None)
+            self.assertNotIn("session", seen)
 
     def test_the_init_line_alone_is_not_in_hermes(self):
         seen = {}
@@ -208,6 +228,48 @@ class TheConnector(unittest.TestCase):
         self.assertEqual(outcome[0], "confirmed")
         self.assertEqual(said[0], ("thinking", None, False, None))
         self.assertEqual(said[1], ("redirected", None, True, "redirected"))
+
+    def test_a_new_chats_id_is_said_while_its_first_turn_runs(self):
+        lines = ['{"type": "system", "subtype": "init", "session_id": ""}',
+                 '{"type": "admission", "status": "started", "session_id": "20261110_made"}',
+                 '{"type": "tool_use", "name": "terminal"}']
+        script = Path(tempfile.mkdtemp()) / "hermes.py"
+        self.addCleanup(shutil.rmtree, script.parent, ignore_errors=True)
+        script.write_text("import sys, time\nfor ln in %r:\n    print(ln, flush=True)\ntime.sleep(0.3)\n"
+                          "print('{\"type\": \"result\", \"session_id\": \"20261110_made\", \"exit_code\": 0}')\n"
+                          % lines, encoding="utf-8")
+        h = own_connector.Hermes([sys.executable, str(script)], [], script.parent, "One")
+        said = []
+        h._run([*h.cmd], None, lambda *a, **k: said.append(k.get("session")))
+        self.assertEqual(said[0], None)
+        self.assertEqual(said[1:], ["20261110_made"] * (len(said) - 1))
+
+    def test_one_tells_the_core_a_new_chats_id_and_only_a_new_chats(self):
+        class Turn:
+            def __init__(self):
+                self.go, self.started = threading.Event(), threading.Event()
+
+            def turn(self, session_id, text, doing, image=None, started=None, live=None):
+                doing("tool", "terminal", True, session=session_id or "20261110_made")
+                self.started.set()
+                self.go.wait(10)
+                return "confirmed", "turn finished", "", session_id or "20261110_made"
+
+        class Core:
+            def post(self, op, body):
+                return 200, {}
+
+        for sid, said in ((None, {"session": "20261110_made"}), (SID, {})):
+            hermes = Turn()
+            c = own_connector.OwnConnector(Core(), hermes, Path("/nonexistent"), say=lambda _: None)
+            t = threading.Thread(target=c._deliver, args=({"id": "own_abc", "session_id": sid, "text": "hi"},))
+            t.start()
+            hermes.started.wait(10)
+            self.assertEqual(c.busy()["turns"], [{"id": "own_abc", "state": "tool", "tool": "terminal",
+                                                  "admitted": True, **said}])
+            self.assertTrue(c.wakeup.is_set(), "the core hears it on the claim this wakes, not the next round")
+            hermes.go.set()
+            t.join(10)
 
 
 class TheCore(unittest.TestCase):
