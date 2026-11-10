@@ -95,7 +95,9 @@ HIDDEN = []
 OPEN = [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
                                       {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]
 def one_feed(o=own):
-    o.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "chats": CHATS, "open": OPEN})
+    # Pinned chats first, as the connector lists them (own_connector.snapshot), and how many are hidden.
+    o.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "open": OPEN, "hidden": len(HIDDEN),
+                             "chats": sorted(CHATS, key=lambda row: not row.get("pinned"))})
 one_feed()
 # The pages: s_plan and s_long are in the scratch state.db, s_old is not (gone from Hermes).
 import sqlite3, tempfile, threading, time
@@ -206,7 +208,7 @@ def set_reaction(r, db=None, sid=None):
     c.close()
     return "set"
 def one_session(o, r):
-    """A rename, hide, bring back or delete, done on the scratch state.db as Hermes's own calls do it (the
+    """A rename, pin, hide, bring back or delete, done on the scratch state.db as Hermes's own calls do it (the
     helper's own path is in test_decisions_sessions.py), then the chat list fed again, as the connector does."""
     c = sqlite3.connect(sdb)
     sid, op = r["session_id"], r["op"]
@@ -219,6 +221,11 @@ def one_session(o, r):
         c.execute("UPDATE sessions SET archived = 1 WHERE id = ?", (sid,))
         HIDDEN.extend(row for row in CHATS if row["id"] == sid)
         CHATS[:] = [row for row in CHATS if row["id"] != sid]
+    elif op in ("pin", "unpin"):
+        # The scratch state.db has no pinned column; the feed carries the pin, as the connector reads it.
+        for row in CHATS:
+            if row["id"] == sid:
+                row["pinned"] = op == "pin"
     elif op == "unarchive":
         c.execute("UPDATE sessions SET archived = 0 WHERE id = ?", (sid,))
         CHATS.extend(row for row in HIDDEN if row["id"] == sid)

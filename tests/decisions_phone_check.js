@@ -776,9 +776,9 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     throw new Error('never came to pass on ' + path)
   }
   await page.getByRole('button', { name: 'Chat actions' }).click()
-  await step('a chat of his own has its actions: Rename, Hide and Delete for good, and no reactions', async () => {
+  await step('a chat of his own has its actions: Rename, Pin, Hide and Delete for good, and no reactions', async () => {
     const sheet = page.getByRole('dialog', { name: 'Chat actions' })
-    for (const name of ['Rename', 'Hide this chat', 'Delete for good...']) await sheet.getByRole('button', { name }).waitFor({ timeout: 3000 })
+    for (const name of ['Rename', 'Pin to the top', 'Hide this chat', 'Delete for good...']) await sheet.getByRole('button', { name }).waitFor({ timeout: 3000 })
     if ((await page.getByLabel('New title').inputValue()) !== 'Markdown check') throw new Error('the title box does not hold its title')
   })
   await page.getByLabel('New title').fill('  Markdown   look ')
@@ -798,6 +798,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.goto(base + '/m/hermes/one')
     await page.getByRole('button', { name: /^Plan the week/ }).waitFor({ timeout: 5000 })
     if (await page.locator('#view .row[data-chat="s_md"]').count()) throw new Error('the hidden chat is still listed')
+    await page.getByRole('button', { name: 'Hidden chats (1)', exact: true }).waitFor({ timeout: 3000 })
   })
   await page.getByRole('button', { name: 'Hidden chats' }).click()
   await step('Hidden chats lists it from One itself, with Bring back', () =>
@@ -822,6 +823,35 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.waitForTimeout(800)
     await page.goto(base + '/m/hermes/one')
     await page.locator('#view .row[data-chat="s_md"]').waitFor({ timeout: 5000 })
+  })
+  // #101 and #102: a chat is pinned from its own row's menu, without opening it, and heads the list.
+  const pinnedIds = () => page.evaluate(() => {
+    const h = [...document.querySelectorAll('#view h2.section')].find(x => x.textContent === 'Pinned')
+    const ids = []
+    for (let n = h && h.nextElementSibling; n && n.tagName !== 'H2'; n = n.nextElementSibling) {
+      const r = n.matches('.row[data-chat]') ? n : n.querySelector('.row[data-chat]')
+      if (r) ids.push(r.dataset.chat)
+    }
+    return ids
+  })
+  await step('each chat row has its own menu, and his Bot Chat has none', async () => {
+    await page.locator('#view [data-chat-menu="s_md"]').waitFor({ timeout: 5000 })
+    if (await page.locator('#view [data-chat-menu="s_obc"]').count()) throw new Error('the Bot Chat has a menu')
+    if (await page.getByRole('heading', { name: 'Pinned' }).count()) throw new Error('a Pinned section with no pins')
+  })
+  await page.locator('#view [data-chat-menu="s_md"]').click()
+  await page.getByRole('dialog', { name: 'Chat actions' }).getByRole('button', { name: 'Pin to the top' }).click()
+  await step('a pinned chat heads the list under Pinned, above Recent, with the pin mark', async () => {
+    await again('/m/hermes/one', async () => JSON.stringify(await pinnedIds()) === '["s_md"]')
+    await page.getByRole('heading', { name: 'Recent' }).waitFor({ timeout: 3000 })
+    if (await page.locator('#view .row[data-chat="s_md"] strong svg').count() !== 1) throw new Error('no pin mark')
+    if (await page.locator('#view .row[data-chat="s_md"]').count() !== 1) throw new Error('listed twice')
+  })
+  await page.locator('#view [data-chat-menu="s_md"]').click()
+  await page.getByRole('dialog', { name: 'Chat actions' }).getByRole('button', { name: 'Unpin' }).click()
+  await step('Unpin puts it back among the recent chats', async () => {
+    await again('/m/hermes/one', async () => !(await page.getByRole('heading', { name: 'Pinned' }).count()))
+    await page.locator('#view .row[data-chat="s_md"]').waitFor({ timeout: 3000 })
   })
   await page.goto(base + '/m/hermes/one/s_md')
   await page.getByRole('button', { name: 'Chat actions' }).click()

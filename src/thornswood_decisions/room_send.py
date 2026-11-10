@@ -112,14 +112,14 @@ asking twice is the same as asking once. It prints {"set": true}, or
 
 `session` renames, hides (archive), brings back (unarchive) or deletes one of
 Patrick's own chats (profile empty only) with Hermes's own SessionDB, the calls
-`hermes sessions rename`, Hermes's session.archive and `hermes sessions delete`
-make (contracts.json "sessions"):
+`hermes sessions rename`, Hermes's session.archive, Desktop's pin and
+`hermes sessions delete` make (contracts.json "sessions"):
 
     <hermes python> -I room_send.py < {"op": "session", "action": "rename" | "archive" | "unarchive" |
-                                       "delete", "session_id", "title": "<rename only>"}
+                                       "pin" | "unpin" | "delete", "session_id", "title": "<rename only>"}
 
 Each ends in the same state however often it runs: a chat that already has the
-title, is already hidden or shown, or is already gone is done. It prints
+title, is already hidden or shown, pinned or not, or is already gone is done. It prints
 {"done": true}, or {"done": false, "reason": "..."} with Hermes's own reason
 (a title another chat holds, a turn running or unfinished). His Bot Chat (the
 hidden chat titled exactly "Bot Chat", with every part Hermes compressed it
@@ -559,7 +559,7 @@ def _session(req: dict) -> dict:
     from hermes_state_runtime import RuntimeStoreError
 
     action, sid, title = req.get("action"), req.get("session_id"), req.get("title")
-    if (action not in ("rename", "archive", "unarchive", "delete") or not isinstance(sid, str) or not sid
+    if (action not in ("rename", "archive", "unarchive", "pin", "unpin", "delete") or not isinstance(sid, str) or not sid
             or (action == "rename") != isinstance(title, str) or (action == "rename" and not title.strip())):
         return {"done": False, "reason": "bad request"}
     db = acquire(None)
@@ -584,6 +584,11 @@ def _session(req: dict) -> dict:
             return {"done": True}
         if action in ("archive", "unarchive"):
             db.set_session_archived(sid, action == "archive")
+            return {"done": True}
+        if action in ("pin", "unpin"):
+            # Hermes's own pin, as Desktop sets it (PATCH /api/sessions/<id> pinned): the whole compression
+            # lineage, and a pin also brings back a chat Hermes had hidden.
+            db.set_session_pinned(sid, action == "pin")
             return {"done": True}
         try:
             db.delete_session(sid, sessions_dir=Path(get_hermes_home()) / "sessions", exclude_active_write_guards=True)
