@@ -383,9 +383,19 @@ section then, and let a worker already on an issue finish it (Patrick, 9 Nov
    build, checks, review, the merge queue), or merged and waiting for a
    release or the main Ship, or when it waits on Patrick's answer (a pending
    card about it, or `needs: patrick`), an update, or another issue it
-   names. Otherwise it is active. A worker with an active issue is
-   busy; a worker whose claimed issues are all waiting is free and gets its
-   next issue. When a waiting issue needs the worker again (a red check, a
+   names. An issue's pull request may be in the fork: Wisp fixes
+   Thornswood issues there on a `wisp/<issue>-<what>` branch, so look in
+   both repositories before calling one active (10 Nov 2026: #4513's fix
+   merged as fork #148, and Wisp sat idle from 9:44 AM as if still on it).
+   A claimed issue with no pull request is parked, not active, when the
+   worker has opened a pull request for another issue since the issue last
+   changed: it works one issue at a time, so it moved on (10 Nov 2026:
+   Rift's #4511 held it busy from 10:33 AM while it waited on game files
+   nobody had read). A parked issue is item 5's: comment what it waits on
+   and take the claim off, or, when nothing blocks it, send it back to that
+   worker as its next issue. Otherwise it is active. A worker with an
+   active issue is busy; a worker whose claimed issues are all waiting or
+   parked is free and gets its next issue. When a waiting issue needs the worker again (a red check, a
    review ask, Patrick's answer), that comes before anything new.
 2. For each worker that is free, `tw_git board` with `eligible` true,
    `areas` that worker's field (the list below, e.g. `["Gamemode",

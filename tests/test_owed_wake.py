@@ -349,6 +349,57 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertTrue(wakes("\n".join(out)), out)
         self.assertIn("in the field of rift, wisp", out[-1])
 
+    def test_a_thornswood_issue_whose_pull_request_is_in_the_fork_waits(self):
+        # 10 Nov 2026: Wisp's #4513 was fixed by fork #148 (merged 5:49 AM), and
+        # the check, reading Thornswood's pull requests alone, held Wisp as
+        # working it from 9:44 AM while 179 issues were open in its field.
+        claimed = dict(BUSY, **{"claimed: Wisp": 1})
+        wisp = 100 * (1 + list(claimed).index("claimed: Wisp"))
+        b = Idle(claimed=claimed, open_={'"area: Gamemode","area: Engine","area: In-game"': 179})
+
+        def ask(broker, op, args):
+            if op == "read" and "/pulls?" in args["path"]:
+                b.asked.append((broker, op, args))
+                if args["repo"] == POLICY["repos"]["fork"]:
+                    return {"body": [{"head": {"ref": f"wisp/{wisp}-created-forms"}, "state": "closed",
+                                      "merged_at": "2026-11-10T12:49:58Z", "created_at": "2026-11-10T04:00:00Z"}]}
+                return {"body": []}
+            if op == "read" and "/search/issues" in args["path"] and args["repo"] == POLICY["repos"]["fork"]:
+                b.asked.append((broker, op, args))
+                return {"body": {"total_count": 0, "items": []}}
+            return b(broker, op, args)
+        out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("in the field of wisp", out[-1])
+
+    def test_a_claim_the_worker_moved_on_from_is_parked_and_the_worker_is_free(self):
+        # 10 Nov 2026: Rift's #4511 (last changed 2:26 AM UTC, waiting on game
+        # files nobody had read) held Rift as busy while it opened pull
+        # requests for #4509 and #4534, so from 10:33 AM Mountain it got nothing new.
+        claimed = dict(BUSY, **{"claimed: Rift": 1})
+        rift = 100 * (1 + list(claimed).index("claimed: Rift"))
+        pulls = [{"head": {"ref": "rift/4534-current-revision"}, "state": "closed",
+                  "merged_at": "2026-11-10T17:33:31Z", "created_at": "2026-11-10T17:08:57Z"}]
+        changed = {"at": "2026-11-10T02:26:14Z"}
+        b = Idle(claimed=claimed, open_={'"area: Mods","area: Load order"': 61}, pulls=pulls)
+
+        def ask(broker, op, args):
+            r = b(broker, op, args)
+            if op == "read" and "/search/issues" in args["path"] and urllib_q(args).endswith('"claimed: Rift"'):
+                for i in r["body"]["items"]:
+                    i["updated_at"] = changed["at"]
+            return r
+        out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn(f"rift #{rift}", out[-2])
+        self.assertIn("take the claim off", out[-2])
+        self.assertIn("in the field of rift", out[-1])
+        # Claimed after its last pull request: that is the issue it is on now.
+        changed["at"] = "2026-11-10T17:54:06Z"
+        out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertIn("every worker is on an active issue", out[-2])
+
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
         out = owed_wake.check(self.home(), "bramble", Broker(due), now=AFTER_SIX, policy=POLICY)
