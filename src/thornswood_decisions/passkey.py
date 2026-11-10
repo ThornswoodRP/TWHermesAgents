@@ -59,6 +59,11 @@ PASSKEY_APPS = {
 NO_AAGUID = "00000000-0000-0000-0000-000000000000"
 
 
+def _request(challenge: bytes) -> str:
+    """A sign-in request's name in the record: the start of its challenge's hash, never the challenge."""
+    return sha256_hex(challenge)[:16]
+
+
 def maker(aaguid: str | None) -> str:
     """The app's name for an AAGUID, or what is known about it."""
     if not aaguid or aaguid == NO_AAGUID:
@@ -262,9 +267,13 @@ class Passkeys:
                 "AND k.workspace_id = ? AND k.phone_key = 1 AND k.revoked_at IS NULL AND d.revoked_at IS NULL "
                 "AND d.kind = 'phone'", (cred_id, workspace_id)).fetchone()
             if not row:
+                # Noted, as each way a sign-in goes is (10 Nov: a new chat asked for the passkey instead of the
+                # fingerprint, and nothing on the core said which way the app had asked or why).
+                self.auth._noted(workspace_id, "passkey", {"why": "no_phone_key", "credential": cred_id[:16]})
                 raise CoreError(404, "no_phone_key", "this phone's fingerprint sign-in was removed; use the passkey")
             if row["aaguid"] not in PHONE_AUTHENTICATORS:
                 # A phone key from before 8 Nov, which a passkey app may hold: asking for it would open that app.
+                self.auth._noted(workspace_id, "passkey", {"why": "phone_key_in_app", "credential": cred_id[:16]})
                 raise CoreError(409, "phone_key_in_app",
                                 "this phone's fingerprint key was not made by the phone itself, so it opens a "
                                 "passkey app; use the passkey and add the fingerprint again")
@@ -276,6 +285,11 @@ class Passkeys:
                 "AND k.revoked_at IS NULL AND d.revoked_at IS NULL ORDER BY k.created_at", (workspace_id,))]
             allow = [Descriptor(id=unb64url(c)) for c in live] or None
         challenge = self._challenge(workspace_id, "sign_in", None)
+        # Which way this request asks: the phone's own fingerprint key, or any passkey (which Android hands
+        # to the passkey app he chose). Its answer, or how it ended, is recorded under the same request.
+        with self.s.tx() as db:
+            self.s.event(db, workspace_id, "passkey.asked", _request(challenge), "unknown",
+                         {"asked": "fingerprint" if phone_key is not None else "passkey"})
         opts = webauthn.generate_authentication_options(
             rp_id=self.rp_id, challenge=challenge, timeout=int(CHALLENGE_LIFETIME.total_seconds() * 1000),
             user_verification=UV.REQUIRED, allow_credentials=allow)
@@ -302,12 +316,13 @@ class Passkeys:
             # be told from one that never reached the core. Noted, not counted as a wrong key.
             self.auth._noted(workspace_id, "passkey", {"why": f"request_{exc.detail.get('why', exc.reason)}"})
             raise
+        request = _request(challenge)
         row = self.s.db.execute(
             "SELECT k.*, d.revoked_at AS device_revoked FROM passkeys k LEFT JOIN devices d ON d.id = k.device_id "
             "WHERE k.credential_id = ? AND k.workspace_id = ?", (b64url(unb64url(cred_id)), workspace_id)).fetchone()
         # Which key was offered, by the start of its credential id (no secret), so a refusal can be matched
         # against the keys the core holds (`tw-decide passkeys`).
-        offered = {"credential": b64url(unb64url(cred_id))[:16]}
+        offered = {"credential": b64url(unb64url(cred_id))[:16], "request": request}
         if not row:
             self.auth._failed(workspace_id, "passkey", {**offered, "why": "unknown"})
             raise CoreError(401, "unknown_passkey", "that passkey is not one of Patrick's here")
@@ -331,7 +346,8 @@ class Passkeys:
                            (v.new_sign_count, self.s.now(), row["id"], row["sign_count"])).rowcount
             if not n:
                 raise CoreError(409, "passkey_raced", "that passkey was just used; sign in again")
-            self.s.event(db, workspace_id, "passkey.used", row["id"], "patrick", {"device": row["device_id"]})
+            self.s.event(db, workspace_id, "passkey.used", row["id"], "patrick",
+                         {"device": row["device_id"], "request": request})
             session = self.auth.issue_session(workspace_id, method="passkey", device_id=row["device_id"], db=db)
         return row["device_id"], session
 
@@ -355,7 +371,8 @@ class Passkeys:
             if not row:
                 raise CoreError(401, "bad_challenge", "that passkey request is used or expired")
             db.execute("UPDATE webauthn_challenges SET used_at = ? WHERE id = ?", (self.s.now(), row["id"]))
-        self.auth._noted(workspace_id, "passkey", {"why": "browser", "error": name, "message": message})
+        self.auth._noted(workspace_id, "passkey", {"why": "browser", "error": name, "message": message,
+                                                   "request": _request(raw)})
 
     def accepted(self, workspace_id: str, device_id: str) -> dict:
         """The passkeys the core takes now, for the app to tell his passkey app after a sign-in (WebAuthn
@@ -383,6 +400,43 @@ class Passkeys:
             d["phone_key"] = bool(d["phone_key"])
             d["fingerprint_try"] = bool(d["fingerprint_try"])
             out.append(d)
+        return out
+
+    def sign_ins(self, p: Principal, last: int = 10) -> list[dict]:
+        """The last sign-ins, newest first, each with the way the app asked (the phone's fingerprint key or any
+        passkey) and what came of it: the key that answered and where it is kept, or how it ended. 10 Nov: a
+        new chat on his phone asked for the passkey through Bitwarden instead of the fingerprint, and the only
+        record of why was in the core's database, which only the VM's administrator can read. A refusal for a
+        fingerprint key the core no longer takes is listed too, since the app then asks for any passkey."""
+        self.auth._need_patrick(p)
+        rows = self.s.db.execute(
+            "SELECT seq, kind, subject, body_json, at FROM events WHERE workspace_id = ? AND ("
+            "kind = 'passkey.asked' OR (kind = 'sign_in.failed' AND subject = 'passkey' AND "
+            "json_extract(body_json, '$.why') IN ('no_phone_key', 'phone_key_in_app'))) "
+            "ORDER BY seq DESC LIMIT ?", (p.workspace_id, max(1, min(int(last), 50)))).fetchall()
+        out = []
+        for r in rows:
+            body = json.loads(r["body_json"] or "{}")
+            if r["kind"] == "sign_in.failed":
+                out.append({"at": r["at"], "asked": "fingerprint", "outcome": body["why"]})
+                continue
+            item = {"at": r["at"], "asked": body.get("asked"), "outcome": "no_answer"}
+            done = self.s.db.execute(
+                "SELECT kind, subject, body_json FROM events WHERE workspace_id = ? AND seq > ? AND "
+                "kind IN ('passkey.used', 'sign_in.failed') AND json_extract(body_json, '$.request') = ? "
+                "ORDER BY seq LIMIT 1", (p.workspace_id, r["seq"], r["subject"])).fetchone()
+            if done and done["kind"] == "passkey.used":
+                key = self.s.db.execute("SELECT label, aaguid, phone_key FROM passkeys WHERE id = ?",
+                                        (done["subject"],)).fetchone()
+                item["outcome"] = "signed_in"
+                if key:
+                    item["key"] = {"label": key["label"], "maker": maker(key["aaguid"]) if key["aaguid"] else None,
+                                   "phone_key": bool(key["phone_key"])}
+            elif done:
+                why = json.loads(done["body_json"] or "{}")
+                item["outcome"] = "ended" if why.get("why") == "browser" else "refused"
+                item["why"] = str(why.get("error") or why.get("why") or "")[:40]
+            out.append(item)
         return out
 
     def revoke(self, p: Principal, passkey_id: str) -> None:

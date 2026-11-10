@@ -360,6 +360,34 @@ class PhoneFingerprint(unittest.TestCase):
             self.pk.sign_in_options(self.w.ws, added["credential_id"])
         self.assertEqual((cm.exception.status, cm.exception.reason), (404, "no_phone_key"))
 
+    def test_each_sign_in_says_how_it_asked_and_which_key_answered(self):
+        # 10 Nov: a new chat on his phone asked for the passkey through Bitwarden, not the fingerprint, and
+        # which way the app had asked was nowhere but the core's database. Settings now lists it.
+        finger = self.key()
+        added = self.add(finger)
+        app = self.key(BITWARDEN)
+        self.pk.register(self.p, app.create(self.pk.register_options(self.p)), "Bitwarden passkey")
+        self.pk.sign_in(self.w.ws, finger.get(self.pk.sign_in_options(self.w.ws, added["credential_id"])))
+        self.pk.sign_in(self.w.ws, app.get(self.pk.sign_in_options(self.w.ws)))
+        ended = self.pk.sign_in_options(self.w.ws)
+        self.pk.browser_failed(self.w.ws, {"challenge": ended["challenge"], "name": "NotAllowedError"})
+        self.pk.sign_in_options(self.w.ws)  # never answered
+        with self.assertRaises(CoreError):
+            self.pk.sign_in_options(self.w.ws, passkey.b64url(b"\x01" * 16))
+        p = self.w.core.auth.authenticate(self.s.token)
+        said = self.pk.sign_ins(p)
+        self.assertEqual([(s["asked"], s["outcome"]) for s in said], [
+            ("fingerprint", "no_phone_key"), ("passkey", "no_answer"), ("passkey", "ended"),
+            ("passkey", "signed_in"), ("fingerprint", "signed_in")])
+        self.assertEqual(said[2]["why"], "NotAllowedError")
+        self.assertEqual(said[3]["key"], {"label": "Bitwarden passkey", "maker": "Bitwarden", "phone_key": False})
+        self.assertEqual(said[4]["key"], {"label": "Fingerprint on this phone", "maker": "Google Password Manager",
+                                          "phone_key": True})
+        # Nothing secret: no challenge and no whole credential id.
+        self.assertNotIn(ended["challenge"], json.dumps(said))
+        self.assertNotIn(added["credential_id"], json.dumps(said))
+        self.assertEqual(len(self.pk.sign_ins(p, last=2)), 2)
+
     def test_a_revoked_phone_is_not_named(self):
         added = self.add(self.key())
         self.w.core.auth.revoke_device(self.p, self.dev)

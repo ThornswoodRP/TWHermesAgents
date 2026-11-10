@@ -420,7 +420,8 @@ class Api:
                 raise CoreError(400, "not_the_app", "only the app's cookie session asks for a new CSRF token")
             return 200, {"csrf": core.auth.rotate_csrf(p)}
         if method == "GET" and route == ["passkeys"]:
-            return 200, {"passkeys": self._passkeys(core).list(p)}
+            keys = self._passkeys(core)
+            return 200, {"passkeys": keys.list(p), "sign_ins": keys.sign_ins(p)}
         if method == "POST" and route == ["passkeys", "register", "options"]:
             self._exact_origin(headers)
             return 200, self._passkeys(core).register_options(p, on_phone=data.get("on_phone") is True)
