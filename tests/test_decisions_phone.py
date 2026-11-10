@@ -680,12 +680,12 @@ class AppFiles(unittest.TestCase):
         # this phone's fingerprint key, which its sign-in names (an id the core sends in the open,
         # never the private key, which never leaves the phone's authenticator); and whether he put
         # the fingerprint offer off (cleared when the core no longer has the phone's key, so it is offered
-        # again); and whether "Hey Hermes" is on for this phone (2 Nov). Never a token, a
-        # private key or the CSRF value.
+        # again); whether "Hey Hermes" is on for this phone (2 Nov); and which chats read their replies
+        # aloud on this phone (#105). Never a token, a private key or the CSRF value.
         uses = [ln.strip() for ln in js.splitlines() if "localStorage" in ln]
-        self.assertEqual(len(uses), 12, uses)
+        self.assertEqual(len(uses), 14, uses)
         for ln in uses:
-            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER|WAKE_KEY)\b", ln)
+            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER|WAKE_KEY|ALOUD_KEY)\b", ln)
         self.assertIn("localStorage.setItem(PHONE_KEY, JSON.stringify(k))", js)
         self.assertIn("keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })", js)
         self.assertIn("forgetKept()\n      csrf = null", js)

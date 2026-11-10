@@ -88,6 +88,7 @@ All of it runs on the VM's own Whisper, with no paid voice service.
 
 - **Dictation**: the microphone beside a chat's box writes words into the box, for Patrick to read before sending.
 - **Read aloud**: the phone's own speech reads a message.
+- **Read replies aloud**: a chat's own button in its bar, kept per chat on that phone. While it is on, each new reply in that chat is read out as it arrives, without voice chat; replies already there when the chat opens are not read.
 - **Voice chat**: listens, sends his words, reads the answer aloud, and listens again. Words that would answer a card wait in the box for a tap.
 - **"Hey Hermes"**: off until turned on in Settings, and only while a chat is open and the app is in front. It never listens in the background.
 - A bar shows whenever the microphone is open or the phone is reading aloud, with Stop. Locking the phone stops both.
