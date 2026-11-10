@@ -509,6 +509,28 @@ def bramble_answers():
             return
         time.sleep(0.2)
 threading.Thread(target=bramble_answers, daemon=True).start()
+# Read replies aloud: what he types to Bramble with it on is answered as voice chat's words are, for the
+# phone to read out by itself.
+ALOUD_ASK, ALOUD_REPLY = "Read this one to me.", "Read aloud is on for this chat."
+def bramble_reads():
+    store = Store(w.path, clock=w.clock)
+    while True:
+        heard = store.db.execute("SELECT id FROM chat_messages WHERE target = 'bramble' AND text = ? "
+                                 "AND status = 'queued'", (ALOUD_ASK,)).fetchone()
+        if heard:
+            with store.tx() as db:
+                db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ? WHERE id = ?",
+                           ((w.clock() + timedelta(minutes=5)).isoformat(), heard["id"]))
+            time.sleep(1)
+            c = sqlite3.connect(bhome / "profiles" / "bramble" / "state.db")
+            c.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_bc', 'assistant', ?, ?)",
+                      (ALOUD_REPLY, time.time()))
+            c.commit()
+            c.close()
+            Chat(store).result(w.ws, tc, heard["id"], "confirmed")
+            return
+        time.sleep(0.2)
+threading.Thread(target=bramble_reads, daemon=True).start()
 code = w.core.auth.operator_pairing_code(w.ws, "phone", "Pixel", by="t")["code"]
 api = Api(w.path, "test", origin=f"http://localhost:{port}", clock=w.clock)
 api.voice_socket = str(vdir / "voice.sock")

@@ -433,7 +433,7 @@ a.mention { text-decoration: none; }
    is there the whole time the microphone is open or the phone reads aloud. Its dot is lit while it records. */
 .composer .mic { flex: 0 0 42px; width: 42px; height: 42px; border-radius: 21px; border: 1px solid var(--line2);
   background: var(--raised); color: var(--fg); display: inline-flex; align-items: center; justify-content: center; }
-.composer .mic[aria-pressed="true"], .chatbar .talk[aria-pressed="true"] { background: var(--warn); border-color: var(--warn);
+.composer .mic[aria-pressed="true"], .chatbar .talk[aria-pressed="true"], .chatbar .aloud[aria-pressed="true"] { background: var(--warn); border-color: var(--warn);
   color: var(--accent-fg); }
 .voicebar { position: sticky; top: var(--top-h); z-index: 3; display: flex; align-items: center; gap: 10px;
   padding: 8px 16px; background: var(--raised); border-bottom: 1px solid var(--warn-line); font-size: 14px; }

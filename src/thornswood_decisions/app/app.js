@@ -95,6 +95,7 @@ const ICON = {
   image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9h.01', camera: 'M4 8h4l2-3h4l2 3h4v11H4zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', dec: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9',
   mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3',
   talk: 'M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4',
+  aloud: 'M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12',
   // The kinds of link a message can hold (linkKind), each with its own mark, as the Claude apps show them.
   thread: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z',
   session: 'M4 5h16v14H4zM7 9l3 3-3 3M12 15h5',
@@ -2141,6 +2142,7 @@ function showChat(key, top, list, dock, items) {
   const c = openComposer()
   if (c) c.chat = key
   voiceButtons()
+  aloudButton()
   voiceSaw(key, items)
   wakeCheck()
 }
@@ -3746,8 +3748,9 @@ function voiceStop(byHim) {
   if (voice.rec) voice.rec.drop()
   if (canSpeak()) speechSynthesis.cancel()
   micOff()
-  Object.assign(voice, { mode: null, state: null, key: null, path: null, queue: [], heard: null, fromWake: false, rec: null })
-  if (byHim) voice.paused = true
+  Object.assign(voice, { mode: null, state: null, key: null, path: null, queue: [], heard: null, fromWake: false, rec: null,
+    aloud: false })
+  if (byHim) { voice.paused = true; aloud.queue = [] }
   paintVoice()
 }
 
@@ -3874,6 +3877,7 @@ async function speakQueue(g) {
 let lastItems = { key: null, items: [] }
 function voiceSaw(key, items) {
   lastItems = { key, items }
+  aloudSaw(key, items)
   if (voice.mode !== 'chat' || !voice.heard) return
   const c = openComposer()
   if (!c || c.chat !== key || c.key !== voice.key) return
@@ -3955,6 +3959,92 @@ function voiceButtons() {
   bar.querySelector('.bar-tools').prepend(b)
 }
 
+// Read replies aloud, a chat's own setting kept on this phone: while it is on, each new reply in that chat
+// is read out by the phone's own speech as it arrives, without voice chat. Only a reply newer than the
+// newest one the chat showed when it was opened or turned on is read, so a page drawn first from the
+// phone's copy and then from the core does not read the older replies the second one adds. Voice chat reads its own answers, so nothing is read twice; a reply
+// that comes while he dictates waits until he is done, and "Hey Hermes" stops listening while one is read.
+const ALOUD_KEY = 'hermes.readAloud.v1'
+const ALOUD_MOST = 200
+const aloud = { key: null, since: 0, heard: null, queue: [] }
+
+function aloudChats() {
+  try {
+    const v = JSON.parse(localStorage.getItem(ALOUD_KEY) || '[]')
+    return Array.isArray(v) ? v.filter(k => typeof k === 'string') : []
+  } catch (e) { return [] }
+}
+
+function aloudOn(key) {
+  return !!key && aloudChats().includes(key)
+}
+
+function setAloud(key, on) {
+  const now = aloudChats().filter(k => k !== key)
+  if (on) now.push(key)
+  try { localStorage.setItem(ALOUD_KEY, JSON.stringify(now.slice(-ALOUD_MOST))); return true } catch (e) { return false }
+}
+
+function aloudReplies(items) {
+  return items.filter(m => !m.mine && !m.status && m.text)
+}
+
+function aloudAt(m) {
+  const t = m.at ? new Date(m.at).getTime() : NaN
+  return Number.isFinite(t) ? t : null
+}
+
+function aloudSaw(key, items) {
+  if (aloud.key !== key || !aloudOn(key) || !canSpeak()) {
+    // Another chat, or the setting off: what is there now counts as heard.
+    const ats = aloudReplies(items).map(aloudAt).filter(t => t !== null)
+    Object.assign(aloud, { key, since: ats.length ? Math.max(...ats) : Date.now(), heard: new Set(), queue: [] })
+    return
+  }
+  for (const m of aloudReplies(items)) {
+    const at = aloudAt(m)
+    const sig = at + ' ' + String(m.text).trim()
+    if (at === null || at <= aloud.since || aloud.heard.has(sig)) continue
+    aloud.heard.add(sig)
+    const words = spoken(m)
+    if (words && voice.mode !== 'chat') aloud.queue.push(words)
+  }
+  aloudSpeak()
+}
+
+function aloudSpeak() {
+  if (!aloud.queue.length || document.visibilityState !== 'visible') return
+  if (voice.mode === 'wake') voiceStop(false)
+  else if (voice.mode) return
+  const g = voice.gen
+  Object.assign(voice, { mode: 'read', path: location.pathname, aloud: true })
+  voiceState('speaking')
+  ;(async () => {
+    while (aloud.queue.length && g === voice.gen) {
+      if (!await speakText(aloud.queue.shift(), g)) break
+    }
+    if (g === voice.gen) { voiceStop(false); wakeCheck() }
+  })()
+}
+
+function aloudButton() {
+  const bar = document.querySelector('#view .chatbar')
+  const c = openComposer()
+  if (!bar || !c || !c.chat || !canSpeak() || bar.querySelector('.aloud')) return
+  const key = c.chat
+  const b = el('button', { class: 'ib aloud', type: 'button', 'aria-label': 'Read replies aloud',
+    'aria-pressed': String(aloudOn(key)), onclick: () => {
+      const on = !aloudOn(key)
+      if (!setAloud(key, on)) { c.status.textContent = 'This phone did not keep the setting.'; return }
+      b.setAttribute('aria-pressed', String(on))
+      c.status.textContent = on ? 'Each new reply in this chat is read aloud while this is on.' : 'Replies in this chat are no longer read aloud.'
+      if (on) aloud.key = null
+      else if (voice.mode === 'read' && voice.aloud) voiceStop(false)
+      if (on) aloudSaw(key, lastItems.key === key ? lastItems.items : [])
+    } }, icon('aloud'))
+  bar.querySelector('.bar-tools').prepend(b)
+}
+
 function readAloud(m) {
   if (voice.mode) voiceStop(false)
   const g = voice.gen
@@ -3968,7 +4058,8 @@ function wakeSetting() {
   const note = el('p', { class: 'quiet', role: 'status' })
   return [
     el('p', { class: 'quiet' }, 'The microphone in a chat\'s box writes down what you say with Whisper on the VM, ' +
-      'and Voice chat in a chat\'s bar talks with it. Read aloud is in a message\'s actions.'),
+      'and Voice chat in a chat\'s bar talks with it. Read aloud is in a message\'s actions, and Read replies aloud ' +
+      'in a chat\'s bar reads each new reply in that chat as it comes, while it is on for that chat on this phone.'),
     el('p', { class: 'quiet' }, on
       ? '"Hey Hermes" is on for this phone: while a chat is open and the app is in front, it listens, with the bar ' +
         'at the top saying so. It never listens in the background or with the phone locked.'
@@ -4219,6 +4310,7 @@ document.addEventListener('visibilitychange', () => {
   } else {
     // Hidden or locked: no listening and nothing read out.
     voiceStop(false)
+    aloud.queue = []
   }
 })
 addEventListener('pagehide', () => voiceStop(false))
