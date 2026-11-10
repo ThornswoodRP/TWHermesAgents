@@ -300,7 +300,9 @@ function CardView({ store }) {
             children: 'Send the same answer again' })
         : null,
       c.receipt
-        ? text(`text-xs ${muted}`, `Answered ${c.receipt.option_key} at ${c.receipt.answered_at}.`)
+        ? text(`text-xs ${muted}`, c.receipt.option_key == null
+          ? `Answered in your words at ${c.receipt.answered_at}: ${c.receipt.words}`
+          : `Answered ${c.receipt.option_key} at ${c.receipt.answered_at}.`)
         : null,
       s.notice ? text(muted, s.notice) : null,
       jsx(ConfirmDialog, {

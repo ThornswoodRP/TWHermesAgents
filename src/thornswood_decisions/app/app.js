@@ -617,8 +617,48 @@ async function decisionsView(into = 'view') {
       ? [el('h2', { class: 'section' }, `Waiting on you (${r.body.cards.length})`),
         r.body.cards.map(c => listRow({ onclick: () => go('/m/decisions/' + c.id) }, {
           title: inlineMd(c.title, true), tags: c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
-          lines: el('span', { class: 'quiet' }, `${c.kind}, answer by ${when(c.expires_at)}`) }))]
+          lines: el('span', { class: 'quiet' }, fromLine(c)) }))]
       : el('p', { class: 'quiet' }, 'Nothing needs you right now.')])
+}
+
+// The mock-up's card (#107): who asked it, its kind and when it must be answered by on one line, its options
+// lettered A, B, C, and "Answer in your words" under them.
+function fromLine(c) {
+  return (c.from ? `From ${agentName(c.from)} · ` : '') + `${c.kind} · answer by ${when(c.expires_at)}`
+}
+
+function letterOf(i) {
+  return el('span', { class: 'letter', 'aria-hidden': 'true' }, String.fromCharCode(65 + i))
+}
+
+// His own words instead of an option (#107): they answer the card, and the Bot that asked is told them as
+// his answer. They choose no option, so they authorize nothing that waits on one. A high-risk card asks for
+// the passkey first, as an option does (choose).
+function wordsAnswer(c, status, back) {
+  const box = el('textarea', { rows: '3', maxlength: '2000', 'aria-label': 'Your answer in your own words',
+    placeholder: 'Your answer, in your own words' })
+  const send = el('button', { class: 'primary', type: 'button', 'data-words': c.id, onclick: () => {
+    const words = box.value.trim()
+    if (!words) { status.textContent = 'Write your answer first.'; return }
+    if (back !== undefined) answerBack = back
+    return choose(c, { key: 'words', words, label: 'your own words', consequence: words }, status)
+  } }, 'Send as your answer')
+  const form = el('div', { class: 'words-form', hidden: true }, box, el('div', { class: 'words-actions' }, send,
+    el('button', { class: 'secondary', type: 'button', onclick: () => { form.hidden = true; open.hidden = false } }, 'Cancel')))
+  const open = el('button', { class: 'secondary words-open', type: 'button', onclick: () => {
+    open.hidden = true
+    form.hidden = false
+    box.focus()
+  } }, 'Answer in your words')
+  return el('div', { class: 'words-answer' }, open, form)
+}
+
+// The key of an answer in his words goes with those words: different words are a new answer, never the
+// same key used for a different request.
+function wordsKey(words) {
+  let h = 5381
+  for (const ch of words) h = ((h * 33) ^ ch.codePointAt(0)) >>> 0
+  return words.length + '.' + h.toString(36)
 }
 
 async function cardView(id, note) {
@@ -633,16 +673,23 @@ async function cardView(id, note) {
   const pending = c.status === 'pending'
   const parts = [
     el('h2', {}, inlineMd(c.title)),
+    el('p', { class: 'quiet card-from' }, fromLine(c)),
     c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null,
     a.status === 200 ? el('div', { class: 'artifact' }, markdown(a.body.body)) : el('p', { class: 'warn' }, said(a.body)),
     el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
-    c.options.map(o => el('div', { class: 'option' },
-      el('strong', {}, inlineMd(o.label)), o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
+    c.options.map((o, i) => el('div', { class: 'option' },
+      letterOf(i), el('strong', {}, inlineMd(o.label)),
+      o.key === c.recommendation ? el('span', { class: 'rec' }, 'recommended') : null,
       el('div', { class: 'quiet' }, inlineMd(o.consequence)),
       pending ? el('button', { class: o.key === c.recommendation ? 'primary' : 'secondary', type: 'button',
-        'data-option': o.key, onclick: () => choose(c, o, status) }, 'Choose: ' + o.label) : null))
+        'data-option': o.key, onclick: () => choose(c, o, status) }, 'Choose: ' + o.label) : null)),
+    pending ? wordsAnswer(c, status) : null
   ]
-  if (c.receipt) {
+  if (c.receipt && c.receipt.option_key == null && c.receipt.words != null) {
+    parts.push(el('div', { class: 'receipt' },
+      el('p', {}, `Answered in your words at ${when(c.receipt.answered_at)} (revision ${c.receipt.revision}):`),
+      el('blockquote', { class: 'words' }, c.receipt.words)))
+  } else if (c.receipt) {
     const picked = c.options.find(o => o.key === c.receipt.option_key)
     parts.push(el('p', { class: 'receipt' }, `Answered "${picked ? picked.label : c.receipt.option_key}" at ` +
       `${when(c.receipt.answered_at)} (revision ${c.receipt.revision}).`))
@@ -711,13 +758,15 @@ function alertTimes(c) {
 async function choose(c, o, status) {
   if (c.risk !== 'high') return answer(c, o, status)
   const note = el('p', { class: 'warn', role: 'status' })
+  const inWords = o.words != null
   const button = el('button', { class: 'primary', type: 'button', 'data-confirm': o.key, onclick: () =>
-    promptNow(button, note, () => answer(c, o, status)) }, 'Answer ' + o.label + ' with your ' + signInWord())
+    promptNow(button, note, () => answer(c, o, status)) },
+  (inWords ? 'Send your words' : 'Answer ' + o.label) + ' with your ' + signInWord())
   show(el('div', { class: 'card' },
     el('h2', {}, 'Check this answer'),
-    el('p', {}, `"${c.title}" is high risk. You are choosing:`),
-    el('p', {}, el('strong', {}, inlineMd(o.label))),
-    el('p', { class: 'quiet' }, inlineMd(o.consequence)),
+    el('p', {}, `"${c.title}" is high risk. ` + (inWords ? 'You are answering in your own words, choosing none of its options:' : 'You are choosing:')),
+    inWords ? el('blockquote', { class: 'words' }, o.words) : el('p', {}, el('strong', {}, inlineMd(o.label))),
+    inWords ? null : el('p', { class: 'quiet' }, inlineMd(o.consequence)),
     el('p', {}, el('strong', {}, 'What yes covers: '), inlineMd(c.scope_of_yes)),
     el('p', { class: 'quiet' }, `Your ${signInWord()} answers it. Cancel the prompt to change your mind.`),
     button, note,
@@ -726,9 +775,10 @@ async function choose(c, o, status) {
 }
 
 async function answer(c, o, status) {
-  const name = `tw-answer:${c.id}:${c.revision}:${c.attention_revision}:${o.key}`
-  const body = { option_key: o.key, revision: c.revision, attention_revision: c.attention_revision,
-    artifact_sha256: c.artifact_sha256, idempotency_key: keyFor(name) }
+  const inWords = o.words != null
+  const name = `tw-answer:${c.id}:${c.revision}:${c.attention_revision}:` + (inWords ? 'words:' + wordsKey(o.words) : o.key)
+  const body = { option_key: inWords ? '' : o.key, revision: c.revision, attention_revision: c.attention_revision,
+    artifact_sha256: c.artifact_sha256, idempotency_key: keyFor(name), ...(inWords ? { words: o.words } : {}) }
   status.textContent = 'Saving...'
   answering = true
   const r = await call('POST', '/cards/' + encodeURIComponent(c.id) + '/answer', body)
@@ -744,7 +794,7 @@ async function answer(c, o, status) {
       promptNow(again, note, () => answer(c, o, status)) }, 'Sign in again and answer')
     show(el('div', { class: 'card' },
       el('p', {}, said(r.body)),
-      el('p', {}, el('strong', {}, o.label), ': ', o.consequence),
+      inWords ? el('blockquote', { class: 'words' }, o.words) : el('p', {}, el('strong', {}, o.label), ': ', o.consequence),
       again, note,
       el('button', { class: 'secondary', type: 'button', onclick: () => cardView(c.id) }, 'Go back to the card')))
     return promptNow(again, note, () => answer(c, o, status))
@@ -766,7 +816,7 @@ async function answer(c, o, status) {
 // me there"): its alert closes, and one line says what was chosen. The tab lists only cards waiting on him.
 function answered(c, o) {
   toWorker({ close: c.id })
-  flash = `Answered "${c.title}": ${o.label}.`
+  flash = o.words != null ? `Answered "${c.title}" in your words.` : `Answered "${c.title}": ${o.label}.`
   // Answered from a Bot Chat: back to that chat, where the card has gone.
   const back = answerBack
   answerBack = null
@@ -2142,9 +2192,11 @@ function chatCards(cards, back) {
       el('a', { href: '/m/decisions/' + encodeURIComponent(c.id), onclick: e => { e.preventDefault(); go('/m/decisions/' + c.id) } },
         el('strong', {}, inlineMd(c.title, true))),
       c.risk === 'high' ? el('span', { class: 'risk' }, 'high risk') : null),
-    el('div', { class: 'opts' }, c.options.map(o => el('button', {
+    el('p', { class: 'quiet card-from' }, fromLine(c)),
+    el('div', { class: 'opts' }, c.options.map((o, i) => el('button', {
       class: o.key === c.recommendation ? 'primary' : 'secondary', type: 'button', 'data-option': o.key,
-      onclick: () => { answerBack = back; return choose(c, o, status) } }, inlineMd(o.label, true)))))), status)
+      onclick: () => { answerBack = back; return choose(c, o, status) } }, letterOf(i), inlineMd(o.label, true)))),
+    wordsAnswer(c, status, back))), status)
 }
 
 // Photos and files on a message to his own Hermes (Patrick, 2 Nov: "no way to add files or photos or

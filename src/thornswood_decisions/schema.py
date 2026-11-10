@@ -936,6 +936,34 @@ CREATE TABLE chat_rewinds (
 );
 CREATE INDEX chat_rewinds_by_status ON chat_rewinds(workspace_id, gateway, status, created_at);
 """,
+    # 25: Patrick answers a card in his own words instead of one of its options (TWHermesAgents #107, 10 Nov:
+    # the mock-up's "Answer in your words"). Such an answer has no option, and his words are its note, which
+    # must then say something. The option is a CHECK and a NOT NULL, so the table is made again; every answer
+    # is copied as it is, and the table stays history (_frozen). An answer with no option meets the option
+    # foreign key by having none, as SQLite reads a key with a NULL in it.
+    f"""
+CREATE TABLE responses_25 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  decision_id TEXT NOT NULL REFERENCES decisions(id),
+  revision INTEGER NOT NULL,
+  attention_revision INTEGER NOT NULL,
+  artifact_sha256 TEXT NOT NULL,
+  option_key TEXT,
+  note TEXT NOT NULL DEFAULT '',
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  answered_at TEXT NOT NULL,
+  UNIQUE (decision_id, revision),
+  FOREIGN KEY (decision_id, revision, option_key) REFERENCES decision_options(decision_id, revision, key),
+  CHECK (option_key IS NOT NULL OR length(trim(note)) BETWEEN 1 AND 2000)
+);
+INSERT INTO responses_25 SELECT id, workspace_id, decision_id, revision, attention_revision, artifact_sha256,
+  option_key, note, principal_id, device_id, answered_at FROM responses;
+DROP TABLE responses;
+ALTER TABLE responses_25 RENAME TO responses;
+{_frozen("responses")}
+""",
 ]
 
 
@@ -1200,5 +1228,28 @@ ALTER TABLE chat_messages DROP COLUMN rewind_to;
 ALTER TABLE chat_messages DROP COLUMN rewind;
 ALTER TABLE own_messages DROP COLUMN rewind_to;
 ALTER TABLE own_messages DROP COLUMN rewind;
+""", ""),
+    # An answer in his own words has no option, which the older table cannot hold.
+    25: ([("SELECT count(*) FROM responses WHERE option_key IS NULL", "answers in Patrick's own words")], f"""
+CREATE TABLE responses_24 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  decision_id TEXT NOT NULL REFERENCES decisions(id),
+  revision INTEGER NOT NULL,
+  attention_revision INTEGER NOT NULL,
+  artifact_sha256 TEXT NOT NULL,
+  option_key TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  answered_at TEXT NOT NULL,
+  UNIQUE (decision_id, revision),
+  FOREIGN KEY (decision_id, revision, option_key) REFERENCES decision_options(decision_id, revision, key)
+);
+INSERT INTO responses_24 SELECT id, workspace_id, decision_id, revision, attention_revision, artifact_sha256,
+  option_key, note, principal_id, device_id, answered_at FROM responses;
+DROP TABLE responses;
+ALTER TABLE responses_24 RENAME TO responses;
+{_frozen("responses")}
 """, ""),
 }
