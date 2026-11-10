@@ -232,7 +232,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.locator('#view [data-job-change="queued"]', { hasText: 'Asking One to pause it...' }).waitFor({ timeout: 8000 })
     if (await page.locator('.sheet-back').count()) throw new Error('the sheet stayed open')
   })
-  await step("Tasks narrowed to one agent, and a subagent's row opens its chat", async () => {
+  await step("Tasks narrowed to one agent, and One's subagent opens its own transcript, read only", async () => {
     const picks = await page.locator('#view .pick-one').allTextContents()
     if (JSON.stringify(picks) !== JSON.stringify(['All', 'One', 'Bramble'])) throw new Error(JSON.stringify(picks))
     await page.locator('#view .pick-one', { hasText: 'Bramble' }).click()
@@ -241,6 +241,11 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (JSON.stringify(shown) !== JSON.stringify(['pytest -q', 'Nightly merge sweep', 'Weekly board review'])) throw new Error(JSON.stringify(shown))
     await page.locator('#view .pick-one', { hasText: 'All' }).click()
     await page.getByText('Read the launcher log and find the crash').click()
+    const sheet = page.getByRole('dialog', { name: 'Subagent' })
+    await sheet.locator('[data-subagent="transcript"]', { hasText: 'Crash in Play at line 12' }).waitFor({ timeout: 10000 })
+    if (!/Read only\./.test(await sheet.textContent())) throw new Error('it does not say read only')
+    if (await sheet.locator('textarea, input').count()) throw new Error('a read-only transcript has a box')
+    await sheet.getByRole('button', { name: 'Open the chat it works for' }).click()
     await page.waitForURL(/\/m\/hermes\/one\/s_md$/, { timeout: 5000 })
   })
   await page.getByRole('link', { name: 'Bots' }).click()

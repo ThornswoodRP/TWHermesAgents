@@ -373,6 +373,10 @@ def one_pages():
                 one_control(o, r)
             for r in got.get("rewinds", []):
                 one_rewind(o, r)
+            for r in got.get("tails", []):
+                # The subagent's transcript, as Hermes's subagent.tail gives it (own_tails.py).
+                o.tail_post(w.ws, "one", to, {"id": r["id"], "available": True, "truncated": False,
+                                              "text": "$ tail -n 40 launcher.log\nCrash in Play at line 12"})
             for r in got.get("orders", []):
                 if r["op"] == "answer":
                     ANSWERS.append(r["value"])

@@ -114,6 +114,15 @@ class Tasks:
                 out.append({"id": agent, "heard": True, "at": got["at"].isoformat(), **got["report"]})
         return {"agents": out}
 
+    def subagent(self, workspace_id: str, agent: str, chat: str, sub: str) -> dict | None:
+        """That Hermes's subagent of this chat, as its last report listed it; None otherwise (own_tails.py:
+        a transcript is read only for a subagent Hermes listed)."""
+        with _LOCK:
+            got = _TASKS.get((workspace_id, agent))
+        if got is None or self.s.clock() - got["at"] > TASKS_STALE or "report" not in got:
+            return None
+        return next((r for r in got["report"].get("subagents") or [] if r["id"] == sub and r["chat"] == chat), None)
+
     def job(self, workspace_id: str, agent: str, job_id: str) -> dict | None:
         """That Hermes's job with this id, as its last report listed it; None when the report is stale, could
         not read its jobs, or did not list it (own_jobs.py: a change names a job Hermes listed)."""
