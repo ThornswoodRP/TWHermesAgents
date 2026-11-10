@@ -74,7 +74,8 @@ APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room
             ("GET", "own"), ("POST", "own"), ("POST", "voice"),
             ("GET", "tasks")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
-OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks", "control")
+OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks", "control",
+                 "turns", "wait")
 # A file or photo for a message to his own Hermes comes as its own bytes, not JSON (own.py attach).
 ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/own/[a-z]+/attach$")
 # A recording to dictate from comes as its own bytes too (voice.py).
@@ -234,6 +235,10 @@ class Api:
                 return 200, own.tasks(self.ws, route[1], token, data)
             if route[2] == "control":
                 return 200, own.control_post(self.ws, route[1], token, data)
+            if route[2] == "turns":
+                return 200, own.turns(self.ws, route[1], token, data)
+            if route[2] == "wait":
+                return 200, own.wait(self.ws, route[1], token, data)
             if route[2] == "attachment":
                 return 200, Raw(own.attachment(self.ws, route[1], token, data.get("id"))[1])
             if route[2] == "claim":
@@ -276,6 +281,10 @@ class Api:
                 return 200, Chat(core.s).reacted(self.ws, token, data)
             if route[1] == "doing":
                 return 200, Chat(core.s).doing(self.ws, token, data)
+            if route[1] == "turns":
+                return 200, Chat(core.s).turns(self.ws, token, data)
+            if route[1] == "wait":
+                return 200, Chat(core.s).wait(self.ws, token, data)
             if route[1] == "result":
                 return 200, Chat(core.s).result(self.ws, token, str(data.get("id", "")), str(data.get("outcome", "")),
                                                 str(data.get("ref", "")), str(data.get("reason", "")))
@@ -348,6 +357,8 @@ class Api:
             return 200, Chat(core.s).tasks_view(p)
         if method == "GET" and route == ["chat"]:
             return 200, Chat(core.s).summary(p)
+        if method == "GET" and len(route) == 2 and route[0] == "turns":
+            return 200, Chat(core.s).turn_live(p, route[1], query.get("after"), query.get("wait"))
         if method == "GET" and len(route) == 3 and route[0] == "chat" and route[2] == "messages":
             return 200, Chat(core.s).page(p, route[1], before=query.get("before"), wait=query.get("wait"),
                                           session=query.get("session"))

@@ -595,7 +595,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   await step('a message being answered shows one live line saying what its turn is doing', async () => {
     const live = page.locator('#view .msg.working')
     await live.waitFor({ timeout: 15000 })
-    if (await live.getAttribute('role') !== 'status') throw new Error('the live line is not a status')
+    if (await live.locator('.bub.typing').getAttribute('role') !== 'status') throw new Error('the live line is not a status')
     if (await live.locator('.dots').count() !== 1) throw new Error('no working dots')
     if (await live.locator('.doing').textContent() !== 'Running a command') throw new Error('doing: ' + await live.locator('.doing').textContent())
     if (await page.locator('#view .msg.working').count() !== 1) throw new Error('more than one live line')
@@ -613,7 +613,30 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     const wide = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
     if (wide > 0) throw new Error('sideways scroll of ' + wide)
   })
+  await step('the turn shows as Desktop draws it: its thinking, the command it runs, and a subagent at work', async () => {
+    const box = page.locator('#view .msg.working .bub.live')
+    await box.locator('.lv-sub').waitFor({ timeout: 15000 })
+    if (await box.locator('.lv-think summary').textContent() !== 'Thought') throw new Error('thinking: ' + await box.locator('.lv-think summary').textContent())
+    const step = box.locator('.lv-step.running')
+    if (await step.locator('.lv-name').textContent() !== 'Running a command') throw new Error('step name')
+    if (await step.locator('.lv-preview').textContent() !== 'npm test') throw new Error('step preview')
+    const sub = await box.locator('.lv-sub').textContent()
+    if (sub !== 'Subagent: Read the launcher logReading a file: launcher.log · 2 tools') throw new Error('subagent: ' + sub)
+    const wide = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
+    if (wide > 0) throw new Error('sideways scroll of ' + wide)
+  })
   await page.goto(base + '/m/bots/wisp')
+  await step("a Bot's reply shows as it is written, without the page being read again", async () => {
+    const text = page.locator('#view .msg.working .bub.live .lv-text')
+    await text.waitFor({ timeout: 15000 })
+    // The stand-in writes a few more words every 0.3 s; the page's own reads come every 2 and 15 s, so only
+    // the core's answer the moment it changes shows more words this soon.
+    const first = await text.textContent()
+    await page.waitForFunction(was => {
+      const t = document.querySelector('#view .msg.working .bub.live .lv-text')
+      return t && t.textContent.length > was.length
+    }, first, { timeout: 1500 })
+  })
   await step("a Bot answering his message shows the same live line in its Bot Chat", async () => {
     const live = page.locator('#view .msg.working')
     await live.waitFor({ timeout: 15000 })

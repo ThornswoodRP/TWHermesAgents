@@ -46,6 +46,8 @@ from . import alerts
 from .own_turns import ORDERS, answer_value, clean_asks, clean_order
 from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
 from .schema import OWN_GATEWAYS
+from .live_turns import LIVE
+from .wakes import WAKES
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
 NAMES = {"me": "my-hermes", "one": "One"}
@@ -305,6 +307,7 @@ class _Pages:
         with self.cond:
             if key not in self.asked and key not in self.held:
                 self.asked[key] = {"id": new_id("pg"), "at": now, "handed": None}
+                WAKES.bump(key[0], key[1])
 
     def wait(self, key: tuple, seconds: float, now) -> dict | None:
         """The page, once the connector posts it, for at most `seconds` of real time."""
@@ -703,6 +706,7 @@ class OwnChat:
         with self.s.tx() as db:
             db.execute("UPDATE own_gateways SET wanted_json = ? WHERE workspace_id = ? AND gateway = ?",
                        (canonical(wanted), workspace_id, gw))
+            self.s.wake(workspace_id, gw)
 
     # ── Patrick's side ────────────────────────────────────────────────────
 
@@ -867,6 +871,7 @@ class OwnChat:
                        "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
                        (mid, p.workspace_id, gw, session_id, text, f"tw-own.{mid}", p.id, p.device_id, now, now,
                         reply_to))
+            self.s.wake(p.workspace_id, gw)
             for fid in files:
                 done = db.execute("UPDATE own_attachments SET message_id = ? WHERE id = ? AND workspace_id = ? "
                                   "AND gateway = ? AND principal_id = ? AND message_id IS NULL AND body IS NOT NULL",
@@ -1288,6 +1293,24 @@ class OwnChat:
                     alerts.queue(self.s, db, workspace_id, "asks", f"{mid}:{a['prompt_id']}", alerts.OWN_WHO[gw],
                                  alerts.own_path(gw, row["session_id"] or row["made_session_id"]))
 
+    def wait(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """That gateway's connector, waiting for new work (wakes.py): the number once it changes, or after
+        `seconds`. Only a number, so it is answered whatever the flags say."""
+        self._check_token(workspace_id, gw, token)
+        return WAKES.wait(workspace_id, self._gateway(gw), body.get("after"), body.get("seconds"))
+
+    def turns(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """What each turn this connector runs now shows, as Desktop draws it (live_turns.py), each time it
+        changes. Only turns of this gateway's own messages."""
+        self._check_token(workspace_id, gw, token)
+        turns = body.get("turns") if isinstance(body, dict) else None
+        ids = [t.get("id") for t in turns if isinstance(t, dict)] if isinstance(turns, list) else []
+        if any(not isinstance(i, str) or not DOING_ID.match(i) for i in ids) or (ids and self.s.db.execute(
+                "SELECT count(*) FROM own_messages WHERE workspace_id = ? AND gateway = ? "
+                f"AND id IN ({','.join('?' * len(ids))})", (workspace_id, gw, *ids)).fetchone()[0] != len(set(ids))):
+            raise CoreError(400, "bad_live", "each turn is one of his messages to this Hermes")
+        return {"kept": LIVE.put(workspace_id, turns, self.s.clock())}
+
     def result(self, workspace_id: str, gw: str, token: str | None, item_id: str, outcome: str, ref: str = "",
                reason: str = "", session_id=None) -> dict:
         self._check_token(workspace_id, gw, token)
@@ -1308,6 +1331,7 @@ class OwnChat:
         # from memory for up to PAGE_FRESH without it.
         for sid in {row["session_id"], made} - {None}:
             PAGES.forget(workspace_id, gw, ("messages",), sid)
+        LIVE.done(workspace_id, item_id)
         with self.s.tx() as db:
             db.execute("UPDATE own_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ?, "
                        "made_session_id = coalesce(made_session_id, ?) WHERE id = ?",

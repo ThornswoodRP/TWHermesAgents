@@ -2294,12 +2294,114 @@ function mineNote(m) {
 // The message whose turn the chat's live line follows: the one being answered, never one in Hermes's queue.
 function beingAnswered(mine) { return mine.find(m => m.status === 'leased' && !inQueue(m)) }
 // The other side's typing bubble: three moving dots and what it is doing.
-function workingItem(name, agent, doing) {
-  return el('div', { class: 'msg theirs working', role: 'status', 'aria-live': 'polite' },
+function workingItem(name, agent, doing, mid) {
+  const seen = mid && liveSeen[mid]
+  const parts = seen && seen.parts && seen.parts.length ? seen.parts : null
+  return el('div', { class: 'msg theirs working', ...(mid ? { 'data-turn': mid } : {}) },
     el('div', { class: 'who a-' + agent }, name),
-    el('div', { class: 'bub typing' }, el('span', { class: 'dots', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')),
+    el('div', { class: 'bub live', hidden: !parts }, parts ? liveParts(parts) : null),
+    el('div', { class: 'bub typing', role: 'status', 'aria-live': 'polite' },
+      el('span', { class: 'dots', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')),
       el('span', { class: 'doing' }, doingWords(doing))))
 }
+
+// ── a turn as it happens, as Hermes Desktop draws it (live_turns.py) ─────
+//
+// Patrick, 9 Nov: "it doesnt feel live it feels very delayed and I want it all to be live". While a turn
+// answers one of his messages, the chat shows it as Desktop does: its thinking (folded once it is past),
+// the reply as it is written, each tool with what it runs and a tick once done, each subagent with what it
+// is doing, and Hermes's status lines. The core answers the open chat the moment the turn changes (a long
+// poll), so nothing waits on a read every few seconds. Once the turn is over, the reply it wrote stays
+// under his message until the chat's own read from Hermes has it.
+const liveSeen = {}   // message id -> the turn's parts the core last gave, {n, parts}
+let liveWatch = null
+
+function stepWords(name) {
+  return TOOL_WORDS[name] || (name ? name.replace(/_/g, ' ') : 'A tool')
+}
+
+const SUB_WORDS = { completed: 'Done', failed: 'Failed', interrupted: 'Stopped', cancelled: 'Stopped', error: 'Failed',
+  timeout: 'Ran out of time' }
+
+function liveParts(parts) {
+  return parts.map((part, i) => {
+    const last = i === parts.length - 1
+    if (part.k === 'text') return el('div', { class: 'lv-text' }, markdown(part.text))
+    if (part.k === 'think') {
+      return el('details', { class: 'lv-think', open: last },
+        el('summary', {}, last ? 'Thinking' : 'Thought'), el('div', { class: 'lv-think-text' }, part.text))
+    }
+    if (part.k === 'step') {
+      const prog = part.progress
+      return el('div', { class: 'lv-step ' + (part.error ? 'failed' : part.done ? 'done' : 'running') },
+        el('span', { class: 'lv-mark', role: 'img', 'aria-label': part.error ? 'Failed' : part.done ? 'Done' : 'Running' },
+          part.error ? '\u2715' : part.done ? '\u2713' : ''),
+        el('span', { class: 'lv-name' }, stepWords(part.name)),
+        part.preview ? el('code', { class: 'lv-preview' }, part.preview) : null,
+        prog ? el('span', { class: 'lv-prog' },
+          [prog.percent !== null && prog.percent !== undefined ? prog.percent + '%' : '', prog.message].filter(Boolean).join(' ')) : null)
+    }
+    if (part.k === 'sub') {
+      const running = part.status === 'running'
+      const tools = part.tools ? `${part.tools} tool${part.tools === 1 ? '' : 's'}` : ''
+      const now = running
+        ? [part.tool ? stepWords(part.tool) + (part.preview ? ': ' + part.preview : '') : 'Working', tools].filter(Boolean).join(' \u00b7 ')
+        : [SUB_WORDS[part.status] || 'Done', tools ? 'after ' + tools : ''].filter(Boolean).join(' ')
+      return el('div', { class: 'lv-sub ' + (running ? 'running' : part.status) },
+        el('div', { class: 'lv-sub-head' }, el('b', {}, 'Subagent'), part.goal ? ': ' + part.goal : ''),
+        el('div', { class: 'lv-sub-now' }, now),
+        !running && part.summary ? el('div', { class: 'lv-sub-sum' }, snippet(part.summary, 3)) : null)
+    }
+    if (part.k === 'note') return el('p', { class: 'lv-note' }, part.text)
+    return null
+  })
+}
+
+// The reply a turn wrote, as it showed live: its last words after its last tool.
+function liveReply(parts) {
+  const last = [...(parts || [])].reverse().find(p => p.k === 'text')
+  return last ? last.text : ''
+}
+
+function drawLive(mid) {
+  const turn = document.querySelector(`#view .msg.working[data-turn="${CSS.escape(mid)}"]`)
+  const box = turn && turn.querySelector('.bub.live')
+  if (!box) return
+  const end = nearEnd()
+  const seen = liveSeen[mid]
+  box.replaceChildren(...liveParts(seen.parts).filter(Boolean))
+  box.hidden = !seen.parts.length
+  if (end) scrollTo({ top: document.documentElement.scrollHeight })
+}
+
+// Follows one turn while its chat is the page open: each answer is asked for again at once.
+function watchLive(mid, seqNow) {
+  if (liveWatch && liveWatch.mid === mid && liveWatch.seq === seqNow) return
+  const me = liveWatch = { mid, seq: seqNow }
+  const on = () => liveWatch === me && seqNow === viewSeq && document.visibilityState === 'visible'
+  ;(async () => {
+    while (on()) {
+      const had = liveSeen[mid]
+      const r = await call('GET', `/turns/${encodeURIComponent(mid)}?after=${had ? had.n : 0}&wait=25`)
+      if (!on()) break
+      if (r.status !== 200) {
+        await new Promise(res => setTimeout(res, 3000))
+        continue
+      }
+      if (r.body.parts) {
+        liveSeen[mid] = r.body
+        drawLive(mid)
+      } else if (had && had.parts) {
+        // The turn is over: its result came, and the chat reads Hermes's own copy of the reply now.
+        liveSeen[mid] = { n: 0, parts: had.parts, over: true }
+        break
+      }
+    }
+    if (liveWatch === me) liveWatch = null
+    if (seqNow === viewSeq && liveSeen[mid] && liveSeen[mid].over) route()
+  })()
+}
+
 // While a turn runs in the open chat, its line follows every two seconds, reading only this chat's state;
 // when the turn ends the chat is drawn again with the reply. A message still waiting to go is watched the
 // same way, so the chat is drawn again the moment it is taken and its turn's line shows (2 Nov: it waited
@@ -2383,12 +2485,17 @@ function turnPart(gw, name, turn, canAct) {
       onclick: () => order({ op: 'stop' }, `Stopping ${name}'s turn...`) }, 'Stop')), status)
 }
 
-function pendingItems(mine, readAt) {
+function pendingItems(mine, readAt, who) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
-    .map(m => ({ mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files,
-      note: mineNote(m) + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
-        + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
-      warn: m.status === 'dead' || m.status === 'uncertain' }))
+    .flatMap(m => {
+      const item = { mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files,
+        note: mineNote(m) + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
+          + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
+        warn: m.status === 'dead' || m.status === 'uncertain' }
+      // The reply its turn wrote, as it showed live, until the chat's own read from Hermes has it.
+      const reply = m.status === 'sent' && who && liveSeen[m.id] ? liveReply(liveSeen[m.id].parts) : ''
+      return reply ? [item, { mine: false, who, agent: who, at: m.updated_at, text: reply }] : [item]
+    })
 }
 
 // Patrick's reaction on one message, through the chat's own route (path, with what names the chat).
@@ -2461,7 +2568,7 @@ async function ownChatView(gw, sid) {
         route().then(() => { const b = document.querySelector('#view .composer textarea'); if (b) b.focus() })
       } : null
     }
-    const items = h.items.concat(pendingItems(v.mine, readAt).map(m => ({ ...m, who: name })))
+    const items = h.items.concat(pendingItems(v.mine, readAt, name).map(m => ({ ...m, who: name })))
     // A rename, hide or delete asked for here: how it stands, and once a hide or a delete is done, so it says.
     const o = lastOp(v.ops, sid)
     const ended = o && o.status === 'done' && (o.op === 'delete' || o.op === 'archive') ? o.op : null
@@ -2496,9 +2603,10 @@ async function ownChatView(gw, sid) {
     // His message being answered now: the other side's live line under it, kept current while it runs.
     const turn = beingAnswered(v.mine)
     const canAct = v.can_send && v.online && !!v.sign_in_until && !h.gone && !t.error && !ended
-    const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing), turnPart(gw, name, turn, canAct)] : bubbles(items)
+    const list = turn ? [bubbles(items), workingItem(name, gw, turn.doing, turn.id), turnPart(gw, name, turn, canAct)] : bubbles(items)
     if (seqNow === viewSeq) {
       showChat('own:' + key, top, list, dock, items)
+      if (turn) watchLive(turn.id, seqNow)
       const waits = turn || v.mine.find(inQueue) || v.mine.find(m => m.status === 'queued')
       if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status, inQueue(waits),
         waits === turn ? askSig(turn.doing) : '')
@@ -2945,7 +3053,7 @@ async function chatView(target, tab, sid) {
   function render() {
     const readAt = v.as_of ? new Date(v.as_of) : null
     const h = history()
-    const items = h.items.concat(pendingItems(v.mine, readAt))
+    const items = h.items.concat(pendingItems(v.mine, readAt, room ? null : name))
     const top = [
       sid ? chatBar(() => go('/m/board'), 'Board', name, work && work.title ? work.title : 'Session', v.target, name,
         null, botLive(v.live))
@@ -2964,10 +3072,11 @@ async function chatView(target, tab, sid) {
     // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs. In a
     // session, the Bot's own turn there shows the same way while it runs, as on the Board.
     const turn = room ? null : v.mine.find(m => m.status === 'leased')
-    const list = [bubbles(items), turn ? workingItem(name, v.target, turn.doing) : work ? workingItem(name, v.target, work) : null,
+    const list = [bubbles(items), turn ? workingItem(name, v.target, turn.doing, turn.id) : work ? workingItem(name, v.target, work) : null,
       room ? null : chatCards(v.cards, location.pathname)]
     if (seqNow === viewSeq) {
       showChat(key, top, list, dock, items)
+      if (turn && !room) watchLive(turn.id, seqNow)
       const waits = room ? null : turn || v.mine.find(m => m.status === 'queued')
       if (waits) watchTurn('/chat/' + encodeURIComponent(v.target) + inSession, seqNow, waits.id, name, waits.status)
     }

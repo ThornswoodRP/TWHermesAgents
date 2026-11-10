@@ -5,7 +5,9 @@ the system Python and only this repository's code:
 
     python3 -I -m thornswood_decisions.connector --hermes /home/hermes/.local/bin/hermes
 
-It does nothing while `connector_effects` is off. Otherwise, every few seconds
+It does nothing while `connector_effects` is off. Otherwise, the moment the
+core has new work for it (it holds a wait open, `POST /api/v1/connector/wait`,
+wakes.py), when one of its turns ends, and every few seconds whatever happens,
 it leases from the core the oldest waiting message for each Bot and the room
 that has nothing in flight (`POST /api/v1/connector/claim`, with its own token
 in ~/.config/thornswood/connector.token, 0600) and hands each to Hermes the
@@ -47,7 +49,10 @@ what came of it goes to `POST /api/v1/connector/reacted`.
 While a Bot Chat turn runs, what it is doing (thinking, writing, or a tool by its
 plain name, read from Hermes's stream with own_connector.follow_turn, never the
 words) goes to `POST /api/v1/connector/doing` when it changes, for the phone's
-live line under the message.
+live line under the message. What the turn shows, as Hermes Desktop draws it (its
+thinking, the reply as it is written, each tool with its preview, its subagents and
+status lines, own_connector.LiveTurn), goes to `POST /api/v1/connector/turns` with
+each change, a few times a second at most, held by the core in memory only.
 For each message, it tells the core what came of it (`POST /api/v1/connector/result`):
 confirmed only when Hermes said so, failed only when nothing was sent, and
 uncertain for everything else. An uncertain message is never sent again by
@@ -72,9 +77,10 @@ its subagents, background commands and scheduled jobs, from `room_send.py` op
 `tasks`, read the way Hermes Desktop reads them (contracts.json "tasks").
 
 Those reports and the phone's pages run on a thread of their own, apart from
-the claims: a Bot's turn holds its round for as long as it runs, up to 15
-minutes, and the core calls a Bot "not heard from" after two minutes without a
-report.
+the claims, and the phone's pages go the moment it asks for one. Each turn runs
+on its own thread and says its result the moment it ends; the next claim does
+not wait for it, so a message to one Bot never waits for another Bot's turn
+(Patrick, 9 Nov: "it doesnt feel live"), up to PARALLEL turns at once.
 """
 
 from __future__ import annotations
@@ -95,10 +101,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from .own_connector import follow_turn, probe_env
+from .own_connector import LiveTurn, Waker, follow_turn, probe_env
 
 CORE = "http://127.0.0.1:9135/api/v1"
 POLL_SECONDS = 5
+WAIT_SECONDS = 10  # one wait on the core for new work, held open (under the posts' 15-second timeout)
 TURN_SECONDS = 15 * 60
 CHECK_SECONDS = 60
 LIVE_SECONDS = 30  # how often each Bot's gateway state goes to the core, for the phone's dots
@@ -106,7 +113,7 @@ TASKS_SECONDS = 30  # how often each Bot's subagents, background commands and sc
 # At most this many `hermes` turns at once: each is a whole Hermes process, and
 # the unit's MemoryMax holds them all.
 PARALLEL = 3
-DOING_SECONDS = 2    # while turns run, what each is doing goes to the core this often when it changed
+DOING_SECONDS = 0.25  # while turns run, what each is doing and shows goes to the core this often when it changed
 DOING_KEEP = 20      # and at least this often, so the core knows the line is current (chat.py DOING_STALE)
 BOT_CHAT = "Bot Chat"
 PAGE_BYTES = 480 * 1024  # under the core's 512 KB
@@ -337,9 +344,14 @@ class Hermes:
             return "set", ""
         return "failed", str(got.get("reason") or "not set")[:200]
 
-    def to_bot(self, bot: str, text: str, doing=None) -> tuple[str, str, str]:
+    def to_bot(self, bot: str, text: str, doing=None, live=None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message to a Bot's Bot Chat. `doing(state, tool)` hears what the
-        turn is doing as Hermes's stream says it (own_connector.follow_turn): thinking, writing, or a tool."""
+        turn is doing as Hermes's stream says it (own_connector.follow_turn): thinking, writing, or a tool.
+        `live` (own_connector.LiveTurn) keeps the turn as Desktop draws it.
+
+        It runs as room_send.py `chat`, Hermes's own `hermes chat` with the gateway's live events said too
+        (room_send.py live_line): `hermes chat`'s own stream-json carries only the reply and the tools, so a
+        Bot's thinking, its subagents and its status lines never reached the phone (Patrick, 9 Nov)."""
         state, why = self.check(bot)
         if state != "ready":
             # Nothing was sent: the message waits, with why (the gateway, or the helper's own failure).
@@ -350,16 +362,18 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.cmd, "-p", bot, "chat", "--in", str(self.home), "-c", BOT_CHAT, "--create-if-missing",
-                    "-Q", "--format", "stream-json", "--query-file", str(path)]
+            argv = [*self.helper_cmd, "chat", "-p", bot, "--in", str(self.home), "-c", BOT_CHAT,
+                    "--create-if-missing", "-Q", "--format", "stream-json", "--query-file", str(path)]
+            # The Bot's own home, named before any of Hermes is imported, as in to_session.
+            env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
             started = time.time()
             try:
                 proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, cwd=str(self.home), text=True,
-                                        encoding="utf-8", errors="replace")
+                                        encoding="utf-8", errors="replace", env=env)
             except OSError:
                 return "failed", "", "could not start the hermes command"
-            reader = threading.Thread(target=follow_turn, args=(proc.stdout, {}, doing or (lambda s, t: None)),
+            reader = threading.Thread(target=follow_turn, args=(proc.stdout, {}, doing or (lambda s, t: None), live),
                                       daemon=True)
             reader.start()
             try:
@@ -383,7 +397,7 @@ class Hermes:
             return "confirmed", "turn finished", ""
         return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
 
-    def to_session(self, bot: str, sid: str, text: str, doing=None) -> tuple[str, str, str]:
+    def to_session(self, bot: str, sid: str, text: str, doing=None, live=None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message into one session of a Bot: the one a Board row opens,
         where the Bot may be working right now (Patrick, 9 Nov). It goes the way Desktop's message box
         sends into an open chat: room_send.py `chat --resume`, through the Bot's running gateway, which
@@ -431,7 +445,7 @@ class Hermes:
                     taken.set()
                 (doing or (lambda s, t: None))(st, tool)
 
-            reader = threading.Thread(target=follow_turn, args=(proc.stdout, seen, heard), daemon=True)
+            reader = threading.Thread(target=follow_turn, args=(proc.stdout, seen, heard, live), daemon=True)
             reader.start()
             ends = time.monotonic() + TURN_SECONDS
             code = None
@@ -524,10 +538,19 @@ class Connector:
         self.waiting: dict[str, str] = {}  # gateways (by profile, "" for the room) found not ready: why
         self._lock = threading.Lock()
         self.doing: dict[str, dict] = {}    # each Bot Chat turn running now: what it is doing
+        self.lives: dict[str, LiveTurn] = {}  # each turn of the round: what it shows, as Desktop draws it
+        self.lives_said: dict[str, int] = {}  # and the change of it the core has
         self.live_bots: list[str] = []      # the Bots the core asked about last time
         self.live_at: float | None = None
         self.tasks_at: float | None = None
         self._tasks_run: threading.Thread | None = None
+        self.running: list[threading.Thread] = []  # the turns going now, each its own thread
+        self.wakeup = threading.Event()     # the claim loop: the core has new work, or a turn ended
+        self.read_wake = threading.Event()  # the reads thread: the core has new work (a page the phone asked for)
+        self._doing_on = False              # a thread is saying what the turns do
+        self._said = (None, None)           # the doing line the core has, and when it got it
+        self._say_lock = threading.Lock()
+        self._report_lock = threading.Lock()
 
     def deliver(self, item: dict) -> dict:
         if item["target"] == "room":
@@ -536,35 +559,78 @@ class Connector:
             def doing(state, tool):
                 with self._lock:
                     self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool}
+            live = LiveTurn()
+            with self._lock:
+                self.lives[item["id"]] = live
             try:
                 if item.get("session"):
-                    outcome, ref, reason = self.hermes.to_session(item["target"], item["session"], item["text"], doing)
+                    outcome, ref, reason = self.hermes.to_session(item["target"], item["session"], item["text"],
+                                                                  doing, live)
                 else:
-                    outcome, ref, reason = self.hermes.to_bot(item["target"], item["text"], doing)
+                    outcome, ref, reason = self.hermes.to_bot(item["target"], item["text"], doing, live)
             finally:
                 with self._lock:
                     self.doing.pop(item["id"], None)
         return {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
 
-    def say_doing(self, threads: list, clock=time.monotonic, wait=DOING_SECONDS) -> None:
-        """While the round's turns run: what each Bot Chat turn is doing, to the core every `wait` seconds
-        when it changed and at least every DOING_KEEP, for the phone's live line. Reading only: the core
-        takes it while mobile_read is on, whatever connector_effects says."""
-        said, said_at = None, None
-        while any(t.is_alive() for t in threads):
+    def _say_doing_while_running(self) -> None:
+        """While any turn runs: what each Bot Chat turn is doing, to the core every DOING_SECONDS when it
+        changed and at least every DOING_KEEP, for the phone's live line, and what each shows (say_live).
+        Reading only: the core takes it while mobile_read is on, whatever connector_effects says. One such
+        thread at a time, started by the round that starts a turn, ending when none runs (decided under the
+        lock that round adds its turns under, so a turn never starts without one)."""
+        with self._lock:
+            if self._doing_on:
+                return
+            self._doing_on = True
+
+        def loop():
+            while True:
+                with self._lock:
+                    if not any(t.is_alive() for t in self.running):
+                        self._doing_on = False
+                        return
+                    now_doing = sorted(self.doing.values(), key=lambda d: d["id"])
+                said, said_at = self._said
+                if now_doing and (now_doing != said or time.monotonic() - said_at >= DOING_KEEP):
+                    # Said once per change whatever the answer: a refusal (mobile_read off) is not asked again
+                    # every quarter second, only with the next change or after DOING_KEEP.
+                    self.core.post("/connector/doing", {"turns": now_doing})
+                    self._said = (now_doing, time.monotonic())
+                self.say_live()
+                time.sleep(DOING_SECONDS)
+        threading.Thread(target=loop, name="doing", daemon=True).start()
+
+    def say_live(self) -> None:
+        """Each turn that changed since the core last had it, as Desktop draws it (own_connector.LiveTurn):
+        said once per change whatever the answer, as the doing line is."""
+        with self._say_lock:
             with self._lock:
-                now_doing = sorted(self.doing.values(), key=lambda d: d["id"])
-            if now_doing and (now_doing != said or clock() - said_at >= DOING_KEEP):
-                # Said once per change whatever the answer: a refusal (mobile_read off) is not asked again
-                # every two seconds, only with the next change or after DOING_KEEP.
-                self.core.post("/connector/doing", {"turns": now_doing})
-                said, said_at = now_doing, clock()
-            for t in threads:
-                t.join(wait / max(len(threads), 1))
+                lives = list(self.lives.items())
+            changed = []
+            for mid, live in lives:
+                v, parts = live.seen()
+                if v and self.lives_said.get(mid) != v:
+                    changed.append((mid, v, parts))
+            for i in range(0, len(changed), 10):
+                self.core.post("/connector/turns",
+                               {"turns": [{"id": mid, "parts": parts} for mid, _, parts in changed[i:i + 10]]})
+            with self._lock:
+                self.lives_said.update({mid: v for mid, v, _ in changed})
 
     def _report(self) -> None:
+        """Each result the core has not taken yet, offered again until it lands: from the round, and from
+        each turn the moment it ends. One report at a time."""
+        with self._report_lock:
+            with self._lock:
+                pending, self.unsaid = self.unsaid, []
+            keep = self._offer(pending)
+            with self._lock:
+                self.unsaid[:0] = keep
+
+    def _offer(self, pending: list[dict]) -> list[dict]:
         keep = []
-        for r in self.unsaid:
+        for r in pending:
             if "version" in r:
                 # A reaction: the core drops an answer about an older wish by itself.
                 status, _ = self.core.post("/connector/reacted", r)
@@ -578,7 +644,7 @@ class Connector:
                 self.say(f"{'PASS' if r['outcome'] == 'confirmed' else 'NOTE'} {r['id']}: {r['outcome']}")
             else:
                 keep.append(r)
-        self.unsaid = keep
+        return keep
 
     def react(self, wanted: list) -> int:
         """The reactions the core handed over, each set in that Bot's Bot Chat one after another (each is one
@@ -599,8 +665,9 @@ class Connector:
                 else:
                     outcome, reason = self.hermes.react(r["bot"], sid, r["message_id"], r.get("emoji"))
             done += outcome == "set"
-            self.unsaid.append({"bot": r["bot"], "message_id": r["message_id"], "version": r["version"],
-                                "outcome": outcome, "reason": reason})
+            with self._lock:
+                self.unsaid.append({"bot": r["bot"], "message_id": r["message_id"], "version": r["version"],
+                                    "outcome": outcome, "reason": reason})
         return done
 
     def _still_waiting(self) -> bool:
@@ -608,63 +675,94 @@ class Connector:
         still not ready, so nothing more is claimed (and leased, and put back) until it is."""
         for profile in list(self.waiting):
             state, why = self.hermes.check(profile)
+            with self._lock:
+                was = self.waiting.get(profile)
+                if state == "ready":
+                    self.waiting.pop(profile, None)
+                else:
+                    self.waiting[profile] = why
             if state == "ready":
-                del self.waiting[profile]
                 self.say(f"PASS {profile or 'the room'}'s gateway is ready; its messages go now")
-            else:
-                if state == "failed" and why != self.waiting[profile]:
-                    self.say(f"FAIL {why}")
-                self.waiting[profile] = why
-        return bool(self.waiting)
+            elif state == "failed" and why != was:
+                self.say(f"FAIL {why}")
+        with self._lock:
+            return bool(self.waiting)
 
-    def once(self) -> int:
-        """One round. Returns how many messages went to Hermes, or -1 when the core said to wait."""
+    def round(self) -> int:
+        """One claim, without waiting for the turns it starts (Patrick, 9 Nov: "it doesnt feel live"): each
+        turn tells the core what came of it the moment it ends, and the next claim takes what came in
+        meanwhile, up to PARALLEL turns at once. Before, a round waited for all its turns, so a message to
+        one Bot waited for another Bot's three-minute turn. Returns how many messages went to Hermes, or -1
+        when the core said to wait."""
         self._report()
         if self.waiting and self._still_waiting():
             return 0
-        status, body = self.core.post("/connector/claim", {"limit": PARALLEL})
+        with self._lock:
+            self.running = [t for t in self.running if t.is_alive()]
+            free = PARALLEL - len(self.running)
+        status, body = self.core.post("/connector/claim", {"limit": free})
         if status == 423:
             return -1
         if status == 401:
             raise SystemExit("STOP: the core refused the connector token")
         if status != 200:
             return 0
-        items = body.get("items", [])
+        items = body.get("items", [])[:free]
         self.react(body.get("reactions", []))
-        results: list[dict] = []
-
-        def run(item):
-            try:
-                r = self.deliver(item)
-            except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
-                r = {"id": item["id"], "outcome": "uncertain", "ref": "",
-                     "reason": f"the connector hit {type(exc).__name__} while sending"}
-            with self._lock:
-                results.append(r)
-
-        threads = [threading.Thread(target=run, args=(i,), daemon=True) for i in items]
-        for t in threads:
+        for item in items:
+            t = threading.Thread(target=self._turn, args=(item,), name=f"turn {item['id']}", daemon=True)
             t.start()
-        self.say_doing(threads)
-        for t in threads:
-            t.join()
-        gateway = {i["id"]: "" if i["target"] == "room" else i["target"] for i in items}
-        for r in results:
-            helper = r["reason"].startswith(HELPER_FAILED)
-            if helper and r["outcome"] != "not_ready":
-                self.say(f"FAIL {r['id']}: {r['reason']}")
-            if r["outcome"] == "not_ready" and r["id"] in gateway:
-                if gateway[r["id"]] not in self.waiting:
-                    self.say(f"FAIL {r['reason']}; {gateway[r['id']] or 'the room'}'s messages wait in the queue"
-                             if helper else
-                             f"NOTE {r['reason']}; {gateway[r['id']]}'s messages wait in the queue"
-                             if r["reason"].startswith(FLEET) else
-                             f"NOTE {gateway[r['id']] or 'the room'}'s gateway is not ready ({r['reason']}); "
-                             "its messages wait in the queue")
-                self.waiting[gateway[r["id"]]] = r["reason"]
-        self.unsaid.extend(results)
+            with self._lock:
+                self.running.append(t)
+        if items:
+            self._say_doing_while_running()
         self._report()
         return len(items)
+
+    def _turn(self, item: dict) -> None:
+        try:
+            r = self.deliver(item)
+        except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
+            r = {"id": item["id"], "outcome": "uncertain", "ref": "",
+                 "reason": f"the connector hit {type(exc).__name__} while sending"}
+        self._ended(item, r)
+
+    def _ended(self, item: dict, r: dict) -> None:
+        """What came of one message, at once: the turn's last parts, then its result. The claim loop is woken,
+        since that Bot's next message can go now."""
+        self.say_live()
+        with self._lock:
+            self.lives.pop(item["id"], None)
+            self.lives_said.pop(item["id"], None)
+        gateway = "" if item["target"] == "room" else item["target"]
+        helper = r["reason"].startswith(HELPER_FAILED)
+        if helper and r["outcome"] != "not_ready":
+            self.say(f"FAIL {r['id']}: {r['reason']}")
+        if r["outcome"] == "not_ready":
+            with self._lock:
+                new = gateway not in self.waiting
+                self.waiting[gateway] = r["reason"]
+            if new:
+                self.say(f"FAIL {r['reason']}; {gateway or 'the room'}'s messages wait in the queue"
+                         if helper else
+                         f"NOTE {r['reason']}; {gateway}'s messages wait in the queue"
+                         if r["reason"].startswith(FLEET) else
+                         f"NOTE {gateway or 'the room'}'s gateway is not ready ({r['reason']}); "
+                         "its messages wait in the queue")
+        with self._lock:
+            self.unsaid.append(r)
+        self._report()
+        self.wakeup.set()
+
+    def once(self) -> int:
+        """One round and its turns to the end, with their results: `--once`, and the tests."""
+        n = self.round()
+        with self._lock:
+            running = list(self.running)
+        for t in running:
+            t.join()
+        self._report()
+        return n
 
     def live(self, clock=time.monotonic) -> bool:
         """Each Bot's gateway state to the core, every LIVE_SECONDS. The first post carries none: the core's
@@ -744,30 +842,35 @@ class Connector:
                 self.say(f"FAIL page: the core answered {status}")
         return sent
 
-    def reads(self, sleep=time.sleep) -> None:
-        """The phone's pages, each Bot's state and its tasks, every few seconds, whatever connector_effects says. Reading
-        only, so it never waits on a claim round: a round waits for its turns, and on 8 Nov a three-minute turn
-        to Bramble left all six Bots "not heard from" on the phone while it ran."""
+    def reads(self) -> None:
+        """The phone's pages, each Bot's state and its tasks, every few seconds and the moment the core asks
+        for a page, whatever connector_effects says. Reading only, so it never waits on a claim: on 8 Nov a
+        three-minute turn to Bramble left all six Bots "not heard from" on the phone while it ran."""
         while True:
             self.pages()
             self.live()
             self.tasks()
-            sleep(POLL_SECONDS)
+            self.read_wake.wait(POLL_SECONDS)
+            self.read_wake.clear()
 
     def forever(self) -> None:
-        # The reads on their own thread; the claim every few seconds, or every half minute while the core says
-        # connector_effects is off. A reads thread that raised stops the connector, as it did when both shared
-        # this loop, with its traceback in the journal.
+        # The reads on their own thread; a claim the moment the core has new work for it (wakes.py) or a turn
+        # ended, and every few seconds whatever happens, or every half minute while the core says
+        # connector_effects is off. A reads thread that raised stops the connector, with its traceback in
+        # the journal.
         reader = threading.Thread(target=self.reads, name="reads", daemon=True)
         reader.start()
+        Waker(lambda body: self.core.post("/connector/wait", body), [self.wakeup, self.read_wake],
+              WAIT_SECONDS).start()
         claim_at = 0.0
         while True:
             if not reader.is_alive():
                 raise SystemExit("STOP: the thread for pages and Bot states stopped")
             if time.monotonic() >= claim_at:
-                n = self.once()
+                n = self.round()
                 claim_at = time.monotonic() + (POLL_SECONDS * 6 if n < 0 else 0)
-            time.sleep(POLL_SECONDS)
+            self.wakeup.wait(POLL_SECONDS)
+            self.wakeup.clear()
 
 
 def main(argv: list[str]) -> int:

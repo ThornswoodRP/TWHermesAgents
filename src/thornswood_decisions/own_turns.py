@@ -29,6 +29,7 @@ import threading
 from datetime import datetime, timedelta
 
 from .store import new_id
+from .wakes import WAKES
 
 KINDS = ("approval", "clarify")
 PROMPT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -110,6 +111,7 @@ class _Orders:
                     and not (o["message_id"] == message_id and o["op"] == op and o.get("prompt_id") == prompt_id)]
             rows.append(order)
             self.waiting[(ws, gw)] = rows
+        WAKES.bump(ws, gw)
         return {"order": order["id"], "status": "queued"}
 
     def hand(self, ws: str, gw: str, now: datetime) -> list[dict]:

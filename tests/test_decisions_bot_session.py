@@ -197,11 +197,11 @@ class TheConnector(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def to_session(self, bot, sid, text, doing=None):
+            def to_session(self, bot, sid, text, doing=None, live=None):
                 self.calls.append(("session", bot, sid, text))
                 return "confirmed", "turn finished", ""
 
-            def to_bot(self, bot, text, doing=None):
+            def to_bot(self, bot, text, doing=None, live=None):
                 self.calls.append(("bot", bot, text))
                 return "confirmed", "turn finished", ""
         stand = Stand()

@@ -383,7 +383,7 @@ class TheCore(unittest.TestCase):
 
 class TheApp(unittest.TestCase):
     def test_questions_approvals_and_stop_under_the_live_line(self):
-        self.assertIn("workingItem(name, gw, turn.doing), turnPart(gw, name, turn, canAct)", APP)
+        self.assertIn("workingItem(name, gw, turn.doing, turn.id), turnPart(gw, name, turn, canAct)", APP)
         self.assertIn("call('POST', `/own/${gw}/turn`, { message_id: turn.id, ...body })", APP)
         self.assertIn("once: 'Allow once', session: 'Allow in this chat', always: 'Always allow', deny: 'Deny'", APP)
         self.assertIn("'Stop'", APP)

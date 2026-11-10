@@ -289,8 +289,9 @@ class TheFleetQueue(unittest.TestCase):
         self.asked = []
 
     def hermes(self, room=True, turn_away=None, kept=False):
-        """A stand-in hermes command whose turn exits 0, leaving the turn gate's note when turn_away says why."""
-        code = "import sys\n"
+        """A stand-in helper whose turn (room_send.py chat) exits 0, leaving the turn gate's note when turn_away
+        says why, and whose ready check says ready."""
+        code = "import sys\nif sys.argv[1:2] != ['chat']:\n    print('{\"ready\": true}')\n    sys.exit(0)\n"
         if turn_away:
             code += textwrap.dedent(f"""
                 import json, os, datetime
@@ -305,8 +306,7 @@ class TheFleetQueue(unittest.TestCase):
         def fleet(bot):
             self.asked.append(bot)
             return (True, "") if room else (False, "1 turn already running; the fleet runs at most 1 at once")
-        return connector.Hermes([sys.executable, str(script)], [sys.executable, "-c", "print('{\"ready\": true}')"],
-                                self.dir, fleet=fleet)
+        return connector.Hermes([sys.executable, str(script)], [sys.executable, str(script)], self.dir, fleet=fleet)
 
     def test_no_room_sends_nothing_and_the_message_waits_with_why(self):
         h = self.hermes(room=False)

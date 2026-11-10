@@ -7,7 +7,8 @@ own user and reaches out to the decision core; nothing listens on any port.
     python3 -I own_connector.py --gateway me  --hermes /home/patrick-hermes/.local/bin/hermes
     py -3 -I own_connector.py   --gateway one --hermes C:\\...\\hermes.exe --core https://hermes.<tailnet>.ts.net/api/v1
 
-Every few seconds it:
+The moment the core has new work for it (a message, a Stop or an answer, a page or a chat's model the
+phone asked for), and every few seconds whatever happens, it:
 
 1. checks that Hermes's gateway is running, without starting one (room_send.py's
    readiness check, with Hermes's own Python), and tells the core whether it is
@@ -52,6 +53,10 @@ Every few seconds it:
 
 While own_chat_write is off the core answers 423 to all of it; this waits and
 copies nothing. It logs no message text, no chat title and no token.
+
+It learns of new work by holding a wait open on the core (`POST /own/<gateway>/wait`, wakes.py), answered
+the moment there is some; a turn that ends or that Hermes takes wakes it too, so a result and the chat's
+next message go at once, not on the next round.
 """
 
 from __future__ import annotations
@@ -77,6 +82,8 @@ from pathlib import Path, PurePosixPath
 LOCAL_CORE = "http://127.0.0.1:9135/api/v1"
 GATEWAYS = {"me": "my-hermes", "one": "One's Hermes"}
 POLL_SECONDS = 5
+WAIT_SECONDS = 15  # one wait on the core for new work, held open (under the posts' 20-second timeout)
+LIVE_SECONDS = 0.25  # while turns run, what each shows goes to the core this often when it changed
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 FEED_SECONDS = 20
 TASKS_SECONDS = 20      # how often its subagents, background commands and scheduled jobs go to the core
@@ -718,13 +725,121 @@ ASK_KEYS = ("prompt_id", "kind", "question", "description", "command", "choices"
 MAX_ASKS = 3
 
 
-def follow_turn(stream, seen: dict, tell) -> None:
+class Waker:
+    """Wakes a connector's loops the moment the core has new work for it (wakes.py): a thread holding one
+    wait open on the core at a time, which sets each of `events` when the core's number changes, and once
+    at its first answer (for whatever was queued before it). A core that does not answer the wait (one
+    older than it, or the network) is asked again in half a minute, and the loops claim every POLL_SECONDS
+    meanwhile, as they always did: a retry for a failure outside the connector, never a guess at timing."""
+
+    def __init__(self, ask, events: list, seconds: float):
+        self.ask, self.events, self.seconds = ask, events, seconds
+
+    def start(self) -> threading.Thread:
+        t = threading.Thread(target=self.follow, name="wakes", daemon=True)
+        t.start()
+        return t
+
+    def follow(self, sleep=time.sleep, rounds: int | None = None) -> None:
+        after = None
+        while rounds is None or rounds > 0:
+            if rounds is not None:
+                rounds -= 1
+            status, body = self.ask({"seconds": 0} if after is None else {"after": after, "seconds": self.seconds})
+            n = body.get("n") if status == 200 and isinstance(body, dict) else None
+            if type(n) is not int:
+                after = None
+                sleep(POLL_SECONDS * 6)
+                continue
+            if n != after:
+                for e in self.events:
+                    e.set()
+            after = n
+
+
+class LiveTurn:
+    """What one turn shows while it runs, in order, as Hermes Desktop draws it (Patrick, 9 Nov: "I want it all
+    to be live"): its thinking, the reply's text as it is written (and any words between its tools), each tool
+    with the preview Hermes makes of it and whether it is done, its subagents, and the status lines Hermes
+    says (a background command finishing, a goal, a loop). In this connector's memory only; the core holds
+    what it is sent in memory only too (live_turns.py). `v` goes up with each change, so the sender posts a
+    turn only when it changed."""
+
+    PARTS = 60          # the newest parts of a turn kept; a text or thinking part keeps its newest TEXT characters
+    TEXT = 12000
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.v = 0
+        self.parts: list[dict] = []
+
+    def _add(self, part: dict) -> None:
+        self.parts.append(part)
+        del self.parts[:-self.PARTS]
+
+    def _words(self, kind: str, text) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        last = self.parts[-1] if self.parts else None
+        if last and last["k"] == kind:
+            last["text"] = (last["text"] + text)[-self.TEXT:]
+        else:
+            self._add({"k": kind, "text": text[-self.TEXT:]})
+
+    def _step(self, sid) -> dict | None:
+        return next((x for x in reversed(self.parts) if x["k"] == "step" and sid and x["id"] == sid), None)
+
+    def hear(self, ev: dict) -> None:
+        kind = ev.get("type")
+        with self.lock:
+            v = self.v
+            if kind == "text":
+                self._words("text", ev.get("text"))
+            elif kind == "thinking":
+                self._words("think", ev.get("text"))
+            elif kind == "step":
+                self._add({"k": "step", "id": str(ev.get("id") or "")[:128], "name": str(ev.get("name") or "")[:64],
+                           "preview": str(ev.get("preview") or "")[:200], "done": False, "error": False})
+            elif kind == "step_progress" and (step := self._step(ev.get("id"))):
+                step["progress"] = {"percent": ev.get("percent"), "message": str(ev.get("message") or "")[:200]}
+            elif kind == "step_done" and (step := self._step(ev.get("id"))):
+                step.update(done=True, error=ev.get("error") is True)
+                step.pop("progress", None)
+            elif kind == "subagent":
+                sid = str(ev.get("id") or "")[:64]
+                sub = next((x for x in self.parts if x["k"] == "sub" and x["id"] == sid), None)
+                if sub is None:
+                    sub = {"k": "sub", "id": sid, "goal": "", "status": "running", "tool": "", "preview": "",
+                           "tools": 0, "summary": ""}
+                    self._add(sub)
+                for k in ("goal", "tool", "preview", "summary"):
+                    if ev.get(k):
+                        sub[k] = str(ev[k])[:600]
+                if isinstance(ev.get("tools"), int):
+                    sub["tools"] = ev["tools"]
+                elif ev.get("event") == "tool":
+                    sub["tools"] += 1
+                if ev.get("event") == "complete":
+                    sub["status"] = str(ev.get("status") or "completed")[:16]
+                    sub["tool"] = sub["preview"] = ""
+            elif kind in ("status", "background") and ev.get("text"):
+                self._add({"k": "note", "text": str(ev["text"])[:300]})
+            else:
+                return
+            self.v = v + 1
+
+    def seen(self) -> tuple[int, list]:
+        with self.lock:
+            return self.v, [dict(x) for x in self.parts]
+
+
+def follow_turn(stream, seen: dict, tell, live: LiveTurn | None = None) -> None:
     """Hermes's stream-json events of one turn, read as they come (hermes_cli/stream_json.py). The start and
     the end are kept in `seen` without their text (the session id and the exit code are all that is read
     from them), and `tell(state, tool)` hears each change of what the turn is doing, once: "thinking" (the
-    start, and after each tool's result), "writing" (the reply's text), or "tool" with the tool's name
-    when it is a plain name (else None). Never the words, a tool's input or its output. The Bots'
-    connector reads its Bot Chat turns with this too (connector.py).
+    start, its thinking, and after each tool's result), "writing" (the reply's text), or "tool" with the
+    tool's name when it is a plain name (else None); `tell` never hears the words, a tool's input or its
+    output. The Bots' connector reads its Bot Chat turns with this too (connector.py).
 
     room_send.py's turn adds one line saying how Hermes took the message ({"type": "admission"}): "queued" (behind
     the turn already running, in Hermes's own queue), "steered" or "redirected" (into the running turn), or
@@ -733,7 +848,11 @@ def follow_turn(stream, seen: dict, tell) -> None:
 
     An attended turn (room_send.py `attended-chat`) also says each question or approval Hermes opens and
     settles ({"type": "ask"} and {"type": "ask_settled"}), kept in `seen["asks"]` by prompt id, and how an
-    order went ({"type": "order"}), kept in `seen["order"]`; each is told again with the turn's state."""
+    order went ({"type": "order"}), kept in `seen["order"]`; each is told again with the turn's state.
+
+    With `live`, the turn is also kept as Desktop draws it, words and all (LiveTurn): the reply as it is
+    written, the thinking, each tool with its preview, the subagents and the status lines, which room_send.py
+    says from the gateway's own events (live_line)."""
     now = None
     for line in stream:
         try:
@@ -747,7 +866,9 @@ def follow_turn(stream, seen: dict, tell) -> None:
         if kind in ("system", "result"):
             ev.pop("text", None)
             seen[kind] = ev
-        state = {"system": ("thinking", None), "tool_result": ("thinking", None),
+        if live is not None:
+            live.hear(ev)
+        state = {"system": ("thinking", None), "tool_result": ("thinking", None), "thinking": ("thinking", None),
                  "text": ("writing", None)}.get(kind)
         if kind == "admission" and ev.get("status") in ADMISSIONS:
             seen["admitted"] = True
@@ -908,7 +1029,7 @@ class Hermes:
         return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
 
     def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None,
-             started=None) -> tuple[str, str, str, str | None]:
+             started=None, live: LiveTurn | None = None) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
         tool by its name, and the questions and approvals it has open. `started(proc)` hears the turn's process,
@@ -929,10 +1050,10 @@ class Hermes:
                 argv += ["--resume", session_id]
             else:
                 argv += ["--yolo", "--source", "cli", "--in", str(self.home_dir)]
-            return self._run(argv, session_id, doing, started)
+            return self._run(argv, session_id, doing, started, live)
 
     def _run(self, argv: list[str], session_id: str | None, doing=None,
-             started=None) -> tuple[str, str, str, str | None]:
+             started=None, live: LiveTurn | None = None) -> tuple[str, str, str, str | None]:
         seen: dict = {}
         tell = doing or (lambda state, tool, admitted=False, taken=None: None)
         began = time.time()
@@ -945,7 +1066,7 @@ class Hermes:
             tell(state, tool, bool(seen.get("admitted")), seen.get("taken"), *((asks, order) if asks or order else ()))
 
         def read(stream):
-            follow_turn(stream, seen, heard)
+            follow_turn(stream, seen, heard, live)
 
         def held():
             # While the turn has said nothing past its start, it may be waiting for the chat's turn lease,
@@ -1257,6 +1378,11 @@ class OwnConnector:
         self.running: list[threading.Thread] = []
         self.doing: dict[str, dict] = {}    # message id -> what its turn is doing now (state, tool)
         self.procs: dict[str, subprocess.Popen] = {}  # message id -> its turn's process, which takes his orders
+        self.lives: dict[str, LiveTurn] = {}  # message id -> what its turn shows, as Desktop draws it
+        self.lives_said: dict[str, int] = {}  # and the change of it the core has
+        self.ended: set[str] = set()          # turns over, dropped once their last change is said
+        self._live_on = False                 # a thread is saying what the turns show
+        self.wakeup = threading.Event()       # the core has new work (wakes.py), a turn ended, or Hermes took one
         self.wanted: list[str] = []
         self._lock = threading.Lock()
         self._ready = ("check_failed", "not checked yet")
@@ -1274,7 +1400,55 @@ class OwnConnector:
             self._ready, self._ready_at = self.hermes.ready(), now
         return self._ready
 
+    def _deliver_live(self, item: dict) -> None:
+        try:
+            self._deliver(item)
+        finally:
+            with self._lock:
+                self.ended.add(item["id"])
+            self.wakeup.set()  # its result goes now, not on the next round
+
+    def say_live(self) -> None:
+        """Each turn that changed since the core last had it, as Desktop draws it (LiveTurn), said once per
+        change whatever the answer; a turn that is over goes once its last change is said."""
+        with self._lock:
+            lives = list(self.lives.items())
+            over = set(self.ended)
+        changed = []
+        for mid, live in lives:
+            v, parts = live.seen()
+            if v and self.lives_said.get(mid) != v:
+                changed.append((mid, v, parts))
+        for i in range(0, len(changed), 10):
+            self.core.post("turns", {"turns": [{"id": mid, "parts": parts} for mid, _, parts in changed[i:i + 10]]})
+        with self._lock:
+            self.lives_said.update({mid: v for mid, v, _ in changed})
+            for mid in over:
+                self.lives.pop(mid, None)
+                self.lives_said.pop(mid, None)
+            self.ended -= over
+
+    def _say_live_while_running(self) -> None:
+        """While any turn runs: what each shows, to the core every LIVE_SECONDS when it changed. One such
+        thread at a time, ending when no turn is held (decided under the lock a round adds its turns under, so
+        a turn never starts without one)."""
+        with self._lock:
+            if self._live_on:
+                return
+            self._live_on = True
+
+        def loop():
+            while True:
+                with self._lock:
+                    if not self.lives:
+                        self._live_on = False
+                        return
+                self.say_live()
+                time.sleep(LIVE_SECONDS)
+        threading.Thread(target=loop, name="live", daemon=True).start()
+
     def _report(self) -> None:
+        self.say_live()  # a turn's last change before its result, so the phone has the whole reply
         with self._lock:
             pending, self.unsaid = self.unsaid, []
         keep = []
@@ -1322,13 +1496,21 @@ class OwnConnector:
             # `taken`: steered or redirected into the turn already running, kept while that turn goes on.
             # `asks`: the questions and approvals the turn has open; `order`: how his last order for it went.
             with self._lock:
-                self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool, "admitted": admitted,
-                                          **({"taken": taken} if taken else {}), **({"asks": asks} if asks else {}),
-                                          **({"order": order} if order else {})}
+                was = self.doing.get(item["id"], {})
+                self.doing[item["id"]] = now = {
+                    "id": item["id"], "state": state, "tool": tool, "admitted": admitted,
+                    **({"taken": taken} if taken else {}), **({"asks": asks} if asks else {}),
+                    **({"order": order} if order else {})}
+            if any(was.get(k) != now.get(k) for k in ("admitted", "taken", "asks", "order")):
+                # Hermes took the message (the chat's next one can go), or a question, an approval or how
+                # an order went: the core has it now, by the claim this wakes, not on the next round.
+                self.wakeup.set()
 
         def started(proc):
             with self._lock:
                 self.procs[item["id"]] = proc
+        with self._lock:
+            live = self.lives.get(item["id"])
         text, image = item["text"], None
         files = item.get("attachments") or []
         if files:
@@ -1344,7 +1526,7 @@ class OwnConnector:
             refs = [file_ref(pth) for _, pth in paths if pth != image]
             text = "\n\n".join(x for x in (text, " ".join(refs)) if x) or f"[Patrick attached {image.name}]"
         try:
-            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image, started)
+            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image, started, live)
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
                                          item.get("session_id"))
@@ -1588,10 +1770,14 @@ class OwnConnector:
             self.orders(orders)
         items = body.get("items", [])
         for item in items:
-            t = threading.Thread(target=self._deliver, args=(item,), daemon=True)
+            with self._lock:
+                self.lives[item["id"]] = LiveTurn()  # held from the start, so the sender runs for it
+            t = threading.Thread(target=self._deliver_live, args=(item,), daemon=True)
             t.started_at = self.clock()
             t.start()
             self.running.append(t)
+        if items:
+            self._say_live_while_running()
         now = self.clock()
         if self.feed_now or self._fed_at is None or now - self._fed_at >= FEED_SECONDS:
             self.feed_now = False
@@ -1601,9 +1787,16 @@ class OwnConnector:
         return len(items)
 
     def forever(self) -> None:
+        """A round the moment the core has new work for it (wakes.py), a turn ended or Hermes took a message,
+        and every few seconds whatever happens; every half minute while the core says to wait."""
+        Waker(lambda body: self.core.post("wait", body), [self.wakeup], WAIT_SECONDS).start()
         while True:
             n = self.once()
-            time.sleep(POLL_SECONDS * (6 if n < 0 else 1))
+            if n < 0:
+                time.sleep(POLL_SECONDS * 6)
+                continue
+            self.wakeup.wait(POLL_SECONDS)
+            self.wakeup.clear()
 
 
 def main(argv: list[str]) -> int:

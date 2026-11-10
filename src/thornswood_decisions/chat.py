@@ -57,6 +57,9 @@ from . import alerts
 from .auth import Principal
 from .core import KEPT_HEAD, DecisionCore
 from .feeds import Feeds, room_events
+from . import live_turns
+from .live_turns import LIVE
+from .wakes import BOTS_GW, WAKES
 from .own import DOING_STATES, PAGE_TEXT, PAGES, TOOL_NAME, _page_mid, clean_page, fetch_page, page_kind, SESSION_ID
 from .reactions import Reactions
 from .reactions import emoji as _emoji
@@ -86,7 +89,7 @@ ROOM_PAGE = 50
 ROOM_KINDS = ("message.user", "message.member")
 DOING_ID = re.compile(r"^msg_[A-Za-z0-9_-]{1,40}$")
 DOING_STALE = timedelta(seconds=60)  # the connector says it at least every 20 s while a turn runs
-PAGES_GW = "bots"   # the Bots' gateway, in the page store and the reactions beside Patrick's own two
+PAGES_GW = BOTS_GW  # the Bots' gateway, in the page store and the reactions beside Patrick's own two
 # Each Bot's gateway state, as the Bots' connector last read it from Hermes (room_send.py op states), for the
 # phone's online dots. Held in the core's memory only, like the pages: it is what is true now, and after a
 # restart the phone says "not heard from" until the connector's next report, half a minute at most.
@@ -284,6 +287,7 @@ class Chat:
             db.execute("INSERT INTO chat_messages(id, workspace_id, target, text, send_key, principal_id, device_id, "
                        "status, created_at, updated_at, session_id) VALUES(?,?,?,?,?,?,?,'queued',?,?,?)",
                        (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now, session))
+            self.s.wake(p.workspace_id, PAGES_GW)
             self.s.event(db, p.workspace_id, "chat.queued", mid, "patrick", {"target": target, "device": p.device_id}
                          | ({"session": session} if session else {}))
             out = {"message_id": mid, "target": target, "status": "queued", "created_at": now} \
@@ -432,6 +436,24 @@ class Chat:
         return {"as_of": snap["as_of"], "bots": out, "rooms_as_of": room_snap["as_of"], "rooms": rooms,
                 "room": bool(rooms)}
 
+    def wait(self, workspace_id: str, token: str | None, body) -> dict:
+        """The Bots' connector, waiting for new work (wakes.py): the number once it changes, or after
+        `seconds`. Only a number, so it is answered whatever the flags say."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        return WAKES.wait(workspace_id, PAGES_GW, body.get("after"), body.get("seconds"))
+
+    def turn_live(self, p: Principal, message_id, after=None, wait=None) -> dict:
+        """What the turn answering one of his messages (to a Bot, or to his own Hermes) shows now, as Desktop
+        draws it (live_turns.py): answered as soon as it differs from the parts numbered `after`, or after
+        `wait` seconds. The open chat asks again with each answer, so the turn shows as it happens."""
+        self._patrick(p)
+        if not isinstance(message_id, str) or not live_turns.TURN_ID.match(message_id) or not self.s.db.execute(
+                "SELECT 1 FROM chat_messages WHERE id = ? AND workspace_id = ? UNION ALL "
+                "SELECT 1 FROM own_messages WHERE id = ? AND workspace_id = ?",
+                (message_id, p.workspace_id, message_id, p.workspace_id)).fetchone():
+            raise CoreError(404, "no_item", "no such message")
+        return LIVE.wait(p.workspace_id, message_id, after, wait, self.s.clock())
+
     # ── each Bot's gateway, for the phone's dots ──────────────────────────
 
     def live(self, workspace_id: str, token: str | None, body) -> dict:
@@ -542,8 +564,8 @@ class Chat:
 
     def claim(self, workspace_id: str, token: str | None, limit: int = MAX_CLAIM) -> dict:
         """Lease the oldest waiting message for each Bot (and the room) that has nothing in flight, at most `limit`."""
-        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_CLAIM:
-            raise CoreError(400, "bad_limit", f"the limit is 1 to {MAX_CLAIM}")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 0 <= limit <= MAX_CLAIM:
+            raise CoreError(400, "bad_limit", f"the limit is 0 to {MAX_CLAIM}")
         Feeds(self.s).check_token(workspace_id, "connector", token)
         if not self.s.flag(workspace_id, "connector_effects"):
             raise CoreError(423, "connector_effects_off", "the connector does nothing while connector_effects is off")
@@ -694,6 +716,21 @@ class Chat:
             raise CoreError(400, "bad_turns", "turns is a list of what each running turn is doing")
         return {"kept": TURNS.put(workspace_id, turns, self.s.clock())}
 
+    def turns(self, workspace_id: str, token: str | None, body) -> dict:
+        """What each Bot Chat turn running now shows, as Desktop draws it (live_turns.py), from the Bots'
+        connector each time it changes. Only his own messages' turns. Reading only (nothing reaches Hermes),
+        so it is taken while mobile_read is on, whatever connector_effects says."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not self.s.flag(workspace_id, "mobile_read"):
+            raise CoreError(423, "mobile_read_off", "the phone reads nothing while mobile_read is off")
+        turns = body.get("turns") if isinstance(body, dict) else None
+        ids = [t.get("id") for t in turns if isinstance(t, dict)] if isinstance(turns, list) else []
+        if any(not isinstance(i, str) or not DOING_ID.match(i) for i in ids) or (ids and self.s.db.execute(
+                f"SELECT count(*) FROM chat_messages WHERE workspace_id = ? AND id IN ({','.join('?' * len(ids))})",
+                (workspace_id, *ids)).fetchone()[0] != len(set(ids))):
+            raise CoreError(400, "bad_live", "each turn is one of his messages to a Bot")
+        return {"kept": LIVE.put(workspace_id, turns, self.s.clock())}
+
     def result(self, workspace_id: str, token: str | None, item_id: str, outcome: str, ref: str = "",
                reason: str = "") -> dict:
         Feeds(self.s).check_token(workspace_id, "connector", token)
@@ -714,6 +751,7 @@ class Chat:
             # The turn is over and the Bot's answer is in its Bot Chat or the session (or the message in the
             # room): that chat's newest page is read again, not shown from memory for up to PAGE_FRESH without it.
             PAGES.forget(workspace_id, PAGES_GW, ("bot", "bot_session", "room"), row["target"])
+            LIVE.done(workspace_id, item_id)
             with self.s.tx() as db:
                 db.execute("UPDATE chat_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ? "
                            "WHERE id = ?", (state, reason or None, self.s.now(), item_id))
