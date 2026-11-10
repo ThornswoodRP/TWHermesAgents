@@ -324,6 +324,7 @@ def one_new_chats(o):
 # sign-in model now, and a local model it can move to.
 CTL = {"model": "gpt-5.5", "provider": "openai-codex", "reasoning": "medium", "levels": ["low", "medium", "high", "xhigh"],
        "yolo": False, "busy": "steer", "approvals": "manual",
+       "messages": 42, "started": 1794251520.0, "folder": "/home/patrick/thornswood",
        "offered": [{"provider": "openai-codex", "model": "gpt-5.5", "name": "OpenAI Codex", "why": "subscription"},
                    {"provider": "openai-codex", "model": "gpt-5.5-mini", "name": "OpenAI Codex", "why": "subscription"},
                    {"provider": "llamacpp", "model": "qwen3-8b.gguf", "name": "Local", "why": "local"}],

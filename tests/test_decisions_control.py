@@ -107,7 +107,8 @@ STUB_CLIENT = textwrap.dedent('''
                 return {"session_id": params["session_id"], "revision": STATE["revision"],
                         "execution_generation": STATE["generation"]}
             if method == "session.info":
-                return {"model": STATE["model"], "provider": STATE["provider"], "source": "tui", "lazy": False}
+                return {"model": STATE["model"], "provider": STATE["provider"], "source": "tui", "lazy": False,
+                        "cwd": "/home/patrick/thornswood"}
             if method == "config.get":
                 return {"reasoning": {"value": STATE["effort"], "display": "show"},
                         "busy": {"key": "busy", "value": STATE["busy"], "scope": "session"},
@@ -167,6 +168,18 @@ STUB_MUTATIONS = textwrap.dedent('''
             return got
 ''')
 
+# hermes_state_registry.py acquire: Hermes's own SessionDB, as far as get_session's row goes.
+STUB_REGISTRY = textwrap.dedent('''
+    class _DB:
+        def get_session(self, sid):
+            if sid != "20261101_201500_ab12cd":
+                return None
+            return {"id": sid, "message_count": 42, "started_at": 1794251520.0}
+    def acquire(path=None):
+        return _DB()
+    def release_or_close(db):
+        pass
+''')
 STUB_AUTH = textwrap.dedent('''
     from types import SimpleNamespace
     PROVIDER_REGISTRY = {"openai-codex": SimpleNamespace(auth_type="oauth_external"),
@@ -222,7 +235,7 @@ class Helper(unittest.TestCase):
                            ("hermes_cli/gateway_mutations.py", STUB_MUTATIONS), ("hermes_cli/auth.py", STUB_AUTH),
                            ("hermes_cli/runtime_provider.py", STUB_RUNTIME_PROVIDER),
                            ("agent/anthropic_credentials.py", STUB_ANTHROPIC), ("agent/reasoning_effort.py", STUB_EFFORT),
-                           ("hermes_constants.py", STUB_CONSTANTS)):
+                           ("hermes_constants.py", STUB_CONSTANTS), ("hermes_state_registry.py", STUB_REGISTRY)):
             (src / name).write_text(text, encoding="utf-8")
         self.src, self.root, self.log = src, self.dir / "hermes", self.dir / "rpc.jsonl"
         self.root.mkdir()
@@ -250,6 +263,15 @@ class Helper(unittest.TestCase):
                          ["session.resume", "session.info", "config.get", "config.get", "config.get", "config.get",
                           "model.options",
                           "session.usage", "session.context_breakdown"])
+
+    def test_the_read_says_how_big_the_chat_is_when_it_started_and_its_folder(self):
+        _, out = self.run_helper({"session_id": SID})
+        st = out["state"]
+        self.assertEqual((st["messages"], st["started"], st["folder"]), (42, 1794251520.0, "/home/patrick/thornswood"))
+        clean = own_control.clean_state(st)
+        self.assertEqual((clean["messages"], clean["started"], clean["folder"]), (42, 1794251520.0, "/home/patrick/thornswood"))
+        odd = own_control.clean_state({"messages": -3, "started": "yesterday", "folder": 7})
+        self.assertEqual((odd["messages"], odd["started"], odd["folder"]), (None, None, None))
 
     def test_the_read_says_how_full_the_context_is_and_the_tokens_used(self):
         _, out = self.run_helper({"session_id": SID})

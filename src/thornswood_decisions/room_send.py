@@ -445,6 +445,19 @@ def _offered(options: dict) -> list:
     return out[:80]
 
 
+def _chat_facts(sid: str) -> dict:
+    """The chat's size and start, from Hermes's own SessionDB row (message_count, started_at), as Desktop's
+    session list shows them; nothing when Hermes has no row for it."""
+    from hermes_state_registry import acquire, release_or_close
+
+    db = acquire(None)
+    try:
+        row = db.get_session(sid) or {}
+    finally:
+        release_or_close(db)
+    return {"messages": row.get("message_count"), "started": row.get("started_at")}
+
+
 async def _control_read(client, sid: str) -> dict:
     """What Hermes holds for one chat, read the way Desktop's details and pickers read it."""
     from agent.reasoning_effort import route_supported_efforts
@@ -460,7 +473,8 @@ async def _control_read(client, sid: str) -> dict:
     provider = info.get("provider") or options.get("provider")
     return {"model": model, "provider": provider, "reasoning": reasoning,
             "levels": list(route_supported_efforts(provider, model)), "yolo": yolo == "1", "busy": busy,
-            "approvals": approvals, "offered": await asyncio.to_thread(_offered, options), **await _usage_read(client, sid)}
+            "approvals": approvals, "folder": info.get("cwd"), **await asyncio.to_thread(_chat_facts, sid),
+            "offered": await asyncio.to_thread(_offered, options), **await _usage_read(client, sid)}
 
 
 USAGE_KEYS = ("input", "output", "total", "calls", "compressions")

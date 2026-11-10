@@ -3123,6 +3123,8 @@ async function detailsPart(gw, sid, close, again) {
       st.busy ? el('p', { 'data-detail': 'busy' }, `Messages sent while it works ${BUSY_WORDS[st.busy]}.`) : null,
       st.approvals === 'off' ? el('p', { class: 'warn', 'data-detail': 'approvals-off' },
         `${name}'s approvals are off: commands run without asking you, in every chat.`) : null,
+      el('p', { 'data-detail': 'this-chat' }, chatSizeWords(st)),
+      st.folder ? el('p', { 'data-detail': 'folder' }, 'Folder: ' + st.folder) : null,
       el('p', { 'data-detail': 'context' }, contextWords(st)),
       el('p', { 'data-detail': 'tokens' }, tokenWords(st)))]
 }
@@ -3133,6 +3135,12 @@ function bigNumber(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M'
   if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K'
   return String(n)
+}
+// "This chat: 42 messages, started 9 Nov 2026, 3:12 PM", from Hermes's own row for it.
+function chatSizeWords(st) {
+  const n = Number.isInteger(st.messages) ? `${st.messages.toLocaleString()} message${st.messages === 1 ? '' : 's'}` : null
+  const at = typeof st.started === 'number' ? 'started ' + when(new Date(st.started * 1000).toISOString()) : null
+  return 'This chat: ' + ([n, at].filter(Boolean).join(', ') || 'not known yet') + '.'
 }
 function contextWords(st) {
   const c = st.context

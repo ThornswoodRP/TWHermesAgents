@@ -21,9 +21,11 @@ Only models one of his sign-ins (his Claude login, ChatGPT), a free model or a l
 read did not offer; and the connector checks the pick again against Hermes's own list just before switching,
 so a hand-made request cannot move a chat to a billed model.
 
-How full the chat's context is and the tokens it used are shown too, read as Desktop's context meter reads
-them (session.context_breakdown and session.usage). Nothing here is kept on disk: a read lives 30 seconds and a change at most 2 minutes, in memory. A core
-restart drops a change in flight, and the pane then shows what Hermes really holds; a change is never shown
+How many messages the chat holds, when it started (Hermes's own sessions row) and the folder it works in
+(session.info cwd) are shown, as Desktop's details and footer show them. How full the chat's context is and
+the tokens it used are shown too, read as Desktop's context meter reads them (session.context_breakdown and
+session.usage). Nothing here is kept on disk: a read lives 30 seconds and a change at most 2 minutes, in
+memory. A core restart drops a change in flight, and the pane then shows what Hermes really holds; a change is never shown
 as made until the connector read it back. A change needs a passkey sign-in from the last 30 minutes, as a
 message to his own Hermes does.
 """
@@ -75,7 +77,14 @@ def clean_state(raw) -> dict:
             "levels": levels, "yolo": raw.get("yolo") is True,
             "busy": raw.get("busy") if raw.get("busy") in BUSY else None,
             "approvals": raw.get("approvals") if raw.get("approvals") in APPROVALS else None, "offered": offered,
+            "messages": _count(raw.get("messages")), "started": _when(raw.get("started")),
+            "folder": _text(raw.get("folder"), 300),
             **_use(raw)}
+
+
+def _when(v) -> float | None:
+    """A time Hermes keeps as seconds since 1970, if it is one."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 10 ** 11 else None
 
 
 def _count(v) -> int | None:

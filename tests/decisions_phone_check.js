@@ -1487,6 +1487,9 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if ((await details.locator('select[data-detail="reasoning"]').inputValue()) !== 'medium') throw new Error('thinking is not medium')
     const use = [await details.locator('[data-detail="context"]').textContent(), await details.locator('[data-detail="tokens"]').textContent()]
     if (use.join(' | ') !== 'Context: about 41% full, 82K of 200K tokens. | Tokens used: 12K in, 4.1K out, over 3 calls, compressed 1 time.') throw new Error(use.join(' | '))
+    const size = await details.locator('[data-detail="this-chat"]').textContent()
+    if (!/^This chat: 42 messages, started .*2026.*\.$/.test(size)) throw new Error(size)
+    if ((await details.locator('[data-detail="folder"]').textContent()) !== 'Folder: /home/patrick/thornswood') throw new Error('no folder')
     const wide = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
     if (wide) throw new Error('the sheet is wider than the phone')
   })
