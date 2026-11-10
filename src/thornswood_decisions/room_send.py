@@ -4,7 +4,7 @@ The connector runs this with Hermes's own Python (the interpreter the `hermes`
 command starts), as the Bots' `hermes` user, so it can use Hermes's client the
 way Desktop does (contracts.json "room"):
 
-    <hermes python> -I room_send.py < {"op": "send", "room_id", "event_id", "text",
+    <hermes python> -I room_send.py < {"op": "send", "room_id", "event_id", "text", "thread_id"?,
                                        "files": [{"id", "name", "mime", "data_base64"}]?}
     <hermes python> -I room_send.py < {"op": "ready", "profile": "<bot or empty>", "name": "<optional>"}
     <hermes python> -I room_send.py < {"op": "states", "profiles": ["<bot>", ...]}
@@ -634,9 +634,12 @@ async def _send(endpoint, req: dict) -> dict:
             except GatewayRPCError as exc:
                 # The room's store refused a file: nothing was sent, and no retry changes that.
                 return {"sent": False, "reason": f"the room did not take a file ({exc})"}
+            # Into the thread he replied in (TWHermesAgents #108), as Desktop's Reply in thread sends it; else a
+            # thread of its own, named by the message's own event id, as Desktop starts one (canonical-group-send.ts).
+            thread = req.get("thread_id") or req["event_id"]
             try:
                 out = await client.rpc("groups.send", room_id=req["room_id"], event_id=req["event_id"],
-                                       payload={"text": req["text"], "thread_id": req["event_id"]}
+                                       payload={"text": req["text"], "thread_id": thread}
                                        | ({"attachments": manifest} if manifest else {}))
             except GatewayRPCError as exc:
                 return {"sent": False, "reason": f"the gateway refused it ({exc})"}

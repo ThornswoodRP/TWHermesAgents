@@ -28,6 +28,10 @@ from pathlib import Path
 
 CORE = "http://127.0.0.1:9135/api/v1"
 ROOM_KINDS = ("message.user", "message.member")
+# A room's threads (TWHermesAgents #108): Hermes keeps each message's thread in its payload's thread_id
+# (gateway/hosted_room_discussion.py), and a thread is the messages that share one. The newest this many,
+# by their last message, go with each room's snapshot.
+ROOM_THREADS = 20
 BOT_CHAT_TITLE = "Bot Chat"
 BOT_MESSAGES = 40
 
@@ -44,49 +48,76 @@ def _iso(epoch) -> str:
     return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
 
 
+def _event(r) -> dict | None:
+    """One room message as the phone shows it, with its thread; None when Hermes's row cannot be read."""
+    try:
+        actor = json.loads(r["actor_json"])
+        payload = json.loads(r["payload_json"])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(actor, dict) or not isinstance(payload, dict):
+        return None
+    name = actor.get("display_name") or actor.get("profile") or actor.get("id") or ""
+    text, thread = payload.get("text"), payload.get("thread_id")
+    return {"seq": int(r["seq"]), "event_id": str(r["event_id"]), "kind": r["kind"], "actor": str(name),
+            "text": text if isinstance(text, str) else "", "at": _iso(r["created_at"]),
+            "thread": thread if isinstance(thread, str) else ""}
+
+
+def room_threads(con: sqlite3.Connection, room_id: str, limit: int = ROOM_THREADS) -> list[dict]:
+    """The room's newest threads by their last message: each one's id, how many messages it has, who started it
+    and with what words (its first message), and when its last message came."""
+    rows = con.execute(
+        "SELECT json_extract(payload_json, '$.thread_id') AS thread, count(*) AS n, min(seq) AS first, "
+        "max(seq) AS last FROM hosted_room_events WHERE room_id = ? AND kind IN (?, ?) "
+        "AND json_valid(payload_json) AND json_type(payload_json, '$.thread_id') = 'text' "
+        "GROUP BY thread ORDER BY last DESC LIMIT ?", (room_id, *ROOM_KINDS, limit)).fetchall()
+    out = []
+    for t in rows:
+        ends = {r["seq"]: _event(r) for r in con.execute(
+            "SELECT seq, event_id, kind, actor_json, payload_json, created_at FROM hosted_room_events "
+            "WHERE room_id = ? AND seq IN (?, ?)", (room_id, t["first"], t["last"])).fetchall()}
+        first, last = ends.get(t["first"]), ends.get(t["last"])
+        if first is None or last is None:
+            continue
+        out.append({"thread": t["thread"], "count": int(t["n"]), "by": first["actor"], "title": first["text"][:200],
+                    "last_seq": int(t["last"]), "at": last["at"]})
+    return out
+
+
 def room_snapshot(state_db: Path, room_id: str, now: datetime, limit: int = 200) -> dict:
     con = _ro(state_db)
     try:
         rows = con.execute("SELECT seq, event_id, kind, actor_json, payload_json, created_at FROM hosted_room_events "
                            "WHERE room_id = ? AND kind IN (?, ?) ORDER BY seq DESC LIMIT ?",
                            (room_id, *ROOM_KINDS, limit)).fetchall()
+        threads = room_threads(con, room_id)
     finally:
         con.close()
-    events = []
-    for r in reversed(rows):
-        try:
-            actor = json.loads(r["actor_json"])
-            payload = json.loads(r["payload_json"])
-        except json.JSONDecodeError:
-            continue
-        name = actor.get("display_name") or actor.get("profile") or actor.get("id") or ""
-        text = payload.get("text") if isinstance(payload, dict) else ""
-        events.append({"seq": int(r["seq"]), "event_id": str(r["event_id"]), "kind": r["kind"], "actor": str(name),
-                       "text": text if isinstance(text, str) else "", "at": _iso(r["created_at"])})
-    return {"source_time": now.isoformat(), "room_id": room_id, "events": events}
+    events = [e for e in (_event(r) for r in reversed(rows)) if e is not None]
+    return {"source_time": now.isoformat(), "room_id": room_id, "events": events, "threads": threads}
 
 
-def room_page(state_db: Path, room_id: str, before: int | None, n: int = 50) -> dict:
+def room_page(state_db: Path, room_id: str, before: int | None, n: int = 50, thread: str | None = None) -> dict:
     """One page of a room for the phone's full history: the newest `n` messages before the room's sequence
-    number `before`, oldest first, the same events the room feed sends."""
+    number `before`, oldest first, the same events the room feed sends. With `thread`, only that thread's
+    messages (#108), and the newest page says the thread's own count and start, as the room's list of threads
+    does."""
     con = _ro(state_db)
     try:
         rows = con.execute("SELECT seq, event_id, kind, actor_json, payload_json, created_at FROM hosted_room_events "
-                           "WHERE room_id = ? AND kind IN (?, ?) AND (? IS NULL OR seq < ?) ORDER BY seq DESC LIMIT ?",
-                           (room_id, *ROOM_KINDS, before, before, n + 1)).fetchall()
+                           "WHERE room_id = ? AND kind IN (?, ?) AND (? IS NULL OR seq < ?) "
+                           "AND (? IS NULL OR (json_valid(payload_json) AND json_extract(payload_json, '$.thread_id') = ?)) "
+                           "ORDER BY seq DESC LIMIT ?",
+                           (room_id, *ROOM_KINDS, before, before, thread, thread, n + 1)).fetchall()
     finally:
         con.close()
     events = []
     for r in reversed(rows[:n]):
-        try:
-            actor = json.loads(r["actor_json"])
-            payload = json.loads(r["payload_json"])
-        except json.JSONDecodeError:
-            continue
-        name = actor.get("display_name") or actor.get("profile") or actor.get("id") or ""
-        text = payload.get("text") if isinstance(payload, dict) else ""
-        events.append({"seq": int(r["seq"]), "kind": r["kind"], "actor": str(name),
-                       "text": text if isinstance(text, str) else "", "at": _iso(r["created_at"])})
+        e = _event(r)
+        if e is not None:
+            del e["event_id"]
+            events.append(e)
     return {"events": events, "more": len(rows) > n}
 
 
@@ -95,7 +126,7 @@ def rooms_snapshot(state_db: Path, room_ids: list[str], now: datetime) -> dict:
     limit = max(25, 200 // max(1, len(room_ids)))
     rooms = [room_snapshot(state_db, r, now, limit) for r in room_ids]
     return {"source_time": now.isoformat(),
-            "rooms": [{"room_id": r["room_id"], "events": r["events"]} for r in rooms]}
+            "rooms": [{"room_id": r["room_id"], "events": r["events"], "threads": r["threads"]} for r in rooms]}
 
 
 def _text(content) -> str:

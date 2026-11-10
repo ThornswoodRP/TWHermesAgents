@@ -193,5 +193,13 @@
     "edit_source": "apps/desktop/src/app/session/hooks/use-prompt-actions/rewind.ts:192 and :266; hermes_cli/gateway_chat_commands.py:76 _rewind",
     "branch": "Hermes's session.mutate operation branch with payload {through_message_id: the row id of the last message kept}: a new chat (model_config _branched_from the parent) holding copies of every active row up to and with that one, titled the parent's next lineage title ('x #2'); the chat itself is left as it is. The receipt names the new chat (branched_session_id), which the gateway attaches at once. hermes chat's /branch sends the same operation without a boundary (the whole chat).",
     "branch_source": "hermes_state_mutations.py:58 _valid_branch_payload; hermes_state_mutation_branch.py:52 branch_in_transaction; gateway/session_controls.py:841 mutate (attaches branched_session_id); hermes_cli/gateway_chat_view.py:390 /branch"
+  },
+  "room_threads": {
+    "asked": "TWHermesAgents #108 (10 Nov, from the mock-up): a room shows its threads with their counts, opening one shows its messages, and a reply from a message's menu goes into that message's thread.",
+    "thread": "Every room message (message.user and message.member) carries its thread in payload.thread_id, an identifier ^[A-Za-z0-9][A-Za-z0-9._:-]*$ of at most 128 characters. A thread is the messages that share one. A message of Patrick's that starts a thread names it by its own client event id, as Desktop's send does; a reply in a thread sends that thread's id.",
+    "thread_source": "gateway/hosted_room_discussion.py:70 _USER_PAYLOAD_FIELDS, :72 _TURN_COORDINATE_FIELDS (thread_id on member messages), :227 validate_user_payload; gateway/hosted_rooms_common.py:19 IDENTIFIER_RE, :23 identifier; gateway/hosted_room_driver.py:29 MAX_IDENTIFIER_CHARS",
+    "desktop": "Desktop's Reply on a room message continues that message's thread (canonical-group-history.tsx ReplyAction passes payload.thread_id), and a new message without one starts a thread named by its own event id.",
+    "desktop_source": "apps/desktop/src/plugins/hermes-bots/canonical-group-history.tsx:245 canReply, :278 ReplyAction; canonical-group-send.ts:104 (thread_id ?? eventId); canonical-group-workspace.tsx:293 (reply thread on send)",
+    "read": "feed_reader.py reads each thread's count, first and last message from hosted_room_events by json_extract(payload_json, '$.thread_id'), read only, and a page of one thread by the same."
   }
 }

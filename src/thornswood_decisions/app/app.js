@@ -1912,6 +1912,8 @@ function messageSheet(m) {
       m.react && mineNow ? el('button', { class: 'secondary', type: 'button', onclick: () => choose(null) },
         'Take my reaction off') : null,
       m.reply ? el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); m.reply() } }, 'Reply') : null,
+      m.threadReply ? el('button', { class: 'secondary', type: 'button', 'data-thread-reply': '',
+        onclick: () => { closeSheet(); m.threadReply() } }, 'Reply in this thread') : null,
       m.retry ? el('button', { class: 'secondary', type: 'button', 'data-rewind': 'retry', onclick: () => { closeSheet(); m.retry() } },
         'Retry') : null,
       m.edit ? el('button', { class: 'secondary', type: 'button', 'data-rewind': 'edit', onclick: () => { closeSheet(); m.edit() } },
@@ -3542,10 +3544,50 @@ async function roomsView(into = 'view') {
 // newest page from Hermes itself takes its place, with older pages behind it.
 // With `sid`, one session of the Bot instead (the one a Board row opens): the
 // feed has no copy of it, so it shows as Hermes's first page comes.
-async function chatView(target, tab, sid) {
+// A room's threads (TWHermesAgents #108, the mock-up's Workbench room): Hermes keeps each room message in a
+// thread (its payload's thread_id), and a message of his that names none starts one of its own. Along the top
+// of a room go All and its newest threads, each with how many messages it has, from the room feed (once a
+// minute); one opens that thread, read from Hermes page by page like the room itself, and what is sent there
+// goes into it. "Reply in this thread" on a message's menu opens its thread with the box ready.
+let focusThreadBox = false
+
+function threadStrip(v, open) {
+  const list = v.threads || []
+  if (!list.length && !open) return null
+  const chip = (label, count, path, on, id) => el('button', { class: 'thread-chip', type: 'button', 'data-thread': id,
+    'aria-current': on ? 'true' : null, onclick: () => go(path) },
+  el('span', { class: 'thread-title' }, label), count == null ? null : el('span', { class: 'thread-count' }, String(count)))
+  return el('nav', { class: 'threads', 'aria-label': 'Threads in ' + v.name },
+    chip('All', null, '/m/rooms/' + v.target, !open, ''),
+    list.map(t => chip(snippet(t.title || 'Thread', 1), t.count, threadPath(v.target, t.thread), t.thread === open,
+      t.thread)))
+}
+
+function threadPath(room, thread) {
+  return '/m/rooms/' + room + '/t/' + encodeURIComponent(thread)
+}
+
+// Each room message with a thread offers "Reply in this thread": its thread opens with the box ready, or in
+// that thread already, the box takes the focus.
+function offerThreadReplies(items, room, open) {
+  for (const it of items) {
+    if (!it.thread) continue
+    it.threadReply = () => {
+      if (it.thread === open) {
+        const box = document.querySelector('#view .dock .composer textarea')
+        if (box) box.focus()
+        return
+      }
+      focusThreadBox = true
+      go(threadPath(room, it.thread))
+    }
+  }
+}
+
+async function chatView(target, tab, sid, thread) {
   setTab(tab)
   const seqNow = ++viewSeq
-  const inSession = sid ? '?session=' + encodeURIComponent(sid) : ''
+  const inSession = sid ? '?session=' + encodeURIComponent(sid) : thread ? '?thread=' + encodeURIComponent(thread) : ''
   const [r, w] = await Promise.all([call('GET', '/chat/' + encodeURIComponent(target) + inSession),
     sid ? call('GET', '/work') : null])
   if (refused(r)) return
@@ -3554,12 +3596,15 @@ async function chatView(target, tab, sid) {
   // A Bot's chat opened here is read up to now (#103, botUnread).
   if (!room && !sid && seqNow === viewSeq) seeBot(v.target, new Date().toISOString())
   const name = room ? v.name : (NAMES[target] || target)
-  const key = sid ? `session:${v.target}:${sid}` : 'chat:' + v.target
+  const key = sid ? `session:${v.target}:${sid}` : thread ? `thread:${v.target}:${thread}` : 'chat:' + v.target
+  // A room's threads (#108): the newest ones along the top, each with its count, and the one open, if any.
+  const inThread = m => !thread || (m.thread || '') === thread
+  const shownThread = thread ? (v.threads || []).find(x => x.thread === thread) : null
   // The Bot's own turn in this session, from the Board, while it runs.
   const work = sid && w && w.status === 200 && w.body.live && w.body.work && Array.isArray(w.body.work.doing)
     ? w.body.work.doing.find(d => d.bot === v.target && d.session_id === sid) : null
   const pages = `/chat/${encodeURIComponent(v.target)}/messages` + inSession
-  const more = pages + (sid ? '&' : '?')
+  const more = pages + (inSession ? '&' : '?')
   const t = threads[key] || (threads[key] = kept(key) || { newest: null, older: [], olderMore: false, note: '', error: null })
   const idOf = m => room ? m.seq : m.mid
   const status = el('p', { class: 'warn', role: 'status' })
@@ -3569,7 +3614,8 @@ async function chatView(target, tab, sid) {
     }
     if (!t.newest || t.newest.gone) {
       // Before the first page, or a Bot with no Bot Chat yet: what the feed last sent.
-      return { notes: [], items: v.history.map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at, text: m.text, mid: 'feed' + k,
+      return { notes: [], items: v.history.filter(inThread).map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at,
+        text: m.text, mid: 'feed' + k, thread: m.thread,
         noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from Hermes.' })), keyed: false }
     }
     const seen = new Set()
@@ -3595,7 +3641,8 @@ async function chatView(target, tab, sid) {
     const noRoom = 'A room has no reactions in Hermes, so a message here takes none.'
     const noSession = `A reaction goes on ${name}'s Bot Chat only.`
     const items = raw.map(m => room
-      ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom }
+      ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom,
+          thread: m.thread }
       : sid ? { mine: m.role === 'user', user: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
         noReact: noSession, tools: m.tools, toolsMore: m.tools_more }
         : { mine: m.role === 'user', user: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
@@ -3625,23 +3672,29 @@ async function chatView(target, tab, sid) {
     const h = history()
     // His own Bot Chats and Board sessions only: a room's messages are not Hermes's turns to take back.
     if (!room && v.can_send && h.keyed) offerRewinds(h.items, rewindChat)
+    if (room && v.can_send) offerThreadReplies(h.items, v.target, thread)
     const branched = branchMade(v.rewinds)
     if (branched && seqNow === viewSeq) return openSession(branched)
-    const items = h.items.concat(pendingItems(v.mine, readAt, room ? null : name))
+    const items = h.items.concat(pendingItems(v.mine.filter(inThread), readAt, room ? null : name))
     const top = [
       sid ? chatBar(() => go('/m/board'), 'Board', name, work && work.title ? work.title : 'Session', v.target, name,
         null, botLive(v.live))
+        : thread ? chatBar(() => go('/m/rooms/' + v.target), 'Back to ' + name, shownThread && shownThread.title
+          ? snippet(shownThread.title, 1) : 'Thread', name)
         : chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, undefined,
           room ? null : v.target, name, null, room ? null : botLive(v.live)),
+      room ? threadStrip(v, thread) : null,
       room ? null : rewindLine(v.rewinds, name, openSession),
       h.notes
     ]
     if (sid && !t.newest) top.push(el('p', { class: 'quiet', role: 'status' }, 'Reading this session from Hermes...'))
     else if (!items.length && !(sid && t.newest && t.newest.gone)) top.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
     const dock = v.can_send
-      ? [chatComposer(sid ? key : target, 'Message to ' + name, 'Send to ' + name,
+      ? [chatComposer(sid || thread ? key : target, thread ? 'Reply in this thread' : 'Message to ' + name,
+          thread ? 'Send to this thread' : 'Send to ' + name,
           (text, k, reply, files, answer, edit) => call('POST', '/chat/' + encodeURIComponent(target),
             { text, idempotency_key: k, ...(answer ? { answer } : {}), ...(sid ? { session: sid } : {}),
+              ...(thread ? { thread } : {}),
               ...(files.length ? { attachments: files } : {}),
               ...(edit ? { rewind: 'edit', rewind_to: edit.mid } : {}) })
             .then(s => { if (edit && s.status === 200) rewindChat.taken(); return s }),
@@ -3654,6 +3707,14 @@ async function chatView(target, tab, sid) {
       room ? null : chatCards(v.cards, location.pathname)]
     if (seqNow === viewSeq) {
       showChat(key, top, list, dock, items)
+      // The open thread's chip in sight on a narrow screen, without moving the page.
+      const onChip = thread && document.querySelector('#view .threads .thread-chip[aria-current="true"]')
+      if (onChip) onChip.parentElement.scrollLeft = Math.max(0, onChip.offsetLeft - onChip.parentElement.offsetLeft - 16)
+      if (focusThreadBox && thread) {
+        focusThreadBox = false
+        const box = document.querySelector('#view .dock .composer textarea')
+        if (box) box.focus()
+      }
       if (turn && !room) watchLive(turn.id, seqNow)
       const waits = room ? null : turn || v.mine.find(m => m.status === 'queued')
       if (waits) watchTurn('/chat/' + encodeURIComponent(v.target) + inSession, seqNow, waits.id, name, waits.status)
@@ -4627,7 +4688,7 @@ function pickView(path) {
 function markCurrent(path) {
   const m = path.match(/^hermes\/(?:me|one)\/(.+)$/) || []
   const bot = path.match(/^bots\/(.+)$/) || (path === 'bramble' ? [0, 'bramble'] : [])
-  const room = path.match(/^rooms\/(.+)$/) || []
+  const room = path.match(/^rooms\/([^/]+)/) || []
   for (const row of document.querySelectorAll('#list .row')) {
     const on = (m[1] && row.dataset.chat === m[1]) || (bot[1] && row.dataset.bot === bot[1]) ||
       (room[1] && row.dataset.room === room[1])
@@ -4681,6 +4742,9 @@ function mainView(path) {
   if (session) return botSessionView(session[1], session[2])
   const room = path.match(/^rooms\/([A-Za-z0-9_-]{1,64})$/)
   if (room) return chatView(room[1], 'rooms')
+  // One thread of a room (#108), by Hermes's own thread id.
+  const thread = path.match(/^rooms\/([A-Za-z0-9_-]{1,64})\/t\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/)
+  if (thread) return chatView(thread[1], 'rooms', null, thread[2])
   if (path === 'room') return chatView('room', 'rooms')
   if (path === 'rooms') return roomsView()
   if (path === 'bramble') return chatView('bramble', 'bots')

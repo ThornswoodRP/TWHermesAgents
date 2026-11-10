@@ -376,7 +376,7 @@ class Api:
             return 200, Chat(core.s).turn_live(p, route[1], query.get("after"), query.get("wait"))
         if method == "GET" and len(route) == 3 and route[0] == "chat" and route[2] == "messages":
             return 200, Chat(core.s).page(p, route[1], before=query.get("before"), wait=query.get("wait"),
-                                          session=query.get("session"))
+                                          session=query.get("session"), thread=query.get("thread"))
         if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "react":
             return 200, Chat(core.s).react(p, route[1], data.get("message_id"), data.get("emoji"))
         if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "attach":
@@ -391,7 +391,8 @@ class Api:
                 return 200, Chat(core.s).view(p, route[1], session=query.get("session"))
             return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"), data.get("answer"),
                                           session=data.get("session"), attachments=data.get("attachments"),
-                                          rewind=data.get("rewind"), rewind_to=data.get("rewind_to"))
+                                          rewind=data.get("rewind"), rewind_to=data.get("rewind_to"),
+                                          thread=data.get("thread"))
         if method == "GET" and route == ["own"]:
             return 200, OwnChat(core.s).summary(p)
         if method == "GET" and len(route) == 2 and route[0] == "own":
