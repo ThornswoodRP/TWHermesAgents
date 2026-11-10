@@ -1500,6 +1500,28 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (model.join() !== 'llamacpp,qwen3-8b.gguf') throw new Error('the model is ' + model)
     if ((await details.locator('select[data-detail="reasoning"]').inputValue()) !== 'high') throw new Error('thinking is not high')
   })
+  await step("the busy setting and One's approval mode change from the details, as Desktop changes them", async () => {
+    if ((await details.locator('select[data-detail="approvals-pick"]').inputValue()) !== 'manual') throw new Error('approvals is not manual')
+    await details.locator('select[data-detail="busy-pick"]').selectOption('queue')
+    await details.locator('select[data-detail="approvals-pick"]').selectOption('smart')
+    await details.locator('button[data-detail="save"]').click()
+    await details.getByText('Its busy setting and approval mode changed.').waitFor({ timeout: 20000 })
+    if ((await details.locator('select[data-detail="busy-pick"]').inputValue()) !== 'queue') throw new Error('busy is not queue')
+    if ((await details.locator('select[data-detail="approvals-pick"]').inputValue()) !== 'smart') throw new Error('approvals is not smart')
+    if (!/wait until the running turn ends/.test(await details.locator('[data-detail="busy"]').textContent())) throw new Error('the busy line did not change')
+  })
+  await step('approvals Off asks for a fresh sign-in first, then says commands run without asking', async () => {
+    await details.locator('select[data-detail="approvals-pick"]').selectOption('off')
+    await details.locator('button[data-detail="save"]').click()
+    await details.getByText('Its approval mode changed.').waitFor({ timeout: 20000 })
+    if ((await details.locator('select[data-detail="approvals-pick"]').inputValue()) !== 'off') throw new Error('approvals is not off')
+    if (!/commands run without asking you, in every chat/.test(await details.locator('[data-detail="approvals-off"]').textContent())) throw new Error('no warning')
+    await details.locator('select[data-detail="approvals-pick"]').selectOption('manual')
+    await details.locator('button[data-detail="save"]').click()
+    // The line from the change before says the same words, so it is the warning going that shows this one.
+    await details.locator('[data-detail="approvals-off"]').waitFor({ state: 'detached', timeout: 20000 })
+    if ((await details.locator('select[data-detail="approvals-pick"]').inputValue()) !== 'manual') throw new Error('approvals is not manual')
+  })
   await details.getByRole('button', { name: 'Close details' }).click()
 
   // ── voice ──

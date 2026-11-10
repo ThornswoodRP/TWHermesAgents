@@ -21,6 +21,7 @@ Everything runs on stand-ins and a scratch workspace; nothing reaches a real Her
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import os
 import shutil
 import subprocess
@@ -70,7 +71,8 @@ STUB_CLIENT = textwrap.dedent('''
         pass
     class GatewayRPCError(GatewayClientError):
         pass
-    STATE = {"model": "gpt-5.5", "provider": "openai-codex", "effort": "medium", "revision": 7, "generation": 3}
+    STATE = {"model": "gpt-5.5", "provider": "openai-codex", "effort": "medium", "revision": 7, "generation": 3,
+             "busy": "steer", "approvals": "manual"}
     OPTIONS = {"model": "gpt-5.5", "provider": "openai-codex", "providers": [
         {"slug": "openai-codex", "name": "OpenAI Codex", "authenticated": True, "models": ["gpt-5.5", "gpt-5.5-mini"]},
         {"slug": "anthropic", "name": "Anthropic", "authenticated": True, "models": ["claude-opus-5-5"]},
@@ -91,6 +93,14 @@ STUB_CLIENT = textwrap.dedent('''
             self.endpoint = endpoint
         async def rpc(self, method, **params):
             log({"method": method, "params": params})
+            if method.startswith("config.") and params.get("key") == "approvals.mode" and "session_id" not in params:
+                # gateway/session_config.py config_get and session_tui_config.py _set_approval_mode: the
+                # profile's own mode, read and written with no session, as Desktop's approval chip does.
+                if method == "config.set":
+                    if params["value"] not in ("manual", "smart", "off"):
+                        raise GatewayRPCError("invalid_params")
+                    STATE["approvals"] = params["value"]
+                return {"key": "approvals.mode", "value": STATE["approvals"]}
             if params.get("session_id") != "20261101_201500_ab12cd":
                 raise GatewayRPCError("not_found")
             if method == "session.resume":
@@ -100,8 +110,14 @@ STUB_CLIENT = textwrap.dedent('''
                 return {"model": STATE["model"], "provider": STATE["provider"], "source": "tui", "lazy": False}
             if method == "config.get":
                 return {"reasoning": {"value": STATE["effort"], "display": "show"},
-                        "busy": {"key": "busy", "value": "steer", "scope": "session"},
+                        "busy": {"key": "busy", "value": STATE["busy"], "scope": "session"},
                         "yolo": {"key": "yolo", "value": "0", "scope": "session"}}[params["key"]]
+            if method == "config.set" and params["key"] == "busy":
+                # gateway/session_busy_controls.py busy_config with write=True.
+                if params["value"] not in ("interrupt", "steer", "queue"):
+                    raise GatewayRPCError("invalid_params")
+                STATE["busy"] = params["value"]
+                return {"key": "busy", "value": STATE["busy"], "scope": "session"}
             if method == "model.options":
                 return OPTIONS
             if method == "session.usage":
@@ -226,12 +242,13 @@ class Helper(unittest.TestCase):
         _, out = self.run_helper({"session_id": SID})
         st = out["state"]
         self.assertEqual((out["applied"], out["reason"]), (False, ""))
-        self.assertEqual((st["model"], st["provider"], st["reasoning"], st["busy"], st["yolo"]),
-                         ("gpt-5.5", "openai-codex", "medium", "steer", False))
+        self.assertEqual((st["model"], st["provider"], st["reasoning"], st["busy"], st["yolo"], st["approvals"]),
+                         ("gpt-5.5", "openai-codex", "medium", "steer", False, "manual"))
         self.assertEqual(st["levels"], ["low", "medium", "high", "xhigh"])
         # Opened as Desktop opens a chat, then only reads.
         self.assertEqual([r["method"] for r in self.rpcs()],
-                         ["session.resume", "session.info", "config.get", "config.get", "config.get", "model.options",
+                         ["session.resume", "session.info", "config.get", "config.get", "config.get", "config.get",
+                          "model.options",
                           "session.usage", "session.context_breakdown"])
 
     def test_the_read_says_how_full_the_context_is_and_the_tokens_used(self):
@@ -274,6 +291,20 @@ class Helper(unittest.TestCase):
                          [("model", {"model": "gpt-5.5-mini", "provider": "openai-codex"}, 7, 3),
                           ("reasoning", {"effort": "high"}, 8, 3)])
 
+    def test_the_busy_setting_and_the_approval_mode_change_as_desktop_changes_them(self):
+        _, out = self.run_helper({"session_id": SID, "set": {"busy": "queue", "approvals": "smart"}})
+        self.assertEqual((out["applied"], out["reason"]), (True, ""))
+        self.assertEqual((out["state"]["busy"], out["state"]["approvals"]), ("queue", "smart"))
+        sets = [r["params"] for r in self.rpcs() if r["method"] == "config.set"]
+        # The busy setting is the chat's; the approval mode is the profile's, sent with no session.
+        self.assertEqual(sets, [{"session_id": SID, "key": "busy", "value": "queue"},
+                                {"key": "approvals.mode", "value": "smart"}])
+        self.assertNotIn("session.mutate", [r["method"] for r in self.rpcs()])
+        for bad in ({"busy": "later"}, {"approvals": "yolo"}, {"busy": None, "approvals": None}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.run_helper({"session_id": SID, "set": bad})[1],
+                                 {"state": None, "applied": False, "reason": "bad request"})
+
     def test_a_pick_not_offered_is_refused_before_anything_is_sent(self):
         for pick in ({"provider": "openrouter", "model": "paid/model"}, {"provider": "anthropic", "model": "claude-opus-5-5"},
                      {"provider": "nous", "model": "hermes-5"}, {"provider": "gemini", "model": "gemini-3"}):
@@ -311,7 +342,7 @@ class Helper(unittest.TestCase):
 
 
 STATE = {"model": "gpt-5.5", "provider": "openai-codex", "reasoning": "medium", "levels": ["low", "medium", "high"],
-         "yolo": False, "busy": "steer",
+         "yolo": False, "busy": "steer", "approvals": "manual",
          "offered": [{"provider": "openai-codex", "model": "gpt-5.5", "name": "OpenAI Codex", "why": "subscription"},
                      {"provider": "llamacpp", "model": "qwen3-8b.gguf", "name": "Local", "why": "local"}]}
 
@@ -366,6 +397,32 @@ class Core(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(CoreError) as e:
                 self.own.control_set(self.p, "one", SID, {**body, "idempotency_key": "k-00000002"})
             self.assertEqual(e.exception.reason, reason)
+
+    def test_the_busy_setting_and_the_approval_mode_are_checked(self):
+        self.read()
+        self.assertEqual(self.own.control(self.p, "one", SID)["state"]["approvals"], "manual")
+        for body, reason in (({"busy": "later"}, "bad_busy"), ({"approvals": "yolo"}, "bad_approvals")):
+            with self.subTest(body=body), self.assertRaises(CoreError) as e:
+                self.own.control_set(self.p, "one", SID, {**body, "idempotency_key": "k-00000004"})
+            self.assertEqual(e.exception.reason, reason)
+        out = self.own.control_set(self.p, "one", SID, {"busy": "queue", "approvals": "smart",
+                                                        "idempotency_key": "k-00000005"})
+        self.assertEqual(out["status"], "queued")
+        self.assertEqual(self.hand()[0]["set"], {"busy": "queue", "approvals": "smart"})
+
+    def test_approvals_off_needs_a_sign_in_from_the_last_5_minutes(self):
+        self.read()
+        stale = replace(passkey(self.w, minutes_ago=10), fresh=False)
+        with self.assertRaises(CoreError) as e:
+            self.own.control_set(stale, "one", SID, {"approvals": "off", "idempotency_key": "k-00000006"})
+        self.assertEqual((e.exception.status, e.exception.reason), (403, "sign_in_again"))
+        self.assertIn("last 5 minutes", str(e.exception))
+        self.assertEqual(self.hand(), [], "nothing was handed to the connector")
+        # Manual and Smart take the 30 minutes any change takes.
+        self.own.control_set(stale, "one", SID, {"approvals": "smart", "idempotency_key": "k-00000007"})
+        fresh = replace(passkey(self.w), fresh=True)
+        out = self.own.control_set(fresh, "one", SID, {"approvals": "off", "idempotency_key": "k-00000008"})
+        self.assertEqual(out["status"], "queued")
 
     def test_a_change_needs_a_recent_passkey_sign_in(self):
         self.read()

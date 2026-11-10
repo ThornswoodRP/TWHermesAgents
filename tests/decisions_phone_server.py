@@ -323,7 +323,7 @@ def one_new_chats(o):
 # One's chat settings, as its connector reads and changes them (room_send.py op control): a ChatGPT
 # sign-in model now, and a local model it can move to.
 CTL = {"model": "gpt-5.5", "provider": "openai-codex", "reasoning": "medium", "levels": ["low", "medium", "high", "xhigh"],
-       "yolo": False, "busy": "steer",
+       "yolo": False, "busy": "steer", "approvals": "manual",
        "offered": [{"provider": "openai-codex", "model": "gpt-5.5", "name": "OpenAI Codex", "why": "subscription"},
                    {"provider": "openai-codex", "model": "gpt-5.5-mini", "name": "OpenAI Codex", "why": "subscription"},
                    {"provider": "llamacpp", "model": "qwen3-8b.gguf", "name": "Local", "why": "local"}],
@@ -335,6 +335,9 @@ def one_control(o, r):
         CTL.update(model=want["model"]["model"], provider=want["model"]["provider"])
     if want.get("reasoning"):
         CTL["reasoning"] = want["reasoning"]
+    for k in ("busy", "approvals"):
+        if want.get(k):
+            CTL[k] = want[k]
     o.control_post(w.ws, "one", to, {"id": r["id"], "state": dict(CTL), "applied": bool(want), "reason": ""})
 def hermes_search(req):
     """A stand-in for Hermes's own search (room_send.py op `search`): chats whose messages or title hold the

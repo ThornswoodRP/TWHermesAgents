@@ -9,7 +9,12 @@ in a chat make (room_send.py "control", contracts.json "control"):
   in it), config.get busy (what a message into a running turn does) and model.options (what can be picked);
 - a model: Hermes's session.mutate model, fenced to the chat's revision and never global. A model Hermes's
   own cost guard holds for a confirmation is not switched: there is no "switch anyway" here;
-- thinking: Hermes's config.set reasoning for that chat, never global.
+- thinking: Hermes's config.set reasoning for that chat, never global;
+- what a message sent while it works does (steer, queue or interrupt): Hermes's config.set busy for that chat;
+- that Hermes's approval mode (Manual, Smart or Off): config.set approvals.mode, the one setting here that is
+  the whole Hermes's rather than the chat's, as Desktop's approval chip and `/approvals` write it. Off lets
+  commands run without asking, so it needs a passkey sign-in from the last 5 minutes (auth.py FRESH_FOR),
+  as a high-risk card does; Manual and Smart need only the 30 minutes any change needs.
 
 Only models one of his sign-ins (his Claude login, ChatGPT), a free model or a local one covers are offered
 (plan Part 6, decision 4 A: no extra spend). The connector lists only those; the core refuses a pick its last
@@ -17,8 +22,7 @@ read did not offer; and the connector checks the pick again against Hermes's own
 so a hand-made request cannot move a chat to a billed model.
 
 How full the chat's context is and the tokens it used are shown too, read as Desktop's context meter reads
-them (session.context_breakdown and session.usage). Approvals and the busy setting are shown, not changed,
-here. Nothing here is kept on disk: a read lives 30 seconds and a change at most 2 minutes, in memory. A core
+them (session.context_breakdown and session.usage). Nothing here is kept on disk: a read lives 30 seconds and a change at most 2 minutes, in memory. A core
 restart drops a change in flight, and the pane then shows what Hermes really holds; a change is never shown
 as made until the connector read it back. A change needs a passkey sign-in from the last 30 minutes, as a
 message to his own Hermes does.
@@ -41,6 +45,7 @@ MAX_WAIT = 25.0
 MAX_OFFERED = 80
 LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 BUSY = ("steer", "queue", "interrupt")
+APPROVALS = ("manual", "smart", "off")
 CTL_ID = re.compile(r"^ctl_[A-Za-z0-9_-]{8,40}$")
 MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$")
 PROVIDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
@@ -68,7 +73,8 @@ def clean_state(raw) -> dict:
             "provider": provider if isinstance(provider, str) and PROVIDER.match(provider) else None,
             "reasoning": raw.get("reasoning") if raw.get("reasoning") in LEVELS else None,
             "levels": levels, "yolo": raw.get("yolo") is True,
-            "busy": raw.get("busy") if raw.get("busy") in BUSY else None, "offered": offered,
+            "busy": raw.get("busy") if raw.get("busy") in BUSY else None,
+            "approvals": raw.get("approvals") if raw.get("approvals") in APPROVALS else None, "offered": offered,
             **_use(raw)}
 
 
@@ -106,8 +112,10 @@ def wanted(state: dict | None, body) -> dict:
     if not isinstance(body, dict):
         raise CoreError(400, "bad_control", "a change is a JSON object")
     pick, level = body.get("model"), body.get("reasoning")
-    if pick is None and level is None:
-        raise CoreError(400, "bad_control", "a change names a model, a thinking level or both")
+    busy, approvals = body.get("busy"), body.get("approvals")
+    if pick is None and level is None and busy is None and approvals is None:
+        raise CoreError(400, "bad_control", "a change names a model, a thinking level, the busy setting or "
+                        "the approval mode")
     if state is None:
         raise CoreError(409, "control_unread", "this chat's settings have not been read yet; open its details again")
     out = {}
@@ -122,6 +130,14 @@ def wanted(state: dict | None, body) -> dict:
         if level not in LEVELS or (state["levels"] and level not in state["levels"]):
             raise CoreError(400, "bad_reasoning", "that thinking level is not one this chat's model takes")
         out["reasoning"] = level
+    if busy is not None:
+        if busy not in BUSY:
+            raise CoreError(400, "bad_busy", "a message sent while it works steers, queues or interrupts")
+        out["busy"] = busy
+    if approvals is not None:
+        if approvals not in APPROVALS:
+            raise CoreError(400, "bad_approvals", "the approval mode is manual, smart or off")
+        out["approvals"] = approvals
     return out
 
 
