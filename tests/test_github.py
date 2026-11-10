@@ -348,6 +348,18 @@ class OutsideWork(unittest.TestCase):
         self.assertFalse(self.r.comment_pr("sprocket", fork).allowed)
         self.assertFalse(self.r.edit_pr("bramble", fork).allowed)
 
+    def test_bramble_comments_on_a_robots_pr_but_never_edits_it(self):
+        # Ops #281: the red-check note on Dependabot's and the pin robot's
+        # pull requests was refused as an edit.
+        for login, ref in (("dependabot[bot]", "dependabot/nuget/launcher/x-1.2"),
+                           ("thornswood-pin-robot[bot]", "engine-pin/next")):
+            p = pr(number=5715, head_ref=ref, author_bot=None, author_login=login)
+            v = self.r.comment_pr("bramble", p)
+            self.assertTrue(v.allowed, f"{login}: {v.reason}")
+            self.assertFalse(self.r.edit_pr("bramble", p).allowed, login)
+            self.assertFalse(self.r.comment_pr("wisp", p).allowed, login)
+            self.assertFalse(self.r.outside_pr(p), login)
+
     def test_team_and_hands_off_prs_are_not_outside(self):
         for p in (pr(head_ref="claude/1-x", author_bot=None, author_login="EvilPatrick06"),
                   pr(head_ref="x/1-x", author_bot=None, author_login="Jhinswife"),

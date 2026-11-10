@@ -158,13 +158,18 @@ class GitHubRules:
                 and not self._hands_off_pr(pr))
 
     def comment_pr(self, bot: str, pr: PullRequest) -> Verdict:
-        """A comment on a pull request: as edit_pr, and Bramble may also answer
-        a pull request from outside the team (what its review found, where the
-        work went). Nothing else of an outside pull request is a Bot's to
-        change: no edit, label, close or merge."""
+        """A comment on a pull request: as edit_pr, and Bramble may also
+        comment on a robot's pull request (Dependabot's, the pin robot's:
+        merge.robot_authors), whose red check or conflict its duties send back
+        as one comment there (Ops #281), and answer a pull request from outside
+        the team (what its review found, where the work went). Nothing else of
+        a robot's or an outside pull request is a Bot's to change: no edit,
+        label or close."""
         v = self.edit_pr(bot, pr)
         if v.allowed:
             return v
+        if self.policy.is_router(bot) and self.policy.robot_author(pr.author_login):
+            return Verdict.yes("Bramble comments on a robot's pull request")
         if self.policy.is_router(bot) and self.outside_pr(pr):
             return Verdict.yes("Bramble answers a pull request from outside the team")
         return v
