@@ -810,6 +810,51 @@ CREATE TABLE chat_alerts (
 );
 CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
 """,
+    # 21: files and photos Patrick attaches to a message to a Bot or a room (#81, 9 Nov: "A Bot chat and a room
+    # take text alone, so a screenshot for a Bot has to go through his own Hermes"). As for his own Hermes
+    # (schema 14): each is uploaded on its own for one chat (target), goes with one message when that is sent,
+    # is fetched by the Bots' connector while the message is leased, and its bytes are dropped once the message
+    # has a result. A message may now be files alone, with no words; the core still refuses one with neither.
+    f"""
+CREATE TABLE chat_messages_21 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  target TEXT NOT NULL,
+  text TEXT NOT NULL CHECK (length(text) <= 8000),
+  send_key TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  status TEXT NOT NULL CHECK (status IN {_in(OUTBOX_STATES)}),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT,
+  session_id TEXT CHECK (session_id IS NULL OR length(session_id) BETWEEN 1 AND 128)
+);
+INSERT INTO chat_messages_21 SELECT id, workspace_id, target, text, send_key, principal_id, device_id, status, attempts,
+  lease_until, created_at, updated_at, reason, session_id FROM chat_messages;
+DROP TABLE chat_messages;
+ALTER TABLE chat_messages_21 RENAME TO chat_messages;
+CREATE INDEX chat_messages_by_target ON chat_messages(workspace_id, target, created_at);
+
+CREATE TABLE chat_attachments (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  target TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  message_id TEXT REFERENCES chat_messages(id),
+  name TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL CHECK (size > 0),
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  body BLOB,
+  created_at TEXT NOT NULL,
+  fetched_at TEXT
+);
+CREATE INDEX chat_attachments_by_message ON chat_attachments(message_id);
+CREATE INDEX chat_attachments_by_owner ON chat_attachments(workspace_id, principal_id, message_id, created_at);
+""",
 ]
 
 
@@ -982,5 +1027,33 @@ ALTER TABLE chat_messages DROP COLUMN session_id;
     # An alert still on its way would never reach the phone.
     20: ([("SELECT count(*) FROM chat_alerts WHERE status IN ('queued', 'leased')", "chat alerts on their way")], """
 DROP TABLE chat_alerts;
+""", ""),
+    # A file still on its way to a Bot or a room would be lost; one already there lives in that Bot's folder or
+    # the room's own store. A message of files alone has no words, which the older release cannot hold.
+    21: ([("SELECT count(*) FROM chat_attachments WHERE body IS NOT NULL", "files and photos on their way to a Bot or a room"),
+          ("SELECT count(*) FROM chat_messages WHERE text = ''", "messages to a Bot or a room that are files alone, with no words")],
+         f"""
+DROP TABLE chat_attachments;
+-- Made under its own name, as migration 4 made it, with session_id where ALTER TABLE ADD COLUMN put it in 19.
+ALTER TABLE chat_messages RENAME TO chat_messages_21;
+CREATE TABLE chat_messages (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  target TEXT NOT NULL,
+  text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 8000),
+  send_key TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  status TEXT NOT NULL CHECK (status IN {_in(OUTBOX_STATES)}),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT
+, session_id TEXT CHECK (session_id IS NULL OR length(session_id) BETWEEN 1 AND 128));
+INSERT INTO chat_messages SELECT id, workspace_id, target, text, send_key, principal_id, device_id, status, attempts,
+  lease_until, created_at, updated_at, reason, session_id FROM chat_messages_21;
+DROP TABLE chat_messages_21;
+CREATE INDEX chat_messages_by_target ON chat_messages(workspace_id, target, created_at);
 """, ""),
 }

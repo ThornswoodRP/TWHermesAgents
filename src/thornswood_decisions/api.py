@@ -76,8 +76,9 @@ APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
 OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks", "control",
                  "turns", "wait")
-# A file or photo for a message to his own Hermes comes as its own bytes, not JSON (own.py attach).
-ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/own/[a-z]+/attach$")
+# A file or photo for a message to his own Hermes, a Bot or a room comes as its own bytes, not JSON (own.py
+# and chat.py attach). A room's chat is its room id.
+ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/(own/[a-z]+|chat/[A-Za-z0-9_-]{1,64})/attach$")
 # A recording to dictate from comes as its own bytes too (voice.py).
 VOICE_PATH = "/api/v1/voice/transcribe"
 
@@ -286,6 +287,8 @@ class Api:
                 return 200, Chat(core.s).turns(self.ws, token, data)
             if route[1] == "wait":
                 return 200, Chat(core.s).wait(self.ws, token, data)
+            if route[1] == "attachment":
+                return 200, Raw(Chat(core.s).attachment(self.ws, token, data.get("id")))
             if route[1] == "result":
                 return 200, Chat(core.s).result(self.ws, token, str(data.get("id", "")), str(data.get("outcome", "")),
                                                 str(data.get("ref", "")), str(data.get("reason", "")))
@@ -365,11 +368,15 @@ class Api:
                                           session=query.get("session"))
         if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "react":
             return 200, Chat(core.s).react(p, route[1], data.get("message_id"), data.get("emoji"))
+        if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "attach":
+            return 200, Chat(core.s).attach(p, route[1], query.get("name"), data.get("_type"), data.get("_raw"))
+        if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "unattach":
+            return 200, Chat(core.s).unattach(p, route[1], data.get("id"))
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1], session=query.get("session"))
             return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"), data.get("answer"),
-                                          session=data.get("session"))
+                                          session=data.get("session"), attachments=data.get("attachments"))
         if method == "GET" and route == ["own"]:
             return 200, OwnChat(core.s).summary(p)
         if method == "GET" and len(route) == 2 and route[0] == "own":

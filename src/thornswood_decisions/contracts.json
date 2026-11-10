@@ -153,5 +153,17 @@
   "context_use": {
     "meter": "Hermes Desktop's context meter (apps/desktop use-statusbar-items.tsx) takes session.context_breakdown when it gives a context_max above 0 (an estimate from the chat's frozen prompt, tools and transcript, chars/4, no model call, when no turn in this process has measured it), else session.usage's context_used, context_max, context_percent and context_estimated. Its popover's counters are session.usage's input, output, total, calls and compressions. room_send.py op control reads both after model.options, and a part Hermes refuses is null with its reason.",
     "meter_source": "tui_gateway/methods_session.py:1443 session.usage, :1454 session.context_breakdown; tui_gateway/contracts/common.py:28 Usage; apps/desktop/src/app/shell/hooks/use-statusbar-items.tsx:337"
+  },
+  "attachments": {
+    "why": "#81: a Bot chat and a room take the same files and photos as Patrick's own Hermes, and the Bot reads them.",
+    "chat_refuses_image": "hermes chat --image is refused when the turn runs through the gateway's chat (--format stream-json), so photos never go by --image. The helper names them on prompt.submit instead, as Desktop does.",
+    "chat_refuses_image_source": "hermes_cli/gateway_chat.py:17 _UNSUPPORTED (image), :92 the refusal",
+    "prompt_photos": "prompt.submit takes attachments: [{path, mime}], at most 10, mime image/png, image/jpeg, image/gif or image/webp, and each path a file directly in get_image_cache_dir() (HERMES_HOME/cache/images). room_send.py copies each photo there under its sha256 and checks it with sniff_image_mime first.",
+    "prompt_photos_source": "gateway/session_controls.py:823 and :837 (attachments on prompt.submit); gateway/session_ingress_media.py:123 _ATTACHMENT_LIMIT, :127 sniff_image_mime, :140 admit_attachments; gateway/platforms/base.py:560 get_image_cache_dir",
+    "other_files": "A file that is not a photo goes into the turn as an @file:\"<path>\" reference in the words, as Desktop sends one.",
+    "room_upload": "groups.attachment.upload {room_id, upload_id, kind (image, pdf or file), name, mime, data_base64} answers a RoomAttachment; the same upload_id with the same bytes is the same attachment. kind and mime must match _sniff_known_mime of the bytes. upload_id is ^[A-Za-z0-9][A-Za-z0-9._:-]*$, so room_send.py uses tw-<sha256 of the core's file id>.",
+    "room_upload_source": "tui_gateway/contracts/canonical.py:518 GroupsAttachmentUploadParams, :542; tui_gateway/methods_groups.py:417; gateway/hosted_room_attachments.py:155 _sniff_known_mime, :518-555 the upload and its upload_id",
+    "room_send": "groups.send's payload takes attachments: [{attachment_id, kind, name, size, mime}] beside text and thread_id; text may be empty when there are attachments. At most 8 files a message, 15,000,000 bytes a file and 25,000,000 a message.",
+    "room_send_source": "gateway/hosted_room_discussion.py:226-234 (payload fields, text or attachments); gateway/hosted_room_attachments.py:34-36 the caps"
   }
 }

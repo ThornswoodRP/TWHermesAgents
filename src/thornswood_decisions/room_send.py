@@ -4,7 +4,8 @@ The connector runs this with Hermes's own Python (the interpreter the `hermes`
 command starts), as the Bots' `hermes` user, so it can use Hermes's client the
 way Desktop does (contracts.json "room"):
 
-    <hermes python> -I room_send.py < {"op": "send", "room_id", "event_id", "text"}
+    <hermes python> -I room_send.py < {"op": "send", "room_id", "event_id", "text",
+                                       "files": [{"id", "name", "mime", "data_base64"}]?}
     <hermes python> -I room_send.py < {"op": "ready", "profile": "<bot or empty>", "name": "<optional>"}
     <hermes python> -I room_send.py < {"op": "states", "profiles": ["<bot>", ...]}
     <hermes python> -I room_send.py < {"op": "react", "profile": "<bot or empty>", "session_id",
@@ -85,6 +86,20 @@ running copy names (own_connector.py UPDATE_FILES).
 
 `groups.send` with the same `event_id` is the same event (hosted_rooms.py:250),
 which is how the core settles an unclear send from the room feed afterwards.
+A message's files (#81) go first into the room's own store, each as Desktop's +
+uploads it (`groups.attachment.upload`, gateway/session_hosted_attachments.py
+store_upload), and `groups.send` names them in its payload (`attachments`, the
+manifest hosted_room_discussion.py validate_user_payload takes); the room's
+driver then hands each Bot the photos as its turn's images and every other
+file as a path line, as it does a file Desktop sent (bound_submission_payload).
+A file the store refuses is said as the reason, and nothing is sent.
+
+In a turn, `--tw-files` says the message carries files (so it is never steered
+into a running turn), and each `--tw-image <path>` is a photo Patrick attached:
+it is copied into Hermes's image staging folder and named on the turn's
+`prompt.submit` (`attachments`), the way Desktop sends one. Hermes's own
+`--image` is refused by its gateway chat (hermes_cli/gateway_chat.py
+_UNSUPPORTED), so these two are taken out before Hermes reads the rest.
 
 `react` sets Patrick's reaction on one message of a chat to exactly the emoji
 asked for, or takes it off (null), with Hermes's own SessionDB, the way
@@ -461,8 +476,14 @@ async def _send(endpoint, req: dict) -> dict:
             if not caps.get("driver"):
                 return {"sent": False, "reason": "the room's driver is not running"}
             try:
+                manifest = [await _upload(client, req["room_id"], f) for f in req.get("files") or []]
+            except GatewayRPCError as exc:
+                # The room's store refused a file: nothing was sent, and no retry changes that.
+                return {"sent": False, "reason": f"the room did not take a file ({exc})"}
+            try:
                 out = await client.rpc("groups.send", room_id=req["room_id"], event_id=req["event_id"],
-                                       payload={"text": req["text"], "thread_id": req["event_id"]})
+                                       payload={"text": req["text"], "thread_id": req["event_id"]}
+                                       | ({"attachments": manifest} if manifest else {}))
             except GatewayRPCError as exc:
                 return {"sent": False, "reason": f"the gateway refused it ({exc})"}
             except (GatewayClientError, TimeoutError, OSError):
@@ -471,6 +492,37 @@ async def _send(endpoint, req: dict) -> dict:
     except (GatewayClientError, TimeoutError, OSError):
         # The connection failed before groups.send went out.
         return {"sent": False, "ready": False, "reason": "could not reach the Bots' gateway"}
+
+
+def room_file(mime: str, data: bytes) -> tuple[str, str]:
+    """(kind, type) a file goes into a room's store as: a photo or a PDF by its bytes, as the store checks
+    them, else a file with the type the phone gave, or the type its bytes are when the store would refuse
+    that one (gateway/hosted_room_attachments.py _sniff_known_mime and _validate_mime_and_kind). Desktop
+    picks the kind by the type alone (apps/desktop canonical-group-attachments.tsx kindFor), so a photo
+    whose bytes are not the type its name says was refused there; here it goes as a file."""
+    from gateway.hosted_room_attachments import _sniff_known_mime
+    sniffed = _sniff_known_mime(data)
+    if sniffed.startswith("image/"):
+        return "image", sniffed
+    if sniffed == "application/pdf":
+        return "pdf", sniffed
+    if mime.startswith("image/") or mime == "application/pdf" or (mime.startswith("text/") and sniffed != "text/plain"):
+        return "file", sniffed
+    return "file", mime
+
+
+async def _upload(client, room_id: str, f: dict) -> dict:
+    """One file into the room's own store, as Desktop's + uploads it (groups.attachment.upload). Its upload
+    id comes from the core's id for it (the store takes letters, digits and . : - only), so sending the same
+    message again uploads nothing twice. Its manifest entry, as groups.send takes it."""
+    import base64
+    import hashlib
+    data = base64.b64decode(f["data_base64"], validate=True)
+    kind, mime = room_file(f["mime"], data)
+    upload = "tw-" + hashlib.sha256(f["id"].encode("utf-8")).hexdigest()
+    got = await client.rpc("groups.attachment.upload", room_id=room_id, upload_id=upload, kind=kind,
+                           name=f["name"], mime=mime, data_base64=f["data_base64"])
+    return {k: got[k] for k in ("attachment_id", "kind", "name", "size", "mime")}
 
 
 def _react(profile: str, req: dict) -> dict:
@@ -782,12 +834,74 @@ class _Attended:
         return getattr(self._client, name)
 
 
-def follow_busy_setting(has_file: bool, orders=None) -> None:
+class _WithPhotos:
+    """The view's gateway client, naming the turn's photos on its prompt.submit (`attachments`), the way
+    Desktop sends a photo (apps/desktop use-prompt-actions/submit.ts submitParams; gateway/session_controls.py
+    submission takes `attachments`, and gateway/session_ingress_media.py admit_attachments each {path, mime}
+    in Hermes's image staging folder)."""
+
+    def __init__(self, client, photos: list):
+        self._client, self._photos = client, photos
+
+    async def rpc(self, method, **params):
+        if method == "prompt.submit" and self._photos:
+            params["attachments"] = self._photos
+        return await self._client.rpc(method, **params)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def staged_photos(paths: list[str]) -> list[dict]:
+    """Each photo Patrick attached, copied into this Hermes's image staging folder under the SHA-256 of its
+    bytes, as Hermes stages a room's photo for a turn (gateway/session_hosted_attachments.py
+    bound_submission_payload): [{path, mime}] for prompt.submit. A file Hermes would not take as an image
+    stops the turn here, before anything is sent."""
+    import hashlib
+    import os
+    import tempfile
+    from pathlib import Path
+    from gateway.platforms.base import get_image_cache_dir
+    from gateway.session_ingress_media import sniff_image_mime
+
+    staging = get_image_cache_dir().resolve()
+    out = []
+    for name in paths:
+        data = Path(name).read_bytes()
+        mime = sniff_image_mime(data)
+        if mime is None:
+            raise SystemExit(f"{Path(name).name} is not a photo Hermes takes as an image")
+        target = staging / (hashlib.sha256(data).hexdigest() + {"image/png": ".png", "image/jpeg": ".jpg",
+                                                                  "image/gif": ".gif", "image/webp": ".webp"}[mime])
+        if not (target.is_file() and not target.is_symlink() and target.read_bytes() == data):
+            fd, temporary = tempfile.mkstemp(dir=staging)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary, target)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+        out.append({"path": str(target), "mime": mime})
+    return out
+
+
+def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None) -> None:
     """Hermes's chat view, with the hand-over of a one-shot message changed as this file's words say.
-    With `orders` (a file of order lines), the turn is attended, as this file's words say."""
+    With `orders` (a file of order lines), the turn is attended, as this file's words say. With `photos`
+    ([{path, mime}], staged_photos), the turn's prompt.submit names them."""
     from hermes_cli import gateway_chat_view
 
     base = gateway_chat_view.GatewayChatView
+
+    class Photos(base):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            if photos:
+                self.client = _WithPhotos(self.client, photos)
+
+    base = Photos
 
     class Attended(base):
         def __init__(self, *args, **kw):
@@ -916,9 +1030,28 @@ def follow_busy_setting(has_file: bool, orders=None) -> None:
     gateway_chat_view.GatewayChatView = BusyAware
 
 
+def own_args(args: list[str]) -> tuple[list[str], bool, list[str]]:
+    """(Hermes's own arguments, whether the message carries files, the photos to hand the turn): this file's
+    `--tw-files` and each `--tw-image <path>` taken out before Hermes reads the rest."""
+    rest, files, photos, i = [], False, [], 0
+    while i < len(args):
+        if args[i] == "--tw-files":
+            files = True
+        elif args[i] == "--tw-image" and i + 1 < len(args):
+            photos.append(args[i + 1])
+            i += 1
+        else:
+            rest.append(args[i])
+        i += 1
+    return rest, files or bool(photos), photos
+
+
 def turn(args: list[str], attended: bool = False) -> None:
     """`hermes chat <args>` in this runtime, with the busy-input hand-over above. Exits as Hermes exits.
-    Attended: the orders come on this process's stdin, and Hermes's own fd 0 becomes the null device."""
+    Attended: the orders come on this process's stdin, and Hermes's own fd 0 becomes the null device.
+    `--tw-files` says the message carries files, and each `--tw-image <path>` is a photo for the turn."""
+    args, has_file, photos = own_args(args)
+    photos = staged_photos(photos) if photos else []
     orders = None
     if attended:
         import os
@@ -927,7 +1060,7 @@ def turn(args: list[str], attended: bool = False) -> None:
         os.dup2(null, 0)
         os.close(null)
         sys.stdin = open(os.devnull, encoding="utf-8")
-    follow_busy_setting("--image" in args, orders)
+    follow_busy_setting(has_file, orders, photos)
     sys.argv = ["hermes", *args]
     import runpy
     runpy.run_module("hermes_cli.main", run_name="__main__", alter_sys=True)

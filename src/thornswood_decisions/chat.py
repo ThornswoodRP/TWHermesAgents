@@ -60,7 +60,8 @@ from .feeds import Feeds, room_events
 from . import live_turns
 from .live_turns import LIVE
 from .wakes import BOTS_GW, WAKES
-from .own import DOING_STATES, PAGE_TEXT, PAGES, TOOL_NAME, _page_mid, clean_page, fetch_page, page_kind, SESSION_ID
+from .own import (ATTACH_ID, DOING_STATES, MAX_ATTACHMENTS, MAX_UNSENT, MAX_UNSENT_BYTES, PAGE_TEXT, PAGES,
+                  SESSION_ID, TOOL_NAME, UNSENT_FOR, _page_mid, checked_file, clean_page, fetch_page, page_kind)
 from .reactions import Reactions
 from .reactions import emoji as _emoji
 from .tasks import Tasks
@@ -102,6 +103,14 @@ _LIVE_LOCK = threading.Lock()
 # memory only like the pages themselves: the Bots list takes it when it is newer than the feed's once-a-minute
 # copy, so a Bot's answer shows there as soon as the core reads it (Patrick, 9 Nov). Keyed by workspace and Bot.
 _SAID: dict[tuple[str, str], dict] = {}
+# Files and photos on a message to a Bot or a room (#81): the same + as in his own Hermes's chats, with the
+# same bounds (own.py: 20 MB a file, 10 a message, and what is uploaded and not sent yet). A room keeps its files
+# in its own store, which takes at most 8 a message, 15,000,000 bytes a file and 25,000,000 bytes a message
+# (Hermes 0.23.0 gateway/hosted_room_attachments.py MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_BYTES and
+# MAX_MESSAGE_ATTACHMENT_BYTES), so the core refuses more there when he sends, not the room after it went.
+ROOM_FILES = 8
+ROOM_FILE_BYTES = 15_000_000
+ROOM_MESSAGE_BYTES = 25_000_000
 
 
 def clean_room_page(body) -> dict:
@@ -200,6 +209,17 @@ class _Turns:
 TURNS = _Turns()
 
 
+def _wanted_files(attachments) -> list[str]:
+    """The ids of the files a message names: none, or up to MAX_ATTACHMENTS different ones."""
+    if attachments is None:
+        return []
+    if (not isinstance(attachments, list) or len(attachments) > MAX_ATTACHMENTS
+            or not all(isinstance(a, str) and ATTACH_ID.match(a) for a in attachments)
+            or len(set(attachments)) != len(attachments)):
+        raise CoreError(400, "bad_attachments", f"attachments are up to {MAX_ATTACHMENTS} ids of files uploaded here")
+    return list(attachments)
+
+
 class Chat:
     def __init__(self, store: Store):
         self.s = store
@@ -247,20 +267,23 @@ class Chat:
             raise CoreError(400, "bad_session", "a session is one of a Bot's own session ids")
         return session
 
-    def send(self, p: Principal, target: str, text, idempotency_key, answer=None, session=None) -> dict:
+    def send(self, p: Principal, target: str, text, idempotency_key, answer=None, session=None,
+             attachments=None) -> dict:
         """One message to a Bot or a room. With `answer` (a card this Bot asked, the option, and the
         revision, attention revision and artifact SHA-256 the phone showed), the message is also
         Patrick's answer to that card: it is taken first, by DecisionCore.answer with all its checks, and
         nothing is sent when it is refused. With `session`, the message goes into that one session of the
         Bot (the one a Board row opens) instead of its Bot Chat, and Hermes hands it to the session as its
-        busy setting says when a turn runs there (connector.py to_session)."""
+        busy setting says when a turn runs there (connector.py to_session). With `attachments` (ids of files
+        uploaded for this chat with attach), the files go with it, and it may be files alone."""
         self._patrick(p)
         if not self.s.flag(p.workspace_id, "mobile_chat_write"):
             raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
         target = self._target(p.workspace_id, target)
         session = self._session(p.workspace_id, target, session)
-        if not isinstance(text, str) or not text.strip():
-            raise CoreError(400, "bad_text", "a message has some text")
+        files = _wanted_files(attachments)
+        if not isinstance(text, str) or not (text.strip() or files):
+            raise CoreError(400, "bad_text", "a message has some text or a file")
         text = text.strip()
         if len(text) > MAX_TEXT:
             raise CoreError(400, "bad_text", f"a message is at most {MAX_TEXT} characters")
@@ -273,7 +296,8 @@ class Chat:
             receipt = self._answer(p, target, text, idempotency_key, answer)
         body_sha = sha256_hex(canonical({"target": target, "text": text}
                                         | ({"answer": receipt["response_id"]} if receipt else {})
-                                        | ({"session": session} if session else {})))
+                                        | ({"session": session} if session else {})
+                                        | ({"attachments": files} if files else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -287,9 +311,10 @@ class Chat:
             db.execute("INSERT INTO chat_messages(id, workspace_id, target, text, send_key, principal_id, device_id, "
                        "status, created_at, updated_at, session_id) VALUES(?,?,?,?,?,?,?,'queued',?,?,?)",
                        (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now, session))
+            self._bind_files(db, p, target, mid, files)
             self.s.wake(p.workspace_id, PAGES_GW)
             self.s.event(db, p.workspace_id, "chat.queued", mid, "patrick", {"target": target, "device": p.device_id}
-                         | ({"session": session} if session else {}))
+                         | ({"session": session} if session else {}) | ({"files": len(files)} if files else {}))
             out = {"message_id": mid, "target": target, "status": "queued", "created_at": now} \
                 | ({"session": session} if session else {})
             if receipt:
@@ -297,6 +322,85 @@ class Chat:
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
                        "result_json, created_at) VALUES(?,?,?,?,?,?,?)",
                        (p.workspace_id, p.id, idempotency_key, "chat.send", body_sha, canonical(out), now))
+        return out
+
+    def _bind_files(self, db, p: Principal, target: str, mid: str, files: list[str]) -> None:
+        """The files a message names, each one uploaded here by him for this chat and not sent with another
+        message, now that message's; a room's within what its store takes."""
+        for fid in files:
+            done = db.execute("UPDATE chat_attachments SET message_id = ? WHERE id = ? AND workspace_id = ? "
+                              "AND target = ? AND principal_id = ? AND message_id IS NULL AND body IS NOT NULL",
+                              (mid, fid, p.workspace_id, target, p.id)).rowcount
+            if not done:
+                raise CoreError(409, "no_attachment", "a file on this message is not one uploaded here for this "
+                                "chat, or it went with another message; add it again")
+        if files and target in {r["room_id"] for r in self.rooms(p.workspace_id)}:
+            sizes = [r[0] for r in db.execute("SELECT size FROM chat_attachments WHERE message_id = ?", (mid,))]
+            if len(sizes) > ROOM_FILES or max(sizes) > ROOM_FILE_BYTES or sum(sizes) > ROOM_MESSAGE_BYTES:
+                raise CoreError(413, "room_files", f"a room takes at most {ROOM_FILES} files a message, "
+                                f"{ROOM_FILE_BYTES // 1_000_000} MB each and {ROOM_MESSAGE_BYTES // 1_000_000} MB "
+                                "in all")
+
+    def attach(self, p: Principal, target: str, name, mime, body: bytes) -> dict:
+        """One file or photo for a message to this Bot or room, uploaded on its own before the message is
+        sent (own.py OwnChat.attach). Nothing reaches Hermes until a message names it."""
+        self._patrick(p)
+        if not self.s.flag(p.workspace_id, "mobile_chat_write"):
+            raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
+        target = self._target(p.workspace_id, target)
+        name, mime, body = checked_file(name, mime, body)
+        now = self.s.now()
+        with self.s.tx() as db:
+            # Uploads never sent go after a day.
+            db.execute("DELETE FROM chat_attachments WHERE workspace_id = ? AND message_id IS NULL AND created_at < ?",
+                       (p.workspace_id, (self.s.clock() - UNSENT_FOR).isoformat()))
+            n, total = db.execute("SELECT count(*), coalesce(sum(size), 0) FROM chat_attachments WHERE workspace_id = ? "
+                                  "AND principal_id = ? AND message_id IS NULL", (p.workspace_id, p.id)).fetchone()
+            if n >= MAX_UNSENT or total + len(body) > MAX_UNSENT_BYTES:
+                raise CoreError(429, "too_many_files", "too many files are waiting to be sent; send or take some off first")
+            fid = new_id("att")
+            digest = sha256_hex(body)
+            db.execute("INSERT INTO chat_attachments(id, workspace_id, target, principal_id, name, mime, size, sha256, "
+                       "body, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (fid, p.workspace_id, target, p.id, name, mime, len(body), digest, body, now))
+        return {"id": fid, "name": name, "mime": mime, "size": len(body), "sha256": digest}
+
+    def unattach(self, p: Principal, target: str, fid) -> dict:
+        """Takes off a file uploaded for this chat and not sent."""
+        self._patrick(p)
+        target = self._target(p.workspace_id, target)
+        if not isinstance(fid, str) or not ATTACH_ID.match(fid):
+            raise CoreError(404, "no_attachment", "no such file")
+        with self.s.tx() as db:
+            gone = db.execute("DELETE FROM chat_attachments WHERE id = ? AND workspace_id = ? AND target = ? "
+                              "AND principal_id = ? AND message_id IS NULL", (fid, p.workspace_id, target, p.id)).rowcount
+        if not gone:
+            raise CoreError(404, "no_attachment", "no such file waiting to be sent")
+        return {"id": fid, "removed": True}
+
+    def attachment(self, workspace_id: str, token: str | None, fid) -> bytes:
+        """A file's bytes, for the Bots' connector, only while the message it goes with is leased."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not isinstance(fid, str) or not ATTACH_ID.match(fid):
+            raise CoreError(404, "no_attachment", "no such file")
+        row = self.s.db.execute("SELECT a.body FROM chat_attachments a JOIN chat_messages m ON m.id = a.message_id "
+                                "WHERE a.id = ? AND a.workspace_id = ? AND m.status = 'leased' AND a.body IS NOT NULL",
+                                (fid, workspace_id)).fetchone()
+        if not row:
+            raise CoreError(404, "no_attachment", "no such file on a message being sent")
+        with self.s.tx() as db:
+            db.execute("UPDATE chat_attachments SET fetched_at = coalesce(fetched_at, ?) WHERE id = ?", (self.s.now(), fid))
+        return bytes(row["body"])
+
+    def _files(self, workspace_id: str, mids: list[str]) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        if not mids:
+            return out
+        q = ",".join("?" * len(mids))
+        for r in self.s.db.execute(f"SELECT id, message_id, name, mime, size FROM chat_attachments WHERE workspace_id = ? "
+                                   f"AND message_id IN ({q}) ORDER BY rowid", (workspace_id, *mids)).fetchall():
+            out.setdefault(r["message_id"], []).append({"id": r["id"], "name": r["name"], "mime": r["mime"],
+                                                        "size": r["size"]})
         return out
 
     def _answer(self, p: Principal, target: str, text: str, idempotency_key: str, answer) -> dict:
@@ -347,8 +451,11 @@ class Chat:
                                  "AND session_id IS ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                                  (workspace_id, *targets, session, MINE)).fetchall()
         mine = [dict(r) for r in reversed(rows)]
+        files = self._files(workspace_id, [m["id"] for m in mine])
         now = self.s.clock()
         for m in mine:
+            if m["id"] in files:
+                m["files"] = files[m["id"]]
             if m["status"] == "queued" and (m["reason"] or "").startswith((WAITS, HELPER_FAILED, FLEET)):
                 m["waits"] = m["reason"]
             if m["status"] == "leased" and (doing := TURNS.get(workspace_id, m["id"], now)):
@@ -598,6 +705,11 @@ class Chat:
                                "updated_at = ? WHERE id = ?", (until, now, w["id"]))
                     item = {"id": w["id"], "kind": "chat", "target": w["target"], "text": row["text"],
                             "send_key": row["send_key"]}
+                    files = [dict(f) for f in db.execute(
+                        "SELECT id, name, mime, size, sha256 FROM chat_attachments WHERE message_id = ? ORDER BY rowid",
+                        (w["id"],)).fetchall()]
+                    if files:
+                        item["attachments"] = files
                     if row["session_id"]:
                         item["session"] = row["session_id"]  # into that session of the Bot, not its Bot Chat
                 else:
@@ -630,6 +742,8 @@ class Chat:
                     db.execute(f"UPDATE {table} SET status = 'uncertain', lease_until = NULL, reason = ?, "
                                f"updated_at = ? WHERE id = ?",
                                ("the connector stopped before it said what happened", self.s.now(), r["id"]))
+                    if table == "chat_messages":
+                        db.execute("UPDATE chat_attachments SET body = NULL WHERE message_id = ?", (r["id"],))
                     if table == "connector_outbox":
                         db.execute("INSERT INTO effect_receipts(id, workspace_id, outbox, outbox_id, outcome, "
                                    "detail_json, at) VALUES(?,?,?,?,?,?,?)",
@@ -774,6 +888,9 @@ class Chat:
             with self.s.tx() as db:
                 db.execute("UPDATE chat_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ? "
                            "WHERE id = ?", (state, reason or None, self.s.now(), item_id))
+                # The files are in the Bot's own folders or the room's store now, or the message did not go:
+                # either way the core keeps only their names.
+                db.execute("UPDATE chat_attachments SET body = NULL WHERE message_id = ?", (item_id,))
                 self.s.event(db, workspace_id, f"chat.{state}", item_id, "connector", {"ref": ref})
                 # His message's turn ended in a Bot's chat: one line on his phone (alerts.py). A message steered
                 # into a Bot's running turn has no turn of its own, so its end is not his to hear about.

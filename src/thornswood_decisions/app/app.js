@@ -1898,22 +1898,24 @@ function chatCards(cards, back) {
 }
 
 // Photos and files on a message to his own Hermes (Patrick, 2 Nov: "no way to add files or photos or
-// anything add a + button like Claude and Hermes have"). The + offers the camera, his photos and his
-// files; each is uploaded to the core as soon as it is picked, shows above the box while it goes, and
-// can be taken off before sending. The message names them, and his Hermes gets them in its own folders
-// (own_connector.py save_attachment): the first photo as the turn's image, every other file as an
-// @file: reference, as Hermes Desktop attaches them. Up to 10 a message, 20 MB each.
+// anything add a + button like Claude and Hermes have"), and to a Bot or a room (#81). The + offers the
+// camera, his photos and his files; each is uploaded to the core as soon as it is picked (to the chat's
+// own route, `base`: /own/<gw> or /chat/<Bot or room>), shows above the box while it goes, and can be taken
+// off before sending. The message names them, and Hermes gets them as Desktop hands them over: in his own
+// Hermes or the Bot's own folders, each photo as the turn's image and every other file as an @file:
+// reference (own_connector.py hand_over), or in a room's own store (room_send.py). Up to 10 a message,
+// 20 MB each; a room takes 8 a message, 15 MB each.
 const ATTACH_MAX = 20 * 1024 * 1024
 let localFile = 0
 
-function attachSheet(gw, draft, status) {
+function attachSheet(base, draft, status) {
   closeSheet()
   const pick = (accept, capture) => {
     closeSheet()
     const input = el('input', { type: 'file', multiple: capture ? null : true, accept: accept || null,
       capture: capture || null, hidden: true })
     input.addEventListener('change', () => {
-      for (const file of [...input.files]) addFile(gw, draft, file, status)
+      for (const file of [...input.files]) addFile(base, draft, file, status)
       input.remove()
       route()
     })
@@ -1933,7 +1935,7 @@ function attachSheet(gw, draft, status) {
   back.querySelector('button').focus()
 }
 
-async function addFile(gw, draft, file, status, label) {
+async function addFile(base, draft, file, status, label) {
   if (draft.files.length >= 10) { sayAgain(status, 'A message takes up to 10 files.'); return }
   const f = { local: ++localFile, name: file.name || 'photo.jpg', mime: file.type || '', size: file.size, state: 'up',
     label: label || null }
@@ -1947,7 +1949,7 @@ async function addFile(gw, draft, file, status, label) {
   if (csrf) headers['X-CSRF-Token'] = csrf
   let r
   try {
-    const resp = await fetch(`${API}/own/${gw}/attach?name=${encodeURIComponent(f.name)}`,
+    const resp = await fetch(`${API}${base}/attach?name=${encodeURIComponent(f.name)}`,
       { method: 'POST', headers, credentials: 'same-origin', cache: 'no-store', body: file })
     let out = {}
     try { out = await resp.json() } catch (e) { out = {} }
@@ -1957,7 +1959,7 @@ async function addFile(gw, draft, file, status, label) {
   }
   if (!draft.files.includes(f)) {
     // Taken off while it went up: take it off the core too.
-    if (r.status === 200) call('POST', `/own/${gw}/unattach`, { id: r.body.id })
+    if (r.status === 200) call('POST', `${base}/unattach`, { id: r.body.id })
     return
   }
   if (r.status === 200) Object.assign(f, { state: 'ok', id: r.body.id, name: r.body.name, mime: r.body.mime })
@@ -1970,7 +1972,7 @@ function sizeWords(n) {
   return n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'
 }
 
-function attachStrip(gw, draft, status) {
+function attachStrip(base, draft, status) {
   if (!draft.files.length) return null
   return el('div', { class: 'files', role: 'list', 'aria-label': 'Files on this message' }, draft.files.map(f =>
     el('div', { class: 'file ' + f.state, role: 'listitem' },
@@ -1981,7 +1983,7 @@ function attachStrip(gw, draft, status) {
       el('button', { class: 'ib', type: 'button', 'aria-label': 'Take off ' + (f.label || f.name), onclick: () => {
         draft.files = draft.files.filter(x => x !== f)
         draft.key = newKey()
-        if (f.id) call('POST', `/own/${gw}/unattach`, { id: f.id })
+        if (f.id) call('POST', `${base}/unattach`, { id: f.id })
         route()
       } }, icon('x', 16)))))
 }
@@ -2610,7 +2612,7 @@ async function ownChatView(gw, sid) {
         dock.push(signInPart(v, status), chatComposer(draftKey, 'Message to ' + name, 'Send to ' + name,
           (text, k, reply, files) => call('POST', `/own/${gw}/send`, { session_id: sid, text, idempotency_key: k,
             ...(reply ? { reply_to: reply.mid, quote: reply.quote, quote_by: reply.by } : {}),
-            ...(files.length ? { attachments: files } : {}) }), status, gw, gw), status)
+            ...(files.length ? { attachments: files } : {}) }), status, gw, '/own/' + gw), status)
       } else {
         dock.push(signInPart(v, status), status)
       }
@@ -3083,8 +3085,9 @@ async function chatView(target, tab, sid) {
     const dock = v.can_send
       ? [chatComposer(sid ? key : target, 'Message to ' + name, 'Send to ' + name,
           (text, k, reply, files, answer) => call('POST', '/chat/' + encodeURIComponent(target),
-            { text, idempotency_key: k, ...(answer ? { answer } : {}), ...(sid ? { session: sid } : {}) }),
-          status, null, null, v.cards), status]
+            { text, idempotency_key: k, ...(answer ? { answer } : {}), ...(sid ? { session: sid } : {}),
+              ...(files.length ? { attachments: files } : {}) }),
+          status, null, '/chat/' + encodeURIComponent(target), v.cards), status]
       : [el('p', { class: 'quiet' }, said({ error: 'chat_write_off' }))]
     // His message a Bot is answering now: the Bot's live line under it, kept current while the turn runs. In a
     // session, the Bot's own turn there shows the same way while it runs, as on the Board.
