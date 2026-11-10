@@ -909,6 +909,36 @@ class Reports(unittest.TestCase):
         self.assertEqual(f.follow(), 1)
         self.assertEqual(len(self.reports), 1)
 
+    def test_a_red_suite_names_its_failed_tests_and_nothing_else(self):
+        vm = FakeVM(NEW)
+        out = ("....F.E\n"
+               "======================================================================\n"
+               "FAIL: test_waits (tests.test_x.Waits.test_waits)\n"
+               "----------------------------------------------------------------------\n"
+               "AssertionError: token abc123 from 10.0.0.7\n"
+               "ERROR: setUpClass (tests.test_y.Slow)\n"
+               "FAIL: test_waits (tests.test_x.Waits.test_waits)\n"
+               "FAIL: not a test name (because; of spaces)\n"
+               "Ran 412 tests in 333.8s\n\nFAILED (failures=1, errors=1)\n")
+
+        def run(args, **kw):
+            if args[0] == "systemd-run":
+                return subprocess.CompletedProcess(args, 1, out, "")
+            return vm(args, **kw)
+        f = self.follower(vm)
+        f.run_ = run
+        self.assertEqual(f.follow(), 1)
+        reason = self.reports[0]["reason"]
+        self.assertIn("Ran 412 tests in 333.8s; failed tests.test_x.Waits.test_waits, tests.test_y.Slow.setUpClass", reason)
+        for leak in ("abc123", "10.0.0.7", "AssertionError", "spaces"):
+            self.assertNotIn(leak, reason)
+
+    def test_failed_tests_keeps_three_and_counts_the_rest(self):
+        out = "\n".join(f"FAIL: test_{i} (tests.test_m.C.test_{i})" for i in range(5))
+        self.assertEqual(follow_main.failed_tests(out),
+                         "tests.test_m.C.test_0, tests.test_m.C.test_1, tests.test_m.C.test_2 and 2 more")
+        self.assertEqual(follow_main.failed_tests("Ran 3 tests\nOK\n"), "")
+
     def test_a_failed_canary_reports_the_put_back(self):
         f = self.follower(FakeVM(NEW, fail={"tw-canary": 1}))
         self.assertEqual(f.follow(), 1)

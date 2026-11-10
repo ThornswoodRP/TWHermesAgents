@@ -795,7 +795,9 @@ follow_main:
   # comment per install on the ledger issue in the ops repository, and on the
   # board an issue while the VM is not installing main, closed by the next
   # good install. Only the commit, the result, the step and a one-line reason
-  # go out, with any address taken out; every step's output stays here.
+  # go out, with any address taken out; every step's output stays here, but
+  # a red suite's count and the names of its failed tests (10 Nov 2026: the
+  # VM's first red suite, at 9cdb394, was a test nobody could name).
   # Bramble's, because Ops is Bramble's alone (github_apps above): written as
   # the workers' App, every report after the workers' App came off Ops
   # (8 Nov 2026, 9:08 PM Mountain) got GitHub's 422 for a repository the

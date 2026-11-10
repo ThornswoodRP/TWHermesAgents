@@ -13,7 +13,8 @@ Runs as root from tw-follow-main.timer. Each run:
   3. puts main's commit in a root-owned release folder, as
      install-on-oracle.sh did;
   4. runs the whole test suite at that commit, as the tw-ci user, with no
-     network, and installs nothing if one test fails;
+     network, and installs nothing if one test fails; of a red suite only
+     its count and the names of the tests that failed leave the VM;
   5. runs that release's deploy/install.sh and, once the decision core is
      installed here (its /etc/thornswood/tw-decide.env is there), that
      release's deploy/decisions/install.sh too, so the core's process, venv,
@@ -63,6 +64,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -85,6 +87,30 @@ RELOAD_LINE = "RELOAD: "
 
 def _text(b) -> str:
     return b.decode("utf-8", "replace") if isinstance(b, (bytes, bytearray)) else (b or "")
+
+
+# A failed test as unittest names it, and nothing else of the output: its
+# method and where it is, which are names in this repository and no secret.
+# Written with no ": ", since Stop.reason cuts the sentence at the first one.
+FAILED_TEST = re.compile(r"^(?:FAIL|ERROR): ([A-Za-z_]\w*) \(([A-Za-z_][\w.]*)\)$")
+
+
+def failed_tests(out: str, most: int = 3) -> str:
+    """The tests a red suite names, for the sentence that leaves the VM:
+    each as module.Class.method, at most `most` and how many more. Every
+    other line of the output stays on the VM."""
+    names = []
+    for line in out.splitlines():
+        m = FAILED_TEST.match(line.strip())
+        if m:
+            where, name = m.group(2), m.group(1)
+            full = where if where.endswith("." + name) else f"{where}.{name}"
+            if full not in names:
+                names.append(full)
+    if not names:
+        return ""
+    more = f" and {len(names) - most} more" if len(names) > most else ""
+    return ", ".join(names[:most]) + more
 
 
 class Stop(Exception):
@@ -301,7 +327,9 @@ class Follower:
             out = (c.stdout or "") + (c.stderr or "")
             ran = [line for line in out.splitlines() if line.startswith("Ran ")]
             if c.returncode != 0:
-                raise Stop("tests", f"the suite fails at {commit[:12]} on the VM ({ran[-1] if ran else 'no count'}): {out.strip()[-800:]}")
+                failed = failed_tests(out)
+                which = f"; failed {failed}" if failed else ""
+                raise Stop("tests", f"the suite fails at {commit[:12]} on the VM ({ran[-1] if ran else 'no count'}{which}): {out.strip()[-800:]}")
             return ran[-1] if ran else "Ran ? tests"
         finally:
             shutil.rmtree(work, ignore_errors=True)
