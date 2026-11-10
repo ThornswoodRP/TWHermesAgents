@@ -855,6 +855,32 @@ CREATE TABLE chat_attachments (
 CREATE INDEX chat_attachments_by_message ON chat_attachments(message_id);
 CREATE INDEX chat_attachments_by_owner ON chat_attachments(workspace_id, principal_id, message_id, created_at);
 """,
+    # 22: an alert when a turn he started stops without an answer (TWHermesAgents #109, 10 Nov: "a long turn
+    # started from the phone has to be checked by hand"). Until now only a turn that answered was alerted, so
+    # one that failed, or whose end the connector could not confirm, said nothing. SQLite cannot widen a CHECK
+    # in place, so the table is made again under its own name with the rows it had.
+    f"""
+ALTER TABLE chat_alerts RENAME TO chat_alerts_22;
+CREATE TABLE chat_alerts (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  kind TEXT NOT NULL CHECK (kind IN ('answered', 'asks', 'stopped')),
+  ref TEXT NOT NULL CHECK (length(ref) BETWEEN 1 AND 200),
+  who TEXT NOT NULL CHECK (length(who) BETWEEN 1 AND 40),
+  path TEXT NOT NULL CHECK (length(path) BETWEEN 4 AND 300),
+  status TEXT NOT NULL CHECK (status IN {_in(OUTBOX_STATES)}),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT,
+  UNIQUE (workspace_id, kind, ref)
+);
+INSERT INTO chat_alerts SELECT id, workspace_id, kind, ref, who, path, status, attempts, lease_until, created_at,
+  updated_at, reason FROM chat_alerts_22;
+DROP TABLE chat_alerts_22;
+CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
+""",
 ]
 
 
@@ -1055,5 +1081,31 @@ INSERT INTO chat_messages SELECT id, workspace_id, target, text, send_key, princ
   lease_until, created_at, updated_at, reason, session_id FROM chat_messages_21;
 DROP TABLE chat_messages_21;
 CREATE INDEX chat_messages_by_target ON chat_messages(workspace_id, target, created_at);
+""", ""),
+    # An alert of a stopped turn still on its way would never reach the phone; one already sent is history the
+    # older release has no kind for, so it goes.
+    22: ([("SELECT count(*) FROM chat_alerts WHERE kind = 'stopped' AND status IN ('queued', 'leased')",
+           "alerts of a stopped turn on their way")], f"""
+DELETE FROM chat_alerts WHERE kind = 'stopped';
+ALTER TABLE chat_alerts RENAME TO chat_alerts_22;
+CREATE TABLE chat_alerts (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  kind TEXT NOT NULL CHECK (kind IN ('answered', 'asks')),
+  ref TEXT NOT NULL CHECK (length(ref) BETWEEN 1 AND 200),
+  who TEXT NOT NULL CHECK (length(who) BETWEEN 1 AND 40),
+  path TEXT NOT NULL CHECK (length(path) BETWEEN 4 AND 300),
+  status TEXT NOT NULL CHECK (status IN {_in(OUTBOX_STATES)}),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lease_until TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT,
+  UNIQUE (workspace_id, kind, ref)
+);
+INSERT INTO chat_alerts SELECT id, workspace_id, kind, ref, who, path, status, attempts, lease_until, created_at,
+  updated_at, reason FROM chat_alerts_22;
+DROP TABLE chat_alerts_22;
+CREATE INDEX chat_alerts_by_status ON chat_alerts(workspace_id, status, created_at);
 """, ""),
 }

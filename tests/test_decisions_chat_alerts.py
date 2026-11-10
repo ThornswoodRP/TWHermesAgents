@@ -3,6 +3,7 @@ ends, or when his own Hermes asks him something, as Hermes Desktop notifies for 
 
 Checks that a Bot Chat or Bot session turn that finished, and a turn of his own Hermes, each queue one
 "answered" alert opening that chat, and a steer into a Bot's running turn or a room message queues none; that
+a turn that failed or ended unconfirmed queues one "stopped" alert, in a Bot's chat or his own Hermes (#109); that
 a question or approval his own Hermes opens queues one "asks" alert, once; that the push worker is handed them
 with a payload of who and the chat's path and nothing of the chat; that results, Retry-After and a lapsed
 lease work for them as for a card's; and that the service worker and the app know the chat paths. Everything
@@ -56,10 +57,20 @@ class Queued(unittest.TestCase):
         mid = self.ended("rift", session="s_rift_lo")
         self.assertEqual(rows(self.w), [("answered", mid, "Rift", "/m/bots/rift/s/s_rift_lo", "queued")])
 
-    def test_a_steer_into_a_bots_turn_a_failure_and_a_room_message_are_not(self):
+    def test_a_steer_into_a_bots_turn_and_a_room_message_are_not(self):
         self.ended("rift", ref="steered into the running turn", session="s_rift_lo", key="key-alert-0002")
-        self.ended("echo", outcome="failed", ref="", key="key-alert-0003")
         self.ended("room", ref="", key="key-alert-0004")
+        self.ended("room", outcome="failed", ref="", key="key-alert-0005")
+        self.assertEqual(rows(self.w), [])
+
+    def test_a_bot_turn_that_failed_or_ended_unconfirmed_is_said_as_stopped(self):
+        failed = self.ended("echo", outcome="failed", ref="", key="key-alert-0003")
+        unsure = self.ended("rift", outcome="uncertain", ref="", session="s_rift_lo", key="key-alert-0006")
+        self.assertEqual(rows(self.w), [("stopped", failed, "Echo", "/m/bots/echo", "queued"),
+                                        ("stopped", unsure, "Rift", "/m/bots/rift/s/s_rift_lo", "queued")])
+
+    def test_a_message_the_bot_was_not_ready_for_is_not(self):
+        self.ended("rift", outcome="not_ready", ref="", key="key-alert-0007")
         self.assertEqual(rows(self.w), [])
 
     def test_the_same_result_twice_is_one_alert(self):
@@ -84,6 +95,14 @@ class Own(unittest.TestCase):
         self.claim()
         self.own.result(self.w.ws, "one", self.g.tok["one"], mid, "confirmed", "turn finished")
         self.assertEqual(rows(self.w), [("answered", mid, "One", f"/m/hermes/one/{SID}", "queued")])
+
+    def test_his_own_turn_that_failed_or_ended_unconfirmed_is_said_as_stopped(self):
+        for n, outcome in enumerate(("failed", "uncertain")):
+            mid = self.own.send(passkey(self.w), "one", SID, None, "tidy up", f"own-key-001{n}")["message_id"]
+            self.claim()
+            self.own.result(self.w.ws, "one", self.g.tok["one"], mid, outcome, reason="the turn stopped")
+            self.assertEqual(rows(self.w)[-1], ("stopped", mid, "One", f"/m/hermes/one/{SID}", "queued"))
+        self.assertEqual(len(rows(self.w)), 2)
 
     def test_a_new_chat_opens_the_chat_hermes_made(self):
         mid = self.own.send(passkey(self.w), "one", None, True, "start", "own-key-0002")["message_id"]
@@ -160,6 +179,8 @@ class TheApp(unittest.TestCase):
         self.assertIn("toWorker({ opened: location.pathname })", app)
         self.assertIn("' answered'", sw)
         self.assertIn("' asks you something'", sw)
+        self.assertIn("' did not finish'", sw)
+        self.assertEqual(set(alerts.KINDS), set(__import__("re").findall(r"(\w+): who =>", sw)))
 
 
 if __name__ == "__main__":

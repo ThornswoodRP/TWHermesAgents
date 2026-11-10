@@ -294,6 +294,25 @@ details.fold summary { color: var(--muted); font-size: 14px; padding: 8px 0; cur
 .lv-note { color: var(--muted); font-size: 13px; margin: 4px 0; }
 .lv-text + .lv-step, .lv-step + .lv-text { margin-top: 8px; }
 @media (prefers-reduced-motion: reduce) { .lv-step.running .lv-mark::before { animation: none; } }
+/* A finished reply's tools (TWHermesAgents #106): one line each, Show opens what it was given and returned. */
+.bub .tools { margin: 0 0 8px; }
+.tool { font-size: 14px; color: var(--muted); margin: 2px 0; }
+.tool > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; cursor: pointer; list-style: none;
+  min-width: 0; }
+.tool > summary::-webkit-details-marker { display: none; }
+.tool .lv-mark { width: 1.1em; text-align: center; color: var(--one-text); flex: none; }
+.tool.failed .lv-mark { color: var(--warn); }
+.tool .tool-name { color: var(--fg); }
+.tool .lv-preview { font: 12.5px var(--mono); background: rgba(0,0,0,.35); border-radius: 4px; padding: 0 4px;
+  min-width: 0; flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool .tool-show { margin-left: auto; font-size: 0; color: var(--one-text); }
+.tool .tool-show::after { content: "Show"; font-size: 13px; }
+.tool[open] .tool-show::after { content: "Hide"; }
+.tool .tool-body { margin: 4px 0 8px 1.6em; }
+.tool .tool-label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
+.tool pre { font: 12.5px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; background: rgba(0,0,0,.35);
+  border-radius: 6px; padding: 6px 8px; margin: 2px 0; max-height: 16em; overflow-y: auto; color: var(--fg); }
+.tool-more { font-size: 13px; color: var(--muted); margin: 2px 0; }
 
 /* Online and offline (2 Nov): a dot on the corner of each agent's avatar, and its state in words on the
    right of each Bot's row. Green: running. Red: not running. Amber: on its way, or not known. The dot's

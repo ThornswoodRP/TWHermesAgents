@@ -13,7 +13,8 @@
 // opened or answered (Patrick, 1 Nov: an answered card kept showing).
 //
 // A chat alert (alerts.py, 9 Nov) is the same kind of line: "Rift answered" when a turn he started ended, or
-// "Hermes asks you something" when his own Hermes opened a question or an approval. Its payload is who and
+// "Hermes asks you something" when his own Hermes opened a question or an approval, or "One did not finish" when
+// a turn he started failed or its end could not be confirmed (#109). Its payload is who and
 // the chat to open, checked before it becomes a path; never a word of the chat. None shows while that very
 // chat is open in front of him, and opening the chat takes its alert off.
 const SHELL = 'tw-shell-v12'
@@ -22,7 +23,8 @@ const CARD_ID = /^[A-Za-z0-9_-]{1,64}$/
 const CHAT_PATH = /^\/m\/(bots\/[a-z0-9][a-z0-9_-]{0,63}(\/s\/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?|hermes\/(me|one)(\/[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?)$/
 const APP_PATH = /^\/m\/(decisions|decisions\/[A-Za-z0-9_-]{1,64}|needs-you)$/
 const WHO = /^[A-Za-z][A-Za-z ]{0,39}$/
-const CHAT_WORDS = { answered: who => who + ' answered', asks: who => who + ' asks you something' }
+const CHAT_WORDS = { answered: who => who + ' answered', asks: who => who + ' asks you something',
+  stopped: who => who + ' did not finish' }
 const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/cinzel-latin.woff2',
   '/m/icon-192.png', '/m/icon-512.png', '/m/icon-maskable-512.png']
 

@@ -126,6 +126,18 @@ MD = ("**Bold** and *italic* and `code`, with a_snake_name kept.\n"
       "| a | b |\n|---|---|\n| 1 | 2 |\n\n> quoted")
 con.execute("INSERT INTO sessions VALUES('s_md', 'cli', 'Markdown check', ?, ?, NULL, NULL, NULL, 0, 0)",
             (epoch("2026-10-31T11:00:00+00:00"), epoch("2026-10-31T12:00:00+00:00")))
+# The reply ran two tools before it wrote (TWHermesAgents #106): Hermes keeps the calls on an assistant row
+# with no words and each result on a tool row; the second command failed.
+con.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
+con.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
+con.execute("INSERT INTO messages(session_id, role, content, timestamp, tool_calls) VALUES('s_md', 'assistant', '', ?, ?)",
+            (epoch("2026-10-31T11:59:00+00:00"), json.dumps([
+                {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": json.dumps({"command": "git status"})}},
+                {"id": "c2", "type": "function", "function": {"name": "terminal", "arguments": json.dumps({"command": "false"})}}])))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp, tool_call_id) VALUES('s_md', 'tool', ?, ?, 'c1')",
+            (json.dumps({"output": "nothing to commit", "exit_code": 0}), epoch("2026-10-31T11:59:10+00:00")))
+con.execute("INSERT INTO messages(session_id, role, content, timestamp, tool_call_id) VALUES('s_md', 'tool', ?, ?, 'c2')",
+            (json.dumps({"output": "", "exit_code": 1}), epoch("2026-10-31T11:59:20+00:00")))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_md', 'assistant', ?, ?)",
             (MD, epoch("2026-10-31T12:00:00+00:00")))
 # Links of each kind, a mention and a phone number (Patrick, 2 Nov 3:18 PM and 3:21 PM); and a chat Hermes has
