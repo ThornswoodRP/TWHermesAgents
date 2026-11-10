@@ -57,6 +57,15 @@ SEEN_EVERY = timedelta(seconds=20)   # how often a connector's poll is written d
 SIGN_IN = timedelta(minutes=30)
 LEASE = timedelta(minutes=20)        # the connector gives a turn 15 minutes
 MAX_TEXT = 8000
+BOT_WAITING = 3                      # a Bot's messages to One waiting at once, at most
+BOT_REPLY = 8000                     # the newest characters of One's answer that go back to the Bot
+# What the core says to One's Hermes under a Bot's words (Patrick, 9 Nov, q-86: "why not just have it message
+# my One bot?", "yeah so it doesnt have to wait on me"). The signature is Hermes's own for a Bot's message
+# (tools/bot_mode_dm.py), so One's Hermes reads it as Bot Mode does.
+BOT_NOTE = ("\n\n(Sent to you through the decision core. Patrick agreed on 9 Nov that steps from the agreed "
+            "plan that a Bot sends here run without asking him. Do not run a step that needs a secret, money, or "
+            "anything destructive that is not in the plan: say so in your answer instead, and the Bot puts it "
+            "on his page as a card. Your answer goes back to the Bot.)")
 # Files and photos on a message (the + in the box, 2 Nov): each at most 20 MB, at most 10 on a message, and
 # at most 100 MB and 20 files uploaded and not yet sent at once for each signed-in phone, so an upload that
 # is never sent cannot fill the store. An upload not sent in a day is dropped.
@@ -277,6 +286,13 @@ def clean(body) -> dict:
     if len({o["id"] for o in out_open}) != len(out_open):
         raise CoreError(400, "bad_feed", "the feed opens a chat twice")
     return {"source_time": source_time, "chats": out_chats, "open": out_open}
+
+
+def bot_words(text: str) -> str:
+    """A Bot's step for One as the Bot wrote it: without the signature and the note the core put round it."""
+    if text.startswith("Message from \U0001F916 ") and "): " in text:
+        text = text.split("): ", 1)[1]
+    return text[:-len(BOT_NOTE)] if text.endswith(BOT_NOTE) else text
 
 
 class _Pages:
@@ -741,6 +757,7 @@ class OwnChat:
         rows = self.s.db.execute(
             "SELECT id, substr(text, 1, 80) AS text, made_session_id, status, reason, created_at FROM own_messages "
             "WHERE workspace_id = ? AND gateway = ? AND session_id IS NULL "
+            "AND principal_id IN (SELECT id FROM principals WHERE kind = 'patrick') "
             "ORDER BY created_at DESC, rowid DESC LIMIT 10", (p.workspace_id, gw)).fetchall()
         listed = {c["id"] for c in snap.get("chats", [])}
         starting = [dict(r) for r in rows if r["made_session_id"] not in listed]
@@ -795,13 +812,20 @@ class OwnChat:
             self._want(p.workspace_id, gw, sid)
         history = [{"who": "Patrick" if m["role"] == "user" else "Hermes", "role": m["role"], "text": m["text"],
                     "at": m["at"]} for m in (opened or {}).get("messages", [])]
+        # In his Bot Chat, the Bots' steps for One too (ask_one), each with the Bot that sent it, in its words.
+        bot_chat = bool(chat and chat.get("bot_chat")) or self.is_bot_chat(p.workspace_id, gw, sid)
         rows = self.s.db.execute(
-            "SELECT id, text, status, reason, created_at, updated_at, reply_to FROM own_messages WHERE workspace_id = ? "
-            "AND gateway = ? AND (session_id = ? OR made_session_id = ?) ORDER BY created_at DESC, rowid DESC "
-            "LIMIT ?", (p.workspace_id, gw, sid, sid, MINE)).fetchall()
+            "SELECT m.id, m.text, m.status, m.reason, m.created_at, m.updated_at, m.reply_to, p.bot AS from_bot "
+            "FROM own_messages m JOIN principals p ON p.id = m.principal_id WHERE m.workspace_id = ? "
+            "AND m.gateway = ? AND (m.session_id = ? OR m.made_session_id = ? OR (? AND p.bot IS NOT NULL)) "
+            "ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+            (p.workspace_id, gw, sid, sid, int(bot_chat), MINE)).fetchall()
         # His reactions in this chat that the phone has asked for, so it shows each one at once, and
         # how it went, until the chat's own page shows it.
-        mine = [dict(r) for r in reversed(rows)]
+        mine = [dict(r) if r["from_bot"] else {k: r[k] for k in r.keys() if k != "from_bot"} for r in reversed(rows)]
+        for m in mine:
+            if m.get("from_bot"):
+                m["text"] = bot_words(m["text"])
         files = self._files(p.workspace_id, [m["id"] for m in mine])
         for m in mine:
             if m["id"] in files:
@@ -889,6 +913,70 @@ class OwnChat:
                        "result_json, created_at) VALUES(?,?,?,?,?,?,?)",
                        (p.workspace_id, p.id, idempotency_key, "own.send", body_sha, canonical(receipt), now))
         return receipt
+
+    def ask_one(self, p: Principal, text, key=None) -> dict:
+        """A Bot's message to One's Hermes, run in its Bot Chat without Patrick (Patrick, 9 Nov, q-86); its
+        answer goes back to the Bot (result, Chat._one_text). Only to One: the steps the Bots cannot run
+        themselves are the ones on Patrick's PC. One message per Bot in flight and BOT_WAITING waiting, so a
+        Bot cannot flood his PC."""
+        if p.kind not in ("bramble", "specialist") or not p.bot:
+            raise CoreError(403, "not_a_bot", "only a Bot sends a message to One this way")
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "nothing goes to One while own_chat_write is off")
+        if not isinstance(text, str) or not text.strip():
+            raise CoreError(400, "bad_text", "a message to One has its text")
+        sign = f"Message from \U0001F916 {p.bot.capitalize()} (@{p.bot}): "
+        body = sign + text.strip() + BOT_NOTE
+        if len(body) > MAX_TEXT:
+            raise CoreError(400, "bad_text", f"a message to One is at most {MAX_TEXT - len(sign) - len(BOT_NOTE)} "
+                            "characters")
+        if key is not None and (not isinstance(key, str) or not 8 <= len(key) <= 200):
+            raise CoreError(400, "bad_key", "a source_key is 8 to 200 characters")
+        body_sha = sha256_hex(canonical({"gateway": "one", "text": body}))
+        with self.s.tx() as db:
+            if key is not None:
+                cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
+                                 "AND principal_id = ? AND idempotency_key = ?", (p.workspace_id, p.id, key)).fetchone()
+                if cmd:
+                    if cmd["op"] != "own.ask_one" or cmd["body_sha256"] != body_sha:
+                        raise CoreError(409, "key_reused", "that source_key was used for a different message")
+                    return json.loads(cmd["result_json"]) | {"replayed": True}
+            waiting = db.execute("SELECT count(*) FROM own_messages WHERE workspace_id = ? AND gateway = 'one' "
+                                 "AND principal_id = ? AND status IN ('queued', 'leased')",
+                                 (p.workspace_id, p.id)).fetchone()[0]
+            if waiting >= BOT_WAITING:
+                raise CoreError(429, "one_busy", f"{BOT_WAITING} of your messages to One are waiting already; "
+                                "send the next once One answers one")
+            now = self.s.now()
+            mid = new_id("own")
+            db.execute("INSERT INTO own_messages(id, workspace_id, gateway, session_id, text, send_key, "
+                       "principal_id, device_id, status, created_at, updated_at) "
+                       "VALUES(?,?,'one',NULL,?,?,?,NULL,'queued',?,?)",
+                       (mid, p.workspace_id, body, f"tw-own.{mid}", p.id, now, now))
+            self.s.wake(p.workspace_id, "one")
+            self.s.event(db, p.workspace_id, "own.queued", mid, p.label, {"gateway": "one", "bot": p.bot})
+            receipt = {"message_id": mid, "gateway": "one", "status": "queued", "created_at": now,
+                       "one_online": self.online(p.workspace_id, "one")}
+            if key is not None:
+                db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
+                           "result_json, created_at) VALUES(?,?,?,?,?,?,?)",
+                           (p.workspace_id, p.id, key, "own.ask_one", body_sha, canonical(receipt), now))
+        return receipt
+
+    def one_answer(self, p: Principal, message_id) -> dict:
+        """A Bot's message to One as it stands, and One's answer once it came: only the Bot that sent it."""
+        row = self.s.db.execute("SELECT status, reason, created_at, updated_at FROM own_messages WHERE id = ? "
+                                "AND workspace_id = ? AND gateway = 'one' AND principal_id = ?",
+                                (message_id, p.workspace_id, p.id)).fetchone() if isinstance(message_id, str) else None
+        if not row:
+            raise CoreError(404, "no_item", "no message of yours to One by that id")
+        out = {"message_id": message_id, "status": row["status"], "reason": row["reason"],
+               "created_at": row["created_at"], "updated_at": row["updated_at"]}
+        cx = self.s.db.execute("SELECT body_json FROM connector_outbox WHERE idempotency_key = ?",
+                               (f"one:{message_id}",)).fetchone()
+        if cx:
+            out["answer"] = json.loads(cx["body_json"]).get("reply")
+        return out
 
     @staticmethod
     def _wanted_files(attachments) -> list[str]:
@@ -1225,18 +1313,22 @@ class OwnChat:
         items = []
         with self.s.tx() as db:
             self._lapse(db, workspace_id, gw)
-            rows = db.execute("SELECT id, session_id, text, send_key, status FROM own_messages "
-                              "WHERE workspace_id = ? AND gateway = ? AND status IN ('queued', 'leased') "
-                              "ORDER BY created_at, rowid", (workspace_id, gw)).fetchall()
+            rows = db.execute("SELECT m.id, m.session_id, m.text, m.send_key, m.status, p.bot FROM own_messages m "
+                              "JOIN principals p ON p.id = m.principal_id "
+                              "WHERE m.workspace_id = ? AND m.gateway = ? AND m.status IN ('queued', 'leased') "
+                              "ORDER BY m.created_at, m.rowid", (workspace_id, gw)).fetchall()
             # In each chat, the next message only once every one before it is in Hermes; each new chat is a
-            # chat of its own, one message at a time.
+            # chat of its own, one message at a time; the Bots' messages share the Bot Chat, one at a time.
             seen_at = self.s.clock()
-            busy = {r["session_id"] or r["id"] for r in rows if r["status"] == "leased"
+
+            def chat_of(r):
+                return "bot chat" if r["bot"] else r["session_id"] or r["id"]
+            busy = {chat_of(r) for r in rows if r["status"] == "leased"
                     and not (r["session_id"] and CONNECTORS.admitted(workspace_id, gw, r["id"], seen_at))}
             until = (self.s.clock() + LEASE).isoformat()
             now = self.s.now()
             for r in rows:
-                key = r["session_id"] or r["id"]
+                key = chat_of(r)
                 if r["status"] != "queued" or key in busy or len(items) >= limit or not ready:
                     continue
                 busy.add(key)
@@ -1248,7 +1340,7 @@ class OwnChat:
                     (r["id"],)).fetchall()]
                 items.append({"id": r["id"], "session_id": r["session_id"], "text": r["text"],
                               "send_key": r["send_key"], "lease_until": until}
-                             | ({"attachments": files} if files else {}))
+                             | ({"attachments": files} if files else {}) | ({"bot_chat": True} if r["bot"] else {}))
             reactions = [{"session_id": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, gw)] if ready else []
             sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
@@ -1312,15 +1404,16 @@ class OwnChat:
         return {"kept": LIVE.put(workspace_id, turns, self.s.clock())}
 
     def result(self, workspace_id: str, gw: str, token: str | None, item_id: str, outcome: str, ref: str = "",
-               reason: str = "", session_id=None) -> dict:
+               reason: str = "", session_id=None, reply=None) -> dict:
         self._check_token(workspace_id, gw, token)
         if outcome not in OUTCOMES:
             raise CoreError(400, "bad_outcome", "an outcome is confirmed, failed or uncertain")
         made = _sid(session_id) if session_id else None
         ref, reason = str(ref)[:128], str(reason)[:200]
         state = OUTCOMES[outcome]
-        row = self.s.db.execute("SELECT status, session_id FROM own_messages WHERE id = ? AND workspace_id = ? "
-                                "AND gateway = ?", (item_id, workspace_id, gw)).fetchone()
+        row = self.s.db.execute("SELECT m.status, m.session_id, p.bot FROM own_messages m JOIN principals p "
+                                "ON p.id = m.principal_id WHERE m.id = ? AND m.workspace_id = ? AND m.gateway = ?",
+                                (item_id, workspace_id, gw)).fetchone()
         if not row:
             raise CoreError(404, "no_item", "no such message")
         if row["status"] == state:
@@ -1337,7 +1430,18 @@ class OwnChat:
                        "made_session_id = coalesce(made_session_id, ?) WHERE id = ?",
                        (state, reason or None, self.s.now(), made if row["session_id"] is None else None, item_id))
             self.s.event(db, workspace_id, f"own.{state}", item_id, f"own connector ({gw})", {"ref": ref})
-            if outcome == "confirmed":
+            if row["bot"]:
+                # A Bot's message: what came of it, and One's answer, go back to that Bot in its own Bot Chat
+                # (Chat.claim, _one_text). One's words are kept as long as a card's answer is.
+                db.execute("INSERT OR IGNORE INTO connector_outbox(id, workspace_id, decision_id, kind, target, "
+                           "body_json, idempotency_key, status, created_at, updated_at) "
+                           "VALUES(?,?,NULL,'one.answered',?,?,?,'queued',?,?)",
+                           (new_id("cx"), workspace_id, row["bot"],
+                            canonical({"message_id": item_id, "outcome": outcome, "reason": reason,
+                                       "reply": reply[-BOT_REPLY:] if isinstance(reply, str) else None}),
+                            f"one:{item_id}", self.s.now(), self.s.now()))
+                self.s.wake(workspace_id, "bots")
+            elif outcome == "confirmed":
                 # The turn he started ended: one line on his phone (alerts.py), opening that chat.
                 alerts.queue(self.s, db, workspace_id, "answered", item_id, alerts.OWN_WHO[gw],
                              alerts.own_path(gw, row["session_id"] or made))

@@ -2215,13 +2215,28 @@ async function gatewayView(gw, into = 'view') {
   if (seqNow === viewSeq) showIn(into, parts)
 }
 
+// A Bot's message in his Bot Chat comes as the user's turn, signed the way Hermes signs one
+// ("Message from 🤖 Wisp (@wisp): ", tools/bot_mode_dm.py): drawn as that Bot's, in its words, without
+// the note the core adds under a Bot's step for One (own.py BOT_NOTE).
+const BOT_SIGNED = /^Message from \u{1F916} ([^(\n]{1,64}) \(@([A-Za-z0-9_-]{1,64})\): /u
+const BOT_NOTE_START = '\n\n(Sent to you through the decision core.'
+function botWords(text) {
+  const i = String(text).indexOf(BOT_NOTE_START)
+  return i >= 0 ? String(text).slice(0, i) : String(text)
+}
+function fromBot(item) {
+  const m = item.mine && String(item.text || '').match(BOT_SIGNED)
+  if (!m) return item
+  return { ...item, mine: false, who: m[1], agent: m[2].toLowerCase(), text: botWords(item.text.slice(m[0].length)) }
+}
+
 // What Hermes holds of one of his own chats: notes to show above it, its
 // messages as bubbles, and the Older messages button when there are more.
 function historyPart(gw, sid, t, name, feed) {
   if (t.error) return { notes: [el('p', { class: 'warn' }, t.error)], items: [], gone: false }
   if (!t.newest) {
     // Before the first page: the last messages the connector's feed sent, when it sent this chat's.
-    const items = (feed || []).map((m, k) => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: 'feed' + k,
+    const items = (feed || []).map((m, k) => fromBot({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: 'feed' + k,
       noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from ' + name + '.' }))
     return { notes: [el('p', { class: 'quiet' }, items.length ? `Asking ${name} for the rest of this chat.`
       : `Asking ${name} for this chat. It shows here within half a minute.`)], items, gone: false }
@@ -2250,7 +2265,7 @@ function historyPart(gw, sid, t, name, feed) {
       route()
     } }, 'Older messages'), olderNote)
   }
-  const items = msgs.map(m => ({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid,
+  const items = msgs.map(m => fromBot({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: m.mid,
     reactions: m.reactions || [] }))
   if (!items.length) notes.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
   return { notes, items, gone: false }
@@ -2488,7 +2503,9 @@ function turnPart(gw, name, turn, canAct) {
 function pendingItems(mine, readAt, who) {
   return mine.filter(m => m.status !== 'sent' || !readAt || new Date(m.updated_at) > readAt)
     .flatMap(m => {
-      const item = { mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files,
+      // A Bot's step for One (own.py ask_one): drawn as that Bot's message, not as one he sent.
+      const bot = m.from_bot ? { mine: false, bot: true, who: m.from_bot.charAt(0).toUpperCase() + m.from_bot.slice(1), agent: m.from_bot } : {}
+      const item = { mine: true, at: m.created_at, text: m.text, status: m.status, replyTo: m.reply_to, sent: m.files, ...bot,
         note: mineNote(m) + ((m.status === 'dead' || m.status === 'uncertain') && m.reason ? ': ' + m.reason : '')
           + (m.status === 'queued' && m.waits ? ': ' + m.waits : ''),
         warn: m.status === 'dead' || m.status === 'uncertain' }
@@ -2568,7 +2585,7 @@ async function ownChatView(gw, sid) {
         route().then(() => { const b = document.querySelector('#view .composer textarea'); if (b) b.focus() })
       } : null
     }
-    const items = h.items.concat(pendingItems(v.mine, readAt, name).map(m => ({ ...m, who: name })))
+    const items = h.items.concat(pendingItems(v.mine, readAt, name).map(m => m.bot ? m : { ...m, who: name }))
     // A rename, hide or delete asked for here: how it stands, and once a hide or a delete is done, so it says.
     const o = lastOp(v.ops, sid)
     const ended = o && o.status === 'done' && (o.op === 'delete' || o.op === 'archive') ? o.op : null

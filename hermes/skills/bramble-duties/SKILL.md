@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.10.0
+version: 1.11.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -262,6 +262,17 @@ to work the queue.
 3. Run a step only through `tw_git start_run` and a verb the policy allows. A
    step no verb covers is a stop: file it for Magpie, with what is missing,
    and never run it another way. It is not a card for Patrick.
+   A step that can only run on Patrick's own machine (One) is the one
+   exception: send it to One's Hermes as the next paragraph says.
+   A step on One goes to One's Hermes with `tw_decide ask_one` and the
+   step written so it stands alone: the note or issue, what to run, and
+   what to say back. Patrick agreed on 9 Nov 2026 that agreed plan steps
+   go to One without asking him, so it does not have to wait on him.
+   One's answer comes to you in your Bot Chat; `tw_decide one_answer` with
+   the message id says where it stands. Never send One a step that needs a
+   secret, spends money or destroys something the plan does not name: that
+   one is a card. If One's answer says a step needs one of those, open the
+   card then and do not send that step to One again.
 4. After a run:
    - put what ran, when, what it printed and the health check on the issue;
    - make one Ops pull request for the batch that deletes the notes that ran

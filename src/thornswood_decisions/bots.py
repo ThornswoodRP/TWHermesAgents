@@ -30,6 +30,7 @@ from . import contracts
 from .auth import Principal
 from .chat import Chat
 from .core import DecisionCore
+from .own import OwnChat
 from .store import CoreError, Store, iso
 
 # Who may connect. Each op is open to both; the Bot inside is the tool's.
@@ -148,6 +149,14 @@ class BotRoute:
         self.core.report_work_done(p, _text(args, "decision_id"), _text(args, "detail"))
         return {"recorded": True}
 
+    def ask_one(self, p: Principal, args: dict) -> dict:
+        """A step of the agreed plan for One's Hermes, run there without Patrick (Patrick, 9 Nov, q-86); the
+        answer comes back to this Bot's Bot Chat (own.py ask_one)."""
+        return OwnChat(self.store).ask_one(p, _text(args, "text"), args.get("source_key"))
+
+    def one_answer(self, p: Principal, args: dict) -> dict:
+        return OwnChat(self.store).one_answer(p, _text(args, "message_id"))
+
     # ── outside pull request cards (#132) ─────────────────────────────────
 
     @staticmethod
@@ -245,7 +254,7 @@ class BotRoute:
                                           str(args.get("session") or ""))
 
     OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
-           "keep_turned_away")
+           "keep_turned_away", "ask_one", "one_answer")
 
     def ops(self) -> dict:
         """The ops for thornswood_brokers.wire.Server: name -> (handler(caller, args), callers)."""

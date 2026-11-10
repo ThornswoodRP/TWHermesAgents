@@ -249,7 +249,8 @@ class Api:
                                       {k: data.get(k) for k in ("commit", "busy", "parallel", "busy_for", "updating",
                                                                 "update_why", "turns")})
             return 200, own.result(self.ws, route[1], token, str(data.get("id", "")), str(data.get("outcome", "")),
-                                   str(data.get("ref", "")), str(data.get("reason", "")), data.get("session_id"))
+                                   str(data.get("ref", "")), str(data.get("reason", "")), data.get("session_id"),
+                                   data.get("reply"))
         if method == "POST" and len(route) == 2 and route[0] in ("feeds", "connector", "push-worker"):
             if "cookie" in headers or headers.get("origin") is not None:
                 raise CoreError(403, "not_a_feed", "a feed, the connector or the push worker comes from the VM, "
