@@ -43,6 +43,7 @@ from .feeds import Feeds
 from .own_control import CONTROLS, MAX_WAIT as CONTROL_WAIT, wanted as control_wanted
 from .own_jobs import DO as JOB_DO, JOB_ID, JOBS
 from .own_sessions import OwnSessions
+from .rewinds import Rewinds, rewind_of
 from . import alerts
 from .own_turns import ORDERS, answer_value, clean_asks, clean_order
 from .reactions import REACTIONS, Reactions  # noqa: F401  (REACTIONS: what the phone offers)
@@ -873,7 +874,8 @@ class OwnChat:
         # In his Bot Chat, the Bots' steps for One too (ask_one), each with the Bot that sent it, in its words.
         bot_chat = bool(chat and chat.get("bot_chat")) or self.is_bot_chat(p.workspace_id, gw, sid)
         rows = self.s.db.execute(
-            "SELECT m.id, m.text, m.status, m.reason, m.created_at, m.updated_at, m.reply_to, p.bot AS from_bot "
+            "SELECT m.id, m.text, m.status, m.reason, m.created_at, m.updated_at, m.reply_to, m.rewind, m.rewind_to, "
+            "p.bot AS from_bot "
             "FROM own_messages m JOIN principals p ON p.id = m.principal_id WHERE m.workspace_id = ? "
             "AND m.gateway = ? AND (m.session_id = ? OR m.made_session_id = ? OR (? AND p.bot IS NOT NULL)) "
             "ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
@@ -892,6 +894,7 @@ class OwnChat:
         return st | {"chat": chat or {"id": sid, "title": ""}, "loaded": opened is not None, "history": history,
                      "mine": mine, "reactions": Reactions(self.s).shown(p.workspace_id, gw, sid),
                      "ops": OwnSessions(self.s).shown(p.workspace_id, gw, sid),
+                     "rewinds": Rewinds(self.s).shown(p.workspace_id, gw, sid),
                      **self._can(p)}
 
     def _unsettled(self, workspace_id: str, gw: str) -> int:
@@ -899,7 +902,7 @@ class OwnChat:
                                  "AND status IN ('queued', 'leased', 'uncertain')", (workspace_id, gw)).fetchone()[0]
 
     def send(self, p: Principal, gw: str, session_id, new, text, idempotency_key, reply_to=None, quote=None,
-             quote_by=None, attachments=None) -> dict:
+             quote_by=None, attachments=None, rewind=None, rewind_to=None) -> dict:
         """One message to one chat (session_id), or the first message of a new chat (new: true), which
         Hermes names itself, as it does any chat.
 
@@ -907,9 +910,15 @@ class OwnChat:
         (reply_to), the words it quotes and whose they are (quote_by: hermes or patrick). Hermes keeps
         no reply link, so the message Hermes gets opens with Hermes's own reply pointer, the line its
         gateway writes for a reply on a messaging app, in plain sight, exactly as Patrick sees it, and
-        the core keeps the link back."""
+        the core keeps the link back.
+
+        A retry or an edit (rewinds.py) first takes the chat back to before one of his turns (rewind_to, by
+        Hermes's own id): a retry sends that turn's own words again, as Hermes keeps them, and an edit sends
+        these words in its place. Its text is what the phone shows meanwhile (a retry's, the turn as the
+        phone has it). It goes to a chat this Hermes listed, with no reply and no file."""
         self._patrick(p)
         gw = self._gateway(gw)
+        rewind, rewind_to = rewind_of(rewind, rewind_to)
         if not self.s.flag(p.workspace_id, "own_chat_write"):
             raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
         if (session_id is None) != (new is True):
@@ -917,6 +926,12 @@ class OwnChat:
         if session_id is not None:
             session_id = _sid(session_id)
         files = self._wanted_files(attachments)
+        if rewind is not None:
+            if session_id is None or files or reply_to is not None or quote is not None or quote_by is not None:
+                raise CoreError(400, "bad_rewind", "a retry or an edit goes to the chat its turn is in, as words "
+                                "alone: no reply and no file")
+            if not self._listed(p.workspace_id, gw, session_id):
+                raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
         if not isinstance(text, str) or not (text.strip() or files):
             raise CoreError(400, "bad_text", "a message has some text or a file")
         text = text.strip()
@@ -933,7 +948,8 @@ class OwnChat:
             raise CoreError(400, "bad_key", "a message carries an idempotency key of 8 to 200 characters")
         body_sha = sha256_hex(canonical({"gateway": gw, "session_id": session_id, "text": text}
                                         | ({"reply_to": reply_to} if reply_to is not None else {})
-                                        | ({"attachments": files} if files else {})))
+                                        | ({"attachments": files} if files else {})
+                                        | ({"rewind": rewind, "rewind_to": rewind_to} if rewind else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -949,10 +965,10 @@ class OwnChat:
             now = self.s.now()
             mid = new_id("own")
             db.execute("INSERT INTO own_messages(id, workspace_id, gateway, session_id, text, send_key, "
-                       "principal_id, device_id, status, created_at, updated_at, reply_to) "
-                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                       "principal_id, device_id, status, created_at, updated_at, reply_to, rewind, rewind_to) "
+                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                        (mid, p.workspace_id, gw, session_id, text, f"tw-own.{mid}", p.id, p.device_id, now, now,
-                        reply_to))
+                        reply_to, rewind, rewind_to))
             self.s.wake(p.workspace_id, gw)
             for fid in files:
                 done = db.execute("UPDATE own_attachments SET message_id = ? WHERE id = ? AND workspace_id = ? "
@@ -964,7 +980,8 @@ class OwnChat:
             self.s.event(db, p.workspace_id, "own.queued", mid, "patrick",
                          {"gateway": gw, "new_chat": session_id is None, "device": p.device_id}
                          | ({"reply": True} if reply_to is not None else {})
-                         | ({"files": len(files)} if files else {}))
+                         | ({"files": len(files)} if files else {})
+                         | ({"rewind": rewind} if rewind else {}))
             receipt = {"message_id": mid, "gateway": gw, "session_id": session_id, "status": "queued",
                        "created_at": now}
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
@@ -1135,6 +1152,33 @@ class OwnChat:
         if not self.s.flag(p.workspace_id, "own_chat_write"):
             raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
         return OwnSessions(self.s).ask(self, p, gw, _sid(session_id), op, title, idempotency_key)
+
+    def rewind(self, p: Principal, gw: str, session_id, op, message_id, idempotency_key) -> dict:
+        """Undo from one of his turns, or branch a new chat through one message (rewinds.py). Each changes
+        what the chat holds, as a message does, so each needs what a message needs: own_chat_write, a chat
+        this Hermes listed, that Hermes answering, and a passkey sign-in from the last 30 minutes."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        sid = _sid(session_id)
+        if not self._listed(p.workspace_id, gw, sid):
+            raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that chat")
+        if self.sign_in_until(p) is None:
+            raise CoreError(403, "passkey_needed", "this changes what the chat holds, as a message to your own Hermes "
+                            "does, so it needs a passkey sign-in from the last 30 minutes; sign in with your passkey again")
+        self.must_be_online(p.workspace_id, gw)
+        return {"session_id": sid} | Rewinds(self.s).ask(p, gw, sid, None, op, message_id, idempotency_key)
+
+    def rewound(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """What came of an undo or a branch. Once done, the chat's newest page is read from Hermes again."""
+        self._check_token(workspace_id, gw, token)
+        out = Rewinds(self.s).done(workspace_id, gw, body, f"own connector ({gw})")
+        row = self.s.db.execute("SELECT chat FROM chat_rewinds WHERE id = ? AND workspace_id = ?",
+                                (body["id"], workspace_id)).fetchone()
+        if row and out.get("status") == "done":
+            PAGES.forget(workspace_id, gw, ("messages",), row["chat"])
+        return out
 
     def listed_or_hidden(self, workspace_id: str, gw: str, sid: str, hidden: bool = False) -> bool:
         """A chat this gateway listed, or for bringing one back, one a page of its hidden chats listed."""
@@ -1398,29 +1442,49 @@ class OwnChat:
         self._asks_alerts(workspace_id, gw)
         if not self.s.flag(workspace_id, "own_chat_write"):
             raise CoreError(423, "own_chat_off", "nothing goes to your own Hermes while own_chat_write is off")
-        items = []
+        items, rewinds = [], []
         with self.s.tx() as db:
             self._lapse(db, workspace_id, gw)
             self._made(db, workspace_id, gw)
-            rows = db.execute("SELECT m.id, m.session_id, m.text, m.send_key, m.status, p.bot FROM own_messages m "
-                              "JOIN principals p ON p.id = m.principal_id "
-                              "WHERE m.workspace_id = ? AND m.gateway = ? AND m.status IN ('queued', 'leased') "
-                              "ORDER BY m.created_at, m.rowid", (workspace_id, gw)).fetchall()
+            rows = [dict(r) | {"kind": "message"} for r in db.execute(
+                "SELECT m.id, m.session_id, m.text, m.send_key, m.status, m.rewind, m.rewind_to, m.created_at, "
+                "m.rowid AS n, p.bot FROM own_messages m JOIN principals p ON p.id = m.principal_id "
+                "WHERE m.workspace_id = ? AND m.gateway = ? AND m.status IN ('queued', 'leased')",
+                (workspace_id, gw)).fetchall()]
+            # Undos and branches (rewinds.py) go in the same order as the messages of their chat.
+            rows += [{"kind": "rewind", "id": r["id"], "session_id": r["chat"], "bot": None, "status": r["status"],
+                      "created_at": r["created_at"], "n": r["n"], "row": r}
+                     for r in Rewinds(self.s).waiting(db, workspace_id, gw)]
+            rows.sort(key=lambda r: (r["created_at"], r["kind"] == "rewind", r["n"]))
             # In each chat, the next message only once every one before it is in Hermes; each new chat is a
             # chat of its own, one message at a time; the Bots' messages share the Bot Chat, one at a time.
+            # An undo, a branch, a retry and an edit take the chat back or copy it, which Hermes does only
+            # while nothing runs there: each goes only once nothing before it in that chat is on its way,
+            # and nothing after it goes until it is done.
             seen_at = self.s.clock()
 
             def chat_of(r):
                 return "bot chat" if r["bot"] else r["session_id"] or r["id"]
+
+            def whole(r):
+                return r["kind"] == "rewind" or r["rewind"] is not None
+            leased = {chat_of(r) for r in rows if r["status"] == "leased"}
             busy = {chat_of(r) for r in rows if r["status"] == "leased"
-                    and not (r["session_id"] and CONNECTORS.admitted(workspace_id, gw, r["id"], seen_at))}
+                    and (whole(r) or not (r["session_id"] and CONNECTORS.admitted(workspace_id, gw, r["id"], seen_at)))}
             until = (self.s.clock() + LEASE).isoformat()
             now = self.s.now()
             for r in rows:
                 key = chat_of(r)
-                if r["status"] != "queued" or key in busy or len(items) >= limit or not ready:
+                if r["status"] != "queued":
+                    continue
+                if (key in busy or not ready or (whole(r) and key in leased)
+                        or (r["kind"] == "message" and len(items) >= limit)):
+                    busy.add(key)  # nothing after it in that chat goes before it
                     continue
                 busy.add(key)
+                if r["kind"] == "rewind":
+                    rewinds.append(Rewinds(self.s).lease(db, r["row"]) | {"session_id": r["session_id"]})
+                    continue
                 db.execute("UPDATE own_messages SET status = 'leased', lease_until = ?, attempts = attempts + 1, "
                            "updated_at = ? WHERE id = ?", (until, now, r["id"]))
                 self.s.event(db, workspace_id, "own.leased", r["id"], f"own connector ({gw})", {})
@@ -1429,11 +1493,13 @@ class OwnChat:
                     (r["id"],)).fetchall()]
                 items.append({"id": r["id"], "session_id": r["session_id"], "text": r["text"],
                               "send_key": r["send_key"], "lease_until": until}
-                             | ({"attachments": files} if files else {}) | ({"bot_chat": True} if r["bot"] else {}))
+                             | ({"attachments": files} if files else {}) | ({"bot_chat": True} if r["bot"] else {})
+                             | ({"rewind": r["rewind"], "rewind_to": r["rewind_to"]} if r["rewind"] else {}))
             reactions = [{"session_id": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, gw)] if ready else []
             sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
                 "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "sessions": sessions,
+                "rewinds": rewinds,
                 "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "jobs": JOBS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "orders": ORDERS.hand(workspace_id, gw, self.s.clock()), "release": RELEASE}

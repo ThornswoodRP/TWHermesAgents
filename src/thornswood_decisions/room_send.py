@@ -192,6 +192,33 @@ before it imports any of Hermes:
 Run inside Hermes's own bootstrap (`hermes --print-runtime-command`) it needs
 no folder: the bootstrap has put it there already.
 
+A retry or an edit (TWHermesAgents #80) is a turn that first takes the chat back to before one of his turns,
+as `hermes chat`'s /retry does (hermes_cli/gateway_chat_commands.py _retry and _rewind; contracts.json
+"rewind"):
+
+    <hermes python> -I room_send.py [attended-]chat --tw-rewind retry|edit <message id> <hermes chat's arguments>
+
+- before its message goes in, the view asks Hermes's session.mutate rewind to that turn, fenced to the chat's
+  revision and generation by Hermes's own PreparedMutations, with the target read from the same snapshot:
+  refused with nothing changed when that message is no longer one of his turns there, or, for a retry, a turn
+  Hermes cannot send again as words (/retry's own check, retryable_user_text), or while a turn runs there;
+- an edit then sends the words in the query file; a retry sends that turn's own words as Hermes kept them, and
+  the query file holds only the words the phone showed (`hermes chat` takes no empty query), never sent;
+- it says how the rewind went, once: {"type": "rewind", "status": "done", "count": n} or
+  {"type": "rewind", "status": "refused", "reason": "..."}, and a refused one ends the turn with nothing sent.
+
+`rewind` undoes from one of his turns, or branches a new chat through one message, of a chat of his own Hermes
+(profile empty) or of a Bot's, with Hermes's session.mutate on that profile's running gateway, the calls
+/undo and /branch make (contracts.json "rewind"):
+
+    <hermes python> -I room_send.py < {"op": "rewind", "profile": "<bot or empty>", "action": "undo" | "branch",
+                                       "session_id", "message_id"}
+
+It prints {"done": true} (an undo), {"done": true, "session_id": "<the new chat>"} (a branch),
+{"done": false, "ready": false, "reason"} when the gateway is not running (nothing was done), or
+{"done": false, "reason"} with Hermes's own reason. An undo names one of his turns, as /undo does; a branch
+keeps every message up to and with the one named.
+
 It imports nothing from this repository.
 """
 
@@ -605,6 +632,72 @@ def _react(profile: str, req: dict) -> dict:
         release_or_close(db)
 
 
+REWIND_SECONDS = 60  # one session.mutate through the gateway
+
+
+def rewind_payload(mid: int, retry: bool = False):
+    """session.mutate rewind's payload, read from the same snapshot as its fences (PreparedMutations.apply takes
+    a function for it, as /retry passes one): nothing is changed when that message is no longer one of his turns
+    in the chat, or, for a retry, when Hermes cannot send that turn again as words (gateway_chat_commands.py
+    _rewind_to and _user_turns, the turns /undo and /retry count)."""
+    def payload(snapshot):
+        from hermes_cli.gateway_chat_commands import _user_turns
+        from hermes_cli.gateway_client import GatewayClientError
+
+        target = next((t for t in _user_turns(snapshot) if t.get("row_id") == mid), None)
+        if target is None:
+            raise GatewayClientError("that turn is no longer one of yours in the chat")
+        if retry:
+            from agent.context_compressor import retryable_user_text, user_originated_turn_view
+            try:
+                retryable_user_text((user_originated_turn_view(target) or {}).get("content"))
+            except ValueError as exc:
+                raise GatewayClientError(f"Hermes cannot send that turn again ({exc})") from exc
+        return {"target_message_id": mid}
+    return payload
+
+
+async def _rewind(endpoint, sid: str, action: str, mid: int) -> dict:
+    from hermes_cli.gateway_client import connect_gateway
+    from hermes_cli.gateway_mutations import PreparedMutations
+
+    async with connect_gateway(endpoint=endpoint) as client:
+        mutations = PreparedMutations()
+        if action == "undo":
+            payload = rewind_payload(mid)
+            got = await mutations.apply(client, sid, "rewind", payload)
+            mutations.acknowledge(sid, "rewind", payload)
+            if got.get("status") == "nothing" or not got.get("rewound_count"):
+                return {"done": False, "reason": "Hermes had nothing to take back there"}
+            return {"done": True}
+        got = await mutations.apply(client, sid, "branch", {"through_message_id": mid})
+        mutations.acknowledge(sid, "branch", {"through_message_id": mid})
+        child = got.get("branched_session_id")
+        if not isinstance(child, str) or not child:
+            return {"done": False, "reason": "Hermes made no new chat"}
+        return {"done": True, "session_id": child}
+
+
+def _rewind_op(profile: str, req: dict) -> dict:
+    from hermes_cli.gateway_client import GatewayClientError
+
+    action, sid, mid = req.get("action"), req.get("session_id"), req.get("message_id")
+    if (action not in ("undo", "branch") or not isinstance(sid, str) or not sid or len(sid) > 128
+            or type(mid) is not int or mid < 1 or (profile and not PROFILE.match(profile))):
+        return {"done": False, "reason": "bad request"}
+    endpoint, state = _found(profile)
+    if endpoint is None:
+        return {"done": False, "ready": False, "reason": f"{profile or 'Hermes'}'s gateway is {state}"}
+    try:
+        return asyncio.run(asyncio.wait_for(_rewind(endpoint, sid, action, mid), REWIND_SECONDS))
+    except (TimeoutError, asyncio.TimeoutError):
+        return {"done": None, "reason": f"Hermes did not answer in {REWIND_SECONDS} seconds; it may be done"}
+    except GatewayClientError as exc:
+        return {"done": False, "reason": f"Hermes refused it ({str(exc)[:150]})"}
+    except OSError as exc:
+        return {"done": False, "ready": False, "reason": f"could not reach the gateway ({type(exc).__name__})"}
+
+
 def _session(req: dict) -> dict:
     from pathlib import Path
 
@@ -756,6 +849,9 @@ def main() -> int:
             print(json.dumps(_search(req)))
         except Exception as exc:  # Hermes's store refused or was busy: say so; nothing was changed
             print(json.dumps({"found": None, "reason": f"Hermes's search did not answer ({type(exc).__name__})"}))
+        return 0
+    if op == "rewind":
+        print(json.dumps(_rewind_op(profile if isinstance(profile, str) else "?", req)))
         return 0
     if op not in ("send", "ready", "react", "session") or not isinstance(profile, str):
         print(json.dumps({"sent": False, "reason": "bad request"}))
@@ -961,10 +1057,11 @@ def staged_photos(paths: list[str]) -> list[dict]:
     return out
 
 
-def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None) -> None:
+def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None, rewind=None) -> None:
     """Hermes's chat view, with the hand-over of a one-shot message changed as this file's words say.
     With `orders` (a file of order lines), the turn is attended, as this file's words say. With `photos`
-    ([{path, mime}], staged_photos), the turn's prompt.submit names them."""
+    ([{path, mime}], staged_photos), the turn's prompt.submit names them. With `rewind` ("retry" or "edit",
+    and his turn's id), the chat is first taken back to before that turn."""
     from hermes_cli import gateway_chat_view
 
     base = gateway_chat_view.GatewayChatView
@@ -1073,6 +1170,9 @@ def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None)
                          if isinstance(r, dict) and r.get("status") == "started"), None)
 
         async def submit(self, text):
+            if rewind is not None and not self.__dict__.get("_tw_rewound"):
+                self.__dict__["_tw_rewound"] = True
+                text = await self._tw_rewind(text)
             running = self._running() if self.finite else None
             if running and not self.prompts and steerable(text, has_file):
                 mode = (await self.client.rpc("config.get", key="busy", session_id=self.session_id) or {}).get("value")
@@ -1091,6 +1191,34 @@ def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None)
                 announce(status, self.session_id)
                 self._queued = (receipt.get("admission_id") if status == "queued" else None)
             return receipt
+
+        async def _tw_rewind(self, text):
+            """The chat taken back to before his turn, as /retry and /undo take it (gateway_chat_commands.py
+            _rewind), and the words to send: a retry's from Hermes, an edit's as given."""
+            from hermes_cli.gateway_client import GatewayClientError
+
+            kind, mid = rewind
+            payload = rewind_payload(mid, retry=kind == "retry")
+            try:
+                got = await self.mutations.apply(self.client, self.session_id, "rewind", payload)
+            except GatewayClientError as exc:
+                say({"type": "rewind", "status": "refused", "reason": f"Hermes refused it ({str(exc)[:150]})"})
+                raise
+            if got.get("status") == "nothing" or not got.get("rewound_count"):
+                self.mutations.acknowledge(self.session_id, "rewind", payload)
+                say({"type": "rewind", "status": "refused", "reason": "Hermes had nothing to take back there"})
+                raise GatewayClientError("nothing to take back")
+            # Kept until the chat is read again, as _rewind keeps it: asked again after a lost read, the same
+            # rewind is replayed, never a new target worked out from the chat already taken back.
+            snapshot = await self.client.rpc("session.resume", session_id=self.session_id)
+            self.mutations.acknowledge(self.session_id, "rewind", payload)
+            self.generation = snapshot["execution_generation"]
+            self.pending = snapshot.get("pending", [])
+            say({"type": "rewind", "status": "done", "count": int(got["rewound_count"])})
+            if kind == "edit":
+                return text
+            from agent.context_compressor import retryable_user_text
+            return retryable_user_text((got.get("target_message") or {}).get("content"))
 
         def _session_info(self, admission, payload):
             super()._session_info(admission, payload)
@@ -1123,7 +1251,14 @@ def own_args(args: list[str]) -> tuple[list[str], bool, list[str]]:
 def turn(args: list[str], attended: bool = False) -> None:
     """`hermes chat <args>` in this runtime, with the busy-input hand-over above. Exits as Hermes exits.
     Attended: the orders come on this process's stdin, and Hermes's own fd 0 becomes the null device.
-    `--tw-files` says the message carries files, and each `--tw-image <path>` is a photo for the turn."""
+    `--tw-files` says the message carries files, and each `--tw-image <path>` is a photo for the turn.
+    `--tw-rewind retry|edit <id>` first, before Hermes's own arguments: the chat is taken back first."""
+    rewind = None
+    if args[1:2] == ["--tw-rewind"]:
+        kind, mid = (args[2:4] + ["", ""])[:2]
+        if kind not in ("retry", "edit") or not mid.isdigit() or int(mid) < 1:
+            raise SystemExit("--tw-rewind takes retry or edit and his turn's id")
+        rewind, args = (kind, int(mid)), [args[0], *args[4:]]
     args, has_file, photos = own_args(args)
     photos = staged_photos(photos) if photos else []
     orders = None
@@ -1134,7 +1269,7 @@ def turn(args: list[str], attended: bool = False) -> None:
         os.dup2(null, 0)
         os.close(null)
         sys.stdin = open(os.devnull, encoding="utf-8")
-    follow_busy_setting(has_file, orders, photos)
+    follow_busy_setting(has_file, orders, photos, rewind)
     sys.argv = ["hermes", *args]
     import runpy
     runpy.run_module("hermes_cli.main", run_name="__main__", alter_sys=True)

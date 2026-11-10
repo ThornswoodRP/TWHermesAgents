@@ -75,7 +75,7 @@ APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room
             ("GET", "tasks")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
 OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks", "control",
-                 "turns", "wait", "job_done")
+                 "turns", "wait", "job_done", "rewound")
 # A file or photo for a message to his own Hermes, a Bot or a room comes as its own bytes, not JSON (own.py
 # and chat.py attach). A room's chat is its room id.
 ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/(own/[a-z]+|chat/[A-Za-z0-9_-]{1,64})/attach$")
@@ -232,6 +232,8 @@ class Api:
                 return 200, own.reacted(self.ws, route[1], token, data)
             if route[2] == "session_done":
                 return 200, own.session_done(self.ws, route[1], token, data)
+            if route[2] == "rewound":
+                return 200, own.rewound(self.ws, route[1], token, data)
             if route[2] == "tasks":
                 return 200, own.tasks(self.ws, route[1], token, data)
             if route[2] == "control":
@@ -283,6 +285,8 @@ class Api:
                 return 200, Chat(core.s).claim(self.ws, token, data.get("limit", 7))
             if route[1] == "reacted":
                 return 200, Chat(core.s).reacted(self.ws, token, data)
+            if route[1] == "rewound":
+                return 200, Chat(core.s).rewound(self.ws, token, data)
             if route[1] == "doing":
                 return 200, Chat(core.s).doing(self.ws, token, data)
             if route[1] == "turns":
@@ -374,11 +378,15 @@ class Api:
             return 200, Chat(core.s).attach(p, route[1], query.get("name"), data.get("_type"), data.get("_raw"))
         if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "unattach":
             return 200, Chat(core.s).unattach(p, route[1], data.get("id"))
+        if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "rewind":
+            return 200, Chat(core.s).rewind(p, route[1], data.get("op"), data.get("message_id"),
+                                            data.get("idempotency_key"), session=data.get("session"))
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1], session=query.get("session"))
             return 200, Chat(core.s).send(p, route[1], data.get("text"), data.get("idempotency_key"), data.get("answer"),
-                                          session=data.get("session"), attachments=data.get("attachments"))
+                                          session=data.get("session"), attachments=data.get("attachments"),
+                                          rewind=data.get("rewind"), rewind_to=data.get("rewind_to"))
         if method == "GET" and route == ["own"]:
             return 200, OwnChat(core.s).summary(p)
         if method == "GET" and len(route) == 2 and route[0] == "own":
@@ -406,13 +414,16 @@ class Api:
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "react":
             return 200, OwnChat(core.s).react(p, route[1], data.get("session_id"), data.get("message_id"),
                                               data.get("emoji"))
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "rewind":
+            return 200, OwnChat(core.s).rewind(p, route[1], data.get("session_id"), data.get("op"),
+                                               data.get("message_id"), data.get("idempotency_key"))
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "turn":
             return 200, OwnChat(core.s).turn_order(p, route[1], data)
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "send":
             return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
                                              data.get("text"), data.get("idempotency_key"),
                                              data.get("reply_to"), data.get("quote"), data.get("quote_by"),
-                                             data.get("attachments"))
+                                             data.get("attachments"), data.get("rewind"), data.get("rewind_to"))
         if method == "POST" and route == ["voice", "transcribe"]:
             return 200, Voice(self.voice_socket).transcribe(p, data.get("_type"), data.get("_raw") or b"")
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "attach":

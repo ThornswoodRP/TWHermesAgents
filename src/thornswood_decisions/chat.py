@@ -63,6 +63,7 @@ from .wakes import BOTS_GW, WAKES
 from .own import (ATTACH_ID, DOING_STATES, MAX_ATTACHMENTS, MAX_UNSENT, MAX_UNSENT_BYTES, PAGE_TEXT, PAGES,
                   SESSION_ID, TOOL_NAME, UNSENT_FOR, _page_mid, checked_file, clean_page, fetch_page, page_kind)
 from .reactions import Reactions
+from .rewinds import Rewinds, rewind_of
 from .reactions import emoji as _emoji
 from .tasks import Tasks
 from .reactions import message_id as _message_id
@@ -268,20 +269,28 @@ class Chat:
         return session
 
     def send(self, p: Principal, target: str, text, idempotency_key, answer=None, session=None,
-             attachments=None) -> dict:
+             attachments=None, rewind=None, rewind_to=None) -> dict:
         """One message to a Bot or a room. With `answer` (a card this Bot asked, the option, and the
         revision, attention revision and artifact SHA-256 the phone showed), the message is also
         Patrick's answer to that card: it is taken first, by DecisionCore.answer with all its checks, and
         nothing is sent when it is refused. With `session`, the message goes into that one session of the
         Bot (the one a Board row opens) instead of its Bot Chat, and Hermes hands it to the session as its
         busy setting says when a turn runs there (connector.py to_session). With `attachments` (ids of files
-        uploaded for this chat with attach), the files go with it, and it may be files alone."""
+        uploaded for this chat with attach), the files go with it, and it may be files alone.
+
+        A retry or an edit (rewinds.py) first takes the Bot's chat back to before one of his turns (rewind_to,
+        by Hermes's own id): a retry sends that turn's own words again, as Hermes keeps them, and an edit sends
+        these words in its place. Its text is what the phone shows meanwhile. A room has no turns to take
+        back, and neither carries an answer to a card or a file."""
         self._patrick(p)
+        rewind, rewind_to = rewind_of(rewind, rewind_to)
         if not self.s.flag(p.workspace_id, "mobile_chat_write"):
             raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
         target = self._target(p.workspace_id, target)
         session = self._session(p.workspace_id, target, session)
         files = _wanted_files(attachments)
+        if rewind is not None and (target not in self.bots(p.workspace_id) or answer is not None or files):
+            raise CoreError(400, "bad_rewind", "a retry or an edit goes to a Bot's chat as words, and answers no card")
         if not isinstance(text, str) or not (text.strip() or files):
             raise CoreError(400, "bad_text", "a message has some text or a file")
         text = text.strip()
@@ -297,7 +306,8 @@ class Chat:
         body_sha = sha256_hex(canonical({"target": target, "text": text}
                                         | ({"answer": receipt["response_id"]} if receipt else {})
                                         | ({"session": session} if session else {})
-                                        | ({"attachments": files} if files else {})))
+                                        | ({"attachments": files} if files else {})
+                                        | ({"rewind": rewind, "rewind_to": rewind_to} if rewind else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -309,12 +319,15 @@ class Chat:
             now = self.s.now()
             mid = new_id("msg")
             db.execute("INSERT INTO chat_messages(id, workspace_id, target, text, send_key, principal_id, device_id, "
-                       "status, created_at, updated_at, session_id) VALUES(?,?,?,?,?,?,?,'queued',?,?,?)",
-                       (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now, session))
+                       "status, created_at, updated_at, session_id, rewind, rewind_to) "
+                       "VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                       (mid, p.workspace_id, target, text, f"tw-chat.{mid}", p.id, p.device_id, now, now, session,
+                        rewind, rewind_to))
             self._bind_files(db, p, target, mid, files)
             self.s.wake(p.workspace_id, PAGES_GW)
             self.s.event(db, p.workspace_id, "chat.queued", mid, "patrick", {"target": target, "device": p.device_id}
-                         | ({"session": session} if session else {}) | ({"files": len(files)} if files else {}))
+                         | ({"session": session} if session else {}) | ({"files": len(files)} if files else {})
+                         | ({"rewind": rewind} if rewind else {}))
             out = {"message_id": mid, "target": target, "status": "queued", "created_at": now} \
                 | ({"session": session} if session else {})
             if receipt:
@@ -438,6 +451,29 @@ class Chat:
         mid, wanted = _message_id(message_id), _emoji(emoji)
         return {"target": target} | Reactions(self.s).want(p, PAGES_GW, target, mid, wanted)
 
+    def rewind(self, p: Principal, target: str, op, message_id, idempotency_key, session=None) -> dict:
+        """Undo from one of his turns, or branch a new chat through one message (rewinds.py), in a Bot's Bot
+        Chat or the session of it a Board row opened. It rides mobile_chat_write like a message to that Bot,
+        and the connector does it only while connector_effects is on, in that Bot's own store and gateway."""
+        self._patrick(p)
+        if not self.s.flag(p.workspace_id, "mobile_chat_write"):
+            raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
+        target = self._target(p.workspace_id, target)
+        if target not in self.bots(p.workspace_id):
+            raise CoreError(400, "no_room_rewinds", "a room's messages are not taken back or branched from")
+        session = self._session(p.workspace_id, target, session)
+        return {"target": target} | Rewinds(self.s).ask(p, PAGES_GW, target, session, op, message_id, idempotency_key)
+
+    def rewound(self, workspace_id: str, token: str | None, body) -> dict:
+        """What came of an undo or a branch in a Bot's chat. Once done, that chat's newest page is read again."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        out = Rewinds(self.s).done(workspace_id, PAGES_GW, body, "connector")
+        row = self.s.db.execute("SELECT chat FROM chat_rewinds WHERE id = ? AND workspace_id = ?",
+                                (body["id"], workspace_id)).fetchone()
+        if row and out.get("status") == "done":
+            PAGES.forget(workspace_id, PAGES_GW, ("bot", "bot_session"), row["chat"])
+        return out
+
     def _targets(self, workspace_id: str, target: str) -> tuple[str, ...]:
         if target in {r["room_id"] for r in self.rooms(workspace_id)}:
             return room_targets(self.s.db, workspace_id, target)
@@ -446,7 +482,8 @@ class Chat:
     def _mine(self, workspace_id: str, target: str, session: str | None = None) -> list[dict]:
         """His newest messages in one chat: a Bot's Bot Chat (session None), one session of the Bot, or a room."""
         targets = self._targets(workspace_id, target)
-        rows = self.s.db.execute("SELECT id, text, status, reason, created_at, updated_at FROM chat_messages "
+        rows = self.s.db.execute("SELECT id, text, status, reason, created_at, updated_at, rewind, rewind_to "
+                                 "FROM chat_messages "
                                  f"WHERE workspace_id = ? AND target IN ({','.join('?' * len(targets))}) "
                                  "AND session_id IS ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                                  (workspace_id, *targets, session, MINE)).fetchall()
@@ -518,6 +555,7 @@ class Chat:
                 # Reactions are set in the Bot Chat only (connector.py react), so a session shows none.
                 "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target)
                 if kind == "bot" and not session else [],
+                "rewinds": Rewinds(self.s).shown(p.workspace_id, PAGES_GW, target, session) if kind == "bot" else [],
                 "live": self.live_states(p.workspace_id).get(target) if kind == "bot" else None}
                 | ({"session": session} if session else {}))
 
@@ -702,15 +740,30 @@ class Chat:
                 "AND status = 'queued' AND kind IN ('decision.answered', 'task.assigned', 'bot.message', 'one.answered') "
                 "ORDER BY created_at, n",
                 (workspace_id, workspace_id)).fetchall()
+            # Undos and branches (rewinds.py) go in the same order as the messages to that Bot, one thing at a
+            # time for each Bot as ever, since Hermes takes a chat back only while nothing runs there.
+            waiting = [dict(w) for w in waiting]
+            for r in Rewinds(self.s).waiting(db, workspace_id, PAGES_GW):
+                if r["status"] == "leased":
+                    busy.add(r["chat"])
+                else:
+                    waiting.append({"kind": "rewind", "id": r["id"], "target": r["chat"], "created_at": r["created_at"],
+                                    "n": r["n"], "row": r})
+            waiting.sort(key=lambda w: (w["created_at"], w["kind"] == "rewind", w["n"]))
             until = (self.s.clock() + LEASE).isoformat()
             now = self.s.now()
+            rewinds = []
             for w in waiting:
-                if w["target"] in busy or len(items) >= limit:
+                if w["target"] in busy or (w["kind"] != "rewind" and len(items) >= limit):
+                    busy.add(w["target"])  # nothing after it for that Bot goes before it
                     continue
                 busy.add(w["target"])
+                if w["kind"] == "rewind":
+                    rewinds.append(Rewinds(self.s).lease(db, w["row"]) | {"bot": w["target"]})
+                    continue
                 if w["kind"] == "chat":
-                    row = db.execute("SELECT text, send_key, session_id FROM chat_messages WHERE id = ?",
-                                     (w["id"],)).fetchone()
+                    row = db.execute("SELECT text, send_key, session_id, rewind, rewind_to FROM chat_messages "
+                                     "WHERE id = ?", (w["id"],)).fetchone()
                     db.execute("UPDATE chat_messages SET status = 'leased', lease_until = ?, attempts = attempts + 1, "
                                "updated_at = ? WHERE id = ?", (until, now, w["id"]))
                     item = {"id": w["id"], "kind": "chat", "target": w["target"], "text": row["text"],
@@ -722,6 +775,8 @@ class Chat:
                         item["attachments"] = files
                     if row["session_id"]:
                         item["session"] = row["session_id"]  # into that session of the Bot, not its Bot Chat
+                    if row["rewind"]:
+                        item["rewind"], item["rewind_to"] = row["rewind"], row["rewind_to"]
                 else:
                     db.execute("UPDATE connector_outbox SET status = 'leased', lease_until = ?, "
                                "attempts = attempts + 1, updated_at = ? WHERE id = ?", (until, now, w["id"]))
@@ -739,7 +794,7 @@ class Chat:
                 self.s.event(db, workspace_id, "connector.leased", w["id"], "connector", {"target": w["target"]})
                 items.append(item)
             reactions = [{"bot": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, PAGES_GW)]
-        return {"items": items, "reactions": reactions}
+        return {"items": items, "reactions": reactions, "rewinds": rewinds}
 
     def _lapse(self, db, workspace_id: str) -> None:
         """A lease that ran out means the connector stopped mid-send: unclear, so never sent again by itself."""

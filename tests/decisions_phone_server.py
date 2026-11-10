@@ -90,7 +90,9 @@ CHATS = [
     {"id": "s_paste", "title": "", "first": "Here is the plan", "last_at": "2026-10-29T12:00:00+00:00",
      "preview": PASTE_MSG[:200]},
     # A chat whose newest message is being answered right now (the live line under it).
-    {"id": "s_work", "title": "Check the build", "last_at": "2026-10-28T12:00:00+00:00", "preview": "earlier"}]
+    {"id": "s_work", "title": "Check the build", "last_at": "2026-10-28T12:00:00+00:00", "preview": "earlier"},
+    # A chat of two turns for Retry, Undo, Edit and resend, and Branch from here (rewinds.py).
+    {"id": "s_rw", "title": "Which is green", "last_at": "2026-10-27T12:00:00+00:00", "preview": "The fork is green too."}]
 HIDDEN = []
 OPEN = [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this week?", "at": "2026-11-01T17:29:00+00:00"},
                                       {"role": "assistant", "text": "<b>three</b> things", "at": "2026-11-01T17:30:00+00:00"}]}]
@@ -177,6 +179,12 @@ con.execute("INSERT INTO sessions VALUES('s_work', 'cli', 'Check the build', ?, 
             (epoch("2026-10-28T11:00:00+00:00"), epoch("2026-10-28T12:00:00+00:00")))
 con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_work', 'assistant', 'earlier', ?)",
             (epoch("2026-10-28T12:00:00+00:00"),))
+con.execute("INSERT INTO sessions VALUES('s_rw', 'cli', 'Which is green', ?, ?, NULL, NULL, NULL, 0, 0)",
+            (epoch("2026-10-27T11:00:00+00:00"), epoch("2026-10-27T12:00:00+00:00")))
+for k, (role, text) in enumerate([("user", "Which branch is green?"), ("assistant", "main is green."),
+                                  ("user", "And the fork?"), ("assistant", "The fork is green too.")]):
+    con.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES('s_rw', ?, ?, ?)",
+                (role, text, epoch("2026-10-27T11:00:00+00:00") + 60 * k))
 con.commit()
 # The two new chats are listed as One's connector lists them, by its own row maker, so the /skill chat's
 # name is what own_connector makes of the skill's text, not a name written here.
@@ -250,6 +258,27 @@ def one_session(o, r):
     c.close()
     one_feed(o)
     o.session_done(w.ws, "one", to, {"id": r["id"], "outcome": "done"})
+def one_rewind(o, r):
+    """An undo or a branch, done on the scratch state.db as Hermes's session.mutate leaves it (the helper's own
+    path is in test_decisions_rewinds.py): an undo makes that turn and everything after it inactive, a branch
+    copies the chat up to that message into a new chat, which the chat list then has."""
+    c = sqlite3.connect(sdb)
+    sid, mid, made = r["session_id"], r["message_id"], None
+    if r["op"] == "undo":
+        c.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND id >= ?", (sid, mid))
+    else:
+        made = sid + "_branch"
+        c.execute("INSERT INTO sessions VALUES(?, 'cli', 'Which is green (branch)', ?, ?, NULL, NULL, NULL, 0, 0)",
+                  (made, epoch("2026-11-01T18:00:00+00:00"), epoch("2026-11-01T18:00:00+00:00")))
+        c.execute("INSERT INTO messages(session_id, role, content, timestamp) SELECT ?, role, content, timestamp "
+                  "FROM messages WHERE session_id = ? AND id <= ? AND active = 1 ORDER BY id", (made, sid, mid))
+        CHATS.append({"id": made, "title": "Which is green (branch)", "last_at": "2026-10-26T12:00:00+00:00",
+                      "preview": "main is green."})
+    c.commit()
+    c.close()
+    if made:
+        one_feed(o)
+    o.rewound(w.ws, "one", to, {"id": r["id"], "outcome": "done"} | ({"session_id": made} if made else {}))
 def one_replies(o):
     """A reply Patrick sends is taken as One's connector takes a message, and lands in the scratch
     state.db as Hermes keeps a user message: its text exactly as sent. Only replies: every other
@@ -338,6 +367,8 @@ def one_pages():
                 one_session(o, r)
             for r in got.get("controls", []):
                 one_control(o, r)
+            for r in got.get("rewinds", []):
+                one_rewind(o, r)
             for r in got.get("orders", []):
                 if r["op"] == "answer":
                     ANSWERS.append(r["value"])
