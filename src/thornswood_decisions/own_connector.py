@@ -49,7 +49,11 @@ phone asked for), and every few seconds whatever happens, it:
 5. every 20 seconds, in a thread of its own, sends what this Hermes has going
    besides its chats, for the app's Tasks tab (`POST /own/<gateway>/tasks`):
    its subagents, background commands and scheduled jobs, read by room_send.py
-   op `tasks` the way Hermes Desktop reads them (contracts.json "tasks").
+   op `tasks` the way Hermes Desktop reads them (contracts.json "tasks");
+6. pauses, resumes, runs now or removes one of this Hermes's scheduled jobs
+   when Patrick asks in the Tasks tab (own_jobs.py), with Hermes's own cron
+   calls (room_send.py op `job`), says whether it was done
+   (`POST /own/<gateway>/job_done`), and reads the jobs again at once.
 
 While own_chat_write is off the core answers 423 to all of it; this waits and
 copies nothing. It logs no message text, no chat title and no token.
@@ -87,6 +91,7 @@ WAIT_SECONDS = 15  # one wait on the core for new work, held open (under the pos
 LIVE_SECONDS = 0.25  # while turns run, what each shows goes to the core this often when it changed
 TOOL_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 FEED_SECONDS = 20
+JOB_DO = ("pause", "resume", "run", "remove")  # what Patrick can ask of a scheduled job (own_jobs.py DO)
 TASKS_SECONDS = 20      # how often its subagents, background commands and scheduled jobs go to the core
 READY_SECONDS = 60       # how often a running gateway is checked again
 NOT_READY_SECONDS = 15   # and one that was not running
@@ -1068,6 +1073,22 @@ class Hermes:
         state = got.get("state") if isinstance(got.get("state"), dict) else None
         return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
 
+    def job(self, job_id: str, do: str) -> tuple[bool, str]:
+        """(done, why not): pause, resume, run now or remove one of this Hermes's scheduled jobs, with Hermes's
+        own cron calls, through the same helper and Python as the readiness check (room_send.py "job")."""
+        req = json.dumps({"op": "job", "profile": "", "job": job_id, "do": do}).encode("utf-8")
+        try:
+            out = subprocess.run(self.ready_cmd, input=req, capture_output=True, **quiet(),
+                                 timeout=CHECK_SECONDS, cwd=str(self.home_dir), check=False, env=probe_env())
+            got = json.loads(out.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            return False, f"Hermes did not answer in {CHECK_SECONDS} seconds"
+        except (OSError, IndexError, json.JSONDecodeError):
+            return False, "could not run the helper with Hermes's Python"
+        if not isinstance(got, dict):
+            return False, "the helper said nothing"
+        return got.get("done") is True, str(got.get("reason") or "")[:200]
+
     def turn(self, session_id: str | None, text: str, doing=None, files: list[str] | None = None,
              started=None, live: LiveTurn | None = None, bot_chat: bool = False) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message. `files` are the arguments that hand the turn
@@ -1490,6 +1511,7 @@ class OwnConnector:
         self.feed_now = True
         self._tasks_at = None
         self._tasks_run: threading.Thread | None = None
+        self._tasks_due = False
         self.last_claim = None
 
     def ready(self) -> tuple[str, str]:
@@ -1702,6 +1724,25 @@ class OwnConnector:
                 self.say(f"FAIL control: the core answered {status}")
         return sent
 
+    def jobs(self, wanted: list) -> int:
+        """Patrick's changes to this Hermes's scheduled jobs (own_jobs.py), made one after another and
+        answered, then the jobs read again at once so the Tasks tab shows what Hermes now holds. Returns how
+        many were answered."""
+        sent = 0
+        for r in wanted[:10]:
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("job"), str)
+                    and r.get("do") in JOB_DO):
+                continue
+            done, reason = self.hermes.job(r["job"], r["do"])
+            self.say(f"{'PASS' if done else 'NOTE'} job {r['do']}: {'done' if done else reason}")
+            status, _ = self.core.post("job_done", {"id": r["id"], "done": done, "reason": reason})
+            if status == 200:
+                sent += 1
+            elif status not in (409, 423):
+                self.say(f"FAIL job: the core answered {status}")
+            self._tasks_due = True
+        return sent
+
     def orders(self, wanted: list) -> int:
         """Patrick's orders for running turns (Stop, and his answers to Hermes's questions and approvals),
         each written to its turn's stdin as one line; room_send.py's attended turn carries it out and says
@@ -1775,9 +1816,11 @@ class OwnConnector:
         whether a round started."""
         now = self.clock()
         if (self._tasks_run is not None and self._tasks_run.is_alive()) or (
-                self._tasks_at is not None and now - self._tasks_at < TASKS_SECONDS):
+                not self._tasks_due and self._tasks_at is not None and now - self._tasks_at < TASKS_SECONDS):
             return False
-        self._tasks_at = now
+        # A job just changed: read at once, not at the next TASKS_SECONDS (a read already running may have
+        # started before the change, so this one waits for it and goes next).
+        self._tasks_at, self._tasks_due = now, False
 
         def report():
             got = self.hermes.tasks()
@@ -1852,6 +1895,9 @@ class OwnConnector:
         orders = body.get("orders", [])
         if isinstance(orders, list) and orders:
             self.orders(orders)
+        jobs = body.get("jobs", [])
+        if isinstance(jobs, list) and jobs:
+            self.jobs(jobs)
         items = body.get("items", [])
         for item in items:
             with self._lock:

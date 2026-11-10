@@ -75,7 +75,7 @@ APP_DATA = {("GET", "cards"), ("GET", "changes"), ("GET", "work"), ("GET", "room
             ("GET", "tasks")}
 # What an own-Hermes connector (own_connector.py) posts, with its own token.
 OWN_CONNECTOR = ("claim", "result", "feed", "page", "reacted", "session_done", "attachment", "tasks", "control",
-                 "turns", "wait")
+                 "turns", "wait", "job_done")
 # A file or photo for a message to his own Hermes, a Bot or a room comes as its own bytes, not JSON (own.py
 # and chat.py attach). A room's chat is its room id.
 ATTACH_PATH = re.compile(r"^" + re.escape("/api/v1") + r"/(own/[a-z]+|chat/[A-Za-z0-9_-]{1,64})/attach$")
@@ -236,6 +236,8 @@ class Api:
                 return 200, own.tasks(self.ws, route[1], token, data)
             if route[2] == "control":
                 return 200, own.control_post(self.ws, route[1], token, data)
+            if route[2] == "job_done":
+                return 200, own.job_post(self.ws, route[1], token, data)
             if route[2] == "turns":
                 return 200, own.turns(self.ws, route[1], token, data)
             if route[2] == "wait":
@@ -387,6 +389,8 @@ class Api:
         if method == "GET" and len(route) == 4 and route[0] == "own" and route[2] == "chats" and route[3] == "archived":
             return 200, OwnChat(core.s).page(p, route[1], "archived", before=query.get("before"),
                                              wait=query.get("wait"))
+        if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "jobs":
+            return 200, OwnChat(core.s).job_set(p, route[1], data)
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "session":
             return 200, OwnChat(core.s).session(p, route[1], data.get("session_id"), data.get("op"),
                                                 data.get("title"), data.get("idempotency_key"))

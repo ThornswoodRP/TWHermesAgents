@@ -41,6 +41,7 @@ from .auth import Principal
 from . import reactions
 from .feeds import Feeds
 from .own_control import CONTROLS, MAX_WAIT as CONTROL_WAIT, wanted as control_wanted
+from .own_jobs import DO as JOB_DO, JOB_ID, JOBS
 from .own_sessions import OwnSessions
 from . import alerts
 from .own_turns import ORDERS, answer_value, clean_asks, clean_order
@@ -1276,6 +1277,43 @@ class OwnChat:
             raise CoreError(423, "own_chat_off", "the core takes no control answer while own_chat_write is off")
         return CONTROLS.answer(workspace_id, gw, body, self.s.clock())
 
+    # ── his scheduled jobs: Pause or Resume, Run now and Remove, from the Tasks tab (own_jobs.py) ──
+
+    def job_set(self, p: Principal, gw: str, body) -> dict:
+        """Ask that Hermes's connector to pause, resume, run now or remove one of its scheduled jobs."""
+        self._patrick(p)
+        gw = self._gateway(gw)
+        if not self.s.flag(p.workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
+        body = body if isinstance(body, dict) else {}
+        job, do, idem = body.get("job"), body.get("do"), body.get("idempotency_key")
+        if do not in JOB_DO:
+            raise CoreError(400, "bad_job", "a job change is pause, resume, run or remove")
+        if not isinstance(job, str) or not JOB_ID.match(job):
+            raise CoreError(400, "bad_job", "a job change names the job by its id")
+        if not isinstance(idem, str) or not 8 <= len(idem) <= 200:
+            raise CoreError(400, "bad_key", "a job change carries an idempotency key of 8 to 200 characters")
+        from .tasks import Tasks
+        if Tasks(self.s).job(p.workspace_id, gw, job) is None:
+            raise CoreError(404, "not_listed", f"{NAMES[gw]} has not listed that job lately; open Tasks again")
+        if self.sign_in_until(p) is None:
+            raise CoreError(403, "passkey_needed", "changing a scheduled job runs with your Hermes's full power, so "
+                            "it needs a passkey sign-in from the last 30 minutes; sign in with your passkey again")
+        self.must_be_online(p.workspace_id, gw)
+        out = JOBS.add(p.workspace_id, gw, job, do, idem, self.s.clock())
+        if not out.get("replayed"):
+            with self.s.tx() as db:
+                self.s.event(db, p.workspace_id, "own.job", out["id"], "patrick",
+                             {"gateway": gw, "job": job, "do": do, "device": p.device_id})
+        return out
+
+    def job_post(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
+        """Whether Hermes made a job change the connector was handed."""
+        self._check_token(workspace_id, gw, token)
+        if not self.s.flag(workspace_id, "own_chat_write"):
+            raise CoreError(423, "own_chat_off", "the core takes no job answer while own_chat_write is off")
+        return JOBS.answer(workspace_id, gw, body, self.s.clock())
+
     # ── the connector's side ──────────────────────────────────────────────
 
     def feed(self, workspace_id: str, gw: str, token: str | None, body) -> dict:
@@ -1368,6 +1406,7 @@ class OwnChat:
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
                 "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "sessions": sessions,
                 "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [],
+                "jobs": JOBS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "orders": ORDERS.hand(workspace_id, gw, self.s.clock()), "release": RELEASE}
 
     def _made(self, db, workspace_id: str, gw: str) -> None:

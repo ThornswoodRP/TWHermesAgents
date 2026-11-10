@@ -9,7 +9,8 @@ const { chromium } = require('playwright')
 // Hermes on the VM with no connector yet, and reactions: Hermes's own, setting
 // one from a message's actions and taking it off), the Rooms
 // list and a room (as text), the Tasks tab (subagents, background commands and
-// scheduled jobs of every agent in one list, narrowed to one), the Board,
+// scheduled jobs of every agent in one list, narrowed to one, and One's own job
+// paused from it), the Board,
 // the install hint, the service worker, and alerts: a "no" kept, a push shown
 // as the one quiet line with its card's tag (delivered by DevTools, with no
 // push service), the alert of an answered card taken off, the alert of an
@@ -218,6 +219,19 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Tasks') throw new Error('not on the Tasks tab')
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-tasks.png', fullPage: true })
+  await step("One's own job opens Pause, Run now and Remove, and a pause is asked of One", async () => {
+    await page.locator('#view button.row[data-task="job"]', { hasText: 'Morning summary' }).click()
+    const sheet = page.getByRole('dialog', { name: 'Scheduled job' })
+    await sheet.waitFor({ timeout: 3000 })
+    const buttons = await sheet.locator('button').allTextContents()
+    if (JSON.stringify(buttons) !== JSON.stringify(['Pause', 'Run now', 'Remove...', 'Open One', 'Close'])) throw new Error(JSON.stringify(buttons))
+    await sheet.locator('button[data-job="confirm-remove"]').click()
+    await sheet.getByText(/^Remove "Morning summary" from One\?/).waitFor({ timeout: 2000 })
+    await sheet.getByRole('button', { name: 'Keep it' }).click()
+    await sheet.locator('button[data-job="pause"]').click()
+    await page.locator('#view [data-job-change="queued"]', { hasText: 'Asking One to pause it...' }).waitFor({ timeout: 8000 })
+    if (await page.locator('.sheet-back').count()) throw new Error('the sheet stayed open')
+  })
   await step("Tasks narrowed to one agent, and a subagent's row opens its chat", async () => {
     const picks = await page.locator('#view .pick-one').allTextContents()
     if (JSON.stringify(picks) !== JSON.stringify(['All', 'One', 'Bramble'])) throw new Error(JSON.stringify(picks))

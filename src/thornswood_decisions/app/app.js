@@ -875,6 +875,72 @@ function jobLine(j) {
   return el('span', { class: 'rec' }, j.next ? 'Next ' + nextWords(j.next) : 'Scheduled')
 }
 
+// The newest change he asked of one of his own jobs, and how it went (own_jobs.py), under the job.
+const JOB_ASKED = { pause: 'pause it', resume: 'resume it', run: 'run it now', remove: 'remove it' }
+const JOB_DONE = { pause: 'Paused', resume: 'Resumed', run: 'Run asked: it starts at Hermes\'s next scheduler tick', remove: 'Removed' }
+function jobChangeLine(j) {
+  const c = j.change
+  if (!c) return null
+  if (c.status === 'queued') return el('span', { class: 'quiet', 'data-job-change': c.status }, `Asking ${agentName(j.agent)} to ${JOB_ASKED[c.do]}...`)
+  if (c.status === 'done') return el('span', { class: 'quiet', 'data-job-change': c.status }, JOB_DONE[c.do] + '.')
+  return el('span', { class: 'warn', 'data-job-change': c.status }, `Did not ${JOB_ASKED[c.do]}: ${c.reason}.`)
+}
+
+// One of his own Hermes's or One's scheduled jobs: Pause or Resume, Run now and Remove, as Hermes Desktop's
+// Scheduled jobs page has them (#43), made by that Hermes with its own cron calls. Each needs a sign-in with
+// his passkey from the last 30 minutes, as a message there does; its prompt opens by itself when it is due.
+function jobSheet(j, until) {
+  closeSheet()
+  const gw = j.agent, name = agentName(gw)
+  const note = el('p', { class: 'quiet', role: 'status' })
+  const sheet = el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Scheduled job' })
+  const fill = (...nodes) => { sheet.replaceChildren(...nodes.flat(Infinity).filter(n => n)); const f = sheet.querySelector('button'); if (f) f.focus() }
+  let signed = !!until && new Date(until) > new Date()
+  const keys = {}
+  async function ask(what) {
+    if (!signed) {
+      const s = await passkeySignIn()
+      if (s.status !== 200) { note.textContent = said(s.body); return }
+      signed = true
+    }
+    keys[what] = keys[what] || newKey()
+    note.textContent = 'Asking...'
+    const r = await call('POST', '/own/' + gw + '/jobs', { job: j.id, do: what, idempotency_key: keys[what] })
+    if (r.status === 200) { closeSheet(); return tasksView() }
+    if (r.status === 401) { csrf = null; closeSheet(); return signInView(said(r.body)) }
+    if (r.status === 403 && r.body.error === 'passkey_needed') signed = false
+    note.textContent = r.status === 0
+      ? 'Could not reach the core. Asking again sends the same change, never a second one.'
+      : (r.body.message || said(r.body))
+  }
+  const head = [el('p', {}, el('strong', {}, j.name || 'A job')),
+    el('p', { class: 'quiet' }, `${name} · ${j.schedule || ''}`),
+    signed ? null : el('p', { class: 'quiet' }, `Changing a job needs your ${signInWord()}. Its prompt opens when you press one.`)]
+  const close = el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close')
+  function confirmRemove() {
+    fill(el('p', {}, `Remove "${j.name || 'this job'}" from ${name}? Hermes deletes it and its schedule; it does not come back.`),
+      el('button', { class: 'danger', type: 'button', 'data-job': 'remove', onclick: () => ask('remove') }, 'Remove for good'),
+      el('button', { class: 'secondary', type: 'button', onclick: () => fill(main()) }, 'Keep it'),
+      note)
+  }
+  const main = () => [head,
+    j.state === 'completed' ? el('p', { class: 'quiet' }, 'This job is done and will not run again.') : [
+      j.state === 'paused'
+        ? el('button', { class: 'secondary', type: 'button', 'data-job': 'resume', onclick: () => ask('resume') }, 'Resume')
+        : el('button', { class: 'secondary', type: 'button', 'data-job': 'pause', onclick: () => ask('pause') }, 'Pause'),
+      j.running ? el('p', { class: 'quiet' }, 'It is running now.')
+        : el('button', { class: 'secondary', type: 'button', 'data-job': 'run', onclick: () => ask('run') },
+          j.state === 'paused' ? 'Run now (and resume it)' : 'Run now')],
+    el('button', { class: 'danger-quiet', type: 'button', 'data-job': 'confirm-remove', onclick: confirmRemove }, 'Remove...'),
+    el('button', { class: 'secondary', type: 'button', onclick: () => { closeSheet(); go(taskChat(gw, null)) } }, 'Open ' + name),
+    close, note]
+  const back = el('div', { class: 'sheet-back' }, sheet)
+  back.addEventListener('click', e => { if (e.target === back) closeSheet() })
+  back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
+  document.body.append(back)
+  fill(main())
+}
+
 function taskRows(agents) {
   const subs = [], procs = [], jobs = [], unheard = [], silent = []
   for (const a of agents) {
@@ -885,7 +951,7 @@ function taskRows(agents) {
     if (a.jobs === null) unheard.push(`${name}: ${a.jobs_why || 'its scheduled jobs could not be read'}`)
     for (const r of a.subagents || []) subs.push({ agent: a.id, ...r })
     for (const r of a.processes || []) procs.push({ agent: a.id, ...r })
-    for (const r of a.jobs || []) jobs.push({ agent: a.id, ...r })
+    for (const r of a.jobs || []) jobs.push({ agent: a.id, change: (a.job_changes || {})[r.id] || null, ...r })
   }
   // The ones not heard from, in one sentence, before what the others could not read.
   if (silent.length) unheard.unshift('Not heard from: ' + andList(silent))
@@ -930,10 +996,12 @@ async function tasksView() {
           at(epochIso(t.ended))] }))] : null,
     jobs.length ? [el('h2', { class: 'section' }, 'Scheduled jobs'), jobs.map(j => {
       const failed = j.last_status && j.last_status !== 'ok'
-      return listRow({ 'data-task': 'job', onclick: () => go(taskChat(j.agent, null)) }, {
+      // His own Hermes's and One's jobs open their actions; a Bot's open that Bot's chat, read only.
+      return listRow({ 'data-task': 'job', onclick: () => GATEWAY[j.agent] ? jobSheet(j, r.body.jobs_until) : go(taskChat(j.agent, null)) }, {
         agent: j.agent, title: j.name || 'A job', lines: [el('span', { class: 'quiet' }, `${name(j)} · ${j.schedule || ''}`),
           failed ? el('span', { class: 'warn' }, `Last run ${j.last_status === 'delivery_failed' ? 'was not delivered' : 'failed'}` +
-            (j.last_error ? `: ${j.last_error}` : '')) : null],
+            (j.last_error ? `: ${j.last_error}` : '')) : null,
+          jobChangeLine(j)],
         right: [jobLine(j)] })
     })] : null,
     subs.length || procs.length || jobs.length ? null

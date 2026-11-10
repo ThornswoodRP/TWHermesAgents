@@ -145,6 +145,21 @@ It prints {"tasks": {"<profile>": {"state", "subagents", "processes", "jobs", ..
 A part it could not read is null, with its reason beside it, never an empty list.
 Commands and errors are the ones Hermes already redacts for Desktop, cut short.
 
+`job` pauses, resumes, runs now or removes one of his own Hermes's scheduled
+jobs (profile "" only; a Bot's jobs are not changed from the app), with Hermes's
+own cron.jobs calls under its home, the ones Hermes's dashboard makes for
+Desktop's Scheduled jobs page (contracts.json "jobs"):
+
+    <hermes python> -I room_send.py < {"op": "job", "job": "<job id>",
+                                       "do": "pause" | "resume" | "run" | "remove"}
+
+Run now is Hermes's own `trigger_job`: the job is due at once, and the running
+gateway's own scheduler fires it at its next tick, with its live connections,
+as `hermes cron run` does when a ticker is running. A paused job that is run
+now is resumed too, as Desktop's Run now resumes it. It prints {"done": true},
+or {"done": false, "reason": "..."} with Hermes's own reason. It needs no
+gateway.
+
 `search` finds his own Hermes's chats by the words in their messages, with
 Hermes's own full-text search, the way Hermes Desktop's chat search does
 (hermes_cli/web_routers/sessions.py search_sessions):
@@ -310,6 +325,46 @@ def _tasks(profile: str) -> dict:
                            if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
                            else f"could not read its gateway ({type(exc).__name__}: {str(exc)[:60]})")
     return out
+
+
+JOB_DO = ("pause", "resume", "run", "remove")
+JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+
+
+def _job(req: dict) -> dict:
+    """One change to one of his own Hermes's scheduled jobs (contracts.json "jobs")."""
+    do, jid = req.get("do"), req.get("job")
+    if do not in JOB_DO or not isinstance(jid, str) or not JOB_ID.match(jid):
+        return {"done": False, "reason": "bad request"}
+    from cron import jobs as cron_jobs
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home = _home("")
+    token = set_hermes_home_override(str(home))
+    try:
+        with cron_jobs.use_cron_store(home):
+            # By its id only, never a name that another job could share.
+            job = cron_jobs.get_job(jid)
+            if not job:
+                return {"done": False, "reason": "Hermes has no scheduled job with that id now"}
+            try:
+                got = {"pause": cron_jobs.pause_job, "resume": cron_jobs.resume_job, "run": cron_jobs.trigger_job,
+                       "remove": cron_jobs.remove_job}[do](job["id"])
+            except ValueError as exc:  # Hermes's own refusal: a one-shot past its time, a finished job
+                return {"done": False, "reason": " ".join(str(exc).split())[:200]}
+            if not got:
+                return {"done": False, "reason": "Hermes has no scheduled job with that id now"}
+            # As Hermes's cronjob tool does after each change (tools/cronjob_tools.py
+            # _notify_provider_jobs_changed_safe): an outside scheduler reconciles, the built-in one reads the
+            # store again at its next tick. The change is in already, so this never undoes it.
+            try:
+                from cron.scheduler import _notify_provider_jobs_changed
+                _notify_provider_jobs_changed()
+            except Exception:
+                pass
+    finally:
+        reset_hermes_home_override(token)
+    return {"done": True}
 
 
 CONTROL_SECONDS = 60  # one read, or one change and its read back, answers in this
@@ -681,6 +736,16 @@ def main() -> int:
         # His own Hermes only: a Bot's chat settings are not changed from the app.
         print(json.dumps(_control_op(req) if not profile else
                          {"state": None, "applied": False, "reason": "a Bot's chat settings are not changed from here"}))
+        return 0
+    if op == "job":
+        # His own Hermes's jobs only: a Bot's scheduled jobs are not changed from the app.
+        if profile:
+            print(json.dumps({"done": False, "reason": "a Bot's scheduled jobs are not changed from here"}))
+            return 0
+        try:
+            print(json.dumps(_job(req)))
+        except Exception as exc:  # Hermes's store refused or was busy: said, and nothing is tried again by itself
+            print(json.dumps({"done": False, "reason": f"Hermes's cron store did not take it ({type(exc).__name__})"}))
         return 0
     if op == "search":
         # His own Hermes's chats only: a Bot's chats are not searched from the app.

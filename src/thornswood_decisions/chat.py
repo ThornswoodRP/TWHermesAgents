@@ -604,8 +604,18 @@ class Chat:
     def tasks_view(self, p: Principal) -> dict:
         """The app's Tasks tab: Hermes, One and each bound Bot, in the rail's order (tasks.py)."""
         self._patrick(p)
+        from .own import OwnChat
+        from .own_jobs import JOBS
         from .schema import OWN_GATEWAYS
-        return Tasks(self.s).view(p.workspace_id, [*OWN_GATEWAYS, *self.bots(p.workspace_id)])
+        out = Tasks(self.s).view(p.workspace_id, [*OWN_GATEWAYS, *self.bots(p.workspace_id)])
+        # His own Hermes's and One's jobs take Pause or Resume, Run now and Remove (own_jobs.py); a Bot's do not.
+        # Only for a Hermes heard from lately: one not heard shows no jobs to change.
+        now = self.s.clock()
+        for a in out["agents"]:
+            if a["id"] in OWN_GATEWAYS and a.get("heard"):
+                a["job_changes"] = JOBS.state(p.workspace_id, a["id"], now)
+        out["jobs_until"] = OwnChat(self.s).sign_in_until(p)
+        return out
 
     def live_states(self, workspace_id: str) -> dict:
         """Each Bot's state for the phone: Hermes's own word for its gateway and when it was read; "not_heard"
