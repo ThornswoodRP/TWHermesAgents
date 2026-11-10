@@ -99,9 +99,12 @@ class Requests(unittest.TestCase):
                                         "preview": "ok"}])
         for op in ("rename", "archive", "pin", "unpin", "delete"):
             self.refused("bot_chat_kept", op=op, sid="s_bot")
+        # Its read mark is not something he finds it by, so it is set as Desktop sets it (#103).
+        self.assertEqual(self.ask(op="read", sid="s_bot")["status"], "queued")
+        self.claim()
         self.assertEqual(self.ask()["status"], "queued")
-        self.assertEqual(self.w.store.db.execute("SELECT count(*) FROM own_session_ops WHERE session_id = 's_bot'")
-                         .fetchone()[0], 0)
+        self.assertEqual([r["op"] for r in self.w.store.db.execute(
+            "SELECT op FROM own_session_ops WHERE session_id = 's_bot'")], ["read"])
         # A page of the chat list that names it so is the same.
         self.g.feed("one")
         self.assertEqual(self.own.page(passkey(self.w), "one", "chats", q="bot"), {"pending": True})
@@ -286,6 +289,10 @@ FAKE_HERMES = {
                 self.data["sessions"][sid]["archived"] = archived
                 self._save()
                 return True
+            def set_session_read(self, sid, read=True):
+                self.data["sessions"][sid]["last_read_at"] = 1000.0 if read else 0.0
+                self._save()
+                return True
             def set_session_pinned(self, sid, pinned):
                 self.data["sessions"][sid]["pinned"] = pinned
                 if pinned:
@@ -363,6 +370,15 @@ class TheHelper(unittest.TestCase):
         kept = {"done": False, "reason": "his Bot Chat is kept as it is: it is not renamed, hidden or deleted"}
         self.assertEqual(self.ask("pin", sid="s_bot2"), kept)
         self.assertNotIn("pinned", self.store()["sessions"]["s_bot2"])
+
+    def test_read_and_unread_set_hermes_read_mark_even_on_his_bot_chat(self):
+        # #103: Desktop's read mark (SessionDB.set_session_read); it changes nothing he finds a chat by.
+        self.assertEqual(self.ask("read"), {"done": True})
+        self.assertEqual(self.store()["sessions"]["s_plan"]["last_read_at"], 1000.0)
+        self.assertEqual(self.ask("unread"), {"done": True})
+        self.assertEqual(self.store()["sessions"]["s_plan"]["last_read_at"], 0.0)
+        self.assertEqual(self.ask("read", sid="s_bot2"), {"done": True})
+        self.assertEqual(self.store()["sessions"]["s_bot2"]["title"], None)
 
     def test_archive_and_bring_back_keep_the_chat(self):
         self.assertEqual(self.ask("archive"), {"done": True})
@@ -494,6 +510,29 @@ class Migration22(unittest.TestCase):
                          ["rename"])
         with self.assertRaises(sqlite3.IntegrityError):
             w.store.db.execute("UPDATE own_session_ops SET op = 'pin'")
+
+
+class Migration26(unittest.TestCase):
+    def test_read_marks_and_their_way_back(self):
+        from thornswood_decisions.schema import DOWNS
+        w = World()
+        self.addCleanup(w.close)
+        g = Gateways(w)
+        on(w, "session_manage_write")
+        g.hello("one")
+        g.feed("one")
+        checks = DOWNS[26][0]
+        count = lambda: [w.store.db.execute(q).fetchone()[0] for q, _ in checks]
+        g.own.session(w.patrick(), "one", SID, "pin", None, "mig26-key-0001")
+        (r,) = g.own.claim(w.ws, "one", g.tok["one"], 0, True)["sessions"]
+        g.own.session_done(w.ws, "one", g.tok["one"], {"id": r["id"], "outcome": "done"})
+        g.own.session(w.patrick(), "one", SID, "read", None, "mig26-key-0002")
+        self.assertEqual(count(), [1])
+        (r,) = g.own.claim(w.ws, "one", g.tok["one"], 0, True)["sessions"]
+        g.own.session_done(w.ws, "one", g.tok["one"], {"id": r["id"], "outcome": "done"})
+        self.assertEqual(count(), [0])
+        w.store.db.executescript(DOWNS[26][1])
+        self.assertEqual([r[0] for r in w.store.db.execute("SELECT op FROM own_session_ops")], ["pin"])
 
 
 if __name__ == "__main__":

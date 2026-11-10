@@ -422,7 +422,8 @@ def line_of(text: str) -> str:
 # ── reading Hermes's chats ────────────────────────────────────────────────
 
 LIST_SQL = f"""
-SELECT s.id, s.title, coalesce(s.last_activity_at, s.started_at) AS last_at, s.pinned AS pinned FROM sessions s
+SELECT s.id, s.title, coalesce(s.last_activity_at, s.started_at) AS last_at, s.pinned AS pinned,
+  s.last_read_at AS last_read FROM sessions s
 WHERE s.archived = 0 AND s.hidden = 0
   AND s.source NOT IN ({",".join("?" * len(NOT_LISTED))})
   AND coalesce(s.end_reason, '') != 'compression'
@@ -445,8 +446,25 @@ def _pins(con: sqlite3.Connection) -> bool:
 
 
 def _listing(con: sqlite3.Connection, sql: str) -> str:
-    """LIST_SQL as this Hermes's store can run it."""
-    return sql if _pins(con) else sql.replace("s.pinned", "0")
+    """LIST_SQL as this Hermes's store can run it: one from before pins pins nothing, and one from before
+    read marks (sessions.last_read_at) has none."""
+    have = _columns(con, "sessions")
+    if "pinned" not in have:
+        sql = sql.replace("s.pinned", "0")
+    if "last_read_at" not in have:
+        sql = sql.replace("s.last_read_at", "NULL")
+    return sql
+
+
+def _read(row: dict, last_at, last_read, have: bool) -> dict:
+    """A chat's read mark, as Hermes's own SessionDB.session_unread tells it (#103): unread when it was active
+    after the mark. A chat with no mark (NULL) is read, and `read_mark` false says so, so opening it here
+    sets one, as Desktop's does once it is marked; a store without read marks says nothing."""
+    if not have:
+        return row
+    if last_read is None:
+        return row | {"read_mark": False}
+    return row | ({"unread": True} if float(last_at or 0) > float(last_read) else {})
 
 
 # His Bot Chat, the chat Bot Mode and every Bot's message to him land in. Hermes keeps it hidden from
@@ -520,14 +538,14 @@ def bot_chat(con: sqlite3.Connection) -> dict | None:
     row = con.execute(BOT_CHAT_SQL, (BOT_CHAT,)).fetchone()
     if row is None:
         return None
-    tip = con.execute(LINEAGE_SQL + "SELECT s.id, coalesce(s.last_activity_at, s.started_at) AS last_at "
-                      "FROM descendants d JOIN sessions s ON s.id = d.id ORDER BY d.depth DESC, s.started_at DESC "
-                      "LIMIT 1", (row["id"], row["id"])).fetchone()
+    tip = con.execute(LINEAGE_SQL + _listing(con, "SELECT s.id, coalesce(s.last_activity_at, s.started_at) AS last_at, "
+                      "s.last_read_at AS last_read FROM descendants d JOIN sessions s ON s.id = d.id "
+                      "ORDER BY d.depth DESC, s.started_at DESC LIMIT 1"), (row["id"], row["id"])).fetchone()
     # Its line comes from its whole lineage: the chat it goes on as now may hold no message with words yet.
     lineage = [r["id"] for r in con.execute(LINEAGE_SQL + "SELECT id FROM ancestors UNION SELECT id FROM descendants",
                                             (row["id"], row["id"])).fetchall()]
-    return {"id": tip["id"], "title": BOT_CHAT, "last_at": _iso(tip["last_at"]), "preview": _line(con, lineage),
-            "bot_chat": True}
+    return _read({"id": tip["id"], "title": BOT_CHAT, "last_at": _iso(tip["last_at"]), "preview": _line(con, lineage),
+                  "bot_chat": True}, tip["last_at"], tip["last_read"], "last_read_at" in _columns(con, "sessions"))
 
 
 def _line(con: sqlite3.Connection, ids: list[str]) -> str:
@@ -547,6 +565,8 @@ def _row(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
     row = {"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]), "preview": _line(con, [r["id"]])}
     if "pinned" in r.keys() and r["pinned"]:
         row["pinned"] = True
+    if "last_read" in r.keys():
+        row = _read(row, r["last_at"], r["last_read"], "last_read_at" in _columns(con, "sessions"))
     if not row["title"]:
         for m in con.execute(FIRST_SQL, (r["id"], 5)):
             first = line_of(_text(m["content"]))
@@ -641,7 +661,7 @@ def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, 
         bot = None if archived else bot_chat(con)
         chats = [bot] if bot and not before else []
         if pins and not before and _pins(con):
-            chats += [_row(con, r) for r in con.execute(pins, (*NOT_LISTED, n - len(chats))).fetchall()
+            chats += [_row(con, r) for r in con.execute(_listing(con, pins), (*NOT_LISTED, n - len(chats))).fetchall()
                       if not bot or r["id"] != bot["id"]]
         room = n - len(chats)
         rows = [r for r in con.execute(_listing(con, sql), (*args, room + 1)).fetchall()

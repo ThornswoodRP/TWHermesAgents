@@ -183,6 +183,11 @@ def _chat_row(c: dict) -> dict:
         row["bot_chat"] = True
     if c.get("pinned") is True:
         row["pinned"] = True
+    # Hermes's read mark (#103): unread, or no mark yet, so the app sets one when the chat is opened.
+    if c.get("unread") is True:
+        row["unread"] = True
+    if c.get("read_mark") is False:
+        row["read_mark"] = False
     return row
 
 
@@ -804,7 +809,7 @@ class OwnChat:
         for gw in OWN_GATEWAYS:
             st = self._state(p, gw)
             chats = (st.pop("snap") or {}).get("chats", [])
-            out.append(st | {"chats": len(chats), "last": _newest(chats),
+            out.append(st | {"chats": len(chats), "last": _newest(chats), "unread": sum(1 for c in chats if c.get("unread")),
                              "unsettled": self._unsettled(p.workspace_id, gw)})
         return {"gateways": out, **self._can(p)}
 

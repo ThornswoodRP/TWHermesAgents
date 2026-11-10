@@ -683,6 +683,28 @@ class TheConnector(unittest.TestCase):
             with self.assertRaises(CoreError):
                 clean(snap | {"hidden": bad})
 
+    def test_a_chat_is_unread_by_hermes_read_mark(self):
+        # #103, as SessionDB.session_unread: unread when active after its mark; no mark (NULL) is read, and
+        # read_mark false says the app should set one. A store without the column says nothing.
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        self.assertFalse(any("unread" in c or "read_mark" in c for c in snap["chats"]))
+        con = sqlite3.connect(self.db)
+        con.execute("ALTER TABLE sessions ADD COLUMN last_read_at REAL")
+        con.execute("UPDATE sessions SET last_read_at = 400 WHERE id = 's_plan'")  # active at 500: unread
+        con.execute("UPDATE sessions SET last_read_at = 450 WHERE id = 's_old2'")  # active at 400: read
+        con.execute("UPDATE sessions SET last_read_at = 0 WHERE id = 's_bot'")  # marked unread
+        con.commit()
+        con.close()
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        marks = {c["id"]: (c.get("unread", False), c.get("read_mark", True)) for c in snap["chats"]}
+        self.assertEqual(marks, {"s_bot": (True, True), "s_plan": (True, True), "s_old2": (False, True),
+                                 "s_tg": (False, False)})
+        kept = {c["id"]: (c.get("unread", False), c.get("read_mark", True)) for c in clean(snap)["chats"]}
+        self.assertEqual(kept, marks)
+        page = own_connector.chats_page(self.db, None, "")
+        self.assertEqual({c["id"]: c.get("unread", False) for c in page["chats"]},
+                         {"s_bot": True, "s_plan": True, "s_old2": False, "s_tg": False})
+
     def test_the_bot_chat_is_listed_first_by_the_id_it_goes_on_as(self):
         con = sqlite3.connect(self.db)
         # Hermes compressed it: the titled, hidden row ended with 'compression' and goes on as s_bot2.

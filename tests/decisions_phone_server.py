@@ -85,7 +85,8 @@ CHATS = [
     {"id": "s_obc", "title": "Bot Chat", "last_at": "2026-11-01T09:45:00+00:00", "preview": "Rift: load order is clean",
      "bot_chat": True},
     {"id": "s_plan", "title": "Plan the week", "last_at": "2026-11-01T17:30:00+00:00", "preview": "three things"},
-    {"id": "s_long", "title": "A long chat", "last_at": "2026-11-01T16:00:00+00:00", "preview": "message 119"},
+    # Unread by Hermes's read mark: it was active after he last read it (#103).
+    {"id": "s_long", "title": "A long chat", "last_at": "2026-11-01T16:00:00+00:00", "preview": "message 119", "unread": True},
     {"id": "s_old", "title": "", "last_at": "2026-10-30T17:30:00+00:00", "preview": "older"},
     {"id": "s_md", "title": "Markdown check", "last_at": "2026-10-31T12:00:00+00:00", "preview": "Markdown"},
     # A chat Hermes has not titled, named by its first message; its newest row a long paste from Hermes Desktop.
@@ -243,6 +244,10 @@ def one_session(o, r):
         c.execute("UPDATE sessions SET archived = 1 WHERE id = ?", (sid,))
         HIDDEN.extend(row for row in CHATS if row["id"] == sid)
         CHATS[:] = [row for row in CHATS if row["id"] != sid]
+    elif op in ("read", "unread"):
+        for row in CHATS:
+            if row["id"] == sid:
+                row["unread"] = op == "unread"
     elif op in ("pin", "unpin"):
         # The scratch state.db has no pinned column; the feed carries the pin, as the connector reads it.
         for row in CHATS:

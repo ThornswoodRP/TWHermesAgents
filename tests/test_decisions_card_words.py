@@ -170,8 +170,9 @@ class Migration25(unittest.TestCase):
             db.execute("INSERT INTO responses(id, workspace_id, decision_id, revision, attention_revision, "
                        "artifact_sha256, option_key, note, principal_id, answered_at) "
                        "VALUES('rsp_x', ?, 'dec_x', 1, 1, 'x', NULL, 'words', ?, 't')", (w.ws, w.patrick_id))
+        from thornswood_decisions.schema import MIGRATIONS
         from thornswood_decisions.store import migrate
-        self.assertEqual(migrate(db), 25)
+        self.assertEqual(migrate(db), len(MIGRATIONS))
         self.assertEqual(tuple(db.execute("SELECT id, option_key FROM responses").fetchone()), (r["response_id"], "b"))
         with self.assertRaises(sqlite3.DatabaseError):
             db.execute("UPDATE responses SET note = 'x'")

@@ -116,7 +116,8 @@ Patrick's own chats (profile empty only) with Hermes's own SessionDB, the calls
 `hermes sessions delete` make (contracts.json "sessions"):
 
     <hermes python> -I room_send.py < {"op": "session", "action": "rename" | "archive" | "unarchive" |
-                                       "pin" | "unpin" | "delete", "session_id", "title": "<rename only>"}
+                                       "pin" | "unpin" | "read" | "unread" | "delete", "session_id",
+                                       "title": "<rename only>"}
 
 Each ends in the same state however often it runs: a chat that already has the
 title, is already hidden or shown, pinned or not, or is already gone is done. It prints
@@ -777,7 +778,8 @@ def _session(req: dict) -> dict:
     from hermes_state_runtime import RuntimeStoreError
 
     action, sid, title = req.get("action"), req.get("session_id"), req.get("title")
-    if (action not in ("rename", "archive", "unarchive", "pin", "unpin", "delete") or not isinstance(sid, str) or not sid
+    if (action not in ("rename", "archive", "unarchive", "pin", "unpin", "read", "unread", "delete")
+            or not isinstance(sid, str) or not sid
             or (action == "rename") != isinstance(title, str) or (action == "rename" and not title.strip())):
         return {"done": False, "reason": "bad request"}
     db = acquire(None)
@@ -788,6 +790,10 @@ def _session(req: dict) -> dict:
         # His Bot Chat is kept as it is: Bot Mode and every Bot's message to him find it by its exact
         # title while it is hidden and not archived (hermes_state_titles.py), so a new title, a hide or a
         # delete would cut him off from it. Hermes's own apps never offer these for it either.
+        if action in ("read", "unread"):
+            # A read mark changes nothing he finds a chat by, so his Bot Chat takes it too, as in Desktop.
+            db.set_session_read(sid, action == "read")
+            return {"done": True}
         bot = db.get_session_by_title(db.CANONICAL_BOT_CHAT_TITLE)
         if bot and bot.get("hidden") and sid in db.get_compression_lineage(bot["id"]):
             return {"done": False, "reason": "his Bot Chat is kept as it is: it is not renamed, hidden or deleted"}
