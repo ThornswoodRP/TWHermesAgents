@@ -209,7 +209,7 @@ class Core(unittest.TestCase):
         agents = {a["id"]: a for a in self.view()["agents"]}
         self.assertEqual(agents["one"]["job_changes"], {"j1": {"id": out["id"], "do": "pause", "status": "done",
                                                                "reason": None}})
-        self.assertEqual(agents["me"]["job_changes"], {})
+        self.assertNotIn("job_changes", agents["me"], "a Hermes not heard from lately shows no jobs to change")
         self.assertIsNotNone(self.view()["jobs_until"])
         # What was asked for is recorded.
         ev = self.w.store.db.execute("SELECT body_json FROM events WHERE kind = 'own.job'").fetchall()
