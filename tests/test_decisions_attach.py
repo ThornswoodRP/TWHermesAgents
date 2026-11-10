@@ -8,8 +8,8 @@ Checks:
   and drops the bytes once the message has a result;
 - a file is taken off before sending, and an upload never sent goes after a day;
 - the connector fetches each file, checks it, saves it in Hermes's own images or attachments folder and
-  hands the first photo as the turn's image and every other file as an @file: reference; a file that does
-  not come whole fails the message before anything reaches Hermes;
+  hands each photo to the turn (room_send.py --tw-image) and every other file as an @file: reference; a file
+  that does not come whole fails the message before anything reaches Hermes;
 - over HTTP: the upload is its bytes, a browser never gets a file's bytes, and the way back from schema 14.
 Everything runs in a scratch test workspace with a stand-in for `hermes`; nothing reaches a real Hermes.
 """
@@ -196,8 +196,13 @@ class TheConnector(unittest.TestCase):
         beach = self.dir / "images" / "phone" / mid / "beach.png"
         notes = self.dir / "attachments" / "phone" / mid / "my notes.pdf"
         second = self.dir / "images" / "phone" / mid / "second.png"
-        self.assertEqual(args[args.index("--image") + 1], str(beach))
-        self.assertEqual(text, f'what do you see?\n\n@file:"{notes}" @file:{second}')
+        # Each photo goes to the turn the way Desktop sends one (room_send.py --tw-image); Hermes's own --image
+        # is refused by its gateway chat, so it is never used.
+        at = args.index("--query-file") + 2
+        self.assertEqual(args[at:at + 5],
+                         ["--tw-files", "--tw-image", str(beach), "--tw-image", str(second)])
+        self.assertNotIn("--image", args)
+        self.assertEqual(text, f'what do you see?\n\n@file:"{notes}"')
         self.assertEqual((beach.read_bytes(), notes.read_bytes()), (PNG, PDF))
         if os.name != "nt":
             self.assertEqual(notes.stat().st_mode & 0o777, 0o600)

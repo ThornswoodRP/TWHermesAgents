@@ -155,7 +155,7 @@ class TheTurn(unittest.TestCase):
         self.assertEqual((methods, said), (["prompt.submit"], ["started"]))
 
     def test_a_file_a_slash_command_or_a_parked_turn_always_queues(self):
-        for kw in ({"extra": ("--image", str(self.dir / "photo.png"))}, {"text": "/model gpt"}, {"parked": True}):
+        for kw in ({"extra": ("--tw-files",)}, {"text": "/model gpt"}, {"parked": True}):
             methods, _, said, _ = self.run_turn(busy="interrupt", **kw)
             self.assertEqual((methods, said), (["prompt.submit"], ["queued", "started"]), kw)
 

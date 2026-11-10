@@ -26,6 +26,16 @@ way Hermes itself does:
 - the room: `room_send.py` with Hermes's own Python, which calls `groups.send`
   on the running gateway with the core's key as the event id.
 
+A message's files and photos (#81) are fetched from the core while it is
+leased (`POST /api/v1/connector/attachment`), each checked against its size
+and SHA-256 before anything reaches Hermes. For a Bot they are saved in that
+Bot's own home, where its Hermes stages what Desktop drops into its box
+(own_connector.fetch_files), and handed over as Desktop hands them: each photo
+as the turn's image, every other file as an @file: reference (hand_over). For
+a room they go into the room's own store, and the message names them
+(room_send.py _send). A file that does not come whole fails the message, and
+nothing was sent.
+
 The helper (room_send.py: readiness, room, reactions) runs inside Hermes's own
 runtime: its real Python, with Hermes's source on the path, found the way
 own_connector.py finds it (`hermes --print-runtime-command`, else the launcher
@@ -86,6 +96,8 @@ not wait for it, so a message to one Bot never waits for another Bot's turn
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
@@ -101,7 +113,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from .own_connector import LiveTurn, Waker, follow_turn, probe_env
+from .own_connector import LiveTurn, Waker, fetch_files, follow_turn, hand_over, probe_env
 
 CORE = "http://127.0.0.1:9135/api/v1"
 POLL_SECONDS = 5
@@ -317,8 +329,14 @@ class Hermes:
             return {"why": str(got.get("reason") or "the tasks helper gave no tasks")[:200]}
         return {"tasks": {k: v for k, v in tasks.items() if k in profiles and isinstance(v, dict)}}
 
-    def to_room(self, room_id: str, send_key: str, text: str) -> tuple[str, str, str]:
-        got = self._helper({"op": "send", "room_id": room_id, "event_id": send_key, "text": text}, CHECK_SECONDS)
+    def to_room(self, room_id: str, send_key: str, text: str, files: list | None = None) -> tuple[str, str, str]:
+        """(outcome, ref, reason) for one message to a room. `files` are (file, bytes) for each file on it,
+        uploaded into the room's own store by the helper before the message goes (room_send.py _send)."""
+        req = {"op": "send", "room_id": room_id, "event_id": send_key, "text": text}
+        if files:
+            req["files"] = [{"id": f["id"], "name": f["name"], "mime": f["mime"],
+                             "data_base64": base64.b64encode(body).decode("ascii")} for f, body in files]
+        got = self._helper(req, CHECK_SECONDS)
         if got is None:
             return "uncertain", "", "no answer from the room helper in a minute"
         if got.get("helper_failed"):
@@ -344,7 +362,7 @@ class Hermes:
             return "set", ""
         return "failed", str(got.get("reason") or "not set")[:200]
 
-    def to_bot(self, bot: str, text: str, doing=None, live=None) -> tuple[str, str, str]:
+    def to_bot(self, bot: str, text: str, doing=None, live=None, files: list[str] | None = None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message to a Bot's Bot Chat. `doing(state, tool)` hears what the
         turn is doing as Hermes's stream says it (own_connector.follow_turn): thinking, writing, or a tool.
         `live` (own_connector.LiveTurn) keeps the turn as Desktop draws it.
@@ -363,7 +381,7 @@ class Hermes:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
             argv = [*self.helper_cmd, "chat", "-p", bot, "--in", str(self.home), "-c", BOT_CHAT,
-                    "--create-if-missing", "-Q", "--format", "stream-json", "--query-file", str(path)]
+                    "--create-if-missing", "-Q", "--format", "stream-json", "--query-file", str(path), *(files or [])]
             # The Bot's own home, named before any of Hermes is imported, as in to_session.
             env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
             started = time.time()
@@ -397,7 +415,8 @@ class Hermes:
             return "confirmed", "turn finished", ""
         return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
 
-    def to_session(self, bot: str, sid: str, text: str, doing=None, live=None) -> tuple[str, str, str]:
+    def to_session(self, bot: str, sid: str, text: str, doing=None, live=None,
+                   files: list[str] | None = None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message into one session of a Bot: the one a Board row opens,
         where the Bot may be working right now (Patrick, 9 Nov). It goes the way Desktop's message box
         sends into an open chat: room_send.py `chat --resume`, through the Bot's running gateway, which
@@ -426,7 +445,7 @@ class Hermes:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
             argv = [*self.helper_cmd, "chat", "-p", bot, "-Q", "--format", "stream-json", "--query-file", str(path),
-                    "--resume", sid]
+                    "--resume", sid, *(files or [])]
             # The Bot's own home, named before any of Hermes is imported (room_send.py loads Hermes's chat
             # view before Hermes reads -p), so every part of the turn is that profile's.
             env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
@@ -524,6 +543,20 @@ class Core:
         except (urllib.error.URLError, OSError):
             return 0, {}
 
+    def fetch(self, op: str, body: dict) -> tuple[int, bytes]:
+        """An answer that is bytes (a file Patrick attached), not JSON: `POST /connector/<op>`."""
+        req = urllib.request.Request(f"{self.base}/connector/{op}", data=json.dumps(body).encode("utf-8"),
+                                     method="POST", headers={"Content-Type": "application/json",
+                                                             "Authorization": f"Bearer {self.token}"})
+        try:
+            with self.opener.open(req, timeout=120) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            return exc.code, b""
+        except (urllib.error.URLError, OSError, ValueError):
+            return 0, b""
+
 
 def say(line: str) -> None:
     """One line to the journal now: under systemd stdout is a pipe, and `-I` ignores PYTHONUNBUFFERED."""
@@ -553,8 +586,20 @@ class Connector:
         self._report_lock = threading.Lock()
 
     def deliver(self, item: dict) -> dict:
+        files = item.get("attachments") or []
+        try:
+            if item["target"] == "room":
+                got = self._fetched(files)
+            else:
+                # Into the Bot's own home, where its Hermes stages what Desktop drops into its box.
+                text, extra = hand_over(item["text"], fetch_files(
+                    self.core, self.hermes.home / ".hermes" / "profiles" / item["target"], item["id"], files)) \
+                    if files else (item["text"], [])
+        except ValueError as exc:
+            # Nothing was handed to Hermes, so the message did not go: Patrick sees why and can send again.
+            return {"id": item["id"], "outcome": "failed", "ref": "", "reason": str(exc)[:200]}
         if item["target"] == "room":
-            outcome, ref, reason = self.hermes.to_room(item["room_id"], item["send_key"], item["text"])
+            outcome, ref, reason = self.hermes.to_room(item["room_id"], item["send_key"], item["text"], got)
         else:
             def doing(state, tool):
                 with self._lock:
@@ -563,15 +608,31 @@ class Connector:
             with self._lock:
                 self.lives[item["id"]] = live
             try:
+                more = {"files": extra} if extra else {}
                 if item.get("session"):
-                    outcome, ref, reason = self.hermes.to_session(item["target"], item["session"], item["text"],
-                                                                  doing, live)
+                    outcome, ref, reason = self.hermes.to_session(item["target"], item["session"], text,
+                                                                  doing, live, **more)
                 else:
-                    outcome, ref, reason = self.hermes.to_bot(item["target"], item["text"], doing, live)
+                    outcome, ref, reason = self.hermes.to_bot(item["target"], text, doing, live, **more)
             finally:
                 with self._lock:
                     self.doing.pop(item["id"], None)
         return {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
+
+    def _fetched(self, files: list) -> list[tuple[dict, bytes]]:
+        """Each file on a room message, fetched from the core and checked against its size and SHA-256:
+        (file, bytes). The room keeps its files in its own store, so nothing is saved here."""
+        out = []
+        for f in files[:10]:
+            if not isinstance(f, dict) or not isinstance(f.get("id"), str):
+                raise ValueError("an attachment the core named is not well formed")
+            status, body = self.core.fetch("attachment", {"id": f["id"]})
+            if status != 200:
+                raise ValueError(f"could not fetch {f.get('name')} from the core (it answered {status or 'nothing'})")
+            if len(body) != f.get("size") or hashlib.sha256(body).hexdigest() != f.get("sha256"):
+                raise ValueError(f"{f.get('name')} came from the core changed or cut short")
+            out.append((f, body))
+        return out
 
     def _say_doing_while_running(self) -> None:
         """While any turn runs: what each Bot Chat turn is doing, to the core every DOING_SECONDS when it

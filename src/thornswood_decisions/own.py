@@ -249,6 +249,21 @@ def file_name(name) -> str:
     return name
 
 
+def checked_file(name, mime, body) -> tuple[str, str, bytes]:
+    """One uploaded file as it is kept: its name made safe (file_name), its type plain or
+    application/octet-stream, and its bytes, which are some and at most MAX_ATTACHMENT. The same for a
+    message to his own Hermes (OwnChat.attach) and to a Bot or a room (Chat.attach)."""
+    name = file_name(name)
+    mime = (mime or "").split(";")[0].strip().lower() or "application/octet-stream"
+    if not MIME.match(mime):
+        mime = "application/octet-stream"
+    if not isinstance(body, (bytes, bytearray)) or not body:
+        raise CoreError(400, "bad_file", "a file has some bytes")
+    if len(body) > MAX_ATTACHMENT:
+        raise CoreError(413, "too_big", f"a file is at most {MAX_ATTACHMENT // (1024 * 1024)} MB")
+    return name, mime, bytes(body)
+
+
 def clean(body) -> dict:
     """Only what the phone shows of one Hermes's chats, each field cut to size."""
     if not isinstance(body, dict):
@@ -999,14 +1014,7 @@ class OwnChat:
         gw = self._gateway(gw)
         if not self.s.flag(p.workspace_id, "own_chat_write"):
             raise CoreError(423, "own_chat_off", "chat with your own Hermes from the phone is off for now")
-        name = file_name(name)
-        mime = (mime or "").split(";")[0].strip().lower() or "application/octet-stream"
-        if not MIME.match(mime):
-            mime = "application/octet-stream"
-        if not isinstance(body, (bytes, bytearray)) or not body:
-            raise CoreError(400, "bad_file", "a file has some bytes")
-        if len(body) > MAX_ATTACHMENT:
-            raise CoreError(413, "too_big", f"a file is at most {MAX_ATTACHMENT // (1024 * 1024)} MB")
+        name, mime, body = checked_file(name, mime, body)
         now = self.s.now()
         with self.s.tx() as db:
             # Uploads never sent go after a day.

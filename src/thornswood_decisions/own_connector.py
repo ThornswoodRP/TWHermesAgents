@@ -1036,9 +1036,10 @@ class Hermes:
         state = got.get("state") if isinstance(got.get("state"), dict) else None
         return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
 
-    def turn(self, session_id: str | None, text: str, doing=None, image: Path | None = None,
+    def turn(self, session_id: str | None, text: str, doing=None, files: list[str] | None = None,
              started=None, live: LiveTurn | None = None, bot_chat: bool = False) -> tuple[str, str, str, str | None]:
-        """(outcome, ref, reason, session id) for one message, with the photo Patrick attached, if any.
+        """(outcome, ref, reason, session id) for one message. `files` are the arguments that hand the turn
+        the photos Patrick attached and say it carries files (hand_over), if any.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
         tool by its name, and the questions and approvals it has open. `started(proc)` hears the turn's process,
         whose stdin takes Patrick's orders for it (room_send.py `attended-chat`: Stop, and his answers)."""
@@ -1051,9 +1052,8 @@ class Hermes:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            argv = [*self.turn_cmd, "attended-chat", "-Q", "--format", "stream-json", "--query-file", str(path)]
-            if image is not None:
-                argv += ["--image", str(image)]
+            argv = [*self.turn_cmd, "attended-chat", "-Q", "--format", "stream-json", "--query-file", str(path),
+                    *(files or [])]
             if bot_chat:
                 # A Bot's message (Patrick, 9 Nov, q-86): into this Hermes's own Bot Chat, found by its name and
                 # made when missing, as Hermes's own message_agent delivers one (tools/bot_mode_dm.py). Never
@@ -1348,12 +1348,44 @@ class Core:
 # Files and photos Patrick attached on the phone go where Hermes Desktop puts what is dropped or pasted into
 # its box: images in Hermes's own images folder, every other file in its attachments folder (the staging
 # folders Hermes's file and vision tools are given, tools/credential_files.py _CACHE_DIRS), each message's
-# in a folder of its own. The first photo goes to Hermes as the turn's image (`--image`), and each other file
-# as an @file: reference in the message, as Desktop attaches a file.
+# in a folder of its own. Each photo Hermes takes as a turn's image (PNG, JPEG, GIF or WebP by its bytes,
+# gateway/session_ingress_media.py _ATTACHMENT_MIMES and sniff_image_mime) goes as one, the way Desktop sends
+# a photo: room_send.py `--tw-image`, which puts it in Hermes's image staging folder and names it on the turn's
+# prompt.submit (`attachments`). Every other file goes as an @file: reference in the message, as Desktop
+# attaches a file. Until 10 Nov the first photo went as `hermes chat --image`, which Hermes's gateway chat
+# refuses ("Unsupported gateway CLI options: --image", hermes_cli/gateway_chat.py _UNSUPPORTED, in 0.22.5 and
+# 0.23.0), so a message with a photo came back unclear and Hermes never saw it (#81).
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"}
 REF_NEEDS_QUOTES = re.compile(r"""[\s()\[\]{}<>"'`]""")
-MESSAGE_ID = re.compile(r"^own_[A-Za-z0-9_-]{4,64}$")
+MESSAGE_ID = re.compile(r"^(own|msg)_[A-Za-z0-9_-]{4,64}$")
 BAD_NAME = re.compile(r'[\\/\x00-\x1f\x7f<>:"|?*]')
+
+
+def photo_type(body: bytes) -> str | None:
+    """The type of a photo Hermes takes as a turn's image, by its bytes, else None (Hermes 0.23.0
+    gateway/session_ingress_media.py sniff_image_mime, the same four)."""
+    if body.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if body.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if body[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def hand_over(text: str, saved: list) -> tuple[str, list[str]]:
+    """What a message with files becomes for a turn: (the words Hermes gets, the extra arguments for
+    room_send.py's turn that hand it each photo). `saved` is (file, path, photo type or None) for each
+    file, in order. A message of photos alone says so in words, as Hermes Desktop says one."""
+    photos = [pth for _, pth, kind in saved if kind]
+    refs = [file_ref(pth) for _, pth, kind in saved if not kind]
+    words = "\n\n".join(x for x in (text, " ".join(refs)) if x)
+    if not words and photos:
+        words = "[Patrick attached " + ", ".join(pth.name for pth in photos) + "]"
+    extra = (["--tw-files"] if saved else []) + [a for pth in photos for a in ("--tw-image", str(pth))]
+    return words, extra
 
 
 def file_ref(path: Path) -> str:
@@ -1378,6 +1410,27 @@ def save_attachment(root: Path, message_id: str, f: dict, body: bytes) -> Path:
     with os.fdopen(fd, "wb") as out:
         out.write(body)
     return path
+
+
+def fetch_files(core, root: Path, message_id: str, files: list) -> list[tuple[dict, Path, str | None]]:
+    """Each file attached to one message, fetched from the core (`core.fetch("attachment", {"id"})`), checked
+    against its size and SHA-256, and saved under `root`, that Hermes's own home (save_attachment): (the file,
+    where it is, its photo type or None). The same for his own Hermes and for a Bot (connector.py). A file that
+    does not come whole, or cannot be saved, raises ValueError before anything reaches Hermes."""
+    out = []
+    for f in files[:10]:
+        if not isinstance(f, dict) or not isinstance(f.get("id"), str):
+            raise ValueError("an attachment the core named is not well formed")
+        status, body = core.fetch("attachment", {"id": f["id"]})
+        if status != 200:
+            raise ValueError(f"could not fetch {f.get('name')} from the core (it answered {status or 'nothing'})")
+        if len(body) != f.get("size") or hashlib.sha256(body).hexdigest() != f.get("sha256"):
+            raise ValueError(f"{f.get('name')} came from the core changed or cut short")
+        try:
+            out.append((f, save_attachment(root, message_id, f, body), photo_type(body)))
+        except OSError as exc:
+            raise ValueError(f"could not save {f.get('name')} into Hermes's folder ({type(exc).__name__})") from None
+    return out
 
 
 class OwnConnector:
@@ -1528,22 +1581,19 @@ class OwnConnector:
                 self.procs[item["id"]] = proc
         with self._lock:
             live = self.lives.get(item["id"])
-        text, image = item["text"], None
+        text, extra = item["text"], []
         files = item.get("attachments") or []
         if files:
             try:
-                paths = self._files(item["id"], files)
+                text, extra = hand_over(text, fetch_files(self.core, self.state_db.parent, item["id"], files))
             except ValueError as exc:
                 # Nothing was handed to Hermes, so the message did not go: Patrick sees why and can send again.
                 with self._lock:
                     self.unsaid.append({"id": item["id"], "outcome": "failed", "ref": "", "reason": str(exc)[:200]})
                     self.feed_now = True
                 return
-            image = next((pth for f, pth in paths if f.get("mime") in IMAGE_TYPES), None)
-            refs = [file_ref(pth) for _, pth in paths if pth != image]
-            text = "\n\n".join(x for x in (text, " ".join(refs)) if x) or f"[Patrick attached {image.name}]"
         try:
-            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, image, started, live,
+            outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, extra, started, live,
                                                          **({"bot_chat": True} if item.get("bot_chat") else {}))
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
@@ -1560,24 +1610,6 @@ class OwnConnector:
         with self._lock:
             self.unsaid.append(r)
             self.feed_now = True
-
-    def _files(self, message_id: str, files: list) -> list[tuple[dict, Path]]:
-        """Each attached file, fetched from the core, checked against its size and SHA-256, and saved."""
-        root = self.state_db.parent
-        out = []
-        for f in files[:10]:
-            if not isinstance(f, dict) or not isinstance(f.get("id"), str):
-                raise ValueError("an attachment the core named is not well formed")
-            status, body = self.core.fetch("attachment", {"id": f["id"]})
-            if status != 200:
-                raise ValueError(f"could not fetch {f.get('name')} from the core (it answered {status or 'nothing'})")
-            if len(body) != f.get("size") or hashlib.sha256(body).hexdigest() != f.get("sha256"):
-                raise ValueError(f"{f.get('name')} came from the core changed or cut short")
-            try:
-                out.append((f, save_attachment(root, message_id, f, body)))
-            except OSError as exc:
-                raise ValueError(f"could not save {f.get('name')} into Hermes's folder ({type(exc).__name__})") from None
-        return out
 
     def react(self, wanted: list) -> int:
         """The reactions the core handed over, each set in Hermes one after another (each is one quick
