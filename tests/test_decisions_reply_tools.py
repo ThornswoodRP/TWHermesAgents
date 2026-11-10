@@ -64,6 +64,7 @@ class ThePage(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.c = Chat(Path(self.dir.name))
+        self.addCleanup(self.c.con.close)  # before the folder goes: Windows will not delete an open database
 
     def page(self, before=None, n=50):
         return own_connector.messages_page(self.c.path, "s_t", before, n)
