@@ -102,7 +102,9 @@ OPEN = [{"id": "s_plan", "messages": [{"role": "user", "text": "What is on this 
 def one_feed(o=own):
     # Pinned chats first, as the connector lists them (own_connector.snapshot), and how many are hidden.
     o.feed(w.ws, "one", to, {"source_time": "2026-11-01T18:00:00+00:00", "open": OPEN, "hidden": len(HIDDEN),
-                             "chats": sorted(CHATS, key=lambda row: not row.get("pinned"))})
+                             "chats": sorted(CHATS, key=lambda row: not row.get("pinned")),
+                             # Hermes's projects, a new chat's folders (#110).
+                             "projects": [{"name": "Thornswood", "path": "C:\\Thornswood-Repo"}]})
 one_feed()
 # The pages: s_plan and s_long are in the scratch state.db, s_old is not (gone from Hermes).
 import sqlite3, tempfile, threading, time

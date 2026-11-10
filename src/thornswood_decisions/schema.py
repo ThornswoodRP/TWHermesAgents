@@ -987,6 +987,11 @@ DROP TABLE own_session_ops;
 ALTER TABLE own_session_ops_26 RENAME TO own_session_ops;
 CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
 """,
+    # 26: a new chat of his own can start in one of Hermes's projects (#110), as Desktop starts one in a
+    # project's folder: the first message keeps the folder it was asked to start in, one Hermes listed.
+    """
+ALTER TABLE own_messages ADD COLUMN folder TEXT CHECK (folder IS NULL OR length(folder) BETWEEN 1 AND 300);
+""",
 ]
 
 
@@ -1299,4 +1304,9 @@ DROP TABLE own_session_ops;
 ALTER TABLE own_session_ops_25 RENAME TO own_session_ops;
 CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
 """, "Requests to mark a chat read or unread that were already done are left out of own_session_ops; the marks stay in Hermes."),
+    # A new chat still on its way would start in Hermes's home instead of the project asked for.
+    26: ([("SELECT count(*) FROM own_messages WHERE folder IS NOT NULL AND status IN ('queued', 'leased')",
+           "new chats on their way to start in a project")], """
+ALTER TABLE own_messages DROP COLUMN folder;
+""", ""),
 }

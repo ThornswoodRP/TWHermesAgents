@@ -2585,8 +2585,19 @@ async function gatewayView(gw, into = 'view') {
   if (v.can_send && v.online) {
     parts.push(signInPart(v, status))
     if (v.sign_in_until) {
+      // Which folder the new chat works in (#110): one of Hermes's projects, as Desktop starts a chat in a
+      // project, or where any of his chats starts. Kept while he moves about, and dropped once not listed.
+      const folders = v.projects || []
+      if (!folders.some(f => f.path === pick.folder)) pick.folder = ''
+      const where = el('select', { 'aria-label': 'Start it in', 'data-detail': 'folder' },
+        el('option', { value: '' }, `${name}'s home folder`),
+        folders.map(f => el('option', { value: f.path }, `${f.name}: ${f.path}`)))
+      where.value = pick.folder
+      where.addEventListener('change', () => { pick.folder = where.value })
+      if (folders.length) parts.push(el('label', { class: 'detail' }, el('span', {}, 'Start it in'), where))
       parts.push(composer('new:' + gw, 'Start a new chat', async (text, key) => {
-        const s = await call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key })
+        const s = await call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key,
+          ...(pick.folder ? { folder: pick.folder } : {}) })
         if (s.status === 200 && s.body.message_id) started[gw] = s.body.message_id
         return s
       }, status, gw), status)

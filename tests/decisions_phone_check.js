@@ -406,8 +406,16 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (await page.getByText(/passkey sign-in|Full power until/).count()) throw new Error('the passkey line is back')
     if (!page.url().endsWith('/m/hermes/one')) throw new Error('url ' + page.url())
   })
-  await page.getByLabel('Start a new chat').fill('Start a list for the weekend.')
-  await page.getByRole('button', { name: 'Start a new chat' }).click()
+  await step("a new chat can start in one of Hermes's projects", async () => {
+    const where = page.getByLabel('Start it in')
+    if (await where.inputValue() !== '') throw new Error('it does not start in the home folder by default')
+    await where.selectOption({ label: 'Thornswood: C:\\Thornswood-Repo' })
+    await page.getByLabel('Start a new chat').fill('Start a list for the weekend.')
+    const sent = page.waitForRequest(r => r.url().endsWith('/own/one/send') && r.method() === 'POST')
+    await page.getByRole('button', { name: 'Start a new chat' }).click()
+    const body = (await sent).postDataJSON()
+    if (body.folder !== 'C:\\Thornswood-Repo' || body.new !== true) throw new Error('send body ' + JSON.stringify(body))
+  })
   await step('a new chat waits under Starting', async () => {
     await page.getByRole('heading', { name: 'Starting' }).waitFor({ timeout: 5000 })
     await page.getByText('Start a list for the weekend.').waitFor({ timeout: 3000 })

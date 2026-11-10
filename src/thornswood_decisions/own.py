@@ -82,6 +82,9 @@ MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}$")
 MAX_CLAIM = 3
 MAX_CHATS = 50
 MAX_OPEN = 8
+# Hermes's projects a new chat can start in (#110): each folder by its project's name.
+MAX_PROJECTS = 30
+FOLDER_MAX = 300
 MAX_MESSAGES = 30
 MAX_WANTED = 3
 MINE = 50
@@ -345,7 +348,26 @@ def clean(body) -> dict:
         if not isinstance(hidden, int) or isinstance(hidden, bool) or not 0 <= hidden <= 1_000_000:
             raise CoreError(400, "bad_feed", "hidden is how many chats Hermes hides")
         out["hidden"] = hidden
+    projects = body.get("projects")
+    if projects is not None:
+        if not isinstance(projects, list) or len(projects) > MAX_PROJECTS:
+            raise CoreError(400, "bad_feed", f"projects is a list of at most {MAX_PROJECTS} folders")
+        kept = []
+        for f in projects:
+            if not isinstance(f, dict):
+                raise CoreError(400, "bad_feed", "each project folder is an object")
+            kept.append({"name": _text(f.get("name"), 200) or "", "path": folder_of(f.get("path"))})
+        if len({f["path"] for f in kept}) != len(kept):
+            raise CoreError(400, "bad_feed", "the feed names a project folder twice")
+        out["projects"] = kept
     return out
+
+
+def folder_of(value) -> str:
+    """A folder as Hermes's projects name it: a path of 1 to FOLDER_MAX characters, on one line."""
+    if not isinstance(value, str) or not 1 <= len(value) <= FOLDER_MAX or any(ch < " " for ch in value):
+        raise CoreError(400, "bad_folder", f"a folder is a path of 1 to {FOLDER_MAX} characters on one line")
+    return value
 
 
 def bot_words(text: str) -> str:
@@ -828,7 +850,7 @@ class OwnChat:
         # Which chat each one made, listed or not: the app goes into the chat it just started (10 Nov).
         made = {r["id"]: r["made_session_id"] for r in rows if r["made_session_id"]}
         return st | {"chats": snap.get("chats", []), "hidden": snap.get("hidden"), "starting": starting, "made": made,
-                     "ops": OwnSessions(self.s).shown(p.workspace_id, gw), **self._can(p)}
+                     "projects": snap.get("projects", []), "ops": OwnSessions(self.s).shown(p.workspace_id, gw), **self._can(p)}
 
     def _connector(self, workspace_id: str, gw: str) -> dict | None:
         """Which copy its connector runs against the core's release, and an update it is on or could not do."""
@@ -909,7 +931,7 @@ class OwnChat:
                                  "AND status IN ('queued', 'leased', 'uncertain')", (workspace_id, gw)).fetchone()[0]
 
     def send(self, p: Principal, gw: str, session_id, new, text, idempotency_key, reply_to=None, quote=None,
-             quote_by=None, attachments=None, rewind=None, rewind_to=None) -> dict:
+             quote_by=None, attachments=None, rewind=None, rewind_to=None, folder=None) -> dict:
         """One message to one chat (session_id), or the first message of a new chat (new: true), which
         Hermes names itself, as it does any chat.
 
@@ -922,7 +944,10 @@ class OwnChat:
         A retry or an edit (rewinds.py) first takes the chat back to before one of his turns (rewind_to, by
         Hermes's own id): a retry sends that turn's own words again, as Hermes keeps them, and an edit sends
         these words in its place. Its text is what the phone shows meanwhile (a retry's, the turn as the
-        phone has it). It goes to a chat this Hermes listed, with no reply and no file."""
+        phone has it). It goes to a chat this Hermes listed, with no reply and no file.
+
+        A new chat can start in a folder (#110): one of Hermes's projects' folders, as its connector last listed
+        them, the way Desktop starts a chat in a project. Otherwise it starts where any of his chats starts."""
         self._patrick(p)
         gw = self._gateway(gw)
         rewind, rewind_to = rewind_of(rewind, rewind_to)
@@ -933,6 +958,13 @@ class OwnChat:
         if session_id is not None:
             session_id = _sid(session_id)
         files = self._wanted_files(attachments)
+        if folder is not None:
+            folder = folder_of(folder)
+            if session_id is not None:
+                raise CoreError(400, "bad_folder", "only a new chat starts in a folder; a chat keeps its own")
+            snap = Feeds(self.s).get(p.workspace_id, gw)[gw] or {}
+            if not any(f["path"] == folder for f in snap.get("projects", [])):
+                raise CoreError(404, "not_a_project", f"that folder is not one of {NAMES[gw]}'s projects")
         if rewind is not None:
             if session_id is None or files or reply_to is not None or quote is not None or quote_by is not None:
                 raise CoreError(400, "bad_rewind", "a retry or an edit goes to the chat its turn is in, as words "
@@ -956,7 +988,8 @@ class OwnChat:
         body_sha = sha256_hex(canonical({"gateway": gw, "session_id": session_id, "text": text}
                                         | ({"reply_to": reply_to} if reply_to is not None else {})
                                         | ({"attachments": files} if files else {})
-                                        | ({"rewind": rewind, "rewind_to": rewind_to} if rewind else {})))
+                                        | ({"rewind": rewind, "rewind_to": rewind_to} if rewind else {})
+                                        | ({"folder": folder} if folder is not None else {})))
         with self.s.tx() as db:
             cmd = db.execute("SELECT op, body_sha256, result_json FROM commands WHERE workspace_id = ? "
                              "AND principal_id = ? AND idempotency_key = ?",
@@ -972,10 +1005,10 @@ class OwnChat:
             now = self.s.now()
             mid = new_id("own")
             db.execute("INSERT INTO own_messages(id, workspace_id, gateway, session_id, text, send_key, "
-                       "principal_id, device_id, status, created_at, updated_at, reply_to, rewind, rewind_to) "
-                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                       "principal_id, device_id, status, created_at, updated_at, reply_to, rewind, rewind_to, folder) "
+                       "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                        (mid, p.workspace_id, gw, session_id, text, f"tw-own.{mid}", p.id, p.device_id, now, now,
-                        reply_to, rewind, rewind_to))
+                        reply_to, rewind, rewind_to, folder))
             self.s.wake(p.workspace_id, gw)
             for fid in files:
                 done = db.execute("UPDATE own_attachments SET message_id = ? WHERE id = ? AND workspace_id = ? "
@@ -988,7 +1021,8 @@ class OwnChat:
                          {"gateway": gw, "new_chat": session_id is None, "device": p.device_id}
                          | ({"reply": True} if reply_to is not None else {})
                          | ({"files": len(files)} if files else {})
-                         | ({"rewind": rewind} if rewind else {}))
+                         | ({"rewind": rewind} if rewind else {})
+                         | ({"in_project": True} if folder is not None else {}))
             receipt = {"message_id": mid, "gateway": gw, "session_id": session_id, "status": "queued",
                        "created_at": now}
             db.execute("INSERT INTO commands(workspace_id, principal_id, idempotency_key, op, body_sha256, "
@@ -1493,7 +1527,7 @@ class OwnChat:
             self._lapse(db, workspace_id, gw)
             self._made(db, workspace_id, gw)
             rows = [dict(r) | {"kind": "message"} for r in db.execute(
-                "SELECT m.id, m.session_id, m.text, m.send_key, m.status, m.rewind, m.rewind_to, m.created_at, "
+                "SELECT m.id, m.session_id, m.text, m.send_key, m.status, m.rewind, m.rewind_to, m.folder, m.created_at, "
                 "m.rowid AS n, p.bot FROM own_messages m JOIN principals p ON p.id = m.principal_id "
                 "WHERE m.workspace_id = ? AND m.gateway = ? AND m.status IN ('queued', 'leased')",
                 (workspace_id, gw)).fetchall()]
@@ -1540,7 +1574,8 @@ class OwnChat:
                 items.append({"id": r["id"], "session_id": r["session_id"], "text": r["text"],
                               "send_key": r["send_key"], "lease_until": until}
                              | ({"attachments": files} if files else {}) | ({"bot_chat": True} if r["bot"] else {})
-                             | ({"rewind": r["rewind"], "rewind_to": r["rewind_to"]} if r["rewind"] else {}))
+                             | ({"rewind": r["rewind"], "rewind_to": r["rewind_to"]} if r["rewind"] else {})
+                             | ({"folder": r["folder"]} if r["folder"] and not r["session_id"] else {}))
             reactions = [{"session_id": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, gw)] if ready else []
             sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
