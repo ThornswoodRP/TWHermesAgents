@@ -7,6 +7,14 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { webcrypto } from 'node:crypto'
+
+// The Desktop runs the pane in its window, where Web Crypto is
+// globalThis.crypto (the pane's newKey takes randomUUID from it). Node has
+// that global only from 19, so on an older node, as the VM's Ubuntu node 18
+// that deploy/install.sh 6b put there on 10 Nov, the stand-in gives it the
+// way the window does.
+if (!globalThis.crypto) globalThis.crypto = webcrypto
 
 const source = readFileSync(process.argv[2], 'utf8')
 

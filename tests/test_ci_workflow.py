@@ -67,6 +67,20 @@ class Workflow(unittest.TestCase):
         first_bash = min(n for n, s in enumerate(steps) if s.get("shell") == "bash")
         self.assertLess(i, first_bash)
 
+    def test_the_vms_job_runs_ubuntus_node_first(self):
+        """10 Nov 2026: deploy/install.sh 6b put Ubuntu's node 18 on the VM,
+        a pane test needed node 19, and only the VM's suite went red."""
+        steps = self.wf["jobs"]["tests"]["steps"]
+        names = [s.get("name", "") for s in steps]
+        i = names.index("Ubuntu's node first, as on the VM")
+        step = steps[i]
+        self.assertEqual(step["if"], "runner.os == 'Linux'")
+        self.assertIn("apt-get install -y -q --no-install-recommends nodejs", step["run"])
+        self.assertIn('ln -sf /usr/bin/node "$RUNNER_TEMP/vm-node/node"', step["run"])
+        self.assertIn("$GITHUB_PATH", step["run"])
+        self.assertLess(i, names.index("The suite"))
+        self.assertIn("apt-get install -y -q nodejs", (REPO / "deploy" / "install.sh").read_text(encoding="utf-8"))
+
     def test_only_hashed_wheels(self):
         installs = [ln for ln in self.text.splitlines() if "pip install" in ln]
         self.assertTrue(installs)
