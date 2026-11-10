@@ -93,7 +93,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   await page.getByText('Add a passkey on this phone').click()
   await step('the pairing added the first passkey, and the phone is not given a second', async () => {
     await page.getByText('This phone already has a passkey for Hermes. Nothing changed.').waitFor({ timeout: 8000 })
-    if ((await page.getByText(/^Added /).count()) !== 1) throw new Error('not one passkey')
+    if ((await page.getByText(/ · added /).count()) !== 1) throw new Error('not one passkey')
   })
   await page.getByText('Sign out').click()
   await step('signed out, with a passkey: one button, the other ways folded away', async () => {
@@ -1155,6 +1155,14 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   })
   await step('high-risk answers, deletes and own-Hermes sends name the fingerprint too', async () => {
     if ((await page.evaluate(() => signInWord())) !== 'fingerprint') throw new Error('the word is not fingerprint')
+  })
+  // 10 Nov: a new chat asked for the passkey through Bitwarden instead of the fingerprint, and which way the
+  // app had asked was only in the core's database. Settings says it for each sign-in.
+  await page.goto(base + '/m/settings')
+  await step('settings says how the last sign-in asked and which key answered', async () => {
+    await page.getByRole('heading', { name: 'Recent sign-ins' }).waitFor({ timeout: 5000 })
+    await page.getByText("Asked for the fingerprint; signed in with Fingerprint on this phone (this phone's fingerprint)", { exact: true }).first().waitFor({ timeout: 3000 })
+    await page.getByText(/^this phone's fingerprint · added .* · last signed in /).first().waitFor({ timeout: 3000 })
   })
   // A key the core no longer has (removed with its phone): the app forgets its name and the passkey signs in.
   // (Settings drops a key name the core does not list, so the name is put back after it loads.)

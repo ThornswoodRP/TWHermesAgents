@@ -3325,6 +3325,24 @@ async function alertsPart(status) {
   return part
 }
 
+// Where a key is kept, in his words: the phone itself (its fingerprint) or the passkey app that holds it.
+function keptIn(k) {
+  if (k.phone_key) return 'this phone\'s fingerprint'
+  return k.maker ? `kept in ${k.maker}` : 'kept in a passkey app'
+}
+
+// One recent sign-in, said whole (10 Nov: a new chat asked for the passkey through Bitwarden instead of the
+// fingerprint, and only the core's database said which way it had asked).
+function signInSaid(s) {
+  const asked = s.asked === 'fingerprint' ? 'Asked for the fingerprint' : 'Asked for any passkey'
+  if (s.outcome === 'signed_in') return `${asked}; signed in with ${s.key ? `${s.key.label} (${keptIn(s.key)})` : 'a key since removed'}`
+  if (s.outcome === 'no_phone_key') return 'Asked for the fingerprint, but the core no longer had this phone\'s key, so it asked for any passkey'
+  if (s.outcome === 'phone_key_in_app') return 'Asked for the fingerprint, but that key was kept in a passkey app, so it asked for any passkey'
+  if (s.outcome === 'ended') return `${asked}; ended on the phone (${s.why})`
+  if (s.outcome === 'refused') return `${asked}; refused (${s.why})`
+  return `${asked}; no answer came back`
+}
+
 async function settingsView(note) {
   setTab('')
   const status = el('p', { class: 'quiet', role: 'status' }, note || '')
@@ -3333,9 +3351,17 @@ async function settingsView(note) {
   if (r.status === 401) return signInView(said(r.body))
   if (r.status === 200) {
     list.append(...(r.body.passkeys.length ? r.body.passkeys.map(k => el('div', { class: 'option' },
-      el('strong', {}, k.label), el('div', { class: 'quiet' }, `Added ${when(k.created_at)}`)))
+      el('strong', {}, k.label),
+      el('div', { class: 'quiet' }, [keptIn(k), `added ${when(k.created_at)}`,
+        k.last_used_at ? `last signed in ${when(k.last_used_at)}` : 'never signed in'].join(' · '))))
       : [el('p', { class: 'quiet' }, 'No passkey yet. Add one so this phone can sign in again.')]))
   }
+  const recent = r.status === 200 && (r.body.sign_ins || []).length
+    ? [el('h2', {}, 'Recent sign-ins'),
+       el('p', { class: 'quiet' }, 'What the app asked for each time, and which key answered.'),
+       ...r.body.sign_ins.map(s => el('div', { class: 'option' },
+         el('strong', {}, signInSaid(s)), el('div', { class: 'quiet' }, when(s.at))))]
+    : null
   const name = el('input', { autocomplete: 'off', placeholder: 'This phone', 'aria-label': 'Passkey name' })
   const alerts = await alertsPart(status)
   // This phone's fingerprint key: kept only while the core still lists it.
@@ -3366,7 +3392,7 @@ async function settingsView(note) {
     el('h2', {}, 'Alerts'), alerts,
     finger ? [el('h2', {}, 'Fingerprint'), finger] : null,
     el('h2', {}, 'Voice'), wakeSetting(),
-    el('h2', {}, 'Passkeys'), list, name,
+    el('h2', {}, 'Passkeys'), list, recent, name,
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       status.textContent = ''
       const k = await addPasskey(name.value.trim())
