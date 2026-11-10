@@ -211,12 +211,27 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     repo = policy["repos"]["app"]
     asked = _asked(bot, ask)
     try:
-        prs = _worked(bot, ask, repo)
-        free = [w for w in workers if not _active(bot, ask, repo, w, workers[w], prs, asked)
-                and not (w == "wisp" and _active(bot, ask, policy["repos"]["fork"], w, workers[w],
-                                                 _worked(bot, ask, policy["repos"]["fork"]), asked))]
+        # A worker's pull request for a Thornswood issue may be in the fork:
+        # Wisp's engine fixes are (10 Nov 2026: #4513's fix merged as fork
+        # #148 at 5:49 AM, and Wisp, seen as still working it, got nothing
+        # from 9:44 AM on, with 179 issues open in its field).
+        prs = {**_worked(bot, ask, policy["repos"]["fork"]), **_worked(bot, ask, repo)}
+        parked: dict[str, list[int]] = {}
+        free = []
+        for w in workers:
+            busy = _active(bot, ask, repo, w, workers[w], prs, asked, parked)
+            if w == "wisp":
+                busy = _active(bot, ask, policy["repos"]["fork"], w, workers[w], prs, asked, parked) or busy
+            if not busy:
+                free.append(w)
         stopped = _stopped(bot, ask, [w for w in workers if w not in free], now)
         said = []
+        if parked:
+            said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
+                        "each holds a claimed issue with no pull request that it has moved on from (it opened a "
+                        "pull request for another issue since the issue last changed), so it is not working it: "
+                        "comment what it waits on and take the claim off, or send it back to the worker as its "
+                        "next issue (bramble-duties, section 6, items 1 and 5). The worker counts as free.")
         if stopped:
             said.append(f"{', '.join(sorted(stopped))} hold an active issue but have run no turn since "
                         f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each stopped "
@@ -256,16 +271,18 @@ def _field(worker: str) -> str:
     return ",".join(f'"area: {a}"' for a in AREAS[worker])
 
 
-def _worked(bot: str, ask: Caller, repo: str) -> set[tuple[str, int]]:
+def _worked(bot: str, ask: Caller, repo: str) -> dict[tuple[str, int], str]:
     """(worker, issue) for each of the repo's 100 most recently updated pull
-    requests that is open or merged, from its <bot>/<issue>-<what> branch."""
+    requests that is open or merged, from its <bot>/<issue>-<what> branch,
+    with when the pull request was opened (newest when there are several)."""
     pulls = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/repos/{repo}/pulls?state=all&sort=updated"
                                  "&direction=desc&per_page=100"}) or {}).get("body") or []
-    out = set()
+    out: dict[tuple[str, int], str] = {}
     for p in pulls if isinstance(pulls, list) else []:
         m = re.match(r"^([a-z]+)/(\d+)-", ((p.get("head") or {}).get("ref") or ""))
         if m and (p.get("state") == "open" or p.get("merged_at")):
-            out.add((m.group(1), int(m.group(2))))
+            key = (m.group(1), int(m.group(2)))
+            out[key] = max(out.get(key, ""), str(p.get("created_at") or ""))
     return out
 
 
@@ -280,24 +297,49 @@ def _asked(bot: str, ask: Caller) -> set[str]:
     return {c["task"] for c in cards if isinstance(c, dict) and c.get("status") == "pending" and c.get("task")}
 
 
-def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: set[tuple[str, int]],
-            asked: set[str] = frozenset()) -> bool:
+def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: dict[tuple[str, int], str],
+            asked: set[str] = frozenset(), parked: dict[str, list[int]] | None = None) -> bool:
     """Whether the worker holds a claimed issue in repo that is not waiting.
     Waiting is never a reason to sit idle (Patrick, 9 Nov 2026: "It should
     auto continue to the next issue in their field and start a new one when
     they are waiting on a build, push, merge, release, or a decision"). An
     issue waits when the worker's branch has an open or merged pull request
-    (a build, a check, a review, a merge or a release), when it carries
-    `needs: patrick`, or when a pending card asks Patrick about it."""
+    in either repo (a build, a check, a review, a merge or a release), when
+    it carries `needs: patrick`, or when a pending card asks Patrick about it.
+
+    A claimed issue with no pull request is parked, not active, when the
+    worker opened a pull request for another issue after the issue last
+    changed: a worker works one issue at a time, so it moved on and is not
+    working this one. Each is added to parked. 10 Nov 2026: Rift's #4511
+    (last changed 7:26 PM on 9 Nov, its note saying the game files were not
+    read yet) held Rift as busy while it opened #5731 and #5756 for other
+    issues, so from 10:33 AM, with 61 issues open in its field, Rift got
+    nothing new and was never seen as stopped either."""
+    newest = max((at for (w, _), at in prs.items() if w == worker), default="")
     q = urllib.parse.quote(f'repo:{repo} is:issue is:open label:"{label}"')
     body = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/search/issues?q={q}&per_page=50"})
             or {}).get("body") or {}
+    active = False
     for i in body.get("items") or []:
         n = int(i.get("number") or 0)
         labels = {(x.get("name") if isinstance(x, dict) else x) for x in i.get("labels") or []}
-        if (worker, n) not in prs and "needs: patrick" not in labels and f"{repo}#{n}" not in asked:
-            return True
-    return False
+        if (worker, n) in prs or "needs: patrick" in labels or f"{repo}#{n}" in asked:
+            continue
+        changed = str(i.get("updated_at") or "")
+        if changed and newest and _when(newest) > _when(changed):
+            if parked is not None:
+                parked.setdefault(worker, []).append(n)
+            continue
+        active = True
+    return active
+
+
+def _when(iso: str) -> float:
+    """GitHub's time (2026-11-10T02:26:14Z) as seconds; an unreadable one is 0."""
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _stopped(bot: str, ask: Caller, busy: list[str], now: float) -> dict[str, str | None]:
