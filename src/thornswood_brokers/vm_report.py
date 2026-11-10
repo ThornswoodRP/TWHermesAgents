@@ -18,7 +18,8 @@ An installed result also carries, when the install wrote it, Patrick's own
 Hermes's way into the box (deploy/install.sh 6b): the public half of its key,
 its bridge token's SHA-256 and a login check, all public, each held to its form.
 Only those fields go out, each held to its form, and the reason is one line
-with any address taken out: every step's output stays in the VM's own log.
+with any address taken out: every step's output stays in the VM's own log,
+except a red suite's count and the names of its failed tests (follow_main).
 Every write is found before it is made (a marker in its text), so a report the
 follower sends again after a lost answer writes nothing twice.
 """
