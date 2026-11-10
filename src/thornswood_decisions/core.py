@@ -346,13 +346,24 @@ class DecisionCore:
 
     # ── answering ─────────────────────────────────────────────────────────
 
-    def answer(self, p: Principal, *, decision_id: str, option_key: str, revision: int, attention_revision: int,
-               artifact_sha256: str, idempotency_key: str, note: str = "") -> dict:
+    def answer(self, p: Principal, *, decision_id: str, option_key: str | None, revision: int,
+               attention_revision: int, artifact_sha256: str, idempotency_key: str, note: str = "",
+               words: str | None = None) -> dict:
+        """Patrick's answer on a card: one of its options (`option_key`, with `note` beside it), or his own
+        words instead of any option (`words`, TWHermesAgents #107), which the Bot that asked is told as his
+        answer. Words choose no option, so they authorize nothing that waits on one (main_answer, and the
+        outside pull request answers tw-git reads, bots.outside_answers)."""
         if p.kind != "patrick":
             raise CoreError(403, "not_patrick", f"only Patrick answers; {p.label} cannot")
         self._writes_on(p.workspace_id)
         if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 200:
             raise CoreError(400, "bad_key", "an answer carries an idempotency key of 8 to 200 characters")
+        if words is not None:
+            if option_key:
+                raise CoreError(400, "bad_answer", "an answer is one of the card's options or his own words, not both")
+            if not isinstance(words, str) or not 1 <= len(words.strip()) <= 2000:
+                raise CoreError(400, "bad_words", "an answer in his own words says something, up to 2000 characters")
+            option_key, note = None, words.strip()
         body = {"decision_id": decision_id, "option_key": option_key, "revision": revision,
                 "attention_revision": attention_revision, "artifact_sha256": artifact_sha256, "note": note}
         body_sha = sha256_hex(canonical(body))
@@ -377,8 +388,9 @@ class DecisionCore:
                     revision, attention_revision, artifact_sha256):
                 raise CoreError(409, "stale_revision", "the card changed since it was shown; read it again",
                                 revision=row["revision"], attention_revision=row["attention_revision"])
-            opt = db.execute("SELECT key FROM decision_options WHERE decision_id = ? AND revision = ? AND key = ?",
-                             (decision_id, revision, option_key)).fetchone()
+            opt = option_key is None or db.execute(
+                "SELECT key FROM decision_options WHERE decision_id = ? AND revision = ? AND key = ?",
+                (decision_id, revision, option_key)).fetchone()
             if not opt:
                 raise CoreError(400, "no_option", f"revision {revision} has no option {option_key!r}")
             if row["risk"] == "high" and not p.fresh:
@@ -393,7 +405,8 @@ class DecisionCore:
             self._fault("after_response")
             db.execute("UPDATE decisions SET status = 'resolved', updated_at = ? WHERE id = ?", (now, decision_id))
             self.s.event(db, p.workspace_id, "decision.answered", decision_id, "patrick",
-                         {"response": rid, "revision": revision, "option": option_key, "device": p.device_id})
+                         {"response": rid, "revision": revision, "option": option_key, "device": p.device_id}
+                         | ({"in_words": True} if option_key is None else {}))
             self._cancel_pushes(db, decision_id, "answered")
             self._fault("after_cancel_pushes")
             requester = db.execute("SELECT bot, kind FROM principals WHERE id = ?", (row["requested_by"],)).fetchone()
@@ -580,7 +593,8 @@ class DecisionCore:
             return None
         return {"response_id": r["id"], "decision_id": decision_id, "revision": r["revision"],
                 "attention_revision": r["attention_revision"], "option_key": r["option_key"],
-                "answered_at": r["answered_at"], "device_id": r["device_id"]}
+                "answered_at": r["answered_at"], "device_id": r["device_id"]} | (
+                    {"words": r["note"]} if r["option_key"] is None else {})
 
     def states(self, decision_id: str) -> dict:
         """The four states, each read from its own record."""
@@ -602,8 +616,11 @@ class DecisionCore:
         opts = db.execute("SELECT key, label, consequence FROM decision_options WHERE decision_id = ? "
                           "AND revision = ? ORDER BY position", (row["id"], row["revision"])).fetchall()
         links = db.execute("SELECT kind, ref FROM task_links WHERE decision_id = ?", (row["id"],)).fetchall()
+        asker = db.execute("SELECT bot FROM principals WHERE id = ?", (row["requested_by"],)).fetchone()
         return {
             "id": row["id"], "kind": row["kind"], "status": row["status"], "title": row["title"],
+            # Which Bot opened it, for the card's "From" line (#107).
+            "from": asker["bot"] if asker else None,
             "revision": row["revision"], "attention_revision": row["attention_revision"],
             "artifact_sha256": row["artifact_sha256"], "recommendation": row["recommendation"],
             "scope_of_yes": row["scope_of_yes"], "risk": row["risk"], "expires_at": row["expires_at"],

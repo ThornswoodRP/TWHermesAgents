@@ -128,6 +128,18 @@ pre.artifact { white-space: pre-wrap; word-break: break-word; font: 14px/1.5 var
   background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .option { border-top: 1px solid var(--line); padding: 8px 0; }
 .option .rec { color: var(--accent-hot); border-color: var(--accent); margin-left: 6px; }
+/* The mock-up's card (#107): options lettered A, B, C, who asked it, and his own words as an answer. */
+.letter { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; flex: 0 0 22px;
+  margin-right: 8px; border: 1px solid var(--line2); border-radius: 6px; font: 600 12px/1 var(--mono); color: var(--muted);
+  vertical-align: 1px; }
+.chat-cards .opts button .letter { color: inherit; border-color: currentColor; }
+.card-from { margin: 2px 0 6px; font-size: 13px; }
+.words-answer { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+.words-answer textarea { margin-top: 0; }
+.words-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.words-actions button { flex: 1 1 auto; min-height: 44px; }
+blockquote.words { margin: 6px 0; padding: 6px 10px; border-left: 3px solid var(--accent); white-space: pre-wrap;
+  overflow-wrap: anywhere; }
 .msg { padding: 8px 0; border-bottom: 1px solid var(--line); }
 .msg .who { font-weight: 600; font-size: 14px; }
 .msg .text { white-space: pre-wrap; word-break: break-word; }

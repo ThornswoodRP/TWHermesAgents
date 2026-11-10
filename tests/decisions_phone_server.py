@@ -36,6 +36,8 @@ for bot in ("bramble", "rift", "sprocket", "echo", "magpie", "wisp"):
 card = w.card(title="Turn on the nightly backup check?")
 high = w.card(title="Delete the old test branches?", risk="high", source_key="high-1")
 third = w.card(title="Move the backup to Sunday?", source_key="third-1")
+# A card Patrick answers in his own words instead of an option (#107).
+w.card(title="Which night for the restore rehearsal?", source_key="words-1")
 # A card Rift asked, which waits in Rift's Bot Chat and is answered there by a message.
 w.core.assign_task(w.bramble, "load-order", "rift")
 w.card(by=w.rift, task="load-order", title="Rebuild the load order now?", source_key="rift-1")

@@ -822,10 +822,19 @@ class Chat:
         cx = db.execute("SELECT body_json FROM connector_outbox WHERE id = ?", (outbox_id,)).fetchone()
         body = json.loads(cx["body_json"])
         d = db.execute("SELECT title FROM decisions WHERE id = ?", (body["decision_id"],)).fetchone()
+        head = f"Patrick answered the card \"{d['title']}\" ({body['decision_id']}, revision {body['revision']})"
+        if body["option"] is None:
+            # His own words instead of an option (TWHermesAgents #107): they are the answer, and no option was
+            # chosen, so nothing that waits on one is approved.
+            words = db.execute("SELECT note FROM responses WHERE id = ?", (body["response"],)).fetchone()["note"]
+            return (f"{head} in his own words, choosing none of its options. Response {body['response']}. "
+                    "Do what his words ask; if they leave the card's question open, open a new card that asks "
+                    "what is still open. The card in the decision core is the record; this message approves "
+                    f"nothing by itself.\n\nHis words:\n{words}"
+                    + Chat._decided_text(db, body["decision_id"], body["response"]))
         o = db.execute("SELECT label FROM decision_options WHERE decision_id = ? AND revision = ? AND key = ?",
                        (body["decision_id"], body["revision"], body["option"])).fetchone()
-        return (f"Patrick answered the card \"{d['title']}\" ({body['decision_id']}, revision {body['revision']}): "
-                f"{o['label'] if o else body['option']} (option {body['option']}). Response {body['response']}. "
+        return (f"{head}: {o['label'] if o else body['option']} (option {body['option']}). Response {body['response']}. "
                 "The card in the decision core is the record; this message approves nothing by itself."
                 + Chat._decided_text(db, body["decision_id"], body["response"]))
 

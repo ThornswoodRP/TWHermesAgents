@@ -349,8 +349,11 @@ class Api:
             return 200, self._changes(core, int(since) if since.isdigit() else 0)
         if method == "POST" and len(route) == 3 and route[0] == "cards" and route[2] == "answer":
             # The same command from Desktop and the phone (07 step 4): DecisionCore.answer checks it all.
+            # His own words instead of an option (#107) come as `words`, with no option.
+            words = data.get("words")
             return 200, core.answer(
                 p, decision_id=route[1], option_key=str(data.get("option_key", "")),
+                words=words if words is None or isinstance(words, str) else "",
                 revision=_int(data, "revision"), attention_revision=_int(data, "attention_revision"),
                 artifact_sha256=str(data.get("artifact_sha256", "")),
                 idempotency_key=str(data.get("idempotency_key", "")), note=str(data.get("note", ""))[:2000])

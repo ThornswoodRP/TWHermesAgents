@@ -204,6 +204,8 @@ class BotRoute:
             "JOIN responses r ON r.decision_id = d.id AND r.revision = d.revision "
             "JOIN principals who ON who.id = r.principal_id "
             "WHERE d.workspace_id = ? AND d.status = 'resolved' AND b.kind = 'bramble' AND who.kind = 'patrick' "
+            # An answer in his own words chose no option (#107), so tw-git and the guard have nothing to act on.
+            "AND r.option_key IS NOT NULL "
             "ORDER BY r.answered_at, d.id", (self.ws,)).fetchall()
         out = []
         for row in rows:
