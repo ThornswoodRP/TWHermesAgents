@@ -964,6 +964,34 @@ DROP TABLE responses;
 ALTER TABLE responses_25 RENAME TO responses;
 {_frozen("responses")}
 """,
+    # 26: a chat of his own is marked read when it is opened in the app, and unread from its menu, with
+    # Hermes's own read mark as Desktop sets it (#103): own_session_ops takes the two new requests.
+    """
+CREATE TABLE own_session_ops_26 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT NOT NULL CHECK (length(session_id) BETWEEN 1 AND 128),
+  op TEXT NOT NULL CHECK (op IN ('rename', 'archive', 'unarchive', 'pin', 'unpin', 'read', 'unread', 'delete')),
+  title TEXT CHECK ((op = 'rename') = (title IS NOT NULL) AND (title IS NULL OR length(title) BETWEEN 1 AND 100)),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO own_session_ops_26 SELECT id, workspace_id, gateway, session_id, op, title, status, lease_until, reason, principal_id, device_id, created_at, updated_at FROM own_session_ops;
+DROP TABLE own_session_ops;
+ALTER TABLE own_session_ops_26 RENAME TO own_session_ops;
+CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
+""",
+    # 27: a new chat of his own can start in one of Hermes's projects (#110), as Desktop starts one in a
+    # project's folder: the first message keeps the folder it was asked to start in, one Hermes listed.
+    """
+ALTER TABLE own_messages ADD COLUMN folder TEXT CHECK (folder IS NULL OR length(folder) BETWEEN 1 AND 300);
+""",
 ]
 
 
@@ -1251,5 +1279,34 @@ INSERT INTO responses_24 SELECT id, workspace_id, decision_id, revision, attenti
 DROP TABLE responses;
 ALTER TABLE responses_24 RENAME TO responses;
 {_frozen("responses")}
+""", ""),
+    # A read mark still on its way would never reach Hermes. One already done stays in Hermes; its request
+    # leaves own_session_ops, and the event chain keeps it (own.session_read, own.session_unread).
+    26: ([("SELECT count(*) FROM own_session_ops WHERE op IN ('read', 'unread') AND status IN ('queued', 'leased')",
+           "requests to mark a chat read or unread on their way")], """
+CREATE TABLE own_session_ops_25 (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  gateway TEXT NOT NULL CHECK (gateway IN ('me', 'one')),
+  session_id TEXT NOT NULL CHECK (length(session_id) BETWEEN 1 AND 128),
+  op TEXT NOT NULL CHECK (op IN ('rename', 'archive', 'unarchive', 'pin', 'unpin', 'delete')),
+  title TEXT CHECK ((op = 'rename') = (title IS NOT NULL) AND (title IS NULL OR length(title) BETWEEN 1 AND 100)),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed')),
+  lease_until TEXT,
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 200),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  device_id TEXT REFERENCES devices(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO own_session_ops_25 SELECT id, workspace_id, gateway, session_id, op, title, status, lease_until, reason, principal_id, device_id, created_at, updated_at FROM own_session_ops WHERE op NOT IN ('read', 'unread');
+DROP TABLE own_session_ops;
+ALTER TABLE own_session_ops_25 RENAME TO own_session_ops;
+CREATE INDEX own_session_ops_by_status ON own_session_ops(workspace_id, gateway, status, created_at);
+""", "Requests to mark a chat read or unread that were already done are left out of own_session_ops; the marks stay in Hermes."),
+    # A new chat still on its way would start in Hermes's home instead of the project asked for.
+    27: ([("SELECT count(*) FROM own_messages WHERE folder IS NOT NULL AND status IN ('queued', 'leased')",
+           "new chats on their way to start in a project")], """
+ALTER TABLE own_messages DROP COLUMN folder;
 """, ""),
 }

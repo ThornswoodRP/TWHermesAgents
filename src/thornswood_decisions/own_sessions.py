@@ -11,6 +11,8 @@ calls, as `hermes sessions rename` and `hermes sessions delete` and Hermes's ses
   (every compressed part of it) and keeps its messages;
 - pin and unpin: Hermes's set_session_pinned, as Desktop pins a chat (#101), for the whole chat; a
   pinned chat heads the chat list here and in Desktop;
+- read and unread: Hermes's set_session_read, the read mark Desktop sets when a chat is opened and its
+  "Mark as unread" clears (#103). His Bot Chat takes these two, as Desktop marks it read too;
 - delete: Hermes's delete_session, refused while a turn is running or unfinished (in the chat or a
   side task of it); it removes that chat with its messages, the earlier parts Hermes compressed it
   from and the side tasks (delegate chats) Hermes ran for it. A chat branched off it is kept, and
@@ -35,7 +37,9 @@ from datetime import timedelta
 from .auth import Principal
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
-OPS = ("rename", "archive", "unarchive", "pin", "unpin", "delete")
+OPS = ("rename", "archive", "unarchive", "pin", "unpin", "read", "unread", "delete")
+# What may be done to his Bot Chat: its read mark only (#103), as Desktop marks it read when it is opened.
+BOT_CHAT_OPS = ("read", "unread")
 MAX_TITLE = 100            # Hermes's own SessionDB.MAX_TITLE_LENGTH
 LEASE = timedelta(minutes=2)
 MAX_CLAIM = 5
@@ -63,7 +67,8 @@ class OwnSessions:
         if not self.s.flag(p.workspace_id, "session_manage_write"):
             raise CoreError(423, "session_manage_off", "renaming, hiding and deleting chats from the phone is off for now")
         if op not in OPS:
-            raise CoreError(400, "bad_op", "a chat is renamed, archived, unarchived, pinned, unpinned or deleted")
+            raise CoreError(400, "bad_op", "a chat is renamed, archived, unarchived, pinned, unpinned, marked read "
+                            "or unread, or deleted")
         title = _title(title) if op == "rename" else None
         if op != "rename" and title is not None:
             raise CoreError(400, "bad_title", "only a rename carries a title")
@@ -80,7 +85,7 @@ class OwnSessions:
                 return json.loads(cmd["result_json"]) | {"replayed": True}
             if not own.listed_or_hidden(p.workspace_id, gw, sid, hidden=op == "unarchive"):
                 raise CoreError(404, "not_listed", f"{own.name(gw)} has not listed that chat")
-            if own.is_bot_chat(p.workspace_id, gw, sid):
+            if op not in BOT_CHAT_OPS and own.is_bot_chat(p.workspace_id, gw, sid):
                 raise CoreError(409, "bot_chat_kept", "your Bot Chat is kept as it is: Bot Mode and every Bot's "
                                 "message to you find it by its name, so it is not renamed, hidden, pinned or "
                                 "deleted; it is always first in the list")

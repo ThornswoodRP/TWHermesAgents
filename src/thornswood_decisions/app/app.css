@@ -97,6 +97,9 @@ main { padding: 0 16px 12px; max-width: 720px; margin: 0 auto; }
 .chat-line { display: flex; align-items: center; margin: 0 -16px 0 0; }
 .chat-line > .row { flex: 1; min-width: 0; width: auto; margin-right: 0; }
 .row .t > strong svg { vertical-align: -1px; color: var(--accent); }
+/* An unread chat (#103): its name in full weight and a dot on the right, as Desktop's sidebar marks it. */
+.row.unread .t > strong { font-weight: 700; }
+.unread-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
 .row .what { color: var(--accent); margin-top: 1px; }
 .row .quiet { color: var(--muted); }
 .rec { font-size: 12px; color: var(--one-text); border: 1px solid var(--one); border-radius: 10px; padding: 0 7px;

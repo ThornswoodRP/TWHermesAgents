@@ -681,11 +681,12 @@ class AppFiles(unittest.TestCase):
         # never the private key, which never leaves the phone's authenticator); and whether he put
         # the fingerprint offer off (cleared when the core no longer has the phone's key, so it is offered
         # again); whether "Hey Hermes" is on for this phone (2 Nov); and which chats read their replies
-        # aloud on this phone (#105). Never a token, a private key or the CSRF value.
+        # aloud on this phone (#105); and when each Bot's chat was last opened here, for its unread mark
+        # (#103). Never a token, a private key or the CSRF value.
         uses = [ln.strip() for ln in js.splitlines() if "localStorage" in ln]
-        self.assertEqual(len(uses), 14, uses)
+        self.assertEqual(len(uses), 16, uses)
         for ln in uses:
-            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER|WAKE_KEY|ALOUD_KEY)\b", ln)
+            self.assertRegex(ln, r"localStorage\.(getItem|setItem|removeItem)\((KEPT|PHONE_KEY|FINGERPRINT_LATER|WAKE_KEY|ALOUD_KEY|BOT_SEEN)\b", ln)
         self.assertIn("localStorage.setItem(PHONE_KEY, JSON.stringify(k))", js)
         self.assertIn("keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })", js)
         self.assertIn("forgetKept()\n      csrf = null", js)

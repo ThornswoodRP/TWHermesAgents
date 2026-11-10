@@ -293,6 +293,20 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.getByText('router, merges', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('Plan the week: three things').waitFor({ timeout: 3000 })
   })
+  // #103: unread chats. One's row counts its chats Hermes marks unread; a Bot's chat whose newest line is
+  // the Bot's, after he last opened it on this device, counts one.
+  await step('One counts its unread chats, and a Bot its chat with a reply he has not opened', async () => {
+    await page.locator('#view > button.row[data-gateway="one"] [data-unread="1"]').waitFor({ timeout: 5000 })
+    if (await page.locator('#view > button.row[data-bot="bramble"] [data-unread]').count()) throw new Error('a Bot never opened here is unread')
+    await page.evaluate(() => localStorage.setItem('hermes.botSeen.v1', JSON.stringify({ bramble: '2026-11-01T16:00:00.000Z' })))
+    await page.goto(base + '/m/bots')
+    await page.locator('#view > button.row[data-bot="bramble"] [data-unread="1"]').waitFor({ timeout: 5000 })
+    await page.goto(base + '/m/bots/bramble')
+    await page.locator('#view').filter({ hasNotText: 'Loading...' }).waitFor({ timeout: 5000 })
+    await page.goto(base + '/m/bots')
+    await page.locator('#view > button.row[data-bot="bramble"]').waitFor({ timeout: 5000 })
+    if (await page.locator('#view > button.row[data-bot="bramble"] [data-unread]').count()) throw new Error('still unread once opened')
+  })
   await step("each gateway's state in its own words", async () => {
     const tag = gw => page.locator(`#view > button.row[data-gateway="${gw}"] .rec`).first().textContent()
     if ((await tag('one')) !== 'On') throw new Error('One: ' + (await tag('one')))
@@ -392,8 +406,16 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (await page.getByText(/passkey sign-in|Full power until/).count()) throw new Error('the passkey line is back')
     if (!page.url().endsWith('/m/hermes/one')) throw new Error('url ' + page.url())
   })
-  await page.getByLabel('Start a new chat').fill('Start a list for the weekend.')
-  await page.getByRole('button', { name: 'Start a new chat' }).click()
+  await step("a new chat can start in one of Hermes's projects", async () => {
+    const where = page.getByLabel('Start it in')
+    if (await where.inputValue() !== '') throw new Error('it does not start in the home folder by default')
+    await where.selectOption({ label: 'Thornswood: C:\\Thornswood-Repo' })
+    await page.getByLabel('Start a new chat').fill('Start a list for the weekend.')
+    const sent = page.waitForRequest(r => r.url().endsWith('/own/one/send') && r.method() === 'POST')
+    await page.getByRole('button', { name: 'Start a new chat' }).click()
+    const body = (await sent).postDataJSON()
+    if (body.folder !== 'C:\\Thornswood-Repo' || body.new !== true) throw new Error('send body ' + JSON.stringify(body))
+  })
   await step('a new chat waits under Starting', async () => {
     await page.getByRole('heading', { name: 'Starting' }).waitFor({ timeout: 5000 })
     await page.getByText('Start a list for the weekend.').waitFor({ timeout: 3000 })
@@ -919,6 +941,22 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   await step('Unpin puts it back among the recent chats', async () => {
     await again('/m/hermes/one', async () => !(await page.getByRole('heading', { name: 'Pinned' }).count()))
     await page.locator('#view .row[data-chat="s_md"]').waitFor({ timeout: 3000 })
+  })
+  // #103: an unread chat is marked in the list, its menu marks it unread, and opening it marks it read in
+  // Hermes. (The long chat was opened earlier on, which marked it read.)
+  await page.locator('#view [data-chat-menu="s_long"]').click()
+  await page.getByRole('dialog', { name: 'Chat actions' }).getByRole('button', { name: 'Mark as unread' }).click()
+  await step('Mark as unread shows the chat in full weight with a dot', async () => {
+    await again('/m/hermes/one', async () => (await page.locator('#view .row.unread[data-chat="s_long"] [aria-label="Unread"]').count()) === 1)
+    if (await page.locator('#view .row.unread').count() !== 1) throw new Error('more than the one unread chat')
+  })
+  await page.goto(base + '/m/hermes/one/s_long')
+  await step('opening an unread chat marks it read, and its menu then offers Mark as unread', async () => {
+    await page.locator('.chatbar .t strong', { hasText: 'A long chat' }).waitFor({ timeout: 8000 })
+    await again('/m/hermes/one', async () => !(await page.locator('#view .row.unread[data-chat="s_long"]').count()))
+    await page.locator('#view [data-chat-menu="s_long"]').click()
+    await page.getByRole('dialog', { name: 'Chat actions' }).getByRole('button', { name: 'Mark as unread' }).waitFor({ timeout: 3000 })
+    await page.keyboard.press('Escape')
   })
   await page.goto(base + '/m/hermes/one/s_md')
   await page.getByRole('button', { name: 'Chat actions' }).click()

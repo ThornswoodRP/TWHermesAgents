@@ -431,7 +431,8 @@ class Api:
             return 200, OwnChat(core.s).send(p, route[1], data.get("session_id"), data.get("new"),
                                              data.get("text"), data.get("idempotency_key"),
                                              data.get("reply_to"), data.get("quote"), data.get("quote_by"),
-                                             data.get("attachments"), data.get("rewind"), data.get("rewind_to"))
+                                             data.get("attachments"), data.get("rewind"), data.get("rewind_to"),
+                                             data.get("folder"))
         if method == "POST" and route == ["voice", "transcribe"]:
             return 200, Voice(self.voice_socket).transcribe(p, data.get("_type"), data.get("_raw") or b"")
         if method == "POST" and len(route) == 3 and route[0] == "own" and route[2] == "attach":

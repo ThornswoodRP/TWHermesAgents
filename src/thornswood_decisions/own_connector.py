@@ -20,6 +20,7 @@ phone asked for), and every few seconds whatever happens, it:
    no one at the keyboard (contracts.json "own_chat"):
 
        a new chat:      hermes chat -Q --format stream-json --query-file <file> --yolo --source cli --in <home>
+                        (or --in the folder of one of Hermes's projects he picked, #110)
        an existing one: hermes chat -Q --format stream-json --query-file <file> --resume <session id>
 
    through room_send.py `attended-chat`, a turn Patrick is there to answer: Hermes asks
@@ -422,7 +423,8 @@ def line_of(text: str) -> str:
 # ── reading Hermes's chats ────────────────────────────────────────────────
 
 LIST_SQL = f"""
-SELECT s.id, s.title, coalesce(s.last_activity_at, s.started_at) AS last_at, s.pinned AS pinned FROM sessions s
+SELECT s.id, s.title, coalesce(s.last_activity_at, s.started_at) AS last_at, s.pinned AS pinned,
+  s.last_read_at AS last_read FROM sessions s
 WHERE s.archived = 0 AND s.hidden = 0
   AND s.source NOT IN ({",".join("?" * len(NOT_LISTED))})
   AND coalesce(s.end_reason, '') != 'compression'
@@ -445,8 +447,25 @@ def _pins(con: sqlite3.Connection) -> bool:
 
 
 def _listing(con: sqlite3.Connection, sql: str) -> str:
-    """LIST_SQL as this Hermes's store can run it."""
-    return sql if _pins(con) else sql.replace("s.pinned", "0")
+    """LIST_SQL as this Hermes's store can run it: one from before pins pins nothing, and one from before
+    read marks (sessions.last_read_at) has none."""
+    have = _columns(con, "sessions")
+    if "pinned" not in have:
+        sql = sql.replace("s.pinned", "0")
+    if "last_read_at" not in have:
+        sql = sql.replace("s.last_read_at", "NULL")
+    return sql
+
+
+def _read(row: dict, last_at, last_read, have: bool) -> dict:
+    """A chat's read mark, as Hermes's own SessionDB.session_unread tells it (#103): unread when it was active
+    after the mark. A chat with no mark (NULL) is read, and `read_mark` false says so, so opening it here
+    sets one, as Desktop's does once it is marked; a store without read marks says nothing."""
+    if not have:
+        return row
+    if last_read is None:
+        return row | {"read_mark": False}
+    return row | ({"unread": True} if float(last_at or 0) > float(last_read) else {})
 
 
 # His Bot Chat, the chat Bot Mode and every Bot's message to him land in. Hermes keeps it hidden from
@@ -471,8 +490,43 @@ def _ro(path: Path) -> sqlite3.Connection:
     return con
 
 
+# Hermes's projects (hermes_cli/projects_db.py, $HERMES_HOME/projects.db): each folder of a project not archived,
+# its main folder first, as Desktop offers them to start a new chat in (#110).
+PROJECTS = 30
+PROJECTS_SQL = ("SELECT p.name, f.path, f.label FROM projects p JOIN project_folders f ON f.project_id = p.id "
+                "WHERE p.archived = 0 ORDER BY p.created_at, p.id, f.is_primary DESC, f.added_at, f.path LIMIT ?")
+FOLDER_MAX = 300
+
+
+def projects(home: Path) -> list[dict]:
+    """The folders of Hermes's projects, read only: [{name, path}], none when Hermes has no projects."""
+    db = home / "projects.db"
+    if not db.is_file():
+        return []
+    try:
+        con = _ro(db)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = con.execute(PROJECTS_SQL, (PROJECTS,)).fetchall()
+    except sqlite3.Error:
+        return []  # a projects.db without its tables yet: Hermes made none
+    finally:
+        con.close()
+    out = []
+    for r in rows:
+        path = r["path"]
+        if not isinstance(path, str) or not 1 <= len(path) <= FOLDER_MAX or any(ch < " " for ch in path):
+            continue
+        name = " ".join(str(r["name"] or "").split())[:80]
+        label = " ".join(str(r["label"] or "").split())[:80]
+        out.append({"name": f"{name} ({label})" if label and label != name else name or path, "path": path})
+    return out
+
+
 def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = MESSAGES) -> dict:
-    """The chat list and the open chats' last messages, from Hermes's state.db, read only."""
+    """The chat list and the open chats' last messages, from Hermes's state.db, read only, and the folders of
+    its projects."""
     con = _ro(state_db)
     try:
         bot = bot_chat(con)
@@ -491,7 +545,8 @@ def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = M
                                                     "at": _iso(m["timestamp"])} for m in reversed(msgs)]})
     finally:
         con.close()
-    return {"source_time": now.isoformat(), "chats": chats, "open": opened, "hidden": hidden}
+    return {"source_time": now.isoformat(), "chats": chats, "open": opened, "hidden": hidden,
+            "projects": projects(state_db.parent)}
 
 
 # A chat's compression lineage, as Hermes's own hermes_state_sessions.py _LINEAGE_CTE_SQL walks it: the
@@ -520,14 +575,14 @@ def bot_chat(con: sqlite3.Connection) -> dict | None:
     row = con.execute(BOT_CHAT_SQL, (BOT_CHAT,)).fetchone()
     if row is None:
         return None
-    tip = con.execute(LINEAGE_SQL + "SELECT s.id, coalesce(s.last_activity_at, s.started_at) AS last_at "
-                      "FROM descendants d JOIN sessions s ON s.id = d.id ORDER BY d.depth DESC, s.started_at DESC "
-                      "LIMIT 1", (row["id"], row["id"])).fetchone()
+    tip = con.execute(LINEAGE_SQL + _listing(con, "SELECT s.id, coalesce(s.last_activity_at, s.started_at) AS last_at, "
+                      "s.last_read_at AS last_read FROM descendants d JOIN sessions s ON s.id = d.id "
+                      "ORDER BY d.depth DESC, s.started_at DESC LIMIT 1"), (row["id"], row["id"])).fetchone()
     # Its line comes from its whole lineage: the chat it goes on as now may hold no message with words yet.
     lineage = [r["id"] for r in con.execute(LINEAGE_SQL + "SELECT id FROM ancestors UNION SELECT id FROM descendants",
                                             (row["id"], row["id"])).fetchall()]
-    return {"id": tip["id"], "title": BOT_CHAT, "last_at": _iso(tip["last_at"]), "preview": _line(con, lineage),
-            "bot_chat": True}
+    return _read({"id": tip["id"], "title": BOT_CHAT, "last_at": _iso(tip["last_at"]), "preview": _line(con, lineage),
+                  "bot_chat": True}, tip["last_at"], tip["last_read"], "last_read_at" in _columns(con, "sessions"))
 
 
 def _line(con: sqlite3.Connection, ids: list[str]) -> str:
@@ -547,6 +602,8 @@ def _row(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
     row = {"id": r["id"], "title": r["title"] or "", "last_at": _iso(r["last_at"]), "preview": _line(con, [r["id"]])}
     if "pinned" in r.keys() and r["pinned"]:
         row["pinned"] = True
+    if "last_read" in r.keys():
+        row = _read(row, r["last_at"], r["last_read"], "last_read_at" in _columns(con, "sessions"))
     if not row["title"]:
         for m in con.execute(FIRST_SQL, (r["id"], 5)):
             first = line_of(_text(m["content"]))
@@ -641,7 +698,7 @@ def chats_page(state_db: Path, before: str | None, q: str, n: int = PAGE_CHATS, 
         bot = None if archived else bot_chat(con)
         chats = [bot] if bot and not before else []
         if pins and not before and _pins(con):
-            chats += [_row(con, r) for r in con.execute(pins, (*NOT_LISTED, n - len(chats))).fetchall()
+            chats += [_row(con, r) for r in con.execute(_listing(con, pins), (*NOT_LISTED, n - len(chats))).fetchall()
                       if not bot or r["id"] != bot["id"]]
         room = n - len(chats)
         rows = [r for r in con.execute(_listing(con, sql), (*args, room + 1)).fetchall()
@@ -1235,20 +1292,32 @@ class Hermes:
 
     def turn(self, session_id: str | None, text: str, doing=None, files: list[str] | None = None,
              started=None, live: LiveTurn | None = None, bot_chat: bool = False,
-             rewind: tuple[str, int] | None = None) -> tuple[str, str, str, str | None]:
+             rewind: tuple[str, int] | None = None, folder: str | None = None) -> tuple[str, str, str, str | None]:
         """(outcome, ref, reason, session id) for one message. `files` are the arguments that hand the turn
         the photos Patrick attached and say it carries files (hand_over), if any.
         `rewind` ("retry" or "edit", and his turn's id): the turn first takes the chat back to before that
         turn (room_send.py --tw-rewind); when Hermes refuses that, nothing is sent and the outcome is failed.
         `doing(state, tool)` hears what the turn is doing as Hermes's stream says it: thinking, writing, or a
         tool by its name, and the questions and approvals it has open. `started(proc)` hears the turn's process,
-        whose stdin takes Patrick's orders for it (room_send.py `attended-chat`: Stop, and his answers)."""
+        whose stdin takes Patrick's orders for it (room_send.py `attended-chat`: Stop, and his answers).
+        `folder`: a new chat starts there (`--in`, #110), when it is still a folder of one of Hermes's projects."""
         if session_id is not None and not SESSION_ID.match(session_id):
             return "failed", "", "that is not a chat id Hermes gives", None
-        with tempfile.TemporaryDirectory(prefix="tw-own-") as folder:
+        start_in = self.home_dir
+        if folder is not None:
+            # The core took only a folder Hermes listed; Hermes's projects are read again here, so one taken off
+            # since, or a folder gone from the disk, starts nothing anywhere else.
+            if session_id or bot_chat or self.state_db is None:
+                return "failed", "", "only a new chat starts in a folder", None
+            if not any(p["path"] == folder for p in projects(self.state_db.parent)):
+                return "failed", "", "that folder is no longer one of Hermes's projects", None
+            if not Path(folder).is_dir():
+                return "failed", "", "that project's folder is not on this computer any more", None
+            start_in = Path(folder)
+        with tempfile.TemporaryDirectory(prefix="tw-own-") as scratch:
             if not WINDOWS:
-                os.chmod(folder, 0o700)
-            path = Path(folder) / "message.txt"
+                os.chmod(scratch, 0o700)
+            path = Path(scratch) / "message.txt"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
@@ -1263,7 +1332,7 @@ class Hermes:
             elif session_id:
                 argv += ["--resume", session_id]
             else:
-                argv += ["--yolo", "--source", "cli", "--in", str(self.home_dir)]
+                argv += ["--yolo", "--source", "cli", "--in", str(start_in)]
             return self._run(argv, session_id, doing, started, live)
 
     def _run(self, argv: list[str], session_id: str | None, doing=None,
@@ -1812,7 +1881,9 @@ class OwnConnector:
                       and type(item.get("rewind_to")) is int else None)
             outcome, ref, reason, sid = self.hermes.turn(item.get("session_id"), text, doing, extra, started, live,
                                                          **({"bot_chat": True} if item.get("bot_chat") else {}),
-                                                         **({"rewind": rewind} if rewind else {}))
+                                                         **({"rewind": rewind} if rewind else {}),
+                                                         **({"folder": item["folder"]} if isinstance(item.get("folder"), str)
+                                                            and not item.get("session_id") else {}))
         except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
             outcome, ref, reason, sid = ("uncertain", "", f"the connector hit {type(exc).__name__} during the turn",
                                          item.get("session_id"))

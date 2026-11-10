@@ -1231,13 +1231,37 @@ async function botsView(into = 'view') {
       lines: [el('span', { class: 'what' }, GATEWAY_WHAT[g.gateway]),
         g.last ? snippet(g.last.preview, 2, el('b', { class: 'sender' }, chatName(g.last) + ': '))
           : el('span', { class: 'quiet' }, g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')],
-      right: [gatewayLine(g), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })
+      right: [gatewayLine(g), unreadBadge(g.unread), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })
     : listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
       agent: b.bot, title: NAMES[b.bot] || b.bot, live: botLive(b.live),
       lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
         b.last ? snippet(b.last.text, 2, b.last.role === 'user' ? el('b', { class: 'sender' }, 'You: ') : null)
           : el('span', { class: 'quiet' }, 'No messages yet.')],
-      right: [liveLine(botLive(b.live)), b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null] }))])
+      right: [liveLine(botLive(b.live)), unreadBadge(botUnread(b)), b.unsettled ? el('span', { class: 'rec' }, `${b.unsettled} waiting`) : null] }))])
+}
+
+// How many chats are unread (#103): a count beside Hermes's and One's rows, from Hermes's own read marks.
+function unreadBadge(n) {
+  return n ? el('span', { class: 'badge', 'data-unread': String(n), 'aria-label': n === 1 ? '1 unread chat' : `${n} unread chats` }, String(n)) : null
+}
+
+// A Bot's chat is unread when its newest line is the Bot's and came after he last opened that chat on this
+// device. The Bots' Bot Chats are read only from their feed, so the mark is this device's, as Hermes's own:
+// a Bot's chat never opened here counts as read.
+const BOT_SEEN = 'hermes.botSeen.v1'
+function botSeen() {
+  try { return JSON.parse(localStorage.getItem(BOT_SEEN) || '{}') || {} } catch (e) { return {} }
+}
+function botUnread(b) {
+  const seen = botSeen()[b.bot]
+  return b.last && b.last.role !== 'user' && seen && Date.parse(b.last.at) > Date.parse(seen) ? 1 : 0
+}
+function seeBot(bot, at) {
+  const t = Date.parse(at || '')
+  const all = botSeen()
+  if (Number.isNaN(t) || (all[bot] && Date.parse(all[bot]) >= t)) return
+  all[bot] = new Date(t).toISOString()
+  try { localStorage.setItem(BOT_SEEN, JSON.stringify(all)) } catch (e) {}
 }
 
 // Sending to his own Hermes needs a passkey sign-in from the last 30 minutes
@@ -2497,14 +2521,15 @@ async function ownPage(path) {
 // changed from here (#102): the same sheet the open chat's ⋯ opens, without opening the chat first.
 function chatRow(gw, c, v) {
   const o = v && v.ops ? lastOp(v.ops, c.id) : null
-  const row = listRow({ 'data-chat': c.id, class: c.bot_chat ? 'pinned' : null, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
+  const cls = [c.bot_chat ? 'pinned' : '', c.unread ? 'unread' : ''].filter(Boolean).join(' ') || null
+  const row = listRow({ 'data-chat': c.id, class: cls, onclick: () => go(`/m/hermes/${gw}/${c.id}`) }, {
     title: c.pinned ? [icon('pin', 13), ' ', chatName(c)] : chatName(c),
     lines: [snippet(c.preview), o && inFlight(o) ? opLine(o, GATEWAY[gw]) : null],
-    right: at(c.last_at) || when(c.last_at) })
+    right: [at(c.last_at) || when(c.last_at), c.unread ? el('span', { class: 'unread-dot', role: 'img', 'aria-label': 'Unread' }) : null] })
   if (!v || !manageable(v, c, o)) return row
   return el('div', { class: 'chat-line' }, row,
     el('button', { class: 'ib', type: 'button', 'aria-label': `Actions for ${chatName(c)}`, 'data-chat-menu': c.id,
-      onclick: () => chatSheet(gw, c.id, c.title, v, !!c.pinned) }, icon('more')))
+      onclick: () => chatSheet(gw, c.id, c.title, v, c) }, icon('more')))
 }
 
 // Whether a chat can be renamed, pinned, hidden or deleted from here now. His Bot Chat is kept as it is.
@@ -2560,8 +2585,19 @@ async function gatewayView(gw, into = 'view') {
   if (v.can_send && v.online) {
     parts.push(signInPart(v, status))
     if (v.sign_in_until) {
+      // Which folder the new chat works in (#110): one of Hermes's projects, as Desktop starts a chat in a
+      // project, or where any of his chats starts. Kept while he moves about, and dropped once not listed.
+      const folders = v.projects || []
+      if (!folders.some(f => f.path === pick.folder)) pick.folder = ''
+      const where = el('select', { 'aria-label': 'Start it in', 'data-detail': 'folder' },
+        el('option', { value: '' }, `${name}'s home folder`),
+        folders.map(f => el('option', { value: f.path }, `${f.name}: ${f.path}`)))
+      where.value = pick.folder
+      where.addEventListener('change', () => { pick.folder = where.value })
+      if (folders.length) parts.push(el('label', { class: 'detail' }, el('span', {}, 'Start it in'), where))
       parts.push(composer('new:' + gw, 'Start a new chat', async (text, key) => {
-        const s = await call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key })
+        const s = await call('POST', `/own/${gw}/send`, { new: true, text, idempotency_key: key,
+          ...(pick.folder ? { folder: pick.folder } : {}) })
         if (s.status === 200 && s.body.message_id) started[gw] = s.body.message_id
         return s
       }, status, gw), status)
@@ -3015,10 +3051,11 @@ async function ownChatView(gw, sid) {
     if (canReact && v.sign_in_until && !ended) offerRewinds(h.items, rewindChat)
     const branched = branchMade(v.rewinds)
     if (branched && seqNow === viewSeq) return go(`/m/hermes/${gw}/${branched}`)
+    if (!h.gone && !t.error && !ended && seqNow === viewSeq) markRead(gw, sid, v.chat, v)
     const top = [
       chatBar(() => go('/m/hermes/' + gw), 'All chats on ' + name, chatName(v.chat),
         undefined, gw, name,
-        manage ? () => chatSheet(gw, sid, v.chat.title, v, !!v.chat.pinned) : null, gatewayLive(v),
+        manage ? () => chatSheet(gw, sid, v.chat.title, v, v.chat) : null, gatewayLive(v),
         v.can_send && v.online && !h.gone && !t.error && !ended ? () => openDetails(gw, sid) : null),
       ended === 'delete' ? el('p', { class: 'receipt', role: 'status' }, `Deleted from ${name} for good.`) : null,
       ended === 'archive' ? el('p', { class: 'receipt', role: 'status' }, `Hidden from ${name}'s chat list, with every message kept. `,
@@ -3306,15 +3343,31 @@ const OP_WORDS = {
   unarchive: ['Bringing it back', 'Not brought back'],
   pin: ['Pinning this chat to the top', 'Not pinned'],
   unpin: ['Unpinning this chat', 'Not unpinned'],
+  read: ['Marking it read', 'Not marked read'],
+  unread: ['Marking it unread', 'Not marked unread'],
   delete: ['Deleting this chat', 'Not deleted']
 }
 
 function inFlight(o) { return o.status === 'queued' || o.status === 'leased' }
 
-// The newest request of one chat, from the core's rows (oldest first).
+// The newest request of one chat, from the core's rows (oldest first). The read mark set when a chat is
+// opened is left out: it is the app's own, said nowhere and holding nothing up.
 function lastOp(ops, sid) {
-  for (let i = ops.length - 1; i >= 0; i--) if (ops[i].session_id === sid) return ops[i]
+  for (let i = ops.length - 1; i >= 0; i--) if (ops[i].session_id === sid && ops[i].op !== 'read') return ops[i]
   return null
+}
+
+// Opening a chat marks it read in Hermes, as Desktop does (#103): when it is unread, or has no read mark yet
+// (then its later replies show as unread here and in Desktop). Once a page load for each chat; a request
+// that does not go is left, and the next open asks again.
+const markedRead = new Set()
+async function markRead(gw, sid, chat, v) {
+  if (!chat || !(chat.unread || chat.read_mark === false) || !v.can_manage || !v.online) return
+  const k = `${gw}:${sid}`
+  if (markedRead.has(k)) return
+  markedRead.add(k)
+  const r = await call('POST', `/own/${gw}/session`, { session_id: sid, op: 'read', title: null, idempotency_key: newKey() })
+  if (r.status !== 200) markedRead.delete(k)
 }
 
 // How the newest request of a chat stands, while it is waiting or after it failed.
@@ -3358,8 +3411,9 @@ function deleteWords(title, name) {
   ]
 }
 
-// The chat's actions: Rename, Pin or Unpin, Hide and Delete for good, in a sheet like a message's.
-function chatSheet(gw, sid, title, v, pinned) {
+// The chat's actions: Rename, Pin or Unpin, Mark as unread, Hide and Delete for good, in a sheet like a message's.
+function chatSheet(gw, sid, title, v, chat) {
+  const pinned = !!(chat && chat.pinned)
   closeSheet()
   const name = GATEWAY[gw]
   const keys = {}
@@ -3400,6 +3454,10 @@ function chatSheet(gw, sid, title, v, pinned) {
       const r = await askSession(gw, sid, pinned ? 'unpin' : 'pin', null, keys, note)
       if (r.status === 200) done()
     } }, pinned ? 'Unpin' : 'Pin to the top'),
+    chat && chat.unread ? null : el('button', { class: 'secondary', type: 'button', 'data-op': 'unread', onclick: async () => {
+      const r = await askSession(gw, sid, 'unread', null, keys, note)
+      if (r.status === 200) done()
+    } }, 'Mark as unread'),
     el('button', { class: 'secondary', type: 'button', onclick: async () => {
       const r = await askSession(gw, sid, 'archive', null, keys, note)
       if (r.status === 200) done()
@@ -3493,6 +3551,8 @@ async function chatView(target, tab, sid) {
   if (refused(r)) return
   const v = r.body
   const room = v.kind === 'room'
+  // A Bot's chat opened here is read up to now (#103, botUnread).
+  if (!room && !sid && seqNow === viewSeq) seeBot(v.target, new Date().toISOString())
   const name = room ? v.name : (NAMES[target] || target)
   const key = sid ? `session:${v.target}:${sid}` : 'chat:' + v.target
   // The Bot's own turn in this session, from the Board, while it runs.

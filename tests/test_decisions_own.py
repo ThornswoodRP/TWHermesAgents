@@ -382,6 +382,25 @@ class Connecting(unittest.TestCase):
                 clean(bad)
 
 
+class MigrationProjectFolder(unittest.TestCase):
+    def test_a_new_chat_s_folder_and_its_way_back(self):
+        from thornswood_decisions.schema import DOWNS
+        n = next(k for k, v in DOWNS.items() if "DROP COLUMN folder" in v[1])
+        w = World()
+        self.addCleanup(w.close)
+        g = Gateways(w)
+        g.hello("one")
+        g.own.feed(w.ws, "one", g.tok["one"], {"source_time": w.clock().isoformat(), "chats": [], "open": [],
+                                                "projects": [{"name": "Thornswood", "path": "/srv/tw"}]})
+        count = lambda: [w.store.db.execute(q).fetchone()[0] for q, _ in DOWNS[n][0]]
+        g.own.send(passkey(w), "one", None, True, "start here", "mig-key-0001", folder="/srv/tw")
+        g.own.send(passkey(w), "one", None, True, "start at home", "mig-key-0002")
+        self.assertEqual(count(), [1])
+        w.store.db.executescript(DOWNS[n][1])
+        self.assertNotIn("folder", [r[1] for r in w.store.db.execute("PRAGMA table_info(own_messages)")])
+        self.assertEqual(w.store.db.execute("SELECT count(*) FROM own_messages").fetchone()[0], 2)
+
+
 class Migration7(unittest.TestCase):
     def test_keeps_every_older_row_and_adds_the_flag_off(self):
         path = Path(tempfile.mkdtemp()) / "core.db"
@@ -518,6 +537,17 @@ CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, title TEXT, st
   archived INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
   content TEXT, timestamp REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1);
+"""
+
+
+# The tables of Hermes's projects.db, as hermes_cli/projects_db.py SCHEMA_SQL makes them.
+PROJECTS_SQL = """
+CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+  description TEXT, icon TEXT, color TEXT, board_slug TEXT, primary_path TEXT, created_at INTEGER NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS project_folders (project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  path TEXT NOT NULL, label TEXT, is_primary INTEGER NOT NULL DEFAULT 0, added_at INTEGER NOT NULL,
+  PRIMARY KEY (project_id, path));
 """
 
 
@@ -683,6 +713,28 @@ class TheConnector(unittest.TestCase):
             with self.assertRaises(CoreError):
                 clean(snap | {"hidden": bad})
 
+    def test_a_chat_is_unread_by_hermes_read_mark(self):
+        # #103, as SessionDB.session_unread: unread when active after its mark; no mark (NULL) is read, and
+        # read_mark false says the app should set one. A store without the column says nothing.
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        self.assertFalse(any("unread" in c or "read_mark" in c for c in snap["chats"]))
+        con = sqlite3.connect(self.db)
+        con.execute("ALTER TABLE sessions ADD COLUMN last_read_at REAL")
+        con.execute("UPDATE sessions SET last_read_at = 400 WHERE id = 's_plan'")  # active at 500: unread
+        con.execute("UPDATE sessions SET last_read_at = 450 WHERE id = 's_old2'")  # active at 400: read
+        con.execute("UPDATE sessions SET last_read_at = 0 WHERE id = 's_bot'")  # marked unread
+        con.commit()
+        con.close()
+        snap = own_connector.snapshot(self.db, [], datetime(2026, 11, 1, tzinfo=timezone.utc))
+        marks = {c["id"]: (c.get("unread", False), c.get("read_mark", True)) for c in snap["chats"]}
+        self.assertEqual(marks, {"s_bot": (True, True), "s_plan": (True, True), "s_old2": (False, True),
+                                 "s_tg": (False, False)})
+        kept = {c["id"]: (c.get("unread", False), c.get("read_mark", True)) for c in clean(snap)["chats"]}
+        self.assertEqual(kept, marks)
+        page = own_connector.chats_page(self.db, None, "")
+        self.assertEqual({c["id"]: c.get("unread", False) for c in page["chats"]},
+                         {"s_bot": True, "s_plan": True, "s_old2": False, "s_tg": False})
+
     def test_the_bot_chat_is_listed_first_by_the_id_it_goes_on_as(self):
         con = sqlite3.connect(self.db)
         # Hermes compressed it: the titled, hidden row ended with 'compression' and goes on as s_bot2.
@@ -761,6 +813,74 @@ class TheConnector(unittest.TestCase):
         self.assertEqual(args[args.index("--in") + 1], str(self.dir))
         self.assertEqual(self.w.store.db.execute("SELECT made_session_id FROM own_messages WHERE id = ?",
                                                  (mid,)).fetchone()[0], "made_by_hermes")
+
+    def projects(self, rows) -> None:
+        """Hermes's projects.db beside its state.db, with the tables hermes_cli/projects_db.py makes."""
+        con = sqlite3.connect(self.dir / "projects.db")
+        con.executescript(PROJECTS_SQL)
+        con.execute("DELETE FROM project_folders")
+        con.execute("DELETE FROM projects")
+        for pid, name, archived, folders in rows:
+            con.execute("INSERT INTO projects(id, slug, name, created_at, archived) VALUES(?,?,?,?,?)",
+                        (pid, pid, name, len(pid), archived))
+            for n, (path, label, primary) in enumerate(folders):
+                con.execute("INSERT INTO project_folders VALUES(?,?,?,?,?)", (pid, path, label, primary, n))
+        con.commit()
+        con.close()
+
+    def test_a_new_chat_starts_in_a_folder_of_hermes_projects(self):
+        # #110: the mock-up's new chat starts in a project, as Desktop's does (hermes chat --in <folder>).
+        when = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        self.assertEqual(own_connector.snapshot(self.db, [], when)["projects"], [], "no projects.db: no projects")
+        tw, gone = self.dir / "tw", self.dir / "gone"
+        tw.mkdir()
+        self.projects([("p_tw", "Thornswood", 0, [(str(gone), "old copy", 0), (str(tw), None, 1)]),
+                       ("p_arch", "Archived one", 1, [(str(self.dir), None, 1)])])
+        self.assertEqual(own_connector.snapshot(self.db, [], when)["projects"],
+                         [{"name": "Thornswood", "path": str(tw)}, {"name": "Thornswood (old copy)", "path": str(gone)}])
+        self.conn.hermes.state_db = self.db
+        self.round()
+        self.assertEqual(self.g.own.chats(passkey(self.w), "one")["projects"],
+                         [{"name": "Thornswood", "path": str(tw)}, {"name": "Thornswood (old copy)", "path": str(gone)}])
+
+        def send(key, folder, sid=None):
+            return self.g.own.send(passkey(self.w), "one", sid, None if sid else True, "build it", key,
+                                   folder=folder)["message_id"]
+        for folder, sid, reason in ((str(self.dir), None, "not_a_project"), (str(tw), "s_plan", "bad_folder"),
+                                    ("a\nb", None, "bad_folder"), ("x" * 301, None, "bad_folder"), (7, None, "bad_folder")):
+            with self.assertRaises(CoreError) as e:
+                send("own-key-bad1", folder, sid)
+            self.assertEqual(e.exception.reason, reason)
+        mid = send("own-key-0001", str(tw))
+        self.round()
+        args = self.turns()[0]["args"]
+        self.assertEqual(args[args.index("--in") + 1], str(tw))
+        self.assertIn("--yolo", args)
+        self.assertEqual(tuple(self.w.store.db.execute("SELECT status, folder FROM own_messages WHERE id = ?",
+                                                 (mid,)).fetchone()), ("sent", str(tw)))
+        # Gone from the disk, or no longer a project by the time it goes: nothing starts anywhere else.
+        mid = send("own-key-0002", str(gone))
+        self.round()
+        self.assertEqual(tuple(self.status(mid)), ("dead", "that project's folder is not on this computer any more"))
+        mid = send("own-key-0003", str(tw))
+        self.projects([("p_tw", "Thornswood", 1, [(str(tw), None, 1)])])
+        self.round()
+        self.assertEqual(tuple(self.status(mid)), ("dead", "that folder is no longer one of Hermes's projects"))
+        self.assertEqual(len(self.turns()), 1)
+        self.assertFalse(any(str(tw) in r[0] for r in self.w.store.db.execute("SELECT body_json FROM events")),
+                         "a folder's path stays out of the event chain")
+
+    def status(self, mid):
+        return self.w.store.db.execute("SELECT status, reason FROM own_messages WHERE id = ?", (mid,)).fetchone()
+
+    def test_the_feed_s_projects_are_kept_to_their_shape(self):
+        snap = {"source_time": "2026-11-01T00:00:00+00:00", "chats": [], "open": []}
+        self.assertNotIn("projects", clean(snap))
+        self.assertEqual(clean(snap | {"projects": [{"name": "A", "path": "/a"}]})["projects"], [{"name": "A", "path": "/a"}])
+        for bad in ("x", [7], [{"name": "A"}], [{"name": "A", "path": "/a"}] * 2,
+                    [{"name": "A", "path": f"/{n}"} for n in range(31)]):
+            with self.assertRaises(CoreError):
+                clean(snap | {"projects": bad})
 
     def test_a_turn_that_did_not_finish_is_uncertain_and_never_resent(self):
         os.environ["TW_FAKE_MODE"] = "fail"
