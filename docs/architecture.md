@@ -29,7 +29,7 @@ Each Bot's config is built from the policy by `src/thornswood_guard/profile_conf
 
 `src/thornswood_guard/` is both a Python package and a Hermes plugin. Installed into each profile, it registers:
 
-- a `pre_tool_call` hook (`tool_guard.py`) that Hermes runs before every tool a Bot calls. It refuses reads of Hermes's home, `.env` files, `auth.json`, process environments and the brokers' sockets; shell commands that push, merge or change git settings that run code; edits to the Bot's own config or shared skills; and anything else the policy forbids. A refusal comes back to the Bot with the reason;
+- a `pre_tool_call` hook (`tool_guard.py`) that Hermes runs before every tool a Bot calls. It refuses reads of Hermes's home (all but the folders where Hermes stages the files Patrick sends: a Bot may read a file inside `attachments`, `images` or `cache/documents`, `images`, `audio` or `videos`, named whole, which Hermes mounts read-only into its sandbox; #99), `.env` files, `auth.json`, process environments and the brokers' sockets; shell commands that push, merge or change git settings that run code; edits to the Bot's own config or shared skills; and anything else the policy forbids. A refusal comes back to the Bot with the reason;
 - two system prompt sections: rule zero (`rule_zero.md`, "fix the cause, no band-aids, ever") and a short one saying a refusal is a stop. Both are frozen into each new session's prompt, so only a change here can remove them;
 - the `tw_git`, `tw_files` and `tw_decide` tools (`brokers.py`), which talk to the brokers over their Unix sockets, and the turn gate, which stops any turn the fleet queue did not admit at its first tool call.
 

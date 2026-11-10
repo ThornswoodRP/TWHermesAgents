@@ -124,6 +124,53 @@ class Shell(unittest.TestCase):
             self.refuse(c)
 
 
+class StagedFiles(unittest.TestCase):
+    """#99 (Patrick, 10 Nov): a Bot reads only what Hermes staged for it, and nothing else under .hermes."""
+
+    PDF = "/root/.hermes/attachments/phone/own_abc123/report.pdf"
+
+    def setUp(self):
+        self.p = policy()
+
+    def test_a_file_tool_reads_a_staged_file(self):
+        for path in (self.PDF, "~/.hermes/attachments/phone/own_abc123/report.pdf",
+                     "/root/.hermes/images/phone/own_abc123/beach.png", "/root/.hermes/cache/documents/doc_1.pdf",
+                     "/root/.hermes/attachments/phone/own_abc123/My Report (1).pdf"):
+            for tool in ("read_file", "search_files"):
+                self.assertTrue(check_tool(self.p, "wisp", tool, {"path": path}).allowed, (tool, path))
+
+    def test_a_file_tool_never_writes_there(self):
+        for tool in ("write_file", "patch"):
+            self.assertFalse(check_tool(self.p, "wisp", tool, {"path": self.PDF, "content": "x"}).allowed, tool)
+
+    def test_every_other_hermes_path_stays_refused(self):
+        for path in ("/root/.hermes/attachments", "/root/.hermes/attachments/", "/root/.hermes/config.yaml",
+                     "/root/.hermes/auth.json", "/root/.hermes/attachments/../auth.json",
+                     "/root/.hermes/attachments/phone/../../auth.json", "/root/.hermes/attachments/./x.pdf",
+                     "/root/.hermes/attachments//x.pdf", "/root/.hermes/attachments/*", "/root/.hermes/cache/web/x",
+                     "/root/.hermes/skills/x/SKILL.md", "/home/hermes/.hermes/profiles/wisp/attachments/phone/a.pdf",
+                     "/root/.hermes/attachmentsX/a.pdf", "/tmp/../root/.hermes/attachments/a.pdf"):
+            self.assertFalse(check_tool(self.p, "wisp", "read_file", {"path": path}).allowed, path)
+
+    def test_a_command_may_open_a_staged_file(self):
+        for c in (f"pdftotext {self.PDF} -", f'pdftotext "{self.PDF}" -',
+                  'pdftotext "/root/.hermes/attachments/phone/own_abc123/My Report (1).pdf" -',
+                  "ls ~/.hermes/images/phone/own_abc123", f"file {self.PDF} 2>&1"):
+            v = check_shell(c)
+            self.assertTrue(v.allowed, (c, v.reason))
+
+    def test_a_command_cannot_reach_past_them(self):
+        for c in (f"cat {self.PDF} ~/.hermes/auth.json", "cat /root/.hermes/attachments/$X",
+                  "cat /root/.hermes/attachments/{..,x}/auth.json", "cat /root/.hermes/attachments/../auth.json",
+                  "cat /root/.hermes/attachments/a;cat</root/.hermes/auth.json",
+                  'cat "/root/.hermes/attachments/x $(id)"', "cat '/root/.hermes/attachments/a/../../auth.json'",
+                  "cat /root/.hermes/attachments/.*/x", "cat /root/.hermes/attachments/x\\ y",
+                  "ls /root/.hermes/attachments", f"cat {self.PDF} > /root/.hermes/config.yaml",
+                  "cat /root/.hermes/attachments/`id`", "grep -r key /root/.hermes",
+                  f"cat {self.PDF}; printenv", f"cat {self.PDF} && cat ~/.hermes/.env"):
+            self.assertFalse(check_shell(c).allowed, c)
+
+
 class Plugin(unittest.TestCase):
     """Load the plugin the way Hermes does: a package directory with register(ctx)."""
 
