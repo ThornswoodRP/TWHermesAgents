@@ -119,6 +119,41 @@ class Work(unittest.TestCase):
         with self.assertRaises(Refused):
             w.git.base("hermes", {"bot": "rift", "repo": FORK})
 
+    def test_a_newer_base_replaces_the_bots_older_one(self):
+        # 11 Nov 2026: no base bundle was ever deleted; 16 GB of them took the
+        # VM's disk under the fleet queue's floor and no Bot turn ran.
+        w = World()
+        first = w.git.base("hermes", {"bot": "rift", "repo": APP})["bundle"]
+        sprockets = w.git.base("hermes", {"bot": "sprocket", "repo": APP})["bundle"]
+        work = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "clone", "-q", str(w.fake.remote(APP)), str(work)], check=True, capture_output=True)
+        (work / "NEW.md").write_text("new\n")
+        git(work, "add", "-A")
+        git(work, "commit", "-q", "-m", "new")
+        git(work, "push", "-q", "origin", "HEAD:main")
+        second = w.git.base("hermes", {"bot": "rift", "repo": APP})
+        self.assertNotEqual(first, second["bundle"])
+        self.assertEqual(sorted(p.name for p in (w.spool / "in" / "rift").iterdir()), [second["bundle"]])
+        self.assertTrue((w.spool / "in" / "sprocket" / sprockets).is_file())
+        out = w.files.checkout("hermes", {"bot": "rift", "repo": APP, "task": "12-load-order",
+                                          "bundle": second["bundle"], "branch": "rift/12-load-order"})
+        self.assertEqual(out["head"], second["sha"])
+
+    def test_tw_git_starts_with_one_base_per_repo_for_each_bot(self):
+        w = World()
+        d = w.spool / "in" / "echo"
+        d.mkdir(parents=True)
+        for i, name in enumerate(["Thornswood-main-aaaaaaaaaaaa.bundle", "Thornswood-main-bbbbbbbbbbbb.bundle",
+                                  "Thornswood-Ops-main-cccccccccccc.bundle", "Thornswood-Ops-main-dddddddddddd.bundle",
+                                  ".Thornswood-main-eeeeeeeeeeee.bundle.tmp", "work.bundle"]):
+            (d / name).write_text("x")
+            os.utime(d / name, (1000 + i, 1000 + i))
+        gone = w.git.prune_spool_in()
+        self.assertEqual(sorted(p.name for p in d.iterdir()),
+                         ["Thornswood-Ops-main-dddddddddddd.bundle", "Thornswood-main-bbbbbbbbbbbb.bundle", "work.bundle"])
+        self.assertEqual(len(gone), 3)
+        self.assertEqual(w.git.prune_spool_in(), [])
+
     def test_a_tree_is_on_the_bots_own_branch_only(self):
         w = World()
         with self.assertRaises(Refused):

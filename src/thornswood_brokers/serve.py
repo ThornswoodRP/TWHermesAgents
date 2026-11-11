@@ -114,6 +114,9 @@ def main(argv: list[str]) -> None:
         decide = policy.data["brokers"]["sockets"]["decide_git"]["path"]
         svc = GitService(policy, gh, _asker(policy), mirrors=Path(state["git_mirrors"]), spool=Path(state["spool"]),
                          ask_decide=lambda op, args: wire.call(decide, op, args, timeout=30))
+        gone = svc.prune_spool_in()
+        if gone:
+            print(f"tw-git: {len(gone)} superseded base bundles left the spool", flush=True)
         _serve(policy, "git", svc.ops())
     elif role == "files":
         from .files_service import FilesService
