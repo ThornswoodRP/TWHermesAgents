@@ -10,7 +10,9 @@ way Desktop does (contracts.json "room"):
     <hermes python> -I room_send.py < {"op": "states", "profiles": ["<bot>", ...]}
     <hermes python> -I room_send.py < {"op": "react", "profile": "<bot or empty>", "session_id",
                                        "message_id", "emoji": "<one of the phone's, or null>"}
-    <hermes python> -I room_send.py < {"op": "control", "session_id", "set": {"model": {...}, "reasoning"}?}
+    <hermes python> -I room_send.py < {"op": "control", "profile": "<bot or empty>", "session_id",
+                                       "allowed": [[provider, model], ...] (a Bot's),
+                                       "set": {"model": {...}, "reasoning"}?}
 
 own_connector.py asks it the same readiness question for Patrick's own Hermes
 (profile empty, as that Hermes's own user), naming that gateway in `name`.
@@ -490,6 +492,22 @@ def _offered(options: dict) -> list:
     return out[:80]
 
 
+def _bot_offered(options: dict, allowed: list) -> list:
+    """For a Bot's chat: the models of Hermes's own picker that are in the Bot's own route list as the
+    connector sent it (connector.bot_models: its routes it reaches with its own sign-in), and nothing else."""
+    pairs = {(p[0], p[1]) for p in allowed if isinstance(p, list) and len(p) == 2}
+    out = []
+    for row in (options or {}).get("providers") or []:
+        if not isinstance(row, dict) or row.get("authenticated") is False or not isinstance(row.get("slug"), str):
+            continue
+        locked = set(row.get("unavailable_models") or [])
+        for model in row.get("models") or []:
+            if isinstance(model, str) and model not in locked and (row["slug"], model) in pairs:
+                out.append({"provider": row["slug"], "model": model, "name": _cut(row.get("name"), 40) or row["slug"],
+                            "why": "subscription"})
+    return out
+
+
 def _chat_facts(sid: str) -> dict:
     """The chat's size and start, from Hermes's own SessionDB row (message_count, started_at), as Desktop's
     session list shows them; nothing when Hermes has no row for it."""
@@ -503,8 +521,11 @@ def _chat_facts(sid: str) -> dict:
     return {"messages": row.get("message_count"), "started": row.get("started_at")}
 
 
-async def _control_read(client, sid: str) -> dict:
-    """What Hermes holds for one chat, read the way Desktop's details and pickers read it."""
+async def _control_read(client, sid: str, allowed: list | None = None) -> dict:
+    """What Hermes holds for one chat, read the way Desktop's details and pickers read it. The model is the
+    one the chat's agent is on now: when Hermes has moved it to a fallback, session.usage says so in its own
+    words (fallback_model, gateway/session_usage.py) and names the fallback's model and provider, so the
+    pane never shows the main model while a fallback answers. `allowed`: a Bot's own models (_bot_offered)."""
     from agent.reasoning_effort import route_supported_efforts
 
     info = await client.rpc("session.info", session_id=sid) or {}
@@ -514,12 +535,15 @@ async def _control_read(client, sid: str) -> dict:
     # The approval mode is the whole profile's, read as Desktop's approval chip reads it (no session).
     approvals = (await client.rpc("config.get", key="approvals.mode") or {}).get("value")
     options = await client.rpc("model.options", session_id=sid) or {}
-    model = info.get("model") or options.get("model")
-    provider = info.get("provider") or options.get("provider")
-    return {"model": model, "provider": provider, "reasoning": reasoning,
+    use = await _usage_read(client, sid)
+    served = use.pop("served")
+    model = served.get("model") or info.get("model") or options.get("model")
+    provider = served.get("provider") or info.get("provider") or options.get("provider")
+    offered = _bot_offered(options, allowed) if allowed is not None else _offered(options)
+    return {"model": model, "provider": provider, "fallback": served.get("fallback") is True, "reasoning": reasoning,
             "levels": list(route_supported_efforts(provider, model)), "yolo": yolo == "1", "busy": busy,
             "approvals": approvals, "folder": info.get("cwd"), **await asyncio.to_thread(_chat_facts, sid),
-            "offered": await asyncio.to_thread(_offered, options), **await _usage_read(client, sid)}
+            "offered": offered, **use}
 
 
 USAGE_KEYS = ("input", "output", "total", "calls", "compressions")
@@ -540,6 +564,10 @@ async def _usage_read(client, sid: str) -> dict:
         out["usage"] = {k: usage.get(k) for k in USAGE_KEYS}
     except GatewayRPCError as exc:
         usage, out["usage"], out["usage_why"] = {}, None, f"Hermes did not say ({str(exc)[:120]})"
+    # The chat's live agent's own model and provider, and whether it is on a fallback (fallback_model is
+    # set only then); empty for a chat whose agent is not built yet, which starts on its main model.
+    out["served"] = {"model": usage.get("model") or None, "provider": usage.get("provider") or None,
+                     "fallback": bool(usage.get("fallback_model"))}
     try:
         breakdown = await client.rpc("session.context_breakdown", session_id=sid) or {}
     except GatewayRPCError as exc:
@@ -549,7 +577,7 @@ async def _usage_read(client, sid: str) -> dict:
     return out
 
 
-async def _control(endpoint, sid: str, want) -> dict:
+async def _control(endpoint, sid: str, want, allowed: list | None = None) -> dict:
     """One chat's settings, changed first when `want` asks: a model (session.mutate model) and a thinking
     level (session.mutate reasoning), each fenced to the chat's revision and generation by Hermes's own
     PreparedMutations, as its ACP and TUI clients send them; what a message sent while it works does
@@ -571,9 +599,11 @@ async def _control(endpoint, sid: str, want) -> dict:
                 if pick:
                     # Checked again against Hermes's own list just before the switch: a request made by
                     # hand never moves a chat to a model that is billed per message.
-                    now = _offered(await client.rpc("model.options", session_id=sid) or {})
+                    options = await client.rpc("model.options", session_id=sid) or {}
+                    now = _bot_offered(options, allowed) if allowed is not None else _offered(options)
                     if not any(o["provider"] == pick.get("provider") and o["model"] == pick.get("model") for o in now):
-                        raise GatewayClientError("that model is not one his sign-ins, a free model or a local one covers")
+                        raise GatewayClientError("that model is not one of this Bot's own routes" if allowed is not None
+                                                 else "that model is not one his sign-ins, a free model or a local one covers")
                     got = await mutations.apply(client, sid, "model",
                                                 {"model": pick["model"], "provider": pick["provider"]})
                     if got.get("status") == "deferred":
@@ -587,16 +617,24 @@ async def _control(endpoint, sid: str, want) -> dict:
                 applied = True
             except GatewayClientError as exc:
                 reason = str(exc)
-        state = await _control_read(client, sid)
+        state = await _control_read(client, sid, allowed)
     return {"state": state, "applied": applied, "reason": reason[:200]}
 
 
 def _control_op(req: dict) -> dict:
     from hermes_cli.gateway_client import GatewayClientError
 
-    sid, want = req.get("session_id"), req.get("set")
-    if not isinstance(sid, str) or not sid or len(sid) > 128 or not (want is None or isinstance(want, dict)):
+    sid, want, profile = req.get("session_id"), req.get("set"), req.get("profile") or ""
+    # A Bot's chat: only its own models (the connector's `allowed`), and only its model and thinking change;
+    # its approvals and what a message does while it works are its policy's.
+    allowed = req.get("allowed") if profile else None
+    if not isinstance(sid, str) or not sid or len(sid) > 128 or not (want is None or isinstance(want, dict)) or (
+            profile and not (isinstance(profile, str) and PROFILE.match(profile) and isinstance(allowed, list)
+                             and all(isinstance(a, list) and len(a) == 2 and all(isinstance(x, str) for x in a)
+                                     for a in allowed))):
         return {"state": None, "applied": False, "reason": "bad request"}
+    if profile and want is not None and set(want) - {"model", "reasoning"}:
+        return {"state": None, "applied": False, "reason": "a Bot's chat takes a model and a thinking level only"}
     if want is not None:
         pick, level = want.get("model"), want.get("reasoning")
         busy, approvals = want.get("busy"), want.get("approvals")
@@ -607,12 +645,12 @@ def _control_op(req: dict) -> dict:
                                  and isinstance(pick.get("provider"), str))) or not (
                 level is None or isinstance(level, str)):
             return {"state": None, "applied": False, "reason": "bad request"}
-    endpoint, state = _found("")
+    endpoint, state = _found(profile)
     if endpoint is None:
         name = req.get("name") if isinstance(req.get("name"), str) else "Hermes"
         return {"state": None, "applied": False, "reason": f"{name[:40]}'s gateway is {state}"}
     try:
-        return asyncio.run(asyncio.wait_for(_control(endpoint, sid, want), CONTROL_SECONDS))
+        return asyncio.run(asyncio.wait_for(_control(endpoint, sid, want, allowed), CONTROL_SECONDS))
     except (TimeoutError, asyncio.TimeoutError):
         return {"state": None, "applied": False, "reason": f"Hermes did not answer in {CONTROL_SECONDS} seconds"}
     except GatewayClientError as exc:
@@ -905,9 +943,9 @@ def main() -> int:
         print(json.dumps({"tasks": {name: _tasks(name) for name in names}}))
         return 0
     if op == "control":
-        # His own Hermes only: a Bot's chat settings are not changed from the app.
-        print(json.dumps(_control_op(req) if not profile else
-                         {"state": None, "applied": False, "reason": "a Bot's chat settings are not changed from here"}))
+        # His own Hermes's chats, and a Bot's Bot Chat within its own routes (Patrick, 11 Nov: each Bot's model
+        # and think level, and a switch, as Desktop has).
+        print(json.dumps(_control_op(req)))
         return 0
     if op == "tail":
         # His own Hermes's subagents only: a Bot's chats stay with its own Board session.

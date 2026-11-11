@@ -293,6 +293,13 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.getByText('router, merges', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('Plan the week: three things').waitFor({ timeout: 3000 })
   })
+  // Patrick, 11 Nov: a Bot on a fallback says so and names the fallback, never the main model it left; a Bot
+  // whose turns have not said their model says nothing about one.
+  await step('a Bot on a fallback says it fell back, naming the fallback', async () => {
+    const tag = await page.locator('#view > button.row[data-bot="bramble"] [data-route="fallback"]').textContent()
+    if (tag !== 'Fell back to gpt-5.5') throw new Error(tag)
+    if (await page.locator('#view > button.row[data-bot="rift"] [data-route]').count()) throw new Error('Rift has no model yet')
+  })
   // #103: unread chats. One's row counts its chats Hermes marks unread; a Bot's chat whose newest line is
   // the Bot's, after he last opened it on this device, counts one.
   await step('One counts its unread chats, and a Bot its chat with a reply he has not opened', async () => {
@@ -331,10 +338,12 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (!page.url().endsWith('/m/bots/bramble')) throw new Error('url ' + page.url())
     if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Bots') throw new Error('not on the Bots tab')
   })
-  await step("the Bot Chat's bar shows Bramble is on by its dot, with no line of words under it", async () => {
+  await step("the Bot Chat's bar shows Bramble is on by its dot, with no line of words under it, and its details", async () => {
     if (await page.locator('#view .chatbar .t span').count()) throw new Error(await page.locator('#view .chatbar .t span').first().textContent())
     const d = page.locator('#view .chatbar .avwrap .dot')
     if ((await d.getAttribute('class')) !== 'dot on' || (await d.getAttribute('aria-label')) !== 'On') throw new Error('no green dot')
+    // Its model, thinking and the switch, as Desktop's (Patrick, 11 Nov).
+    await page.locator('#view .chatbar [data-details]').waitFor({ timeout: 3000 })
   })
   await page.getByLabel('Message to Bramble').fill('Thanks, and look at the launcher log next.')
   await page.getByRole('button', { name: 'Send to Bramble' }).click()

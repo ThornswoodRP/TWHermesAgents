@@ -7,7 +7,7 @@ Some problems the Bots hit are caused in [Hermes Agent](https://github.com/NousR
 | Folder | What it holds |
 |---|---|
 | `v0.22.5/` | The patches made against Hermes v0.22.5 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). They apply in number order |
-| `v0.23.0/` | The patches made against Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`). 0011 also applies to upstream `main` (`466591fe`, 8 Nov 2026) as it is |
+| `v0.23.0/` | The patches made against Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`). 0011 and 0012 also apply to upstream `main` as they are |
 | `main/` | The patches remade on upstream `main`, where upstream had changed the same lines. 0002, 0003 and 0004 apply to upstream `main` as they are, so they have no copy here |
 | `followups/` | Commits for the upstream pull request branches that answer upstream's code health check, each at its cause |
 
@@ -22,7 +22,7 @@ git am v0.22.5/*.patch
 The VM and Patrick's Desktop run Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`), the version `src/thornswood_decisions/contracts.json` pins. None of these fixes is in v0.23.0 yet. Applied one after another with `git am --3way`, these apply on it as they are:
 
 ```bash
-git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-headers-logged.patch v0.22.5/0003-spill-fallback-posix-path.patch v0.22.5/0004-aux-codex-pick-by-model.patch v0.22.5/0005-desktop-relay-local-source-once-it-signals.patch main/0006-desktop-scheduled-jobs-every-gateway.patch v0.22.5/0008-desktop-ready-wait-on-remote.patch main/0007-webhook-coalesce-survives-restart.patch main/0010-display-watch-profile-scope.patch v0.23.0/0011-cron-gated-fire-ends-session.patch
+git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-headers-logged.patch v0.22.5/0003-spill-fallback-posix-path.patch v0.22.5/0004-aux-codex-pick-by-model.patch v0.22.5/0005-desktop-relay-local-source-once-it-signals.patch main/0006-desktop-scheduled-jobs-every-gateway.patch v0.22.5/0008-desktop-ready-wait-on-remote.patch main/0007-webhook-coalesce-survives-restart.patch main/0010-display-watch-profile-scope.patch v0.23.0/0011-cron-gated-fire-ends-session.patch v0.23.0/0012-anthropic-quota-early-reopen.patch
 ```
 
 The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already has the upstream code their `main/` copies were made for. Neither does 0009: v0.23.0 has upstream's rewrite of that flow.
@@ -42,6 +42,7 @@ The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already 
 | 0009 | A source switch resolves the target's address in its dial, not in its commit | not opened yet | not remade |
 | 0010 | The Bot Screen watcher reads each home under its own terminal policy | not opened yet | `013bde47` (only on `main`; the file is the same in v0.22.5) |
 | 0011 | A cron fire a gate stopped ends the session its owner admitted | not opened yet | made on v0.23.0; applies to `main` as is |
+| 0012 | A Claude subscription limit that reopens before its reset lets the Bots back on Claude | not opened yet | made on v0.23.0; applies to `main` as is |
 
 GitHub allows an account without write access five open pull requests in a repository, so the later patches open as the earlier ones merge or close.
 
@@ -147,6 +148,20 @@ HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/tui_gateway/test_displ
 git am v0.23.0/0011-cron-gated-fire-ends-session.patch
 python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
 HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/cron/test_sessiondb_init_hang.py -q -rfE
+```
+
+## 0012: a Claude subscription limit that reopens before its reset lets the Bots back on Claude
+
+**Cause.** An Anthropic 429 benches the Claude login in the credential pool for the model it refused (`model_cooldowns`), until the reset the response named in `Retry-After`: days out for the weekly window. Hermes asks the provider whether a window reopened early only for Codex (`_codex_quota_restored_upstream`, and `_primary_quota_reopened_early` for a session on its fallback). For Anthropic it asked nothing, so when Patrick's weekly limit was reset on 11 Nov, every Bot stayed on its ChatGPT fallback until the old reset time: each turn's `restore_primary_runtime` went back to Claude, found the login benched, and fell back again.
+
+**Fix.** `agent/anthropic_quota_probe.py` asks Anthropic's OAuth usage endpoint, the one `/usage` reads, whether every window that refuses that model (five hours, seven days, and the Opus or Sonnet week for those models) is under 100%. It runs only for an OAuth login with a model bench longer than the probe interval, at most once every 5 minutes for a token and model, and only on the paths that pick a credential, never on the read-only ones. Any doubt (no answer, a refusal, no window it can read, an API key) keeps the bench, as the Codex probe does. A window it finds open lifts that model's bench on the login and on the rows sharing its key, and is written as a reset (`status_cleared_ids`) so the older cooldown on disk is not merged back. `_primary_quota_reopened_early` asks it for an Anthropic primary too, so a session on its fallback goes back at its next turn.
+
+Its tests (`tests/agent/test_anthropic_quota_early_reopen.py`) run against a real pool and a temporary auth store with the endpoint stubbed. They have not been run here: the session that wrote it could not install Hermes.
+
+```bash
+git am v0.23.0/0012-anthropic-quota-early-reopen.patch
+python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
+HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/agent/test_anthropic_quota_early_reopen.py tests/agent/test_credential_pool.py -q -rfE
 ```
 
 ## The follow-up commits

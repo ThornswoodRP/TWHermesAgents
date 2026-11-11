@@ -64,7 +64,9 @@
     "local_send": "On the Bots' own machine, Hermes's message_agent sends to a Bot Chat with `hermes -p <profile> chat --in ~ -c 'Bot Chat' --create-if-missing -Q --query-file <file>`, as the same user; no API_SERVER_KEY and no api_server listener. The connector (step 4) uses this, so nothing in the gateway's settings changes. Only exit 0 is a confirmed send; anything else is unclear and never resent.",
     "local_send_source": "tools/bot_mode_dm.py:11-13 (transports), hermes_cli/_parser.py:241 --query-file and :289 --create-if-missing, hermes_cli/gateway_chat.py:376 (the query-file contract)",
     "history_local": "Each profile's ~/.hermes/profiles/<id>/state.db: sessions (id, title, archived, started_at) and messages (session_id, role, content, timestamp, active). The Bot Chat is the session titled 'Bot Chat'; read only, roles user and assistant, active rows.",
-    "history_local_source": "hermes_state_common.py:461 (sessions), :531 (messages); hermes_state.py:181 state.db"
+    "history_local_source": "hermes_state_common.py:461 (sessions), :531 (messages); hermes_state.py:181 state.db",
+    "route_local": "The model a Bot is on: after each gateway turn Hermes writes the model the turn really used on that session's row (sessions.model) and its route in model_config $.gateway_runtime (provider, fallback_active true while it is off its main model). The newest such row by last_activity_at, else started_at, is what the Bot is on now; read only.",
+    "route_local_source": "gateway/run_turn_prepare.py:258 _sync_session_model_from_agent, called from gateway/run_turn_runner.py:1155"
   },
   "desktop_plugin": {
     "layout": "~/.hermes/plugins/thornswood-decisions/ with dashboard/manifest.json {name, api: plugin_api.py}, dashboard/plugin_api.py (a FastAPI router), desktop/plugin.js",

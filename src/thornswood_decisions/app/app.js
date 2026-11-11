@@ -1208,6 +1208,15 @@ function liveAvatar(id, label, live) {
 function liveLine(live) {
   return el('span', { class: 'rec live ' + live.cls }, live.words)
 }
+// The model a Bot's newest turn ran on, in Hermes's own record of it (feeds.py _route). While Hermes has the Bot
+// on a fallback it says so and names the fallback, never the main model it left (Patrick, 11 Nov).
+function routeWords(route) {
+  return route.fallback ? 'Fell back to ' + route.model : route.model
+}
+function routeTag(route) {
+  return route ? el('span', { class: 'rec' + (route.fallback ? ' off' : ''), 'data-route': route.fallback ? 'fallback' : 'main' },
+    routeWords(route)) : null
+}
 
 async function botsView(into = 'view') {
   if (into === 'view') setTab('bots')
@@ -1233,7 +1242,7 @@ async function botsView(into = 'view') {
           : el('span', { class: 'quiet' }, g.as_of ? 'No chats yet.' : 'Its chats show here once it is turned on.')],
       right: [gatewayLine(g), unreadBadge(g.unread), g.unsettled ? el('span', { class: 'rec' }, `${g.unsettled} waiting`) : null] })
     : listRow({ 'data-bot': b.bot, onclick: () => go('/m/bots/' + b.bot) }, {
-      agent: b.bot, title: NAMES[b.bot] || b.bot, live: botLive(b.live),
+      agent: b.bot, title: NAMES[b.bot] || b.bot, live: botLive(b.live), tags: routeTag(b.route),
       lines: [WHAT[b.bot] ? el('span', { class: 'what' }, WHAT[b.bot]) : null,
         b.last ? snippet(b.last.text, 2, b.last.role === 'user' ? el('b', { class: 'sender' }, 'You: ') : null)
           : el('span', { class: 'quiet' }, 'No messages yet.')],
@@ -3166,11 +3175,17 @@ function modelName(st) {
   return st.model ? `${st.model}${o ? ' (' + o.name + ')' : st.provider ? ' (' + st.provider + ')' : ''}` : 'Not known'
 }
 
+// Whose details: a chat on his own Hermes or One, or a Bot's Bot Chat (gw 'bot', sid the Bot), which takes a
+// model and a thinking level only: a Bot's approvals and what a message sent while it works does are its policy's.
+function detailsOf(gw, sid) {
+  return gw === 'bot'
+    ? { name: NAMES[sid] || sid, path: `/chat/${encodeURIComponent(sid)}/control`, key: 'bot:' + sid, bot: true }
+    : { name: GATEWAY[gw], path: `/own/${gw}/chats/${encodeURIComponent(sid)}/control`, key: `${gw}:${sid}`, bot: false }
+}
+
 // The details of one chat, as nodes for a pane or a sheet. `again` draws them again.
 async function detailsPart(gw, sid, close, again) {
-  const name = GATEWAY[gw]
-  const path = `/own/${gw}/chats/${encodeURIComponent(sid)}/control`
-  const key = `${gw}:${sid}`
+  const { name, path, key, bot } = detailsOf(gw, sid)
   // The first look at a chat waits up to 20 seconds for its connector's read; a redraw never waits.
   let r = await call('GET', path + (detailWaited.has(key) ? '' : '?wait=20'))
   detailWaited.add(key)
@@ -3226,8 +3241,8 @@ async function detailsPart(gw, sid, close, again) {
       if (model !== st.model || provider !== st.provider) body.model = { provider, model }
     }
     if (level.value && level.value !== st.reasoning) body.reasoning = level.value
-    if (busyPick.value && busyPick.value !== st.busy) body.busy = busyPick.value
-    if (approvalPick.value && approvalPick.value !== st.approvals) body.approvals = approvalPick.value
+    if (!bot && busyPick.value && busyPick.value !== st.busy) body.busy = busyPick.value
+    if (!bot && approvalPick.value && approvalPick.value !== st.approvals) body.approvals = approvalPick.value
     if (!Object.keys(body).length) { note.textContent = 'Nothing is different from what the chat has now.'; return }
     if (body.approvals === 'off') {
       // Off lets commands run without asking him: a fresh sign-in is the yes, every time.
@@ -3254,17 +3269,21 @@ async function detailsPart(gw, sid, close, again) {
     el('div', { class: 'details' },
       row('Model', pick),
       row('Thinking', level),
-      row('Sent while it works', busyPick),
-      row(`Approvals (all of ${name})`, approvalPick),
+      bot ? null : row('Sent while it works', busyPick),
+      bot ? null : row(`Approvals (all of ${name})`, approvalPick),
       el('button', { class: 'primary', type: 'button', 'data-detail': 'save', disabled: busy ? '' : null, onclick: save },
         v.can_change ? 'Change' : `Change (with your ${signInWord()})`),
       changeLine(v.change, name),
       note,
-      el('p', { 'data-detail': 'approvals' }, st.yolo
+      // Hermes's own word that this chat is off its main model (session.usage fallback_model), so the model
+      // above is the fallback it is on, never the main one it left.
+      st.fallback ? el('p', { class: 'warn', 'data-detail': 'fallback' },
+        `Fell back: ${name} is off its main model, on ${st.model} now.`) : null,
+      bot ? null : el('p', { 'data-detail': 'approvals' }, st.yolo
         ? 'Approvals: skipped in this chat. Commands run without asking you.'
         : 'Approvals: it asks you before a command its rules flag.'),
-      st.busy ? el('p', { 'data-detail': 'busy' }, `Messages sent while it works ${BUSY_WORDS[st.busy]}.`) : null,
-      st.approvals === 'off' ? el('p', { class: 'warn', 'data-detail': 'approvals-off' },
+      !bot && st.busy ? el('p', { 'data-detail': 'busy' }, `Messages sent while it works ${BUSY_WORDS[st.busy]}.`) : null,
+      !bot && st.approvals === 'off' ? el('p', { class: 'warn', 'data-detail': 'approvals-off' },
         `${name}'s approvals are off: commands run without asking you, in every chat.`) : null,
       el('p', { 'data-detail': 'this-chat' }, chatSizeWords(st)),
       st.folder ? el('p', { 'data-detail': 'folder' }, 'Folder: ' + st.folder) : null,
@@ -3312,7 +3331,7 @@ async function detailsSheet(gw, sid) {
   const back = el('div', { class: 'sheet-back' }, sheet)
   back.addEventListener('click', e => { if (e.target === back) closeSheet() })
   back.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet() })
-  sheet.append(el('p', { class: 'quiet', role: 'status' }, 'Reading from ' + GATEWAY[gw] + '...'))
+  sheet.append(el('p', { class: 'quiet', role: 'status' }, 'Reading from ' + detailsOf(gw, sid).name + '...'))
   document.body.append(back)
   async function fill() {
     if (!back.isConnected) return
@@ -3681,8 +3700,11 @@ async function chatView(target, tab, sid, thread) {
         null, botLive(v.live))
         : thread ? chatBar(() => go('/m/rooms/' + v.target), 'Back to ' + name, shownThread && shownThread.title
           ? snippet(shownThread.title, 1) : 'Thread', name)
+        // A Bot's model, thinking and the switch are in its details, as Desktop's are; the bar keeps no line
+        // of words under the name.
         : chatBar(() => go(room ? '/m/rooms' : '/m/bots'), room ? 'All rooms' : 'All Thornswood Bots', name, undefined,
-          room ? null : v.target, name, null, room ? null : botLive(v.live)),
+          room ? null : v.target, name, null, room ? null : botLive(v.live),
+          !room && v.can_send ? () => openDetails('bot', v.target) : null),
       room ? threadStrip(v, thread) : null,
       room ? null : rewindLine(v.rewinds, name, openSession),
       h.notes
@@ -4632,9 +4654,11 @@ async function route() {
   const drawn = [d.pick ? pickView(path) : mainView(path)]
   if (d.list) drawn.push(d.list('list').then(() => markCurrent(path)))
   const ownChat = path.match(/^hermes\/(me|one)\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/)
-  if (!ownChat) details.open = false
-  if (d.side) drawn.push(details.open && ownChat ? detailsView('side', ownChat[1], ownChat[2]) : decisionsView('side'))
-  document.getElementById('side').setAttribute('aria-label', details.open && ownChat ? 'Chat details' : 'Decisions')
+  const botChat = path.match(/^bots\/([a-z]+)$/)
+  const detailed = ownChat ? [ownChat[1], ownChat[2]] : botChat ? ['bot', botChat[1]] : null
+  if (!detailed) details.open = false
+  if (d.side) drawn.push(details.open && detailed ? detailsView('side', ...detailed) : decisionsView('side'))
+  document.getElementById('side').setAttribute('aria-label', details.open && detailed ? 'Chat details' : 'Decisions')
   await Promise.all(drawn)
 }
 

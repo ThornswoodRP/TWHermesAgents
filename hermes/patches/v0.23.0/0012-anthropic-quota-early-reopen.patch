@@ -1,0 +1,483 @@
+From 678fde580c2d650f05391b42a272593ce7b96ed5 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 21:02:45 +0000
+Subject: [PATCH] A Claude subscription limit that reopens early lifts the
+ login's model bench
+
+An Anthropic 429 benches the OAuth login for the refused model until the
+reset the response named, days out for a subscription's weekly window. The
+window can reopen sooner (a reset given to the account, a plan change), and
+only the OAuth usage endpoint says so. Codex has that check (#43747);
+Anthropic had none, so a session pinned to its fallback stayed there until
+the old reset time, and so did every new pick of the login.
+
+The pool now asks the usage endpoint, throttled per token and model and
+failing closed, when it lifts cooldowns for a model whose bench has longer
+to run than the probe interval, and records a verified reopen as a reset so
+the disk's older cooldown is not merged back over it. The restore path asks
+for an Anthropic primary as it does for a Codex one.
+---
+ agent/agent_runtime_helpers.py                |  20 +-
+ agent/anthropic_quota_probe.py                |  96 ++++++++
+ agent/credential_pool.py                      |  65 +++++-
+ .../test_anthropic_quota_early_reopen.py      | 208 ++++++++++++++++++
+ 4 files changed, 379 insertions(+), 10 deletions(-)
+ create mode 100644 agent/anthropic_quota_probe.py
+ create mode 100644 tests/agent/test_anthropic_quota_early_reopen.py
+
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index d628c122..0f9013e6 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -1350,23 +1350,27 @@ def _revert_credential_rotation(agent) -> None:
+ 
+ 
+ def _primary_quota_reopened_early(agent, primary_provider, primary_model, matches_primary, load_primary_pool) -> bool:
+-    """True when a Codex quota window that the primary pool still has benched has reopened.
++    """True when a Codex or Claude subscription window that the primary pool still has benched has reopened.
+ 
+-    A Codex 429 benches the entry, and arms ``_rate_limited_until``, until a ``resets_at`` that can be
+-    days out (weekly window). The window can reopen sooner (redeemed reset, top-up, plan change); the
+-    pool's throttled usage probe notices, but only on ``select()``, which a session pinned to its
+-    fallback never reaches. Fails closed: any doubt leaves both cooldowns in force.
++    A Codex 429 benches the entry, and an Anthropic 429 benches it for the refused model; either arms
++    ``_rate_limited_until``, until a reset that can be days out (weekly window). The window can reopen
++    sooner (redeemed or granted reset, top-up, plan change); the pool's throttled usage probe notices,
++    but only on ``select()``, which a session pinned to its fallback never reaches. Fails closed: any
++    doubt leaves both cooldowns in force.
+ 
+     At most one check per probe interval per agent: the probe caches its verdict and nothing clears
+     it on the next 429, so a "restored" answer the endpoint got wrong would otherwise restore,
+     fail, and fall back again on every turn of the cached window. Checks in between could only
+     replay that cached verdict, so they return before loading the pool.
+     """
+-    if primary_provider != "openai-codex":
++    if primary_provider == "openai-codex":
++        from hermes_cli.auth_codex import CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS as interval
++    elif primary_provider == "anthropic":
++        from agent.anthropic_quota_probe import ANTHROPIC_QUOTA_PROBE_MIN_INTERVAL_SECONDS as interval
++    else:
+         return False
+-    from hermes_cli.auth_codex import CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS
+     now = time.monotonic()
+-    if now - getattr(agent, "_codex_reopen_checked_at", float("-inf")) < CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS:
++    if now - getattr(agent, "_codex_reopen_checked_at", float("-inf")) < interval:
+         return False
+     agent._codex_reopen_checked_at = now
+     try:
+diff --git a/agent/anthropic_quota_probe.py b/agent/anthropic_quota_probe.py
+new file mode 100644
+index 00000000..0474c7bc
+--- /dev/null
++++ b/agent/anthropic_quota_probe.py
+@@ -0,0 +1,96 @@
++"""Whether a Claude subscription limit that benched a login has reopened before its declared reset.
++
++A Claude subscription (Pro or Max) 429 benches the OAuth login for the refused model until the reset
++the response named (its ``Retry-After``), which is days out for the weekly window. The window can
++reopen sooner: the account is given a reset, or the plan changes. Only Anthropic's OAuth usage
++endpoint says so, the one ``/usage`` reads (``agent/account_usage._fetch_anthropic_account_usage``).
++Without asking it, a session pinned to its fallback stays there until the old reset time.
++
++The same rules as the Codex probe (``hermes_cli/auth_codex._probe_codex_quota_restored``): throttled
++per token and model, so the hot selection path can call it freely; it fails closed, so any doubt (no
++answer, a refusal, no window it can read) keeps the cooldown.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import logging
++import threading
++import time
++from typing import Optional
++
++import httpx
++
++logger = logging.getLogger(__name__)
++
++ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
++ANTHROPIC_QUOTA_PROBE_MIN_INTERVAL_SECONDS = 300  # 5 minutes, as the Codex probe
++
++# The windows that refuse every model on the login, and the ones that refuse one model family only.
++ACCOUNT_WINDOWS = ("five_hour", "seven_day")
++FAMILY_WINDOWS = (("opus", "seven_day_opus"), ("sonnet", "seven_day_sonnet"))
++
++_cache: dict[str, tuple[float, Optional[bool]]] = {}
++_lock = threading.Lock()
++
++
++def _windows_for(model: Optional[str]) -> tuple[str, ...]:
++    name = (model or "").lower()
++    return ACCOUNT_WINDOWS + tuple(key for family, key in FAMILY_WINDOWS if family in name)
++
++
++def _used_percent(window) -> Optional[float]:
++    """A window's utilization as a percent, read the way ``/usage`` reads it
++    (``account_usage._usage_windows`` with ``fraction=True``)."""
++    used = window.get("utilization") if isinstance(window, dict) else None
++    if isinstance(used, bool) or not isinstance(used, (int, float)):
++        return None
++    used = float(used)
++    return used * 100 if used <= 1 else used
++
++
++def quota_restored(payload: dict, model: Optional[str]) -> Optional[bool]:
++    """True when every window that refuses ``model`` is under 100%; False when one is full; None when the
++    payload holds none of them."""
++    seen = [p for p in (_used_percent(payload.get(key)) for key in _windows_for(model)) if p is not None]
++    if not seen:
++        return None
++    return max(seen) < 100.0
++
++
++def probe_anthropic_quota_restored(
++    access_token: Optional[str], *, model: Optional[str] = None,
++    min_interval_seconds: float = ANTHROPIC_QUOTA_PROBE_MIN_INTERVAL_SECONDS,
++) -> Optional[bool]:
++    """Ask the usage endpoint whether this login can serve ``model`` again. None: no answer."""
++    from agent.anthropic_credentials import _is_oauth_token
++
++    token = (access_token or "").strip()
++    if not token or not _is_oauth_token(token):
++        return None  # an API key pays per token and has no subscription window to ask about
++    key = hashlib.sha256(f"{token}\0{model or ''}".encode()).hexdigest()
++    now = time.monotonic()
++    with _lock:
++        cached = _cache.get(key)
++        if cached is not None and (now - cached[0]) < min_interval_seconds:
++            return cached[1]
++        _cache[key] = (now, None)  # reserve the slot so concurrent selectors don't stampede
++    result: Optional[bool] = None
++    try:
++        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json",
++                   "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}
++        with httpx.Client(timeout=10.0) as client:
++            response = client.get(ANTHROPIC_USAGE_URL, headers=headers)
++        if response.status_code == 200:
++            result = quota_restored(response.json() or {}, model)
++        elif response.status_code == 429:
++            result = False
++    except (httpx.HTTPError, OSError, ValueError):  # no answer, or a body that is not JSON: fail closed
++        logger.debug("Anthropic quota probe failed", exc_info=True)
++        result = None
++    with _lock:
++        _cache[key] = (now, result)
++    if result:
++        logger.info("Anthropic usage says the Claude subscription limit for %s reopened before its declared reset",
++                    model or "this login")
++    return result
+diff --git a/agent/credential_pool.py b/agent/credential_pool.py
+index 0d057f99..c34d43c0 100644
+--- a/agent/credential_pool.py
++++ b/agent/credential_pool.py
+@@ -1940,6 +1940,59 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
+             logger.debug("Codex quota-restored probe failed", exc_info=True)
+             return False
+ 
++    def _anthropic_quota_restored_upstream(self, entry: PooledCredential, model: Optional[str]) -> bool:
++        """Live-check whether a Claude subscription limit that benched this entry for ``model``
++        reopened early.
++
++        An Anthropic 429 benches the OAuth entry for the refused model (``_cool_down_model``) until
++        the reset the response named, days out for a subscription's weekly window. The window
++        reopens sooner when the account is given a reset or changes plan, and nothing but Anthropic's
++        usage endpoint says so. Only a model bench longer than the probe interval is asked about: a
++        per-minute limit lifts by itself sooner than the probe could. The stored token is refreshed
++        first when it is due (a refresh keeps the model bench), since a benched entry is skipped by
++        the refresh chain and an expired token gets no answer. Fails closed, as the Codex check does.
++        """
++        from agent.anthropic_quota_probe import (
++            ANTHROPIC_QUOTA_PROBE_MIN_INTERVAL_SECONDS, probe_anthropic_quota_restored,
++        )
++
++        if self.provider != "anthropic" or entry.auth_type != AUTH_TYPE_OAUTH or not model:
++            return False
++        until = model_cooldown_until(entry, model)
++        if until is None or until - time.time() <= ANTHROPIC_QUOTA_PROBE_MIN_INTERVAL_SECONDS:
++            return False
++        try:
++            if self._entry_needs_refresh(entry):
++                refreshed = self._refresh_entry(entry, force=False)
++                if refreshed is None:
++                    return False
++                entry = refreshed
++            return bool(probe_anthropic_quota_restored(entry.access_token, model=model))
++        except OSError:  # the auth store's lock or file: no fresh token, so no answer, and the bench stays
++            logger.debug("Anthropic quota-restored probe failed", exc_info=True)
++            return False
++
++    def _lift_model_cooldown(
++        self, entry: PooledCredential, model: Optional[str],
++    ) -> tuple[PooledCredential, list[str]]:
++        """Clear ``model``'s cooldown on ``entry`` and on every entry sharing its key, the rows
++        ``_cool_down_model`` benched together. A verified early reopen is a reset, so each row is
++        marked cleared (``status_cleared_at``) and the caller persists those ids as cleared: the
++        disk's older cooldown is then not merged back over it. Caller holds the lock and persists.
++        Returns the live entry and the ids it lifted."""
++        key = entry.runtime_api_key
++        live, ids = entry, []
++        for scoped in list(self._entries):
++            if scoped.id != entry.id and not (key and scoped.runtime_api_key == key):
++                continue
++            cooldowns = {m: until for m, until in (scoped.model_cooldowns or {}).items() if m != model}
++            updated = self._adopt(scoped, persist=False, model_cooldowns=cooldowns or None,
++                                  status_cleared_at=time.time())
++            ids.append(updated.id)
++            if scoped.id == entry.id:
++                live = updated
++        return live, ids
++
+     def _entry_needs_refresh(self, entry: PooledCredential) -> bool:
+         if entry.auth_type != AUTH_TYPE_OAUTH:
+             return False
+@@ -2045,6 +2098,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
+         available: list[PooledCredential] = []
+         pending_refresh: list[PooledCredential] = []
+         sole_credential = self._is_sole_credential()
++        reopened_ids: list[str] = []  # benches a live probe found reopened early: persisted as cleared
+         for entry in self._entries:
+             # Borrowed credentials persist as metadata-only references and are
+             # hydrated from their live source on load; never lease an
+@@ -2075,7 +2129,14 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
+                         cleared_any = True
+                 continue
+             if model_cooldown_until(entry, model) is not None:
+-                continue
++                # A Claude subscription window can reopen early too: a live probe lifts the
++                # cooldown on the model it asked about.
++                if not (clear_expired and self._anthropic_quota_restored_upstream(entry, model)):
++                    continue
++                entry = self._find(lambda e, i=entry.id: e.id == i) or entry
++                entry, lifted = self._lift_model_cooldown(entry, model)
++                reopened_ids.extend(lifted)
++                cleared_any = True
+             if entry.last_status == STATUS_EXHAUSTED:
+                 exhausted_until = _exhausted_until(entry, sole_credential=sole_credential)
+                 # Codex quota windows can reopen EARLY; a throttled live probe
+@@ -2110,7 +2171,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
+             pruned_ids = set(entries_to_prune)
+             self._entries = [e for e in self._entries if e.id not in pruned_ids]
+         if cleared_any:
+-            self._persist(removed_ids=entries_to_prune)
++            self._persist(removed_ids=entries_to_prune, status_cleared_ids=reopened_ids or None)
+         return available, pending_refresh
+ 
+     def _log_no_available_entries(self) -> None:
+diff --git a/tests/agent/test_anthropic_quota_early_reopen.py b/tests/agent/test_anthropic_quota_early_reopen.py
+new file mode 100644
+index 00000000..0e6cee8a
+--- /dev/null
++++ b/tests/agent/test_anthropic_quota_early_reopen.py
+@@ -0,0 +1,208 @@
++"""A Claude subscription limit that reopens before its declared reset lifts the login's model bench.
++
++An Anthropic 429 benches the OAuth login for the refused model until the reset the response named
++(days out for the weekly window). When the account is given a reset early, only Anthropic's usage
++endpoint says so; the pool asks it (throttled, fails closed) on the lifting paths, and a session pinned
++to its fallback asks through ``_primary_quota_reopened_early``.
++
++Real ``agent.credential_pool`` against a real temp auth store; the usage endpoint is stubbed.
++"""
++import json
++import time
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++TOKEN = "sk-ant-oat01-synthetic-test-token-0000"
++MODEL = "claude-opus-4-6"
++OTHER = "claude-sonnet-4-5"
++WEEK = 3 * 86400
++
++
++@pytest.fixture
++def home(tmp_path, monkeypatch):
++    root = tmp_path / "hermes-root"
++    root.mkdir()
++    (tmp_path / "fakehome").mkdir()
++    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
++    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "fakehome"))
++    for var in ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
++        monkeypatch.delenv(var, raising=False)
++    monkeypatch.setenv("HERMES_HOME", str(root))
++    import hermes_constants
++    hermes_constants._default_hermes_root_memo = None  # type: ignore[attr-defined]
++    from agent import anthropic_quota_probe
++    anthropic_quota_probe._cache.clear()
++    return root
++
++
++def _write_benched(root, until_in=WEEK, cooldowns=None):
++    until = time.time() + until_in
++    (root / "auth.json").write_text(json.dumps({"credential_pool": {"anthropic": [{
++        "id": "max", "label": "max", "auth_type": "oauth", "priority": 0, "source": "manual",
++        "access_token": TOKEN, "refresh_token": "refresh",
++        # Not due for a refresh: the probe asks with the stored token.
++        "expires_at_ms": int((time.time() + 3600) * 1000),
++        "model_cooldowns": cooldowns if cooldowns is not None else {MODEL: until},
++    }]}}))
++
++
++def _pool():
++    from agent.credential_pool import load_pool
++    return load_pool("anthropic")
++
++
++def _stored_cooldowns(root):
++    rows = json.loads((root / "auth.json").read_text())["credential_pool"]["anthropic"]
++    return rows[0].get("model_cooldowns") or {}
++
++
++def test_a_reopened_window_lifts_the_model_bench_and_it_stays_lifted(home):
++    _write_benched(home, cooldowns={MODEL: time.time() + WEEK, OTHER: time.time() + WEEK})
++    pool = _pool()
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=True) as probe:
++        assert pool.lift_reopened_cooldowns(model=MODEL) is True
++    probe.assert_called_once_with(TOKEN, model=MODEL)
++    assert pool.next_available_at(model=MODEL) is None
++    # Only the model it asked about: the other model's bench is its own observation.
++    assert pool.next_available_at(model=OTHER) is not None
++    # Persisted as a reset, so the disk's older cooldown is not merged back, and another process agrees.
++    assert MODEL not in _stored_cooldowns(home) and OTHER in _stored_cooldowns(home)
++    assert _pool().select(model=MODEL) is not None
++
++
++def test_a_full_window_keeps_the_bench(home):
++    _write_benched(home)
++    pool = _pool()
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=False):
++        assert pool.lift_reopened_cooldowns(model=MODEL) is False
++    assert pool.next_available_at(model=MODEL) is not None
++    assert MODEL in _stored_cooldowns(home)
++
++
++def test_no_answer_keeps_the_bench(home):
++    _write_benched(home)
++    pool = _pool()
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=None):
++        assert pool.lift_reopened_cooldowns(model=MODEL) is False
++    assert pool.next_available_at(model=MODEL) is not None
++
++
++def test_a_short_bench_is_not_asked_about(home):
++    """A per-minute limit lifts by itself before the probe interval would let it ask again."""
++    _write_benched(home, until_in=60)
++    pool = _pool()
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=True) as probe:
++        assert pool.lift_reopened_cooldowns(model=MODEL) is False
++    probe.assert_not_called()
++
++
++def test_read_only_paths_never_probe(home):
++    _write_benched(home)
++    pool = _pool()
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=True) as probe:
++        assert pool.has_available(model=MODEL) is False
++        assert pool.next_available_at(model=MODEL) is not None
++    probe.assert_not_called()
++
++
++def test_an_api_key_is_never_asked_about(home):
++    (home / "auth.json").write_text(json.dumps({"credential_pool": {"anthropic": [{
++        "id": "seat", "label": "seat", "auth_type": "api_key", "priority": 0, "source": "manual",
++        "access_token": "sk-ant-api03-synthetic-test-key-0000",
++        "model_cooldowns": {MODEL: time.time() + WEEK},
++    }]}}))
++    pool = _pool()
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=True) as probe:
++        assert pool.lift_reopened_cooldowns(model=MODEL) is False
++    probe.assert_not_called()
++
++
++@pytest.mark.parametrize("payload, model, want", [
++    ({"five_hour": {"utilization": 12.0}, "seven_day": {"utilization": 40.0}}, MODEL, True),
++    ({"five_hour": {"utilization": 12.0}, "seven_day": {"utilization": 100.0}}, MODEL, False),
++    ({"five_hour": {"utilization": 100}, "seven_day": {"utilization": 3.0}}, MODEL, False),
++    # The Opus week caps Opus only.
++    ({"five_hour": {"utilization": 5.0}, "seven_day": {"utilization": 5.0},
++      "seven_day_opus": {"utilization": 100.0}}, MODEL, False),
++    ({"five_hour": {"utilization": 5.0}, "seven_day": {"utilization": 5.0},
++      "seven_day_opus": {"utilization": 100.0}}, OTHER, True),
++    # Read as /usage reads it: a value at or under 1 is a fraction.
++    ({"five_hour": {"utilization": 0.25}, "seven_day": {"utilization": 0.5}}, MODEL, True),
++    ({}, MODEL, None),
++    ({"five_hour": None, "seven_day": {"utilization": "x"}}, MODEL, None),
++])
++def test_usage_windows_read(payload, model, want):
++    from agent.anthropic_quota_probe import quota_restored
++    assert quota_restored(payload, model) is want
++
++
++def test_probe_asks_once_per_interval_and_fails_closed(home):
++    from agent import anthropic_quota_probe as probe_mod
++
++    calls = []
++
++    class Response:
++        status_code = 200
++
++        @staticmethod
++        def json():
++            return {"five_hour": {"utilization": 3.0}, "seven_day": {"utilization": 10.0}}
++
++    class Client:
++        def __init__(self, *a, **k):
++            pass
++
++        def __enter__(self):
++            return self
++
++        def __exit__(self, *a):
++            return False
++
++        def get(self, url, headers):
++            calls.append((url, headers.get("Authorization")))
++            return Response()
++
++    with patch.object(probe_mod.httpx, "Client", Client):
++        assert probe_mod.probe_anthropic_quota_restored(TOKEN, model=MODEL) is True
++        assert probe_mod.probe_anthropic_quota_restored(TOKEN, model=MODEL) is True
++    assert calls == [(probe_mod.ANTHROPIC_USAGE_URL, f"Bearer {TOKEN}")]
++
++    probe_mod._cache.clear()
++
++    class Refused(Client):
++        def get(self, url, headers):
++            raise OSError("no route")
++
++    with patch.object(probe_mod.httpx, "Client", Refused):
++        assert probe_mod.probe_anthropic_quota_restored(TOKEN, model=MODEL) is None
++    assert probe_mod.probe_anthropic_quota_restored("sk-ant-api03-key", model=MODEL) is None
++
++
++def test_a_session_pinned_to_its_fallback_asks_and_clears_its_own_cooldown(home):
++    """``_primary_quota_reopened_early`` now asks for an Anthropic primary, as it does for Codex."""
++    from agent.agent_runtime_helpers import _primary_quota_reopened_early
++
++    _write_benched(home)
++    agent = MagicMock(spec=[])
++    agent._credential_pool = None
++
++    def load():
++        return _pool()
++
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=True):
++        assert _primary_quota_reopened_early(agent, "anthropic", MODEL, lambda p: True, load) is True
++        # Throttled per agent: a second ask inside the interval does not load the pool again.
++        assert _primary_quota_reopened_early(agent, "anthropic", MODEL, lambda p: True, load) is False
++    assert MODEL not in _stored_cooldowns(home)
++
++
++def test_a_session_whose_window_is_still_full_stays_put(home):
++    from agent.agent_runtime_helpers import _primary_quota_reopened_early
++
++    _write_benched(home)
++    agent = MagicMock(spec=[])
++    agent._credential_pool = None
++    with patch("agent.anthropic_quota_probe.probe_anthropic_quota_restored", return_value=False):
++        assert _primary_quota_reopened_early(agent, "anthropic", MODEL, lambda p: True, _pool) is False
++    assert MODEL in _stored_cooldowns(home)
+-- 
+2.43.0
+

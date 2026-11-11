@@ -8,12 +8,15 @@ Checks:
   Claude login; a model change and a thinking change each go through Hermes's own PreparedMutations
   (session.mutate fenced to the chat's revision and generation); a pick not offered is refused before
   anything is sent; a model Hermes's selection guard holds for a confirmation is not switched; a pick
-  while a turn runs is said to land after it; a Bot's chat is never changed from here;
+  while a turn runs is said to land after it; the model is the one the chat's agent is on now, with
+  Hermes's own word when that is a fallback (session.usage fallback_model); a Bot's Bot Chat through its own
+  gateway, offered only its own routes and changed in its model and thinking only;
 - the core: a read asked for, handed to that gateway's connector and answered; a change checked against
   the last read's offer, needing a passkey sign-in of the last 30 minutes, the newest change winning, the
   same idempotency key replayed and never a second change; an unanswered change given up after 2 minutes;
-  the routes over HTTP;
-- One's connector: the asks the core handed out, run through the helper and posted back.
+  the routes over HTTP; a Bot's chat asked through the Bots' one connector, each ask naming its Bot;
+- One's connector and the Bots' connector: the asks the core handed out, run through the helper and posted
+  back.
 
 Everything runs on stand-ins and a scratch workspace; nothing reaches a real Hermes.
 """
@@ -29,6 +32,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from datetime import timedelta
 from pathlib import Path
 
@@ -37,6 +41,8 @@ from test_decisions_api import Served
 from test_decisions_own import SID, Gateways, on, passkey
 
 from thornswood_decisions import connector, own_connector, own_control
+from thornswood_decisions.chat import Chat
+from thornswood_decisions.feeds import Feeds
 from thornswood_decisions.own import OwnChat
 from thornswood_decisions.store import CoreError
 
@@ -107,6 +113,9 @@ STUB_CLIENT = textwrap.dedent('''
                 return {"session_id": params["session_id"], "revision": STATE["revision"],
                         "execution_generation": STATE["generation"]}
             if method == "session.info":
+                if os.environ.get("TW_STUB_FALLBACK"):
+                    # The chat's main model, as its row holds it, while its agent answers on a fallback.
+                    return {"model": "claude-opus-5-5", "provider": "anthropic", "source": "tui", "lazy": False}
                 return {"model": STATE["model"], "provider": STATE["provider"], "source": "tui", "lazy": False,
                         "cwd": "/home/patrick/thornswood"}
             if method == "config.get":
@@ -123,8 +132,12 @@ STUB_CLIENT = textwrap.dedent('''
                 return OPTIONS
             if method == "session.usage":
                 # tui_gateway/methods_session.py session.usage: no agent built yet means no context figures.
-                return {"model": STATE["model"], "input": 12345, "output": 4100, "total": 16445, "calls": 3,
-                        "compressions": 1}
+                # gateway/session_usage.py usage_stats: the live agent's model and provider, and fallback_model
+                # set only while _fallback_activated.
+                fell = bool(os.environ.get("TW_STUB_FALLBACK"))
+                return {"model": STATE["model"], "provider": STATE["provider"] if fell else "", "input": 12345,
+                        "output": 4100, "total": 16445, "calls": 3, "compressions": 1,
+                        "fallback_model": STATE["model"] if fell else None}
             if method == "session.context_breakdown":
                 if os.environ.get("TW_STUB_NOCTX"):
                     raise GatewayRPCError("Could not compute context breakdown: no prompt")
@@ -351,13 +364,51 @@ class Helper(unittest.TestCase):
                                  TW_STUB_BUSY="1")
         self.assertEqual((out["applied"], out["reason"]), (True, "a turn is running; Hermes switches this chat when it ends"))
 
+    def test_a_fallback_shows_the_model_that_answers_and_says_it_fell_back(self):
+        """Patrick, 11 Nov: the app said a Bot was on Claude while ChatGPT answered. The model is the live
+        agent's, and Hermes's fallback_model is the word that it fell back."""
+        _, out = self.run_helper({"session_id": SID}, TW_STUB_FALLBACK="1")
+        st = out["state"]
+        self.assertEqual((st["model"], st["provider"], st["fallback"]), ("gpt-5.5", "openai-codex", True))
+        self.assertIs(own_control.clean_state(st)["fallback"], True)
+        _, out = self.run_helper({"session_id": SID})
+        self.assertIs(out["state"]["fallback"], False)
+        self.assertIs(own_control.clean_state({"fallback": "yes"})["fallback"], False)
+
+    def test_a_bots_chat_is_read_and_changed_within_its_own_routes(self):
+        allowed = [["anthropic", "claude-opus-5-5"], ["openai-codex", "gpt-5.5"], ["openai-codex", "gpt-5.5-mini"]]
+        bot = {"session_id": SID, "profile": "rift", "name": "Rift", "allowed": allowed}
+        _, out = self.run_helper(bot)
+        self.assertEqual({(o["provider"], o["model"]) for o in out["state"]["offered"]},
+                         {(p, m) for p, m in allowed})
+        self.assertEqual({o["why"] for o in out["state"]["offered"]}, {"subscription"})
+        _, out = self.run_helper({**bot, "set": {"model": {"provider": "anthropic", "model": "claude-opus-5-5"},
+                                                 "reasoning": "high"}})
+        self.assertEqual((out["applied"], out["state"]["model"], out["state"]["reasoning"]),
+                         (True, "claude-opus-5-5", "high"))
+        # A model off its own list, a free or local one included, is refused before anything is sent.
+        before = len([r for r in self.rpcs() if r["method"] == "session.mutate"])
+        for pick in ({"provider": "llamacpp", "model": "qwen3-8b.gguf"}, {"provider": "openrouter", "model": "priced/free"}):
+            with self.subTest(pick=pick):
+                _, out = self.run_helper({**bot, "set": {"model": pick}})
+                self.assertEqual((out["applied"], out["reason"]), (False, "that model is not one of this Bot's own routes"))
+        self.assertEqual(len([r for r in self.rpcs() if r["method"] == "session.mutate"]), before)
+        # Its approvals and its busy rule are its policy's.
+        for want in ({"busy": "queue"}, {"approvals": "off"}):
+            with self.subTest(want=want):
+                self.assertEqual(self.run_helper({**bot, "set": want})[1], {
+                    "state": None, "applied": False, "reason": "a Bot's chat takes a model and a thinking level only"})
+        self.assertNotIn("config.set", [r["method"] for r in self.rpcs()])
+
     def test_bad_requests_a_bot_and_a_stopped_gateway(self):
         for req in ({"session_id": ""}, {"session_id": SID, "set": {}}, {"session_id": SID, "set": {"model": "x"}},
-                    {"session_id": SID, "set": {"reasoning": "high", "other": 1}}):
+                    {"session_id": SID, "set": {"reasoning": "high", "other": 1}},
+                    # A Bot's ask carries its own models; one without them, or a bad profile, is not run.
+                    {"session_id": SID, "profile": "rift", "set": {"reasoning": "high"}},
+                    {"session_id": SID, "profile": "../x", "allowed": []},
+                    {"session_id": SID, "profile": "rift", "allowed": [["anthropic"]]}):
             with self.subTest(req=req):
                 self.assertEqual(self.run_helper(req)[1], {"state": None, "applied": False, "reason": "bad request"})
-        _, out = self.run_helper({"session_id": SID, "profile": "rift", "set": {"reasoning": "high"}})
-        self.assertEqual(out["reason"], "a Bot's chat settings are not changed from here")
         _, out = self.run_helper({"session_id": SID}, TW_STUB_DOWN="1")
         self.assertEqual(out, {"state": None, "applied": False, "reason": "One's gateway is absent"})
         self.assertEqual(self.rpcs(), [])
@@ -536,6 +587,97 @@ class Core(unittest.TestCase):
         self.assertFalse(body["can_change"])
 
 
+BOTS = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
+BOT_STATE = {"model": "gpt-5.5", "provider": "openai-codex", "fallback": True, "reasoning": "medium",
+             "levels": ["low", "medium", "high"],
+             "offered": [{"provider": "anthropic", "model": "claude-opus-5-5", "name": "Anthropic", "why": "subscription"},
+                         {"provider": "openai-codex", "model": "gpt-5.5", "name": "OpenAI Codex", "why": "subscription"}]}
+
+
+class BotChatCore(unittest.TestCase):
+    """A Bot's Bot Chat details (Patrick, 11 Nov): asked through the Bots' one connector, each ask naming its
+    Bot, and a change of its model or thinking only."""
+
+    def setUp(self):
+        for d in (own_control.BOT_CONTROLS.read, own_control.BOT_CONTROLS.asked, own_control.BOT_CONTROLS.changes):
+            d.clear()
+        self.w = World()
+        self.addCleanup(self.w.close)
+        for bot in BOTS:
+            self.w.core.bind_bot(self.w.ws, bot, bot, by="tests")
+        for flag in ("mobile_chat_write", "connector_effects"):
+            self.w.store.set_flag(self.w.ws, flag, True, by="tests")
+        self.chat = Chat(self.w.store)
+        self.tok = Feeds(self.w.store).new_token(self.w.ws, "connector", by="tests")
+        feeds = Feeds(self.w.store)
+        feeds.put(self.w.ws, "bots", feeds.new_token(self.w.ws, "bots", by="tests"), {
+            "source_time": self.w.store.clock().isoformat(),
+            "bots": [{"bot": "rift", "session_id": SID, "messages": [],
+                      "route": {"model": "gpt-5.5", "provider": "openai-codex", "fallback": True, "at": ""}}]})
+        self.p = self.w.patrick()
+
+    def hand(self) -> list:
+        return self.chat.claim(self.w.ws, self.tok)["controls"]
+
+    def answer(self, ask, state=BOT_STATE, applied=False, reason=""):
+        return self.chat.control_post(self.w.ws, self.tok, {"id": ask["id"], "state": state, "applied": applied,
+                                                            "reason": reason})
+
+    def test_the_list_and_the_chat_say_the_model_and_that_it_fell_back(self):
+        rift = next(b for b in self.chat.summary(self.p)["bots"] if b["bot"] == "rift")
+        self.assertEqual((rift["route"]["model"], rift["route"]["fallback"]), ("gpt-5.5", True))
+        self.assertEqual(self.chat.view(self.p, "rift")["route"]["model"], "gpt-5.5")
+        self.assertIsNone(next(b for b in self.chat.summary(self.p)["bots"] if b["bot"] == "echo")["route"])
+
+    def test_a_read_goes_to_the_bots_connector_naming_its_bot(self):
+        got = self.chat.control(self.p, "rift")
+        self.assertEqual((got["pending"], got["state"], got["can_change"]), (True, None, True))
+        asks = self.hand()
+        self.assertEqual([(a["bot"], a["session_id"], "set" in a) for a in asks], [("rift", SID, False)])
+        self.answer(asks[0])
+        got = self.chat.control(self.p, "rift")
+        self.assertEqual((got["pending"], got["state"]["model"], got["state"]["fallback"]), (False, "gpt-5.5", True))
+
+    def test_a_change_is_its_model_or_thinking_and_goes_once(self):
+        self.chat.control(self.p, "rift")
+        self.answer(self.hand()[0])
+        for body, reason in (({"busy": "queue", "idempotency_key": "key-00000001"}, "bad_control"),
+                             ({"approvals": "off", "idempotency_key": "key-00000001"}, "bad_control"),
+                             ({"reasoning": "high"}, "bad_key"),
+                             ({"model": {"provider": "llamacpp", "model": "qwen3-8b.gguf"},
+                               "idempotency_key": "key-00000001"}, "model_not_offered")):
+            with self.subTest(body=body):
+                with self.assertRaises(CoreError) as e:
+                    self.chat.control_set(self.p, "rift", body)
+                self.assertEqual(e.exception.reason, reason)
+        want = {"model": {"provider": "anthropic", "model": "claude-opus-5-5"}, "idempotency_key": "key-00000002"}
+        self.assertEqual(self.chat.control_set(self.p, "rift", want)["status"], "queued")
+        self.assertTrue(self.chat.control_set(self.p, "rift", want).get("replayed"))
+        asks = self.hand()
+        self.assertEqual([(a["bot"], a["set"]) for a in asks],
+                         [("rift", {"model": {"provider": "anthropic", "model": "claude-opus-5-5"}})])
+        self.answer(asks[0], {**BOT_STATE, "model": "claude-opus-5-5", "provider": "anthropic", "fallback": False},
+                    applied=True)
+        got = self.chat.control(self.p, "rift")
+        self.assertEqual((got["change"]["status"], got["state"]["model"], got["state"]["fallback"]),
+                         ("done", "claude-opus-5-5", False))
+        self.assertEqual(self.hand(), [])
+
+    def test_no_bot_chat_no_such_bot_and_the_switch(self):
+        for bot, reason in (("echo", "no_bot_chat"), ("nobody", "no_chat")):
+            with self.subTest(bot=bot):
+                with self.assertRaises(CoreError) as e:
+                    self.chat.control(self.p, bot)
+                self.assertEqual(e.exception.reason, reason)
+        with self.assertRaises(CoreError) as e:
+            self.chat.control_post(self.w.ws, "nope", {"id": "ctl_aaaaaaaaaa"})
+        self.assertEqual(e.exception.status, 401)
+        self.w.store.set_flag(self.w.ws, "mobile_chat_write", False, by="tests")
+        with self.assertRaises(CoreError) as e:
+            self.chat.control(self.p, "rift")
+        self.assertEqual(e.exception.reason, "chat_write_off")
+
+
 class FakeCore:
     def __init__(self, status=200):
         self.posts, self.status = [], status
@@ -567,6 +709,44 @@ class Connector(unittest.TestCase):
                          {"op": "control", "profile": "", "name": "One", "session_id": SID, "set": {"reasoning": "high"}})
         self.assertEqual(core.posts, [("control", {"id": "ctl_aaaaaaaaaa", "state": STATE, "applied": True, "reason": ""})])
         self.assertEqual(said, ["PASS chat settings: changed"])
+
+
+    def test_the_bots_connector_asks_each_bots_own_gateway_with_its_own_models(self):
+        script = self.dir / "helper.py"
+        script.write_text("import json, sys, pathlib\nreq = json.loads(sys.stdin.read())\n"
+                          f"pathlib.Path({str(self.dir / 'req.json')!r}).write_text(json.dumps(req))\n"
+                          f"print(json.dumps({{'state': {BOT_STATE!r}, 'applied': 'set' in req, 'reason': ''}}))\n",
+                          encoding="utf-8")
+        hermes = connector.Hermes.__new__(connector.Hermes)
+        hermes._helper = lambda req, seconds: json.loads(subprocess.run(
+            [sys.executable, "-I", str(script)], input=json.dumps(req).encode(), capture_output=True).stdout)
+        said, core = [], FakeCore()
+        conn = connector.Connector.__new__(connector.Connector)
+        conn.hermes, conn.core, conn.say = hermes, core, said.append
+        models = [["anthropic", "claude-opus-5-5"], ["openai-codex", "gpt-5.5"]]
+        with unittest.mock.patch.object(connector, "bot_models", return_value=models) as bm:
+            sent = conn.controls([{"id": "ctl_aaaaaaaaaa", "bot": "rift", "session_id": SID, "set": {"reasoning": "high"}},
+                                  {"id": "ctl_bbbbbbbbbb", "bot": "../x", "session_id": SID},
+                                  {"id": "ctl_cccccccccc", "session_id": SID}, "junk"])
+        self.assertEqual(sent, 1)
+        bm.assert_called_once_with("rift")
+        self.assertEqual(json.loads((self.dir / "req.json").read_text()),
+                         {"op": "control", "profile": "rift", "name": "Rift", "session_id": SID, "allowed": models,
+                          "set": {"reasoning": "high"}})
+        self.assertEqual(core.posts, [("/connector/control", {"id": "ctl_aaaaaaaaaa", "state": BOT_STATE,
+                                                              "applied": True, "reason": ""})])
+
+    def test_a_bots_models_are_its_own_routes_it_reaches_with_its_own_sign_in(self):
+        from thornswood_guard.policy import Policy
+        from thornswood_guard.routes import chain_for
+        policy = Policy.load()
+        for bot in BOTS:
+            with self.subTest(bot=bot):
+                got = connector.bot_models(bot)
+                self.assertTrue(got, "every Bot has a route of its own")
+                chain = [[r["provider"], r["model"]] for r in chain_for(policy, bot, proxy_ready=False)]
+                self.assertTrue(all(m in chain for m in got))
+        self.assertEqual(connector.bot_models("nobody"), [])
 
 
 if __name__ == "__main__":

@@ -66,6 +66,7 @@ from .reactions import Reactions
 from .rewinds import Rewinds, rewind_of
 from .reactions import emoji as _emoji
 from .tasks import Tasks
+from .own_control import BOT_CONTROLS, MAX_WAIT as CONTROL_WAIT, wanted as control_wanted
 from .reactions import message_id as _message_id
 from .store import CoreError, Store, canonical, new_id, parse, sha256_hex
 
@@ -573,7 +574,9 @@ class Chat:
                 "reactions": Reactions(self.s).shown(p.workspace_id, PAGES_GW, target)
                 if kind == "bot" and not session else [],
                 "rewinds": Rewinds(self.s).shown(p.workspace_id, PAGES_GW, target, session) if kind == "bot" else [],
-                "live": self.live_states(p.workspace_id).get(target) if kind == "bot" else None}
+                "live": self.live_states(p.workspace_id).get(target) if kind == "bot" else None,
+                # The model its newest turn ran on, and whether that was a fallback (feeds.py _route).
+                "route": (chat or {}).get("route") if kind == "bot" else None}
                 | ({"session": session} if session else {})
                 # A room's newest threads, each with its count (#108); the feed sends them once a minute.
                 | ({"threads": threads} if threads is not None else {}))
@@ -588,7 +591,8 @@ class Chat:
         for bot in self.bots(p.workspace_id):
             msgs = chats.get(bot, {}).get("messages", [])
             out.append({"bot": bot, "last": self._last(p.workspace_id, bot, msgs[-1] if msgs else None),
-                        "unsettled": self._unsettled(p.workspace_id, bot), "live": live.get(bot)})
+                        "unsettled": self._unsettled(p.workspace_id, bot), "live": live.get(bot),
+                        "route": chats.get(bot, {}).get("route")})
         room_snap = feeds.get(p.workspace_id, "room")
         rooms = []
         for r in self.rooms(p.workspace_id):
@@ -619,6 +623,68 @@ class Chat:
         return LIVE.wait(p.workspace_id, message_id, after, wait, self.s.clock())
 
     # ── each Bot's gateway, for the phone's dots ──────────────────────────
+
+    # ── a Bot's model and thinking: its chat's details, as Desktop's pickers (own_control.py) ──
+
+    def _bot_chat(self, workspace_id: str, bot: str) -> str:
+        """The Bot's own Bot Chat, as the feed last read it from Hermes."""
+        if bot not in self.bots(workspace_id):
+            raise CoreError(404, "no_chat", "there is no such Bot")
+        snap = Feeds(self.s).get(workspace_id, "bots")
+        sid = next((b["session_id"] for b in (snap["bots"] or {}).get("bots", []) if b["bot"] == bot), "")
+        if not sid:
+            raise CoreError(409, "no_bot_chat", f"{bot.capitalize()} has no Bot Chat yet, so it has no model to show")
+        return sid
+
+    def control(self, p: Principal, bot: str, wait=0) -> dict:
+        """What Hermes holds for a Bot's Bot Chat: its model, whether that is a fallback, its thinking level, and
+        the models it may be moved to, with the newest change and how it went. From memory, or read through the
+        Bots' connector, waiting at most `wait` seconds; "pending" while no read is in."""
+        self._patrick(p)
+        if not self.s.flag(p.workspace_id, "mobile_chat_write"):
+            raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
+        sid = self._bot_chat(p.workspace_id, bot)
+        try:
+            wait = min(max(float(wait or 0), 0.0), CONTROL_WAIT)
+        except (TypeError, ValueError):
+            raise CoreError(400, "bad_wait", f"wait is 0 to {CONTROL_WAIT} seconds") from None
+        key = (p.workspace_id, bot, sid)
+        BOT_CONTROLS.ask(key, self.s.clock())
+        if wait:
+            BOT_CONTROLS.wait(key, wait, None)
+        got = BOT_CONTROLS.state(key, self.s.clock())
+        return {"pending": got["state"] is None, **got, "can_change": True}
+
+    def control_set(self, p: Principal, bot: str, body) -> dict:
+        """Move a Bot's Bot Chat to another of its own models, or change its thinking level: that chat only,
+        never the Bot's profile, which its policy sets. As a message to the Bot, it needs chat from the phone on
+        and nothing more; only the models of the Bot's own route list that cost nothing per message are
+        offered (room_send.py _bot_offered)."""
+        self._patrick(p)
+        if not self.s.flag(p.workspace_id, "mobile_chat_write"):
+            raise CoreError(423, "chat_write_off", "chat from the phone is off for now")
+        sid = self._bot_chat(p.workspace_id, bot)
+        if isinstance(body, dict) and (body.get("busy") is not None or body.get("approvals") is not None):
+            raise CoreError(400, "bad_control", "a Bot's chat takes a model and a thinking level only; its approvals "
+                            "are its policy's")
+        idem = body.get("idempotency_key") if isinstance(body, dict) else None
+        if not isinstance(idem, str) or not 8 <= len(idem) <= 200:
+            raise CoreError(400, "bad_key", "a change carries an idempotency key of 8 to 200 characters")
+        key = (p.workspace_id, bot, sid)
+        want = control_wanted(BOT_CONTROLS.state(key, self.s.clock())["state"], body)
+        out = BOT_CONTROLS.change(key, want, idem, self.s.clock())
+        if not out.get("replayed"):
+            with self.s.tx() as db:
+                self.s.event(db, p.workspace_id, "chat.control", out["id"], "patrick",
+                             {"bot": bot, "device": p.device_id, **want})
+        return out
+
+    def control_post(self, workspace_id: str, token: str | None, body) -> dict:
+        """What the Bots' connector read for a Bot's chat, and for a change whether Hermes took it."""
+        Feeds(self.s).check_token(workspace_id, "connector", token)
+        if not self.s.flag(workspace_id, "mobile_chat_write"):
+            raise CoreError(423, "chat_write_off", "the core takes no control answer while chat from the phone is off")
+        return BOT_CONTROLS.answer(workspace_id, None, body, self.s.clock())
 
     def live(self, workspace_id: str, token: str | None, body) -> dict:
         """The Bots' connector's report of each Bot's gateway state. Reading only, so it is taken while
@@ -822,7 +888,10 @@ class Chat:
                 self.s.event(db, workspace_id, "connector.leased", w["id"], "connector", {"target": w["target"]})
                 items.append(item)
             reactions = [{"bot": r.pop("chat"), **r} for r in Reactions(self.s).hand(db, workspace_id, PAGES_GW)]
-        return {"items": items, "reactions": reactions, "rewinds": rewinds}
+        # Reads and changes of a Bot's model and thinking (own_control.py BOT_CONTROLS), each naming its Bot.
+        controls = BOT_CONTROLS.hand(workspace_id, None, self.s.clock()) \
+            if self.s.flag(workspace_id, "mobile_chat_write") else []
+        return {"items": items, "reactions": reactions, "rewinds": rewinds, "controls": controls}
 
     def _lapse(self, db, workspace_id: str) -> None:
         """A lease that ran out means the connector stopped mid-send: unclear, so never sent again by itself."""

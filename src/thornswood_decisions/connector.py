@@ -362,6 +362,20 @@ class Hermes:
             return "failed", "", str(got.get("reason", "not sent"))
         return "uncertain", "", str(got.get("reason") or "the room helper stopped without saying")
 
+    def control(self, bot: str, session_id: str, want: dict | None) -> tuple[dict | None, bool, str]:
+        """(what Hermes holds for the Bot's chat, whether a change was made, why not): its model, whether that
+        is a fallback, its thinking level, and the models it may be moved to, through that Bot's own gateway
+        (room_send.py op `control` with the profile). The models are the Bot's own route list's that cost
+        nothing per message (bot_models), so a pick can never move it off its policy."""
+        got = self._helper({"op": "control", "profile": bot, "name": bot.capitalize(), "session_id": session_id,
+                            "allowed": bot_models(bot), **({"set": want} if want else {})}, CHECK_SECONDS)
+        if got is None:
+            return None, False, "the Bot's gateway did not answer in a minute"
+        if got.get("helper_failed"):
+            return None, False, str(got.get("reason"))[:200]
+        state = got.get("state") if isinstance(got.get("state"), dict) else None
+        return state, got.get("applied") is True, str(got.get("reason") or "")[:200]
+
     def react(self, bot: str, session_id: str, message_id: int, emoji: str | None) -> tuple[str, str]:
         """(outcome, reason): set Patrick's reaction on one message of a Bot's Bot Chat to exactly `emoji`
         (None takes it off), with that profile's own store."""
@@ -552,6 +566,19 @@ class Hermes:
         if seen.get("taken"):
             return "confirmed", f"{seen['taken']} into the running turn", ""
         return self._ended(bot, sid, code, started, seen)
+
+
+def bot_models(bot: str, policy_file: Path | None = None) -> list[list[str]]:
+    """[provider, model] of each route in the Bot's own list (policy.yaml routes, in its order) that it reaches
+    with its own sign-in: not one behind the admission proxy, which spends credits or needs One. These are
+    the only models its chat may be moved to from the app."""
+    from thornswood_guard.policy import Policy
+    from thornswood_guard.routes import chain_for
+    policy = Policy.load(policy_file) if policy_file else Policy.load()
+    if bot not in policy.bots:
+        return []
+    return [[r["provider"], r["model"]] for r in chain_for(policy, bot, proxy_ready=False)
+            if r.get("via") != "admission-proxy"]
 
 
 def fleet_room(policy_file: Path | None = None):
@@ -797,6 +824,24 @@ class Connector:
                                     "outcome": outcome, "reason": reason})
         return done
 
+    def controls(self, wanted: list) -> int:
+        """The reads and changes of a Bot's model and thinking the core handed over (own_control.py
+        BOT_CONTROLS), each through that Bot's gateway and posted back at once. Returns how many were posted."""
+        done = 0
+        for r in wanted[:3]:
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("bot"), str)
+                    and PROFILE_ID.match(r["bot"]) and isinstance(r.get("session_id"), str)
+                    and SESSION_ID.match(r["session_id"])):
+                continue
+            state, applied, reason = self.hermes.control(r["bot"], r["session_id"], r.get("set"))
+            status, _ = self.core.post("/connector/control", {"id": r["id"], "state": state, "applied": applied,
+                                                              "reason": reason})
+            if status == 200:
+                done += 1
+            else:
+                self.say(f"FAIL control: the core answered {status}")
+        return done
+
     def rewinds(self, wanted: list) -> int:
         """The undos and branches the core handed over (rewinds.py), each done in that Bot's chat one after
         another (each is one session.mutate). Returns how many were done; what came of each goes to the core
@@ -855,6 +900,7 @@ class Connector:
         items = body.get("items", [])[:free]
         self.react(body.get("reactions", []))
         self.rewinds(body.get("rewinds", []))
+        self.controls(body.get("controls", []))
         for item in items:
             t = threading.Thread(target=self._turn, args=(item,), name=f"turn {item['id']}", daemon=True)
             t.start()

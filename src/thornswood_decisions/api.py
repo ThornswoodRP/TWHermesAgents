@@ -279,6 +279,8 @@ class Api:
                 return 200, Chat(core.s).page_requests(self.ws, token)
             if route[1] == "live":
                 return 200, Chat(core.s).live(self.ws, token, data)
+            if route[1] == "control":
+                return 200, Chat(core.s).control_post(self.ws, token, data)
             if route[1] == "tasks":
                 return 200, Chat(core.s).tasks(self.ws, token, data)
             if route[1] == "page":
@@ -386,6 +388,10 @@ class Api:
         if method == "POST" and len(route) == 3 and route[0] == "chat" and route[2] == "rewind":
             return 200, Chat(core.s).rewind(p, route[1], data.get("op"), data.get("message_id"),
                                             data.get("idempotency_key"), session=data.get("session"))
+        if len(route) == 3 and route[0] == "chat" and route[2] == "control":
+            if method == "GET":
+                return 200, Chat(core.s).control(p, route[1], wait=query.get("wait"))
+            return 200, Chat(core.s).control_set(p, route[1], data)
         if len(route) == 2 and route[0] == "chat":
             if method == "GET":
                 return 200, Chat(core.s).view(p, route[1], session=query.get("session"))
