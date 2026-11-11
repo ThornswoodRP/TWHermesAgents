@@ -782,10 +782,11 @@ class BotChatFeed(unittest.TestCase):
         prof.mkdir(parents=True)
         con = sqlite3.connect(prof / "state.db")
         con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, archived INTEGER NOT NULL DEFAULT 0, "
-                    "started_at REAL NOT NULL, hidden INTEGER NOT NULL DEFAULT 0)")
+                    "started_at REAL NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, model TEXT, model_config TEXT, "
+                    "last_activity_at REAL)")
         con.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
                     "role TEXT NOT NULL, content TEXT, timestamp REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1)")
-        con.executemany("INSERT INTO sessions VALUES(?,?,?,?,?)", [
+        con.executemany("INSERT INTO sessions(id, title, archived, started_at, hidden) VALUES(?,?,?,?,?)", [
             ("bc", "Bot Chat", 0, 1761990000.0, 1), ("other", "Something else", 0, 1761999999.0, 0)])
         con.executemany("INSERT INTO messages(session_id, role, content, timestamp, active) VALUES(?,?,?,?,?)", [
             ("bc", "user", "status?", 1761998400.0, 1),
@@ -803,6 +804,8 @@ class BotChatFeed(unittest.TestCase):
         self.assertEqual((b["bot"], b["session_id"]), ("bramble", "bc"))
         self.assertEqual([(m["role"], m["text"]) for m in b["messages"]], [("user", "status?"), ("assistant", "All green.")])
         self.assertEqual([x["messages"] for x in snap["bots"][1:]], [[]] * 5)
+        # No turn has written its route yet: nothing is said about the model.
+        self.assertEqual([x["route"] for x in snap["bots"]], [None] * 6)
         w = World()
         self.addCleanup(w.close)
         seat(w)
@@ -815,6 +818,47 @@ class BotChatFeed(unittest.TestCase):
         with self.assertRaises(CoreError):
             f.put(w.ws, "bots", tok, {"source_time": now.isoformat(),
                                       "bots": [{"bot": "rift", "messages": [{"role": "system", "text": "x"}]}]})
+
+    def _turn(self, sid, model, runtime, at):
+        con = sqlite3.connect(self.home / "profiles" / "bramble" / "state.db")
+        con.execute("UPDATE sessions SET model = ?, model_config = ?, last_activity_at = ? WHERE id = ?",
+                    (model, json.dumps({"gateway_runtime": runtime}) if runtime is not None else None, at, sid))
+        con.commit()
+        con.close()
+
+    def test_the_model_the_newest_turn_ran_on_and_whether_it_fell_back(self):
+        """Hermes writes the model a gateway turn really used, with fallback_active, on that session's row
+        (gateway/run_turn_prepare.py _sync_session_model_from_agent); the newest one is what the Bot is on."""
+        now = datetime(2026, 11, 11, 21, 0, tzinfo=timezone.utc)
+        self._turn("bc", "claude-opus-4-6", {"provider": "anthropic", "fallback_active": False}, 1762890000.0)
+        self._turn("other", "gpt-5.5", {"provider": "openai-codex", "fallback_active": True}, 1762893600.0)
+        route = feed_reader.bots_snapshot(self.home, list(BOTS), now)["bots"][0]["route"]
+        self.assertEqual(route, {"model": "gpt-5.5", "provider": "openai-codex", "fallback": True,
+                                 "at": "2025-11-11T20:40:00+00:00"})
+        # Back on Claude: the next turn writes its own row, and the app no longer says it fell back.
+        self._turn("bc", "claude-opus-4-6", {"provider": "anthropic", "fallback_active": False}, 1762897200.0)
+        snap = feed_reader.bots_snapshot(self.home, list(BOTS), now)
+        self.assertEqual(snap["bots"][0]["route"]["model"], "claude-opus-4-6")
+        self.assertIs(snap["bots"][0]["route"]["fallback"], False)
+        # A row from before Hermes wrote its route, or a broken one, says nothing.
+        self._turn("bc", "claude-opus-4-6", None, 1762900800.0)
+        self._turn("other", "gpt-5.5", None, 1762900800.0)
+        self.assertIsNone(feed_reader.bots_snapshot(self.home, list(BOTS), now)["bots"][0]["route"])
+
+    def test_the_core_keeps_a_route_it_can_trust_and_the_app_reads_it(self):
+        now = datetime(2026, 11, 11, 21, 0, tzinfo=timezone.utc)
+        self._turn("bc", "gpt-5.5", {"provider": "openai-codex", "fallback_active": True}, 1762890000.0)
+        snap = feed_reader.bots_snapshot(self.home, list(BOTS), now)
+        snap["bots"][1]["route"] = {"model": "rm -rf /; x", "provider": "anthropic", "fallback": "yes", "at": "now"}
+        w = World()
+        self.addCleanup(w.close)
+        seat(w)
+        f = Feeds(w.store)
+        f.put(w.ws, "bots", f.new_token(w.ws, "bots", by="tests"), snap)
+        kept = {b["bot"]: b["route"] for b in f.get(w.ws, "bots")["bots"]["bots"]}
+        self.assertEqual((kept["bramble"]["model"], kept["bramble"]["fallback"]), ("gpt-5.5", True))
+        self.assertIsNone(kept["rift"])
+        self.assertIsNone(kept["echo"])
 
 
 # ── the connector process, against stand-ins for `hermes` and the room helper ──

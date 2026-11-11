@@ -163,12 +163,43 @@ def bot_chat(state_db: Path) -> dict | None:
         {"role": r["role"], "text": _text(r["content"]), "at": _iso(r["timestamp"])} for r in reversed(rows)]}
 
 
+# The model a Bot's newest turn ran on. After each turn the gateway writes the model it really used on that
+# session's row, with the route it took in model_config.gateway_runtime: its provider and fallback_active,
+# true while Hermes has moved the session off its main model (Hermes 0.23.0
+# gateway/run_turn_prepare.py _sync_session_model_from_agent, called from gateway/run_turn_runner.py after a
+# turn). So the newest such row says what the Bot is on now, a fallback included, in Hermes's own words.
+ROUTE_SQL = """
+SELECT model, json_extract(model_config, '$.gateway_runtime.provider') AS provider,
+  json_extract(model_config, '$.gateway_runtime.fallback_active') AS fallback,
+  coalesce(last_activity_at, started_at) AS at FROM sessions
+WHERE model IS NOT NULL AND model != '' AND model_config IS NOT NULL AND json_valid(model_config)
+  AND json_type(model_config, '$.gateway_runtime') = 'object'
+ORDER BY at DESC LIMIT 1
+"""
+
+
+def bot_route(state_db: Path) -> dict | None:
+    """The model, provider and fallback state of one profile's newest turn; None before its first turn."""
+    if not state_db.exists():
+        return None
+    con = _ro(state_db)
+    try:
+        r = con.execute(ROUTE_SQL).fetchone()
+    finally:
+        con.close()
+    if not r:
+        return None
+    return {"model": str(r["model"]), "provider": str(r["provider"] or ""), "fallback": r["fallback"] in (1, True),
+            "at": _iso(r["at"])}
+
+
 def bots_snapshot(hermes_home: Path, bots: list[str], now: datetime) -> dict:
     out = []
     for bot in bots:
-        chat = bot_chat(hermes_home / "profiles" / bot / "state.db")
+        db = hermes_home / "profiles" / bot / "state.db"
+        chat = bot_chat(db)
         out.append({"bot": bot, "session_id": chat["session_id"] if chat else "",
-                    "messages": chat["messages"] if chat else []})
+                    "messages": chat["messages"] if chat else [], "route": bot_route(db)})
     return {"source_time": now.isoformat(), "bots": out}
 
 

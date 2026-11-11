@@ -106,7 +106,7 @@ def clean(name: str, body: dict) -> dict:
                     raise CoreError(400, "bad_feed", "a Bot Chat message is from the user or the assistant")
                 kept.append(row)
             out["bots"].append({"bot": _text(b.get("bot"), 64), "session_id": _text(b.get("session_id"), 128),
-                                "messages": kept})
+                                "messages": kept, "route": _route(b.get("route"))})
     else:
         rooms = body.get("rooms") if "rooms" in body else [{"room_id": body.get("room_id"), "events": body.get("events")}]
         if not isinstance(rooms, list) or not 1 <= len(rooms) <= MAX_ROOMS:
@@ -116,6 +116,21 @@ def clean(name: str, body: dict) -> dict:
         if len(set(ids)) != len(ids):
             raise CoreError(400, "bad_feed", "the feed names a room twice")
     return out
+
+
+# A model or provider name as Hermes writes them (own_control.py MODEL and PROVIDER).
+ROUTE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$")
+ROUTE_PROVIDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+
+
+def _route(r) -> dict | None:
+    """The model a Bot's newest turn ran on (feed_reader.bot_route): its name, its provider, and whether Hermes
+    had moved off the Bot's main model for it. Anything else, or nothing yet, is None: never a guess."""
+    if not isinstance(r, dict) or not isinstance(r.get("model"), str) or not ROUTE_MODEL.match(r["model"]):
+        return None
+    provider = r.get("provider")
+    return {"model": r["model"], "provider": provider if isinstance(provider, str) and ROUTE_PROVIDER.match(provider)
+            else "", "fallback": r.get("fallback") is True, "at": _text(r.get("at"), 40)}
 
 
 def _room(r) -> dict:

@@ -38,7 +38,7 @@ import time
 from datetime import datetime, timedelta
 
 from .store import CoreError, new_id
-from .wakes import WAKES
+from .wakes import BOTS_GW, WAKES
 
 FRESH = timedelta(seconds=30)       # a read answers from memory this long
 AGAIN = timedelta(seconds=20)       # an ask not answered is handed out again after this
@@ -73,6 +73,8 @@ def clean_state(raw) -> dict:
     levels = [lv for lv in LEVELS if lv in (raw.get("levels") or [])]
     return {"model": model if isinstance(model, str) and MODEL.match(model) else None,
             "provider": provider if isinstance(provider, str) and PROVIDER.match(provider) else None,
+            # Hermes's own word that the chat is off its main model now (session.usage fallback_model).
+            "fallback": raw.get("fallback") is True,
             "reasoning": raw.get("reasoning") if raw.get("reasoning") in LEVELS else None,
             "levels": levels, "yolo": raw.get("yolo") is True,
             "busy": raw.get("busy") if raw.get("busy") in BUSY else None,
@@ -151,9 +153,13 @@ def wanted(state: dict | None, body) -> dict:
 
 
 class _Controls:
-    """Per chat: the last read, the ask the connector has not answered, and the newest change and how it went."""
+    """Per chat: the last read, the ask the connector has not answered, and the newest change and how it went.
+    A key is (workspace, agent, chat): his own Hermes or One for his own chats, a Bot for its Bot Chat. `wakes`
+    names the connector that answers, when it is not the agent's own: the Bots' one connector answers for all
+    six."""
 
-    def __init__(self):
+    def __init__(self, wakes: str | None = None):
+        self.wakes = wakes
         self.cond = threading.Condition()
         self.read: dict = {}      # (ws, gw, chat) -> (read_at, state)
         self.asked: dict = {}     # (ws, gw, chat) -> {"id", "set", "at", "handed"}
@@ -182,7 +188,7 @@ class _Controls:
             got = self.read.get(key)
             if key not in self.asked and not (got and now - got[0] < FRESH):
                 self.asked[key] = {"id": new_id("ctl"), "set": None, "at": now, "handed": None}
-                WAKES.bump(key[0], key[1])
+                WAKES.bump(key[0], self.wakes or key[1])
 
     def wait(self, key: tuple, seconds: float, since) -> None:
         """Until a read newer than `since` is in, for at most `seconds` of real time."""
@@ -209,26 +215,31 @@ class _Controls:
             # The newest change wins: an older one not handed out yet is replaced, never run after it.
             self.asked[key] = {"id": cid, "set": want, "at": now, "handed": None}
             self.changes[key] = {"id": cid, "set": want, "status": "queued", "reason": None, "at": now, "key": idem}
-        WAKES.bump(key[0], key[1])
+        WAKES.bump(key[0], self.wakes or key[1])
         return {"id": cid, "status": "queued"}
 
-    def hand(self, ws: str, gw: str, now: datetime) -> list[dict]:
+    def hand(self, ws: str, gw: str | None, now: datetime) -> list[dict]:
+        """The asks for that gateway's connector; with `gw` None, every agent's (the Bots' connector), each
+        naming its Bot."""
         with self.cond:
             self._drop_old(now)
             out = []
             for key, a in sorted(self.asked.items(), key=lambda kv: kv[1]["at"]):
-                if key[0] != ws or key[1] != gw or len(out) >= 3 or (a["handed"] and now - a["handed"] < AGAIN):
+                if key[0] != ws or (gw is not None and key[1] != gw) or len(out) >= 3 or (
+                        a["handed"] and now - a["handed"] < AGAIN):
                     continue
                 a["handed"] = now
-                out.append({"id": a["id"], "session_id": key[2], **({"set": a["set"]} if a["set"] else {})})
+                out.append({"id": a["id"], "session_id": key[2], **({"set": a["set"]} if a["set"] else {}),
+                            **({"bot": key[1]} if gw is None else {})})
             return out
 
-    def answer(self, ws: str, gw: str, body, now: datetime) -> dict:
+    def answer(self, ws: str, gw: str | None, body, now: datetime) -> dict:
         if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not CTL_ID.match(body["id"]):
             raise CoreError(400, "bad_control", "a control answer names the ask it answers")
         state = clean_state(body.get("state")) if body.get("state") is not None else None
         with self.cond:
-            key = next((k for k, a in self.asked.items() if a["id"] == body["id"] and k[0] == ws and k[1] == gw), None)
+            key = next((k for k, a in self.asked.items() if a["id"] == body["id"] and k[0] == ws
+                        and (gw is None or k[1] == gw)), None)
             if key is None:
                 raise CoreError(409, "not_asked", "no control read or change with that id was asked of this gateway")
             a = self.asked.pop(key)
@@ -247,3 +258,5 @@ class _Controls:
 
 
 CONTROLS = _Controls()
+# A Bot's Bot Chat: model and thinking only, read and changed by the Bots' connector (connector.py controls).
+BOT_CONTROLS = _Controls(wakes=BOTS_GW)
