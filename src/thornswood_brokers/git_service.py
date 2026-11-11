@@ -139,6 +139,11 @@ class RemoteDecisions:
 BASE_BUNDLE = re.compile(r"(?P<line>[A-Za-z0-9._-]+)-[0-9a-f]{12}\.bundle")
 
 
+def branches_file(repo: str) -> str:
+    """The file in spool/in/<bot> naming the Bot's branches on GitHub in repo."""
+    return f"branches-{repo.split('/')[1]}.json"
+
+
 def prune_base_bundles(folder: Path, *, current: str | None = None, half_made: bool = False) -> list[str]:
     """A Bot's spool/in keeps only its newest base bundle for each repo and
     base, and no bundle a crash left half made. A base bundle is read once,
@@ -459,6 +464,16 @@ class GitService:
             self._git(mirror, "bundle", "create", "-q", str(tmp), f"refs/heads/{base}")
             os.replace(tmp, out / name)
         prune_base_bundles(out, current=name)
+        # The Bot's branches GitHub has now, read from the mirror the fetch
+        # above pruned, for tw-files: a pushed tree whose branch is gone
+        # (merged, and GitHub deleted it, or deleted by hand) is finished.
+        on_github = sorted(b for b in self._git(mirror, "for-each-ref", "--format=%(refname:lstrip=3)",
+                                                "refs/remotes/origin/").split("\n")
+                           if b and self.policy.own_branch(bot, b))
+        listed = out / branches_file(repo)
+        tmp = out / f".{listed.name}.tmp"
+        tmp.write_text(json.dumps({"repo": repo, "branches": on_github}))
+        os.replace(tmp, listed)
         return {"bundle": name, "base": base, "sha": sha}
 
     def prune_spool_in(self) -> list[str]:
