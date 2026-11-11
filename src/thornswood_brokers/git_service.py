@@ -136,6 +136,47 @@ class RemoteDecisions:
         return None
 
 
+BASE_BUNDLE = re.compile(r"(?P<line>[A-Za-z0-9._-]+)-[0-9a-f]{12}\.bundle")
+
+
+def branches_file(repo: str) -> str:
+    """The file in spool/in/<bot> naming the Bot's branches on GitHub in repo."""
+    return f"branches-{repo.split('/')[1]}.json"
+
+
+def prune_base_bundles(folder: Path, *, current: str | None = None, half_made: bool = False) -> list[str]:
+    """A Bot's spool/in keeps only its newest base bundle for each repo and
+    base, and no bundle a crash left half made. A base bundle is read once,
+    by the checkout that starts a tree from it, and a newer base replaces
+    it; until 11 Nov 2026 none was ever deleted, 16 GB of them filled the
+    VM's disk past the fleet queue's floor and no Bot turn was admitted.
+    current is the bundle just handed out, which is its line's newest;
+    without it the newest file of each line stays. half_made is for tw-git's
+    start only, when no bundle is being written."""
+    newest: dict[str, tuple[float, str]] = {}
+    gone: list[str] = []
+    with os.scandir(folder) as it:
+        entries = [e for e in it if e.is_file(follow_symlinks=False)]
+    for e in entries:
+        if e.name.startswith(".") and e.name.endswith(".bundle.tmp"):
+            continue
+        m = BASE_BUNDLE.fullmatch(e.name)
+        if not m:
+            continue
+        when = e.stat(follow_symlinks=False).st_mtime
+        if m["line"] not in newest or (when, e.name) > newest[m["line"]]:
+            newest[m["line"]] = (when, e.name)
+    if current and BASE_BUNDLE.fullmatch(current):
+        newest[BASE_BUNDLE.fullmatch(current)["line"]] = (float("inf"), current)
+    keep = {name for _, name in newest.values()}
+    for e in entries:
+        stale_tmp = half_made and e.name.startswith(".") and e.name.endswith(".bundle.tmp")
+        if stale_tmp or (BASE_BUNDLE.fullmatch(e.name) and e.name not in keep):
+            os.unlink(folder / e.name)
+            gone.append(e.name)
+    return gone
+
+
 class GitService:
     def __init__(self, policy: Policy, github: GitHub, ask_policy: Callable[[str, dict], dict], *,
                  mirrors: Path, spool: Path, git_base: str = "https://github.com/",
@@ -422,7 +463,28 @@ class GitService:
             tmp = out / f".{name}.tmp"
             self._git(mirror, "bundle", "create", "-q", str(tmp), f"refs/heads/{base}")
             os.replace(tmp, out / name)
+        prune_base_bundles(out, current=name)
+        # The Bot's branches GitHub has now, read from the mirror the fetch
+        # above pruned, for tw-files: a pushed tree whose branch is gone
+        # (merged, and GitHub deleted it, or deleted by hand) is finished.
+        on_github = sorted(b for b in self._git(mirror, "for-each-ref", "--format=%(refname:lstrip=3)",
+                                                "refs/remotes/origin/").split("\n")
+                           if b and self.policy.own_branch(bot, b))
+        listed = out / branches_file(repo)
+        tmp = out / f".{listed.name}.tmp"
+        tmp.write_text(json.dumps({"repo": repo, "branches": on_github}))
+        os.replace(tmp, listed)
         return {"bundle": name, "base": base, "sha": sha}
+
+    def prune_spool_in(self) -> list[str]:
+        """At start, each Bot's spool/in back to its newest base per repo."""
+        root = self.spool / "in"
+        gone: list[str] = []
+        if root.is_dir():
+            for d in sorted(root.iterdir()):
+                if d.is_dir() and not d.is_symlink():
+                    gone += prune_base_bundles(d, half_made=True)
+        return gone
 
     def open_pr(self, caller: str, args: dict) -> dict:
         bot, repo, task = self._bot(args), self._repo(args), self._task(args)

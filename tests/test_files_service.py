@@ -119,6 +119,102 @@ class Work(unittest.TestCase):
         with self.assertRaises(Refused):
             w.git.base("hermes", {"bot": "rift", "repo": FORK})
 
+    def test_a_newer_base_replaces_the_bots_older_one(self):
+        # 11 Nov 2026: no base bundle was ever deleted; 16 GB of them took the
+        # VM's disk under the fleet queue's floor and no Bot turn ran.
+        w = World()
+        first = w.git.base("hermes", {"bot": "rift", "repo": APP})["bundle"]
+        sprockets = w.git.base("hermes", {"bot": "sprocket", "repo": APP})["bundle"]
+        work = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "clone", "-q", str(w.fake.remote(APP)), str(work)], check=True, capture_output=True)
+        (work / "NEW.md").write_text("new\n")
+        git(work, "add", "-A")
+        git(work, "commit", "-q", "-m", "new")
+        git(work, "push", "-q", "origin", "HEAD:main")
+        second = w.git.base("hermes", {"bot": "rift", "repo": APP})
+        self.assertNotEqual(first, second["bundle"])
+        self.assertEqual(sorted(p.name for p in (w.spool / "in" / "rift").glob("*.bundle")), [second["bundle"]])
+        self.assertTrue((w.spool / "in" / "sprocket" / sprockets).is_file())
+        out = w.files.checkout("hermes", {"bot": "rift", "repo": APP, "task": "12-load-order",
+                                          "bundle": second["bundle"], "branch": "rift/12-load-order"})
+        self.assertEqual(out["head"], second["sha"])
+
+    def test_tw_git_starts_with_one_base_per_repo_for_each_bot(self):
+        w = World()
+        d = w.spool / "in" / "echo"
+        d.mkdir(parents=True)
+        for i, name in enumerate(["Thornswood-main-aaaaaaaaaaaa.bundle", "Thornswood-main-bbbbbbbbbbbb.bundle",
+                                  "Thornswood-Ops-main-cccccccccccc.bundle", "Thornswood-Ops-main-dddddddddddd.bundle",
+                                  ".Thornswood-main-eeeeeeeeeeee.bundle.tmp", "work.bundle"]):
+            (d / name).write_text("x")
+            os.utime(d / name, (1000 + i, 1000 + i))
+        gone = w.git.prune_spool_in()
+        self.assertEqual(sorted(p.name for p in d.iterdir()),
+                         ["Thornswood-Ops-main-dddddddddddd.bundle", "Thornswood-main-bbbbbbbbbbbb.bundle", "work.bundle"])
+        self.assertEqual(len(gone), 3)
+        self.assertEqual(w.git.prune_spool_in(), [])
+
+    def _send(self, w, task):
+        w.files.write("hermes", w.a(task=task, path=f"{task}.txt", content="work\n"))
+        w.files.commit("hermes", w.a(task=task, message=f"Work on {task}"))
+        b = w.files.bundle("hermes", w.a(task=task))
+        w.git.push("hermes", {"bot": "sprocket", "repo": APP, "task": task.split("-")[0], "branch": b["branch"],
+                              "bundle": b["bundle"]})
+        return b
+
+    def _start(self, w, task):
+        b = w.git.base("hermes", {"bot": "sprocket", "repo": APP})
+        return w.files.checkout("hermes", {"bot": "sprocket", "repo": APP, "task": task, "bundle": b["bundle"],
+                                           "branch": f"sprocket/{task}"})
+
+    def test_a_tree_whose_branch_went_out_and_is_gone_goes_at_the_next_checkout(self):
+        # 11 Nov 2026: nothing removed a tree; 72 of them (21 GB) took the VM's
+        # disk under the fleet queue's floor and no Bot turn ran.
+        w = World()
+        self._start(w, "1-merged")
+        self._send(w, "1-merged")
+        self._start(w, "2-open")
+        self._send(w, "2-open")
+        self._start(w, "3-not-sent")
+        w.checkout(bot="rift", task="4-rifts")
+        git(w.fake.remote(APP), "branch", "-D", "sprocket/1-merged")  # merged, and GitHub deleted the branch
+        out = self._start(w, "5-next")
+        self.assertEqual(out["removed"], ["1-merged"])
+        self.assertEqual([t["task"] for t in w.files.trees("hermes", {"bot": "sprocket"})["trees"]],
+                         ["2-open", "3-not-sent", "5-next"])
+        self.assertFalse(any(p.name.startswith("1-merged-") for p in (w.spool / "out" / "sprocket").iterdir()))
+        self.assertTrue(any(p.name.startswith("2-open-") for p in (w.spool / "out" / "sprocket").iterdir()))
+        self.assertTrue(w.tree(bot="rift", task="4-rifts").is_dir())
+        self.assertNotIn("removed", self._start(w, "6-after"))
+
+    def test_a_tree_sent_after_the_branch_list_stays(self):
+        w = World()
+        self._start(w, "1-first")
+        b = w.git.base("hermes", {"bot": "sprocket", "repo": APP})
+        listed = w.spool / "in" / "sprocket" / "branches-Thornswood.json"
+        os.utime(listed, (1000, 1000))
+        self._send(w, "1-first")
+        out = w.files.checkout("hermes", {"bot": "sprocket", "repo": APP, "task": "2-second", "bundle": b["bundle"],
+                                          "branch": "sprocket/2-second"})
+        self.assertNotIn("removed", out)
+        self.assertTrue(w.tree(task="1-first").is_dir())
+
+    def test_without_tw_gits_list_no_tree_goes(self):
+        w = World()
+        self._start(w, "1-merged")
+        self._send(w, "1-merged")
+        git(w.fake.remote(APP), "branch", "-D", "sprocket/1-merged")
+        (w.spool / "in" / "sprocket" / "branches-Thornswood.json").unlink()
+        self.assertNotIn("removed", w.checkout(task="2-next"))
+        self.assertTrue(w.tree(task="1-merged").is_dir())
+
+    def test_remove_takes_the_trees_push_bundles_with_it(self):
+        w = World()
+        self._start(w, "1-done")
+        self._send(w, "1-done")
+        w.files.remove("hermes", w.a(task="1-done"))
+        self.assertEqual(list((w.spool / "out" / "sprocket").iterdir()), [])
+
     def test_a_tree_is_on_the_bots_own_branch_only(self):
         w = World()
         with self.assertRaises(Refused):

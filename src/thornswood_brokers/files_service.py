@@ -17,13 +17,17 @@ policy (a check runs as tw-<bot> and could have planted one).
 
 Work comes in and goes out as git bundles: tw-git writes the base into
 spool/in/<bot>, tw-files writes the Bot's branch into spool/out/<bot>, and
-tw-git pushes it after its own checks. Neither broker reads the other's state.
+tw-git pushes it after its own checks. With the base, tw-git writes which of
+the Bot's branches GitHub has now; a checkout removes the Bot's trees in that
+repo whose branch went out and is gone from GitHub since. Neither broker
+reads the other's state.
 """
 
 from __future__ import annotations
 
 import errno
 import fnmatch
+import json
 import os
 import re
 import secrets
@@ -400,6 +404,7 @@ class FilesService:
         with self._lock(bot):
             if os.path.lexists(tree):
                 raise Refused(f"the tree for task {args.get('task')} already exists")
+            finished = self._remove_finished(bot, repo)
             # The Bot's own folder is the install's (its group and setgid bit
             # are what keep the tree the Bot's); the broker never makes it.
             if not os.path.lexists(self.work / bot):
@@ -412,7 +417,62 @@ class FilesService:
             self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{base}:refs/remotes/origin/{base}", allow_file=True)
             self._git(tree, "checkout", "-q", "-b", branch, f"refs/remotes/origin/{base}")
             head = self._git(tree, "rev-parse", "HEAD").stdout.strip()
-        return {"tree": f"{repo} {tree.name}", "branch": branch, "base": base, "head": head}
+        out = {"tree": f"{repo} {tree.name}", "branch": branch, "base": base, "head": head}
+        if finished:
+            out["removed"] = finished
+        return out
+
+    def _remove_finished(self, bot: str, repo: str) -> list[str]:
+        """The Bot's trees in repo whose branch went out (tw-files bundled it
+        for tw-git) and that GitHub no longer has, by tw-git's list written
+        after that bundle: the pull request merged and GitHub deleted the
+        branch, or someone deleted it. Until 11 Nov 2026 nothing removed a
+        tree, and 72 of them (21 GB) took the VM's disk under the fleet
+        queue's floor. Called with the Bot's lock held."""
+        listed = self.spool_in / bot / f"branches-{repo.split('/')[1]}.json"
+        try:
+            st = os.lstat(listed)
+            if not stat.S_ISREG(st.st_mode):
+                return []
+            on_github = set(json.loads(listed.read_text()).get("branches") or [])
+        except (OSError, ValueError):
+            return []
+        folder = self.work / bot / self._repo_dir(bot, repo)
+        try:
+            names = sorted(e.name for e in os.scandir(folder)
+                           if TASK.fullmatch(e.name) and stat.S_ISDIR(e.stat(follow_symlinks=False).st_mode))
+        except OSError:
+            return []
+        removed = []
+        for name in names:
+            sent = self._sent(bot, name)
+            if not sent or max(os.lstat(p).st_mtime for p in sent) >= st.st_mtime:
+                continue
+            tree = folder / name
+            try:
+                branch = self._git(tree, "symbolic-ref", "--short", "-q", "HEAD", check=False).stdout.strip()
+            except Refused:
+                continue
+            if not branch or not self.policy.own_branch(bot, branch) or branch in on_github:
+                continue
+            try:
+                shutil.rmtree(tree)
+                for p in sent:
+                    os.unlink(p)
+            except OSError as e:
+                removed.append(f"{name} (not all of it: {e.strerror} on {Path(e.filename or '').name})")
+                continue
+            removed.append(name)
+        return removed
+
+    def _sent(self, bot: str, task: str) -> list[Path]:
+        """The bundles tw-files made of this tree for tw-git to push."""
+        d = self.spool_out / bot
+        pattern = re.compile(re.escape(task) + r"-[0-9a-f]{12}\.bundle")
+        try:
+            return [d / e.name for e in os.scandir(d) if pattern.fullmatch(e.name) and e.is_file(follow_symlinks=False)]
+        except OSError:
+            return []
 
     def status(self, caller: str, args: dict) -> dict:
         bot, _, tree = self._tree(args)
@@ -479,6 +539,8 @@ class FilesService:
         bot, repo, tree = self._tree(args)
         with self._lock(bot):
             shutil.rmtree(tree)
+            for p in self._sent(bot, tree.name):
+                os.unlink(p)
         return {"removed": f"{repo} {tree.name}"}
 
     def _spool(self, root: Path, bot: str, name: str) -> Path:
