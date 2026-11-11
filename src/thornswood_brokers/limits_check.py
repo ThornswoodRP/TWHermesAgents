@@ -4,8 +4,9 @@ tw-limits-check.service runs this as root, once, ordered before the brokers
 and the gateway. It reads memory.max, memory.high, cpu.max and pids.max of
 each Thornswood slice from the cgroup tree, starts one throwaway check of each
 tier and reads which slice it really landed in, and checks the swapfile,
-/srv/tw's group quotas, each Bot's own Tier A disk and the free-space
-floors. It records the outcome in
+/srv/tw's group quotas and each Bot's own Tier A disk: what holds until it
+is changed. Free space is not here: tw-policy reads it live at every admit.
+It records the outcome in
 tw-policy. The gateway starts either way so Patrick can be told; tw-policy
 admits no sandbox job until a check passes. A failed check is never fixed by
 raising or removing a limit.
@@ -27,7 +28,6 @@ from typing import Callable
 
 from thornswood_guard.policy import Policy
 
-from . import host as hostmod
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def tier_problems(run: Callable[[list[str]], subprocess.CompletedProcess], polic
 
 
 def run_check(policy: Policy, *, root: Path = Path("/"), run=None, hermes_uid: int | None = None,
-              image: str | None = None, host_state=None) -> list[str]:
+              image: str | None = None) -> list[str]:
     run = run or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=120))
     cg = root / "sys" / "fs" / "cgroup"
     problems = []
@@ -187,12 +187,12 @@ def run_check(policy: Policy, *, root: Path = Path("/"), run=None, hermes_uid: i
     srv = policy.data["brokers"]["state"]["work"].rsplit("/", 1)[0]
     problems += quota_problems(run, srv, disk_caps(policy))
     problems += tier_a_disk_problems(run, policy)
-    state = host_state or hostmod.read(root, srv=srv)
-    rules = policy.data["admission"]
-    if state.srv_free_gb < rules["admit"]["srv_free_gb"]:
-        problems.append(f"{state.srv_free_gb:.0f} GB free on {srv}; the floor is {rules['admit']['srv_free_gb']} GB")
-    if state.boot_free_gb < rules["admit"]["boot_free_gb"]:
-        problems.append(f"{state.boot_free_gb:.0f} GB free on the boot disk; the floor is {rules['admit']['boot_free_gb']} GB")
+    # No free-space floor here. Free space changes from minute to minute, and
+    # tw-policy reads it at every admit (host.admit_problems), sandbox jobs
+    # included; a reading kept from boot froze one moment until the next
+    # boot. On 11 Nov 2026 the install ran this check at 6:47:08 PM UTC with
+    # 24.89 GiB free, tw-git freed 15 GB two seconds later, and every sandbox
+    # job stayed refused on the old reading.
     if image:
         problems += tier_problems(run, policy, hermes_uid, image)
     return problems

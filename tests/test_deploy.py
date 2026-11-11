@@ -32,6 +32,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import HEAD, REPO, policy
 
@@ -426,7 +427,7 @@ class LimitsCheck(unittest.TestCase):
 
     def check(self, run=None, **kw):
         return limits_check.run_check(self.p, root=self.root, run=run or FakeRun(), hermes_uid=1002,
-                                      image="thornswood-sandbox:pinned", host_state=kw.get("host") or roomy())
+                                      image="thornswood-sandbox:pinned")
 
     def test_slice_paths(self):
         self.assertEqual(limits_check.slice_path("tw-hermes.slice"), "tw.slice/tw-hermes.slice")
@@ -463,14 +464,21 @@ class LimitsCheck(unittest.TestCase):
         self.assertIn("a Tier B job did not land in tw-sandbox.slice", got)
         self.assertIn("a Tier A container did not land under the hermes user's slice", got)
 
-    def test_16_swap_quotas_and_floors(self):
+    def test_16_swap_and_quotas(self):
         (self.root / "proc" / "swaps").write_text("Filename Type Size Used Priority\n")
-        got = "\n".join(self.check(FakeRun(quota="group quota on /srv/tw is off"),
-                                   host=HostState(16, 0, 0, 0, 0.2, 20, 5)))
+        got = "\n".join(self.check(FakeRun(quota="group quota on /srv/tw is off")))
         self.assertIn("swapfile", got)
         self.assertIn("group quotas are not on", got)
-        self.assertIn("20 GB free on /srv/tw", got)
-        self.assertIn("free on the boot disk", got)
+
+    def test_16_free_space_is_not_kept_from_boot(self):
+        # 11 Nov 2026: the install's check read 24.89 GiB free under the 25 GB
+        # floor, tw-git freed 15 GB two seconds later, and every sandbox job
+        # stayed refused on that reading until the next boot. tw-policy reads
+        # free space at every admit (test_policy_service); the boot check
+        # holds only what stays as it is until someone changes it.
+        full = os.statvfs_result((4096, 4096, 1000, 1, 1, 1000, 1, 1, 0, 255))
+        with mock.patch("os.statvfs", return_value=full):
+            self.assertEqual(self.check(), [])
 
     def test_16_a_bot_whose_tier_a_folder_is_not_its_own_filesystem_is_found(self):
         run = FakeRun()
