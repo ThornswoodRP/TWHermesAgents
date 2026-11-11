@@ -205,23 +205,28 @@ class GitService:
     def _url(self, repo: str) -> str:
         return f"{self.git_base}{repo}" + ("" if self.git_base.startswith("file:") else ".git")
 
-    def _begin(self, bot, task, action, repo, target, commit) -> dict:
-        return self.ask("op_begin", {"bot": bot, "task": task, "action": action, "repo": repo, "target": target, "commit": commit})
+    def _begin(self, bot, task, action, repo, target, commit, undone: bool = False) -> dict:
+        args = {"bot": bot, "task": task, "action": action, "repo": repo, "target": target, "commit": commit}
+        if undone:
+            args["undone"] = True
+        return self.ask("op_begin", args)
 
     def _finish(self, key: str, outcome: str, receipt=None, reason: str | None = None) -> None:
         self.ask("op_finish", {"key": key, "outcome": outcome, "receipt": receipt, "reason": reason})
 
     def _guarded_write(self, bot, task, action, repo, target, commit, *, write: Callable[[], object],
-                       read_back: Callable[[], object | None]) -> dict:
+                       read_back: Callable[[], object | None], undone: bool = False) -> dict:
         """op_begin, the one write, read back, report. read_back returns a
-        receipt when the write is visible on GitHub, None when it is not."""
-        op = self._begin(bot, task, action, repo, target, commit)
+        receipt when the write is visible on GitHub, None when it is not.
+        undone: the caller read GitHub just now and the write's effect is not
+        there, so a receipt for the same write is of a past state."""
+        op = self._begin(bot, task, action, repo, target, commit, undone)
         if op["state"] == "reconcile":
             found = read_back()
             self.ask("op_reconcile", {"key": op["key"], "found": found is not None, "receipt": found})
             if found is not None:
                 return {"done": True, "reconciled": True, "receipt": found}
-            op = self._begin(bot, task, action, repo, target, commit)
+            op = self._begin(bot, task, action, repo, target, commit, undone)
         try:
             answer = write()
         except GitHubError as e:
@@ -559,6 +564,11 @@ class GitService:
         else:
             raise Refused("a label is added or removed")
         self._check(v)
+        # A label is a state on the issue, read just now: one already as asked
+        # needs no write, and one that is not is a write to make now, whatever
+        # an older receipt for the same label says (Thornswood-Ops #280).
+        if (label in issue.labels) == (action == "add"):
+            return {"done": True, "already": True, "receipt": {"label": label, "on": action == "add"}}
         app = "bramble" if bot == "bramble" else self._app(bot)
         perms = WRITE["pr_conversation"] if issue.pull_request else WRITE["issues"]
 
@@ -575,7 +585,8 @@ class GitService:
             has = label in self._issue(repo, number).labels
             return {"label": label, "on": has} if has == (action == "add") else None
 
-        return self._guarded_write(bot, task, f"label-{action}", repo, f"issue/{number}/{label}", "", write=write, read_back=read_back)
+        return self._guarded_write(bot, task, f"label-{action}", repo, f"issue/{number}/{label}", "", write=write,
+                                   read_back=read_back, undone=True)
 
     def _repo_label(self, repo: str, name: str) -> dict | None:
         try:

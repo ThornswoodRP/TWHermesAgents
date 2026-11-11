@@ -789,6 +789,24 @@ class PullRequestsAndIssues(unittest.TestCase):
         self.assertTrue(out["done"], out)
         self.assertEqual(w.fake.tokens[-1]["permissions"], {"pull_requests": "write", "metadata": "read"})
 
+    def test_a_claim_that_came_off_goes_on_again(self):
+        # Thornswood-Ops #280, 10 Nov 2026: "claimed: Wisp" on #4482 answered
+        # "already done" from an older receipt while the issue showed no claim.
+        w = World()
+        w.fake.add_issue(APP, 4482, labels=["area: Gamemode"])
+        args = {"bot": "bramble", "repo": APP, "task": "ThornswoodRP/Thornswood#4482", "number": 4482,
+                "label": "claimed: Wisp"}
+        self.assertTrue(w.git.label("hermes", dict(args, action="add"))["done"])
+        self.assertTrue(w.git.label("hermes", dict(args, action="remove"))["done"])
+        out = w.git.label("hermes", dict(args, action="add"))
+        self.assertTrue(out["done"], out)
+        self.assertNotIn("already", out)
+        self.assertIn("claimed: Wisp", [l["name"] for l in w.fake.issues[(APP, 4482)]["labels"]])
+        writes = len(w.fake.writes())
+        again = w.git.label("hermes", dict(args, action="add"))
+        self.assertTrue(again["done"] and again["already"], again)
+        self.assertEqual(len(w.fake.writes()), writes, "a label already as asked needs no write")
+
     def test_a_comment_on_an_issue_keeps_issues_write(self):
         w = World()
         w.fake.add_issue(APP, 3150, labels=["claimed: Sprocket"])

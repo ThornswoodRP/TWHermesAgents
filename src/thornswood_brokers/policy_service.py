@@ -519,7 +519,16 @@ class PolicyService:
         with self._tx():
             row = self.db.execute("SELECT state, attempt, receipt FROM operations WHERE key=?", (key,)).fetchone()
             if row and row[0] == "confirmed":
-                raise Refused(f"{fields['action']} on {fields['target']} was already done; receipt {row[2]}")
+                # undone: tw-git read GitHub just now and the confirmed write's
+                # effect is not there any more (a label taken off since), so
+                # the receipt describes the past and the write is a new one.
+                # Until 10 Nov 2026 the receipt was final, so a claim that
+                # came off could never go on again (Thornswood-Ops #280:
+                # "claimed: Wisp" on #4482 answered "already done" while the
+                # issue showed no claim).
+                if not args.get("undone"):
+                    raise Refused(f"{fields['action']} on {fields['target']} was already done; receipt {row[2]}")
+                self._audit(caller, "op_reopen", {"key": key, "receipt": row[2]})
             if row and row[0] in ("started", "unknown"):
                 return {"key": key, "state": "reconcile",
                         "reason": "an earlier attempt's outcome is unknown; read GitHub and report it with op_reconcile before anything else"}
