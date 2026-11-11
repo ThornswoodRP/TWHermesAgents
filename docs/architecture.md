@@ -105,7 +105,7 @@ The host's caps are in `policy.yaml` `slices`, rendered into `deploy/systemd/*.s
 | `tw-sandbox.slice` | `tw-files` checks | 4 GB | 100% |
 | The `hermes` user's slice | The Bots' podman containers | 4 GB | 100% |
 
-At every boot, before the brokers and the gateway start, `tw-limits-check` reads each slice's caps from the cgroup tree, starts one job of each tier to see where it lands, and checks the swapfile, the Bots' disk quotas and the free-space floors. If anything is off, `tw-policy` admits no sandbox job.
+At every boot, before the brokers and the gateway start, `tw-limits-check` reads each slice's caps from the cgroup tree, starts one job of each tier to see where it lands, and checks the swapfile and the Bots' disk quotas. If anything is off, `tw-policy` admits no sandbox job. Free space is not part of it: `tw-policy` reads it at every admit.
 
 ## Backups
 
