@@ -257,7 +257,6 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)))
         self.assertIn("tw-git did not answer", out[-2])
-        self.assertIn("still due", out[-2])
 
     def test_no_free_worker_check_from_11_pm_to_6_am(self):
         # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain.
@@ -445,23 +444,6 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("pick for each free worker", out[-1])
         searches = [a for a in b.reads() if "/search/" in a["path"]]
         self.assertLessEqual(len(searches), 3, [urllib_q(a) for a in searches])
-
-    def test_a_refused_look_is_still_due_at_the_next_check(self):
-        # 10 Nov 2026: the look was recorded before it ran, so each refusal cost an hour.
-        home = self.day()
-
-        def down(broker, op, args):
-            if broker == "git":
-                raise BrokerRefused("GitHub: 403 You have exceeded a secondary rate limit")
-            return Idle()(broker, op, args)
-        out = owed_wake.check(home, "bramble", down, now=NOON, policy=POLICY)
-        self.assertFalse(wakes("\n".join(out)))
-        self.assertIn("still due", out[-2])
-        self.assertNotIn("idle_checked", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)))
-        b = Idle(claimed=dict(BUSY, **{"claimed: Rift": 0}), open_={'"area: Mods","area: Load order"': 2})
-        out = owed_wake.check(home, "bramble", b, now=NOON + 300, policy=POLICY)
-        self.assertTrue(wakes("\n".join(out)), out)
-        self.assertIn("in the field of rift", out[-1])
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}

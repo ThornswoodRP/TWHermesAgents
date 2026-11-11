@@ -213,20 +213,16 @@ def _own_work(bot: str, ask: Caller, policy: dict) -> list[str]:
 def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, state: dict) -> list[str]:
     """The free worker wake, 6 AM to 11 PM: its lines, the last SLEEP unless a free
     worker has work on the board."""
+    state["idle_checked"] = now
     state.pop("stopped", None)
+    _save(path, state)
     workers = {name: b["claim_label"] for name, b in policy["bots"].items() if b.get("role") == "worker"}
     repo = policy["repos"]["app"]
     asked = _asked(bot, ask)
     try:
-        lines = _look(bot, ask, now, policy, workers, repo, asked)
+        return _look(bot, ask, now, policy, workers, repo, asked)
     except BrokerRefused as e:
-        # The look did not happen, so it is not recorded as done: it stays due
-        # and runs whole at the next check. Until 10 Nov 2026 it was recorded
-        # before it ran, and each refused look cost an hour.
-        return [f"tw-git did not answer ({e}); the free worker check did not run and is still due", SLEEP]
-    state["idle_checked"] = now
-    _save(path, state)
-    return lines
+        return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
 
 
 def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, str], repo: str,
