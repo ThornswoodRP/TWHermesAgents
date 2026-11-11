@@ -180,6 +180,15 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
             _save(path, state)
     if not idle_due:
         return [*said, night if not working and night else "the free worker check is not due", SLEEP]
+    if alert_due:
+        # One look per run (10 Nov 2026): the alert look's searches and the
+        # free worker look's, sent back to back on the workers' App, passed
+        # GitHub's secondary rate limit at every hourly look from 11:59 AM
+        # (a 403 on the tenth search in seven seconds), and no worker was
+        # given an issue from 12:27 PM. The free worker look stays due and
+        # runs at the next check, five minutes on.
+        return [*said, "the free worker check is due and runs at the next check, apart from this one's searches",
+                SLEEP]
     return [*said, *_free_workers(bot, ask, now, policy, path, state)]
 
 
@@ -211,64 +220,112 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     repo = policy["repos"]["app"]
     asked = _asked(bot, ask)
     try:
-        # A worker's pull request for a Thornswood issue may be in the fork:
-        # Wisp's engine fixes are (10 Nov 2026: #4513's fix merged as fork
-        # #148 at 5:49 AM, and Wisp, seen as still working it, got nothing
-        # from 9:44 AM on, with 179 issues open in its field).
-        prs = {**_worked(bot, ask, policy["repos"]["fork"]), **_worked(bot, ask, repo)}
-        parked: dict[str, list[int]] = {}
-        free = []
-        for w in workers:
-            busy = _active(bot, ask, repo, w, workers[w], prs, asked, parked)
-            if w == "wisp":
-                busy = _active(bot, ask, policy["repos"]["fork"], w, workers[w], prs, asked, parked) or busy
-            if not busy:
-                free.append(w)
-        stopped = _stopped(bot, ask, [w for w in workers if w not in free], now)
-        said = []
-        if parked:
-            said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
-                        "each holds a claimed issue with no pull request that it has moved on from (it opened a "
-                        "pull request for another issue since the issue last changed), so it is not working it: "
-                        "comment what it waits on and take the claim off, or send it back to the worker as its "
-                        "next issue (bramble-duties, section 6, items 1 and 5). The worker counts as free.")
-        if stopped:
-            said.append(f"{', '.join(sorted(stopped))} hold an active issue but have run no turn since "
-                        f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each stopped "
-                        "mid-issue and nothing wakes it by itself; tell each to carry on, or take its claim off "
-                        "if it is blocked (bramble-duties, section 6, items 5 and 6). This is said at every "
-                        "hourly look until it runs a turn or its claim comes off.")
-        if not free:
-            return said or ["every worker is on an active issue", SLEEP]
-        # Open, unclaimed, and nobody's whose work is hands off: the board's
-        # eligible rule (bramble-duties, section 6) as one search can say it.
-        # Bramble's own pick reads the board's Order and Status.
-        rest = " ".join([*(f'-label:"{b["claim_label"]}"' for b in policy["bots"].values()),
-                         *(f'-label:"{l}"' for l in policy["hands_off"]["lanes"]["labels"]),
-                         *(f"-author:{p} -assignee:{p}" for p in policy["hands_off"]["people"])])
-        # Every free worker is looked at, not only the first with work: at
-        # 2:00 PM on 9 Nov 2026 the line named Rift's field alone, and Wisp's
-        # 181 issues went unsaid.
-        fed = [w for w in free if _count(bot, ask, repo, f"label:{_field(w)} {rest}")]
-        if fed:
-            return [*said, f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits), and "
-                    f"open unclaimed issues are in the field of {', '.join(fed)}: pick for each of them, reading "
-                    "the board by its area (bramble-duties, section 6)."]
-        owned = " ".join(f'-label:"area: {a}"' for mine in AREAS.values() for a in (*mine,)) + " " + \
-            " ".join(f'-label:"area: {a}"' for a in BRAMBLES_OWN)
-        if _count(bot, ask, repo, f"{owned} {rest}"):
-            return [*said, f"{', '.join(free)} hold no active issue, and open unclaimed issues are picked by the "
-                    "part they name: pick for the free workers (bramble-duties, section 6)."]
-        if said:
-            return said
+        return _look(bot, ask, now, policy, workers, repo, asked)
     except BrokerRefused as e:
         return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
+
+
+def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, str], repo: str,
+          asked: set[str]) -> list[str]:
+    """The free worker look itself, in at most five GitHub searches: the
+    workers' claims in each repo (one search each, every claim label at
+    once), the free workers' fields (one), and the parts no worker owns (one,
+    only when the fields hold nothing). Until 10 Nov 2026 it searched once
+    per worker and once per free worker's field, up to twelve searches in
+    seven seconds with the alert look's, and GitHub refused the tenth."""
+    # A worker's pull request for a Thornswood issue may be in the fork:
+    # Wisp's engine fixes are (10 Nov 2026: #4513's fix merged as fork
+    # #148 at 5:49 AM, and Wisp, seen as still working it, got nothing
+    # from 9:44 AM on, with 179 issues open in its field).
+    prs = {**_worked(bot, ask, policy["repos"]["fork"]), **_worked(bot, ask, repo)}
+    claims = _claims(bot, ask, repo, list(workers.values()))
+    fork_claims = _claims(bot, ask, policy["repos"]["fork"], [workers["wisp"]]) if "wisp" in workers else {}
+    parked: dict[str, list[int]] = {}
+    free = []
+    for w in workers:
+        busy = _active(repo, w, claims.get(workers[w], []), prs, asked, parked)
+        if w == "wisp":
+            busy = _active(policy["repos"]["fork"], w, fork_claims.get(workers[w], []), prs, asked,
+                           parked) or busy
+        if not busy:
+            free.append(w)
+    stopped = _stopped(bot, ask, [w for w in workers if w not in free], now)
+    said = []
+    if parked:
+        said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
+                    "each holds a claimed issue with no pull request that it has moved on from (it opened a "
+                    "pull request for another issue since the issue last changed), so it is not working it: "
+                    "comment what it waits on and take the claim off, or send it back to the worker as its "
+                    "next issue (bramble-duties, section 6, items 1 and 5). The worker counts as free.")
+    if stopped:
+        said.append(f"{', '.join(sorted(stopped))} hold an active issue but have run no turn since "
+                    f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each stopped "
+                    "mid-issue and nothing wakes it by itself; tell each to carry on, or take its claim off "
+                    "if it is blocked (bramble-duties, section 6, items 5 and 6). This is said at every "
+                    "hourly look until it runs a turn or its claim comes off.")
+    if not free:
+        return said or ["every worker is on an active issue", SLEEP]
+    # Open, unclaimed, and nobody's whose work is hands off: the board's
+    # eligible rule (bramble-duties, section 6) as one search can say it.
+    # Bramble's own pick reads the board's Order and Status.
+    rest = " ".join([*(f'-label:"{b["claim_label"]}"' for b in policy["bots"].values()),
+                     *(f'-label:"{l}"' for l in policy["hands_off"]["lanes"]["labels"]),
+                     *(f"-author:{p} -assignee:{p}" for p in policy["hands_off"]["people"])])
+    # Every free worker is looked at, not only the first with work (at
+    # 2:00 PM on 9 Nov 2026 the line named Rift's field alone, and Wisp's
+    # 181 issues went unsaid), in one search for all their fields: the
+    # labels of what comes back say whose field each issue is in.
+    fields = _search(bot, ask, repo, "label:" + ",".join(f'"area: {a}"' for w in free for a in AREAS.get(w, ()))
+                     + f" {rest}", 100) if any(AREAS.get(w) for w in free) else {}
+    seen = {l for i in fields.get("items") or [] for l in _labels(i)}
+    fed = [w for w in free if any(f"area: {a}" in seen for a in AREAS.get(w, ()))]
+    unread = int(fields.get("total_count") or 0) > len(fields.get("items") or [])
+    if fed:
+        more = [w for w in free if w not in fed and AREAS.get(w)] if unread else []
+        return [*said, f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits), and "
+                f"open unclaimed issues are in the field of {', '.join(fed)}"
+                + (f" (and maybe of {', '.join(more)}, past the first 100 the look read)" if more else "")
+                + ": pick for each free worker, reading the board by its area (bramble-duties, section 6)."]
+    owned = " ".join(f'-label:"area: {a}"' for mine in AREAS.values() for a in (*mine,)) + " " + \
+        " ".join(f'-label:"area: {a}"' for a in BRAMBLES_OWN)
+    if _count(bot, ask, repo, f"{owned} {rest}"):
+        return [*said, f"{', '.join(free)} hold no active issue, and open unclaimed issues are picked by the "
+                "part they name: pick for the free workers (bramble-duties, section 6)."]
+    if said:
+        return said
     return [f"{', '.join(free)} hold no active issue, but no open unclaimed issue is theirs", SLEEP]
 
 
-def _field(worker: str) -> str:
-    """The worker's area labels as one search's label: term (any of them)."""
-    return ",".join(f'"area: {a}"' for a in AREAS[worker])
+def _labels(item: dict) -> set[str]:
+    return {(x.get("name") if isinstance(x, dict) else x) for x in item.get("labels") or []}
+
+
+def _search(bot: str, ask: Caller, repo: str, terms: str, per_page: int, page: int = 1) -> dict:
+    """One issue search in repo through tw-git: its body (total_count, items)."""
+    q = urllib.parse.quote(f"repo:{repo} is:issue is:open {terms}")
+    more = f"&page={page}" if page > 1 else ""
+    return (ask("git", "read", {"bot": bot, "repo": repo,
+                                "path": f"/search/issues?q={q}&per_page={per_page}{more}"}) or {}).get("body") or {}
+
+
+def _claims(bot: str, ask: Caller, repo: str, labels: list[str]) -> dict[str, list[dict]]:
+    """The open issues in repo carrying each claim label, from one search for
+    all of them (a label: term with commas is any of them), a page of 100 at
+    a time: on 10 Nov 2026 the five workers held 35 between them."""
+    terms = "label:" + ",".join(f'"{l}"' for l in labels)
+    body = _search(bot, ask, repo, terms, 100)
+    items = list(body.get("items") or [])
+    total = min(int(body.get("total_count") or 0), 1000)  # search serves its first 1000
+    page = 1
+    while len(items) < total and body.get("items"):
+        page += 1
+        body = _search(bot, ask, repo, terms, 100, page)
+        items.extend(body.get("items") or [])
+    out: dict[str, list[dict]] = {}
+    for i in items:
+        for l in _labels(i) & set(labels):
+            out.setdefault(l, []).append(i)
+    return out
 
 
 def _worked(bot: str, ask: Caller, repo: str) -> dict[tuple[str, int], str]:
@@ -297,7 +354,7 @@ def _asked(bot: str, ask: Caller) -> set[str]:
     return {c["task"] for c in cards if isinstance(c, dict) and c.get("status") == "pending" and c.get("task")}
 
 
-def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: dict[tuple[str, int], str],
+def _active(repo: str, worker: str, items: list[dict], prs: dict[tuple[str, int], str],
             asked: set[str] = frozenset(), parked: dict[str, list[int]] | None = None) -> bool:
     """Whether the worker holds a claimed issue in repo that is not waiting.
     Waiting is never a reason to sit idle (Patrick, 9 Nov 2026: "It should
@@ -316,13 +373,10 @@ def _active(bot: str, ask: Caller, repo: str, worker: str, label: str, prs: dict
     issues, so from 10:33 AM, with 61 issues open in its field, Rift got
     nothing new and was never seen as stopped either."""
     newest = max((at for (w, _), at in prs.items() if w == worker), default="")
-    q = urllib.parse.quote(f'repo:{repo} is:issue is:open label:"{label}"')
-    body = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/search/issues?q={q}&per_page=50"})
-            or {}).get("body") or {}
     active = False
-    for i in body.get("items") or []:
+    for i in items:
         n = int(i.get("number") or 0)
-        labels = {(x.get("name") if isinstance(x, dict) else x) for x in i.get("labels") or []}
+        labels = _labels(i)
         if (worker, n) in prs or "needs: patrick" in labels or f"{repo}#{n}" in asked:
             continue
         changed = str(i.get("updated_at") or "")
