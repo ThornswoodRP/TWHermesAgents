@@ -121,14 +121,26 @@ class Idle:
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour"}
         if op == "read":
+            import re
             import urllib.parse
             if "/pulls?" in args["path"]:
                 return {"body": self.pulls}
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(args["path"]).query)["q"][0]
-            for label, n in self.claimed.items():
-                if q.endswith(f'label:"{label}"'):
-                    first = 100 * (1 + list(self.claimed).index(label))
-                    return {"body": {"total_count": n, "items": [{"number": first + i} for i in range(n)]}}
+            # The search's one positive label: term, any of its labels (GitHub's comma).
+            term = re.search(r'(?:^|\s)label:((?:"[^"]+",?)+)', q)
+            wanted = re.findall(r'"([^"]+)"', term.group(1)) if term else []
+            if wanted and all(w.startswith("claimed: ") for w in wanted):
+                items = [{"number": 100 * (1 + list(self.claimed).index(label)) + i, "labels": [{"name": label}]}
+                         for label, n in self.claimed.items() if label in wanted for i in range(n)]
+                return {"body": {"total_count": len(items), "items": items}}
+            if wanted:
+                items, total = [], 0
+                for key, n in self.open.items():
+                    areas = [a for a in re.findall(r'"(area: [^"]+)"', key) if a in wanted]
+                    if areas and not key.startswith("-"):
+                        total += n
+                        items += [{"number": 9000 + len(items), "labels": [{"name": areas[0]}]} for _ in range(n)]
+                return {"body": {"total_count": total, "items": items[:100]}}
             for key, n in self.open.items():
                 if key in q:
                     return {"body": {"total_count": n}}
@@ -150,10 +162,18 @@ class MorningAndFreeWorkers(unittest.TestCase):
     def home(self):
         return Path(tempfile.mkdtemp())
 
+    def look(self, home, b, now):
+        """The check at now, and when that run was the alert look, the next one
+        five minutes on, which is the free worker look's."""
+        out = owed_wake.check(home, "bramble", b, now=now, policy=POLICY)
+        if "runs at the next check" in "\n".join(out):
+            out = owed_wake.check(home, "bramble", b, now=now + 300, policy=POLICY)
+        return out
+
     def day(self):
-        """A home whose morning sweep ran today."""
+        """A home whose morning sweep ran today, and whose alert look ran at noon."""
         home = self.home()
-        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09"})
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": NOON})
         return home
 
     def test_the_first_check_after_six_mountain_wakes_once_that_day(self):
@@ -163,6 +183,10 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("morning sweep", out[-1])
         self.assertIn(("policy", "turn_room", {"bot": "bramble", "sweep": True}), b.asked)
         again = owed_wake.check(home, "bramble", b, now=AFTER_SIX + 300, policy=POLICY)
+        self.assertFalse(wakes("\n".join(again)), "the next check is the alert look, and nothing is new")
+        self.assertIn("runs at the next check", again[-2], "the free worker look never shares a run with it")
+        self.assertFalse([a for a in b.reads()[-3:] if "/pulls?" in a["path"]], "no free worker read in that run")
+        again = owed_wake.check(home, "bramble", b, now=AFTER_SIX + 600, policy=POLICY)
         self.assertFalse(wakes("\n".join(again)), "the next check is the free worker one, and all are busy")
         self.assertIn("every worker is on an active issue", again[-2])
         tomorrow = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=AFTER_SIX + 86400, policy=POLICY)
@@ -198,7 +222,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
         def ask(broker, op, args):
             if op == "read" and "/search/issues" in args["path"] and "ThornswoodRP/skymp" in args["path"].replace("%2F", "/"):
                 b.asked.append((broker, op, args))
-                return {"body": {"total_count": 1, "items": [{"number": 7}]}}
+                return {"body": {"total_count": 1, "items": [{"number": 7, "labels": [{"name": "claimed: Wisp"}]}]}}
             return b(broker, op, args)
         out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)))
@@ -222,7 +246,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertFalse(wakes("\n".join(out)))
         self.assertEqual(b.reads(), [], "no GitHub read until the hour is up")
         b = Idle(claimed=claimed, open_={'"area: Mods","area: Load order"': 1})
-        out = owed_wake.check(home, "bramble", b, now=NOON + owed_wake.IDLE_EVERY, policy=POLICY)
+        out = self.look(home, b, NOON + owed_wake.IDLE_EVERY)
         self.assertTrue(wakes("\n".join(out)))
 
     def test_tw_git_down_sleeps(self):
@@ -233,6 +257,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)))
         self.assertIn("tw-git did not answer", out[-2])
+        self.assertIn("still due", out[-2])
 
     def test_no_free_worker_check_from_11_pm_to_6_am(self):
         # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain.
@@ -247,7 +272,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
 
     def test_bramble_is_alert_at_any_hour_for_its_own_work(self):
         # Patrick, 9 Nov 2026, 1:27 AM: "Bramble should still be working and always be working and alert".
-        home = self.day()
+        home = self.home()
         items = {"Thornswood-Ops": [{"number": 261, "updated_at": "2026-11-09T08:00:00Z"}]}
 
         def ask(broker, op, args):
@@ -321,14 +346,16 @@ class MorningAndFreeWorkers(unittest.TestCase):
         for w in ("rift", "echo", "wisp"):
             self.assertNotIn(w, out[-1], "running, recently heard from, or unknown is not stopped")
         later = NOON + owed_wake.IDLE_EVERY + 1
-        out = owed_wake.check(home, "bramble", b, now=later, policy=POLICY)
+        out = self.look(home, b, later)
+        later += 300
         self.assertTrue(wakes("\n".join(out)), "a stop that is still there is said again an hour later")
         self.assertIn("magpie, sprocket", out[-1])
         self.assertNotIn("stopped", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)),
                          "nothing is kept as told")
-        b.turns["sprocket"] = {"running": False, "last": datetime.fromtimestamp(later, timezone.utc).isoformat()}
+        b.turns["sprocket"] = {"running": False, "last": datetime.fromtimestamp(later + owed_wake.IDLE_EVERY, timezone.utc).isoformat()}
         b.turns["magpie"] = {"running": True, "last": None}
-        out = owed_wake.check(home, "bramble", b, now=later + owed_wake.IDLE_EVERY - 60, policy=POLICY)
+        b.turns["echo"] = {"running": True, "last": None}
+        out = self.look(home, b, later + owed_wake.IDLE_EVERY)
         self.assertFalse(wakes("\n".join(out)), "once each ran a turn, nothing is said")
 
     def test_a_stop_and_a_free_worker_are_both_said(self):
@@ -385,9 +412,10 @@ class MorningAndFreeWorkers(unittest.TestCase):
 
         def ask(broker, op, args):
             r = b(broker, op, args)
-            if op == "read" and "/search/issues" in args["path"] and urllib_q(args).endswith('"claimed: Rift"'):
-                for i in r["body"]["items"]:
-                    i["updated_at"] = changed["at"]
+            if op == "read" and "/search/issues" in args["path"]:
+                for i in r["body"].get("items") or []:
+                    if {"name": "claimed: Rift"} in i.get("labels", []):
+                        i["updated_at"] = changed["at"]
             return r
         out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
@@ -399,6 +427,41 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), out)
         self.assertIn("every worker is on an active issue", out[-2])
+
+    def test_a_free_worker_look_sends_few_searches(self):
+        # 10 Nov 2026: one search per worker's claims and one per free worker's
+        # field, after the alert look's three, passed GitHub's secondary rate
+        # limit at every hourly look from 11:59 AM (a 403 on the tenth search
+        # in seven seconds), so no worker was given an issue from 12:27 PM.
+        claimed = {f"claimed: {n}": 0 for n in ("Rift", "Sprocket", "Echo", "Magpie", "Wisp")}
+        b = Idle(claimed=claimed, open_={'"area: Mods","area: Load order"': 61,
+                                         '"area: Gamemode","area: Engine","area: In-game"': 179,
+                                         '"area: Website","area: Discord","area: Voice"': 4})
+        out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("in the field of rift, wisp", out[-1])
+        self.assertIn("maybe of sprocket, echo, magpie, past the first 100", out[-1],
+                      "a field the first page did not reach is still named for Bramble's pick")
+        self.assertIn("pick for each free worker", out[-1])
+        searches = [a for a in b.reads() if "/search/" in a["path"]]
+        self.assertLessEqual(len(searches), 3, [urllib_q(a) for a in searches])
+
+    def test_a_refused_look_is_still_due_at_the_next_check(self):
+        # 10 Nov 2026: the look was recorded before it ran, so each refusal cost an hour.
+        home = self.day()
+
+        def down(broker, op, args):
+            if broker == "git":
+                raise BrokerRefused("GitHub: 403 You have exceeded a secondary rate limit")
+            return Idle()(broker, op, args)
+        out = owed_wake.check(home, "bramble", down, now=NOON, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)))
+        self.assertIn("still due", out[-2])
+        self.assertNotIn("idle_checked", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)))
+        b = Idle(claimed=dict(BUSY, **{"claimed: Rift": 0}), open_={'"area: Mods","area: Load order"': 2})
+        out = owed_wake.check(home, "bramble", b, now=NOON + 300, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("in the field of rift", out[-1])
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
