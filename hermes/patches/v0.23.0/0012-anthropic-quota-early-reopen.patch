@@ -1,4 +1,4 @@
-From 678fde580c2d650f05391b42a272593ce7b96ed5 Mon Sep 17 00:00:00 2001
+From 44219f6d0833dd705e5d95f95c1c207cf9b884cb Mon Sep 17 00:00:00 2001
 From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 21:02:45 +0000
 Subject: [PATCH] A Claude subscription limit that reopens early lifts the
@@ -266,7 +266,7 @@ index 0d057f99..c34d43c0 100644
      def _log_no_available_entries(self) -> None:
 diff --git a/tests/agent/test_anthropic_quota_early_reopen.py b/tests/agent/test_anthropic_quota_early_reopen.py
 new file mode 100644
-index 00000000..0e6cee8a
+index 00000000..57086b04
 --- /dev/null
 +++ b/tests/agent/test_anthropic_quota_early_reopen.py
 @@ -0,0 +1,208 @@
@@ -285,7 +285,7 @@ index 00000000..0e6cee8a
 +
 +import pytest
 +
-+TOKEN = "sk-ant-oat01-synthetic-test-token-0000"
++TOKEN = "sk-ant-oat01-test"
 +MODEL = "claude-opus-4-6"
 +OTHER = "claude-sonnet-4-5"
 +WEEK = 3 * 86400
@@ -381,7 +381,7 @@ index 00000000..0e6cee8a
 +def test_an_api_key_is_never_asked_about(home):
 +    (home / "auth.json").write_text(json.dumps({"credential_pool": {"anthropic": [{
 +        "id": "seat", "label": "seat", "auth_type": "api_key", "priority": 0, "source": "manual",
-+        "access_token": "sk-ant-api03-synthetic-test-key-0000",
++        "access_token": "sk-ant-api03-test",
 +        "model_cooldowns": {MODEL: time.time() + WEEK},
 +    }]}}))
 +    pool = _pool()
