@@ -487,6 +487,15 @@ class Operations(unittest.TestCase):
             self.begin(s)
         self.assertIn("already done", str(e.exception))
 
+    def test_a_confirmed_write_whose_effect_is_gone_is_a_new_one(self):
+        # Thornswood-Ops #280: a claim taken off could never go on again.
+        s = service()
+        op = self.begin(s, action="label-add", target="issue/4482/claimed: Wisp", commit="")
+        s.op_finish("tw-git", {"key": op["key"], "outcome": "confirmed", "receipt": {"on": True}})
+        again = self.begin(s, action="label-add", target="issue/4482/claimed: Wisp", commit="", undone=True)
+        self.assertEqual((again["state"], again["attempt"]), ("go", 2))
+        self.assertIn("op_reopen", [r[0] for r in s.db.execute("SELECT op FROM audit")])
+
     def test_20_a_crash_before_the_receipt_means_reconcile(self):
         db = Path(tempfile.mkdtemp()) / "policy.db"
         s = service(db=db)
