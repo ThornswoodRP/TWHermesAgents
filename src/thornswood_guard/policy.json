@@ -551,17 +551,17 @@
       "check_commands": [
         [
           "node",
-          "tests/test-{name}.js"
+          "{tests}/test-{name}.js"
         ],
         [
           "pwsh",
           "-NoProfile",
           "-File",
-          "tests/test-{name}.ps1"
+          "{tests}/test-{name}.ps1"
         ],
         [
           "python3",
-          "tests/test-{name}.py"
+          "{tests}/test-{name}.py"
         ],
         [
           "pwsh",
