@@ -151,11 +151,10 @@ class Follower:
         # Before the install restarts the brokers and the reload the gateway,
         # new turns are held and running ones end (#52; tw-reload-bots ends
         # the hold). A test's stand-in, or tw-policy as root.
-        self.drain_ = drain or (lambda: reload.drain(reload._policy, time.sleep, self.say))
+        self.drain_ = drain or (lambda: reload.drain(self._ask_policy, time.sleep, self.say))
         self.end_hold_ = end_hold or self._end_hold
         # tw-git's vm_install, or a test's stand-in.
-        self.report_ = report or (lambda args: wire.call(policy.data["brokers"]["sockets"]["git"]["path"],
-                                                         "vm_install", args))
+        self.report_ = report or (lambda args: wire.call(self.socket("git"), "vm_install", args))
         self.r = policy.data["follow_main"]
         self.run_ = run
         self.root = root
@@ -169,9 +168,28 @@ class Follower:
         # Whether this run holds new turns (its drain), so the reload need not.
         self.held = False
 
+    def socket(self, name: str) -> str:
+        """A broker's socket as the installed release names it, read when it is
+        used: an install can move it. 12 Nov 2026: #164 moved the brokers'
+        sockets to /run/tw-brokers, and this run, started on the release
+        before, asked the old path to end its hold on new turns, so no Bot
+        started a turn until the hold ran out 24 minutes later. The policy
+        this run started with names it only when the installed one cannot
+        be read."""
+        try:
+            data = json.loads((packages_in((self.opt / "current").resolve()) / "thornswood_guard" / "policy.json")
+                              .read_text(encoding="utf-8"))
+            return str(data["brokers"]["sockets"][name]["path"])
+        except (Stop, OSError, ValueError, KeyError, TypeError):
+            return self.p.data["brokers"]["sockets"][name]["path"]
+
+    def _ask_policy(self, op: str, args: dict) -> dict:
+        """Ask tw-policy, as root, where the installed release says it is."""
+        return wire.call(self.socket("policy"), op, args, timeout=30)
+
     def _end_hold(self) -> None:
         try:
-            reload._policy("end_hold", {})
+            self._ask_policy("end_hold", {})
         except Exception as e:  # noqa: BLE001  the hold ends by itself at HOLD_MAX
             self.say(f"FAIL: tw-policy did not end the hold on new turns ({e}); it ends by itself within 40 minutes")
 
