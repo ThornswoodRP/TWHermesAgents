@@ -58,6 +58,9 @@ AFTER_KILL = 10
 # the reload looks. Within follow-main's 45 minutes with the tests and install.
 DRAIN_WAIT = 20 * 60
 DRAIN_POLL = 10
+# Given by a caller that has held new turns and waited for the running ones
+# already (follow_main.Follower), which also ends the hold.
+HELD_FLAG = "--held"
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
@@ -177,7 +180,19 @@ def _end_sessions(run: Runner, sleep: Callable[[float], None], say) -> tuple[lis
 
 
 def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep, say=print,
-                release: Callable[[str], dict] = _release_turns, ask: Callable[[str, dict], dict] = _policy) -> int:
+                release: Callable[[str], dict] = _release_turns, ask: Callable[[str, dict], dict] = _policy,
+                already_held: bool = False) -> int:
+    """already_held: whoever runs the reload has held new turns and waited
+    for the running ones already (follow-main's install, HELD_FLAG), and ends
+    the hold itself, so the reload neither waits again nor ends it. 12 Nov
+    2026: the a98bd644 install held new turns at 7:40 PM Mountain and waited
+    its 20 minutes for a running turn of Sprocket's; then this reload held
+    them again at 8:01 PM and waited 20 minutes more for the same turn, so
+    no Bot started a turn for 40 minutes: Echo's brief, Rift's and Wisp's
+    next turns and every Bramble sweep waited in line."""
+    if already_held:
+        say("new turns are held already, and the running ones had their wait; reloading now")
+        return _reload(run, sleep, say, release)
     held = drain(ask, sleep, say)
     try:
         return _reload(run, sleep, say, release)
@@ -234,10 +249,14 @@ def _reload(run: Runner, sleep: Callable[[float], None], say, release: Callable[
 
 def main(argv: list[str] | None = None) -> int:
     import os
+    argv = sys.argv[1:] if argv is None else argv
+    if argv not in ([], [HELD_FLAG]):
+        print(f"STOP: tw-reload-bots takes nothing, or {HELD_FLAG} when its caller holds new turns already")
+        return 1
     if os.geteuid() != 0:
         print("STOP: run it as root: sudo /opt/thornswood-hermes/bin/tw-reload-bots")
         return 1
-    return reload_bots()
+    return reload_bots(already_held=argv == [HELD_FLAG])
 
 
 if __name__ == "__main__":
