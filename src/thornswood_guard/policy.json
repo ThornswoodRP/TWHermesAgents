@@ -678,12 +678,36 @@
       "CPUQuota": "100%",
       "TasksMax": 1024
     },
+    "tw-grok.slice": {
+      "MemoryHigh": "1536M",
+      "MemoryMax": "2G",
+      "CPUWeight": 20,
+      "CPUQuota": "100%",
+      "TasksMax": 512
+    },
     "hermes-user.slice": {
       "MemoryHigh": "3584M",
       "MemoryMax": "4G",
       "CPUQuota": "100%",
       "TasksMax": 1024
     }
+  },
+  "grok_lanes": {
+    "user": "grok-lanes",
+    "home": "/srv/tw/grok-lanes",
+    "apt_key": "deploy/grok-lanes/grok-bot.asc",
+    "apt_key_fingerprint": "380FF4BCDC34A4BD92A3565342A1772E62E492D6",
+    "apt_uri": "https://downloads.cursor.com/aptrepo",
+    "apt_suite": "grok-bot",
+    "package": "grok-bot",
+    "app": "/opt/Grok Bot/grok-bot",
+    "ready_file": ".grokbot/local-exec-daemon-credential.json",
+    "display": 71,
+    "screen_port": 6080,
+    "screen_minutes": 120,
+    "screen_open": false,
+    "disk_quota_gb": 8,
+    "status_file": "/var/lib/thornswood/grok-lanes.json"
   },
   "backups": {
     "age_recipient_file": "/etc/thornswood/backup-recipient.txt",

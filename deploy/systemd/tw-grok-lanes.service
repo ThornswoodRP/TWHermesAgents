@@ -1,0 +1,49 @@
+# The Grok lanes' computer (policy.yaml grok_lanes; Patrick's answer A on
+# q-5933-lanes-fallback, 12 Nov 2026): xAI's Grok Bot for Linux on a virtual
+# screen, as grok-lanes, so the lanes' read-only fallback runs here, not on
+# One. Every command a lane runs here runs inside these limits: no sudo, no
+# /home (Patrick's own Hermes's box key is there), none of the brokers' or
+# the Bots' folders, no /etc/thornswood, and a write only in its own home.
+# Electron's sandbox needs user namespaces and its JIT writable code, so
+# RestrictNamespaces and MemoryDenyWriteExecute are not set here.
+[Unit]
+Description=Thornswood: the Grok lanes' computer (Grok Bot on a virtual screen)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=grok-lanes
+Group=grok-lanes
+Slice=tw-grok.slice
+Environment=HOME=/srv/tw/grok-lanes
+WorkingDirectory=/srv/tw/grok-lanes
+ExecStart=/opt/thornswood-hermes/current/deploy/grok-lanes/run-app 71 "/opt/Grok Bot/grok-bot"
+ReadWritePaths=/srv/tw/grok-lanes
+InaccessiblePaths=-/srv/tw/backups -/srv/tw/boxbackups -/srv/tw/boxdrop -/srv/tw/ci -/srv/tw/decide -/srv/tw/decide-test -/srv/tw/follow -/srv/tw/git -/srv/tw/policy -/srv/tw/push -/srv/tw/push-test -/srv/tw/snapshots -/srv/tw/spool -/srv/tw/work -/etc/thornswood -/var/lib/thornswood -/var/lib/tw-offsite -/root
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

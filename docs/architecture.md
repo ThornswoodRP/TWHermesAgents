@@ -75,6 +75,10 @@ When a Bot needs Patrick, it opens a card in the decision core (`src/thornswood_
 
 His own Hermes on the VM (my-hermes, the `patrick-hermes` user) is not a Bot and is not set by `apply.py`. Each release's `deploy/decisions/install.sh` gives it two things, as that user: the `thornswood-decisions` plugin link, which adds rule zero to its prompt, and a copy of the `thornswood-coordinator` skill (`hermes/skills/thornswood-coordinator`). The skill holds Patrick's rules for talking to him and the steps for taking any ask he drops in one chat: file it on the board for the Bot that owns its field, follow it, and report status. Its status report comes from `scripts/coordinator_report.py`, which reads the board and the open pull requests with that user's own `gh` sign-in and changes nothing.
 
+## The Grok lanes' computer
+
+Patrick's Grok Bot lanes (Thornswood #5933) audit from Grok Bot's own cloud, and when its included usage runs out they do their read-only work on a "local computer" instead. Since Patrick's answer A on q-5933-lanes-fallback (12 Nov 2026) that computer is this VM, not One. `deploy/install.sh` 6c installs xAI's Grok Bot for Linux from its signed apt repository (the key pinned by fingerprint in `policy.yaml` `grok_lanes`) and makes the `grok-lanes` account: no shell, no sudo, no group but its own, a home under `/srv/tw` with an 8 GB disk cap. `tw-grok-lanes.service` runs the app on a virtual screen as that account in `tw-grok.slice`, with none of the brokers' or the Bots' folders, no `/home`, no `/etc/thornswood` and no way to gain a privilege. `tw-grok-screen.service` shows that screen and the sign-in link on the VM's Tailscale address alone, port 6080, while the app has no local computer registered, and stops by itself after two hours. Patrick signs in once there and turns on Execution on this computer. Each installed result on the ops ledger says whether the local computer is registered, whether the screen is open, the app's version and any problem. Setting `screen_open: true` opens the screen again at the next install, for a change in the app's settings.
+
 ## The live Board
 
 `thornswood_live` is a small Hermes plugin in each Bot's profile. It watches four of Hermes's own hooks and blocks nothing: when a turn thinks, which tool it runs by name, and when it ends. It writes one small file per process. `live_reader.py` (`tw-decide-live.service`) reads those files every 2 seconds and sends the core one row per running turn, so the app's Board shows what each Bot is doing right now. No words of a turn, tool arguments or output ever leave it.
@@ -104,6 +108,7 @@ The host's caps are in `policy.yaml` `slices`, rendered into `deploy/systemd/*.s
 | `tw-brokers.slice` | The brokers | 512 MB | 50% |
 | `tw-sandbox.slice` | `tw-files` checks | 4 GB | 100% |
 | The `hermes` user's slice | The Bots' podman containers | 4 GB | 100% |
+| `tw-grok.slice` | The Grok lanes' computer | 2 GB | 100% |
 
 At every boot, before the brokers and the gateway start, `tw-limits-check` reads each slice's caps from the cgroup tree, starts one job of each tier to see where it lands, and checks the swapfile and the Bots' disk quotas. If anything is off, `tw-policy` admits no sandbox job. Free space is not part of it: `tw-policy` reads it at every admit.
 

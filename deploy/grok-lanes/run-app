@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# The Grok lanes' computer: xAI's Grok Bot for Linux on a virtual screen, as
+# grok-lanes (tw-grok-lanes.service; policy.yaml grok_lanes). The screen is
+# Xvfb on display :<display> with an X cookie, and no TCP or abstract socket,
+# so only this unit and tw-grok-screen.service, which share its /tmp, reach
+# it. The app opens its sign-in link with $BROWSER, which puts it on the
+# screen's page instead (open-url).
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd -P)"
+display="${1:?usage: run-app <display> <app>}"
+app="${2:?usage: run-app <display> <app>}"
+[[ "$display" =~ ^[0-9]+$ ]] || { echo "the display is a number, not $display"; exit 2; }
+[[ -x "$app" ]] || { echo "$app is not installed; the install puts the grok-bot package in"; exit 2; }
+export XAUTHORITY="$HOME/.Xauthority"
+export BROWSER="$here/open-url"
+mkdir -p "$HOME/web"
+exec xvfb-run -n "$display" -f "$XAUTHORITY" \
+  -s "-screen 0 1280x800x24 -nolisten tcp -nolisten local" \
+  "$app" --disable-gpu

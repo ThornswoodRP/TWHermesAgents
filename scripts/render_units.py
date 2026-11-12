@@ -20,6 +20,7 @@ WHAT = {
     "tw-hermes.slice": "the gateway (six profiles and the room) and hermes serve, as hermes",
     "tw-brokers.slice": "tw-policy, tw-files, tw-git and tw-proxy, each as its own user",
     "tw-sandbox.slice": "every Tier B check, as tw-<bot>",
+    "tw-grok.slice": "the Grok lanes' computer: the Grok Bot app and its screen, as grok-lanes",
     "hermes-user.slice": "the hermes user's own manager: the Tier A podman containers",
 }
 

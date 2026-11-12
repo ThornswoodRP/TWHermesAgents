@@ -428,7 +428,7 @@ class FakeRun:
         if argv[0] == "findmnt":
             return subprocess.CompletedProcess(argv, 0, "/\n", "")
         if argv[0] == "quota":
-            gb = 25 if argv[-1] == "tw-work-wisp" else 10
+            gb = {"tw-work-wisp": 25, "grok-lanes": policy().data["grok_lanes"]["disk_quota_gb"]}.get(argv[-1], 10)
             caps = getattr(self, "caps", {})
             limit = caps.get(argv[-1], gb * 1024 * 1024)
             return subprocess.CompletedProcess(argv, 0, f"Disk quotas for group {argv[-1]} (gid 990):\n"
@@ -527,6 +527,12 @@ class LimitsCheck(unittest.TestCase):
         got = self.check(run)
         self.assertEqual(got, ["tw-work-wisp has no 25 GB hard limit on /"])
         self.assertIn(["quotaon", "-p", "-g", "/"], run.calls)
+
+    def test_16_the_grok_lanes_without_their_disk_cap_are_found(self):
+        # Thornswood #5933: the lanes clone the repositories in their home.
+        run = FakeRun()
+        run.caps = {"grok-lanes": 0}
+        self.assertEqual(self.check(run), ["grok-lanes has no 8 GB hard limit on /"])
 
     def test_16_a_failed_check_holds_every_sandbox_job(self):
         from test_policy_service import service
