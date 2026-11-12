@@ -13,9 +13,11 @@ response), the Bot told (a confirmed connector receipt), the work done
 card).
 
 A Main card (step 6) is Patrick's tap for what the brokers need his yes for:
-a main run while runs.main_without_patrick is false, a collection publish, or
-the claim label cutover. Only Bramble opens one. It names exactly what it is
-for in one release link, release:<main|publish|cutover>:<owner>/<repo>@<the
+a main run while runs.main_without_patrick is false, a collection publish,
+the claim label cutover, or the merge of a pull request that changes a
+workflow, the deploy gate or a verb script (merge.patrick_paths, Ops #276),
+which names that pull request and its head. Only Bramble opens one. It names exactly what it is
+for in one release link, release:<main|publish|cutover|merge>:<owner>/<repo>@<the
 40-character commit>[#<pull request>], fixed for the card's life; its scope of
 a yes names that commit, so the commit is on the card he reads; it offers
 "authorize"; and it is high risk, so his answer needs a fresh sign-in. tw-git
@@ -63,7 +65,7 @@ MAX_OPTIONS = 6
 LIVE = ("draft", "pending")
 ROOM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # A Main card's one release link: what Patrick's "authorize" is for.
-RELEASE_LINK = re.compile(r"(main|publish|cutover):([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})(?:#([1-9][0-9]*))?")
+RELEASE_LINK = re.compile(r"(main|publish|cutover|merge):([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})(?:#([1-9][0-9]*))?")
 AUTHORIZE = "authorize"
 
 
@@ -560,12 +562,15 @@ class DecisionCore:
             return None
         if len(refs) != 1:
             raise CoreError(400, "release_link", "a Main card names what it is for in exactly one release link, "
-                                                 "release:<main|publish|cutover>:<owner>/<repo>@<40-character commit>"
+                                                 "release:<main|publish|cutover|merge>:<owner>/<repo>@<40-character commit>"
                                                  "[#<pull request>]")
         m = RELEASE_LINK.fullmatch(refs[0])
         if not m:
-            raise CoreError(400, "release_link", f"{refs[0]!r} is not <main|publish|cutover>:<owner>/<repo>@"
+            raise CoreError(400, "release_link", f"{refs[0]!r} is not <main|publish|cutover|merge>:<owner>/<repo>@"
                                                  "<40-character commit>[#<pull request>]")
+        if m.group(1) == "merge" and not m.group(4):
+            raise CoreError(400, "release_link", "a merge card names its pull request: "
+                                                 "merge:<owner>/<repo>@<its head commit>#<pull request>")
         return {"for": m.group(1), "repo": m.group(2), "commit": m.group(3),
                 "pr": int(m.group(4)) if m.group(4) else None}
 

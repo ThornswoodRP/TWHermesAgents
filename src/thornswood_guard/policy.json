@@ -129,7 +129,25 @@
     "workflow_authors": [
       "github-actions[bot]"
     ],
-    "outside_label": "outside work"
+    "outside_label": "outside work",
+    "patrick_paths": {
+      "ThornswoodRP/Thornswood": {
+        "dirs": [
+          ".github/workflows/",
+          "scripts/vps/gate/"
+        ],
+        "verb_lists": [
+          "scripts/vps/gate/verbs.json",
+          "scripts/release/nexus-verbs.json"
+        ]
+      },
+      "ThornswoodRP/skymp": {
+        "dirs": [
+          ".github/workflows/"
+        ],
+        "verb_lists": []
+      }
+    }
   },
   "runs": {
     "main_without_patrick": true,

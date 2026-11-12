@@ -704,8 +704,10 @@ class PolicyService:
             raise Refused(f"Patrick's answer on card {did} was given before the decision core was restored from a "
                           "backup; it authorizes nothing, so a new card is needed")
         kind, repo, commit, pr, rev = a.get("for"), a.get("repo"), a.get("commit"), a.get("pr"), a.get("revision")
-        if kind not in ("main", "publish", "cutover") or not isinstance(repo, str) or "/" not in repo:
-            raise Refused(f"card {did} does not name a main, publish or cutover for a repository")
+        if kind not in ("main", "publish", "cutover", "merge") or not isinstance(repo, str) or "/" not in repo:
+            raise Refused(f"card {did} does not name a main, publish, cutover or merge for a repository")
+        if kind == "merge" and pr is None:
+            raise Refused(f"card {did} is a merge and names no pull request")
         if not (isinstance(commit, str) and len(commit) == 40 and all(c in "0123456789abcdef" for c in commit)):
             raise Refused(f"card {did} does not name a 40-character commit")
         if not (pr is None or (isinstance(pr, int) and not isinstance(pr, bool) and pr > 0)):
@@ -769,7 +771,7 @@ class PolicyService:
         with self._tx():
             for (body,) in self.db.execute("SELECT body FROM decisions").fetchall():
                 d = Decision(**json.loads(body))
-                if d.kind in ("main", "publish", "cutover") and not d.dead:
+                if d.kind in ("main", "publish", "cutover", "merge") and not d.dead:
                     d.dead = True
                     d.notes.append("dead: store restored from a backup")
                     self.db.execute("UPDATE decisions SET body=? WHERE id=?", (json.dumps(d.__dict__), d.id))

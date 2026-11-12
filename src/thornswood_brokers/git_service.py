@@ -403,6 +403,30 @@ class GitService:
             out[path] = json.loads(base64.b64decode(raw["content"]))
         return out
 
+    def _verb_paths(self, repo: str, ref: str) -> list[str]:
+        """Each script and 'reads' entry the verbs of this repo's verb lists
+        name on ref (merge.patrick_paths), as Thornswood's Auto-Merge.js reads
+        them from main. A list ref does not have names nothing."""
+        out = []
+        for path in self.policy.patrick_verb_lists(repo):
+            try:
+                raw = self.gh.get("bramble", repo, f"/repos/{repo}/contents/{path}?ref={quote(ref)}")
+            except GitHubError as e:
+                if e.status == 404:
+                    continue
+                raise
+            try:
+                verbs = json.loads(base64.b64decode(raw["content"])).get("verbs") or {}
+            except (KeyError, ValueError, AttributeError) as e:
+                raise Refused(f"{path} on {ref} in {repo} could not be read as a verb list ({e}); nothing merges unseen") from e
+            for v in verbs.values():
+                if not isinstance(v, dict):
+                    continue
+                if isinstance(v.get("script"), str) and v["script"]:
+                    out.append(v["script"])
+                out.extend(r for r in v.get("reads") or [] if isinstance(r, str) and r)
+        return out
+
     def _issue(self, repo: str, number: int) -> Issue:
         raw = self.gh.get(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{int(number)}")
         return Issue(repo=repo, number=int(number), author_login=raw["user"]["login"],
@@ -887,8 +911,13 @@ class GitService:
         # Work by someone off Patrick's list merges only once he answered
         # "let them merge" for that person (#132); read only when it is needed.
         allowed = self._allowed_people(pr) if self.rules.outside_credits(pr) else None
+        # A workflow, the gate or a verb script merges only on Patrick's yes
+        # for this head (Ops #276); what the verbs run is read from the base.
+        verb_paths = self._verb_paths(repo, pr.base_ref) if self.policy.patrick_verb_lists(repo) else []
+        decision_id = args.get("decision_id")
         self._check(self.rules.merge(bot, pr, sha, method, checks, branch_checks=branch_checks,
-                                     allowed_people=allowed))
+                                     allowed_people=allowed, verb_paths=verb_paths, decision_id=decision_id))
+        uses = bool(self.policy.patrick_files(repo, pr.files, verb_paths))
 
         # Where GitHub's auto-merge merges (policy merge.auto_merge), this turns
         # it on at this exact head, and GitHub merges once the checks the
@@ -923,6 +952,8 @@ class GitService:
 
         out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back,
                                   undone=undone)
+        if uses and not out.get("reconciled"):
+            self.ask("decision_use", {"id": decision_id})
         receipt = out.get("receipt") or {}
         if receipt.get("queued"):
             out["queued"] = True

@@ -822,6 +822,12 @@ class MainCardImport(unittest.TestCase):
         self.assertFalse(s.check_decision(d.id, kind="publish", repo=APP, commit=OTHER).allowed)
         self.assertFalse(s.check_decision(d.id, kind="main", repo=APP, commit=HEAD).allowed)
 
+    def test_a_merge_is_bound_to_its_pull_request(self):
+        s = service()
+        s.decision_import("tw-git", {"answer": self.answer(s, **{"for": "merge", "pr": 150})})
+        self.assertTrue(s.check_decision("dec_abcdefghijklmnop", kind="merge", repo=APP, commit=HEAD, pr=150).allowed)
+        self.assertFalse(s.check_decision("dec_abcdefghijklmnop", kind="merge", repo=APP, commit=HEAD, pr=151).allowed)
+
     def test_asking_again_changes_nothing_and_it_is_still_used_once(self):
         s = service()
         s.decision_import("tw-git", {"answer": self.answer(s)})
@@ -838,7 +844,8 @@ class MainCardImport(unittest.TestCase):
     def test_only_authorize_and_only_a_core_card_with_a_full_binding(self):
         s = service()
         for bad in ({"option": "not_now"}, {"decision_id": "d1"}, {"for": "deploy"}, {"commit": HEAD[:12]},
-                    {"repo": "Thornswood"}, {"revision": 0}, {"pr": True}, {"answered_at": "soon"}):
+                    {"repo": "Thornswood"}, {"revision": 0}, {"pr": True}, {"answered_at": "soon"},
+                    {"for": "merge"}):
             with self.subTest(bad), self.assertRaises(Refused):
                 s.decision_import("tw-git", {"answer": self.answer(s, **bad)})
 

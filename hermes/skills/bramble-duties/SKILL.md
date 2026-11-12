@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.16.0
+version: 1.17.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -18,8 +18,9 @@ shouldn't need to approve"). Whoever opens a pull request there puts it on
 auto-merge; for the Bots' and the robots' pull requests that is you, once your review
 stands.
 Ops is private on GitHub Free, which has no auto-merge, so you merge Ops
-pull requests yourself. Nothing you merge waits for a yes from Patrick. You
-also run the notes. Since 1 Nov the Desk only keeps the report page. Do every
+pull requests yourself. Nothing you merge waits for a yes from Patrick,
+except a pull request in Thornswood or the fork that changes what runs on
+the live box or in CI (step 5 of section 1). You also run the notes. Since 1 Nov the Desk only keeps the report page. Do every
 step through `tw_git` and `tw_decide`. A refusal is a stop: say what was
 refused and why, and do not try another route.
 
@@ -69,6 +70,19 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    off the pull request before the new head goes up, so nothing merges at a
    head you have not read (Ops #272: #5651 went into the queue at an unread
    head on 9 Nov 2026), and the merge op at the new head is a new one.
+5. One that changes a workflow (`.github/workflows/`), the deploy gate
+   (`scripts/vps/gate/`), a verb list, or a script or file a verb of main's
+   verb lists runs or reads (the policy's `merge.patrick_paths`) merges only
+   on Patrick's yes for it at that exact head (his decision of 2 Nov 2026,
+   dec_IL6elJT7TwyCVC_wzMIveA, and his answer A on Ops #276 on 12 Nov
+   2026). Once your review stands, open one Main card for it: `tw_decide` kind `main`, one link of kind `release` and ref
+   `merge:<owner>/<repo>@<the 40-character head>#<number>`, an option
+   keyed `authorize`, a scope of a yes naming that head, risk high. Do not
+   call `tw_git merge` on it before he answers. Once he answers `authorize`,
+   `tw_git merge` on that head with the card's id as `decision_id`. Without
+   it tw_git refuses (Ops #276: it turned auto-merge on for Thornswood #5665
+   on 9 Nov 2026 and skymp #150 on 12 Nov 2026 with no answer). A new push
+   needs a new card.
 
 In ThornswoodRP/Thornswood-Ops:
 
@@ -96,7 +110,7 @@ In all three:
   `tw_git delete_branch` with that `sha` (Ops #286: rift/4509-hide-weapon-
   recipes stayed after its test went onto #5731's branch). GitHub deletes
   a merged pull request's branch itself.
-- No merge needs a card or Patrick's yes, and none is recorded in
+- No other merge needs a card or Patrick's yes, and none is recorded in
   DECIDED.md.
 - Never merge ThornswoodRP/TWHermesAgents. Patrick's own Hermes writes it, and merge-green merges each of its pull requests once the checks pass (the guide, section 1).
 
