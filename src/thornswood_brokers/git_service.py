@@ -1080,6 +1080,47 @@ class GitService:
         return self._guarded_write(bot, task, "close_issue", repo, f"issue/{number}/close", "",
                                    write=write, read_back=read_back)
 
+    def delete_branch(self, caller: str, args: dict) -> dict:
+        """Bramble deletes a Bot's branch that has no open pull request, at the
+        head it read (sha), so a branch someone pushed to since stays. GitHub
+        deletes a pull request's branch when it merges, but a branch that never
+        got one, or whose work went into another pull request, stayed for good:
+        rift/4509-hide-weapon-recipes, whose test went onto #5731's branch
+        (Ops #286, 10 Nov 2026)."""
+        bot, repo, task = self._bot(args), self._repo(args), self._task(args)
+        branch, sha = str(args.get("branch") or ""), str(args.get("sha") or "")
+        if not self.policy.is_router(bot):
+            raise Refused(f"only Bramble deletes a branch; {self.policy.bot_name(bot)} never does")
+        if (no := self.rules._outside_app(bot, repo)) is not None:
+            raise Refused(no.reason)
+        owner = self.policy.branch_owner(branch)
+        if owner is None:
+            raise Refused(f"{branch or 'that'} is not a Bot's branch (<bot>/...); only a Bot's branch is deleted")
+        if not SHA.fullmatch(sha):
+            raise Refused("name the head you read (sha), so a branch that moved since is not deleted")
+        now = self._ref_sha(repo, branch)
+        if now is None:
+            raise Refused(f"GitHub has no branch {branch} in {repo}")
+        if now != sha:
+            raise Refused(f"{branch} is at {now[:12]}, not {sha[:12]}; read it again")
+        org = repo.split("/", 1)[0]
+        open_prs = [p["number"] for p in self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls?state=open&head={quote(org + ':' + branch)}")
+                    if p.get("state") == "open" and (p.get("head") or {}).get("ref") == branch]
+        if open_prs:
+            raise Refused(f"{branch} is the head of open pull request #{open_prs[0]}; that pull request closes or merges first")
+
+        def write():
+            r = self.gh.call("bramble", repo, WRITE["push"], "DELETE", f"/repos/{repo}/git/refs/heads/{quote(branch)}")
+            if r.status != 204:
+                raise GitHubError(r.status, str(r.body))
+            return {"deleted": True}
+
+        def read_back():
+            return {"deleted": True} if self._ref_sha(repo, branch) is None else None
+
+        return self._guarded_write(bot, task, "delete_branch", repo, f"refs/heads/{branch}", sha,
+                                   write=write, read_back=read_back)
+
     def start_run(self, caller: str, args: dict) -> dict:
         bot, task = self._bot(args), self._task(args)
         repo = self.policy.data["runs"]["repo"]
@@ -1262,7 +1303,7 @@ class GitService:
 
     # Every op that changes something on GitHub.
     WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-              "close_issue", "start_run")
+              "close_issue", "delete_branch", "start_run")
 
     def _executor_only(self, name: str, op: Callable[[str, dict], dict]) -> Callable[[str, dict], dict]:
         """One executor at a time (plan phases 4 and 5): until the cutover the
@@ -1279,7 +1320,7 @@ class GitService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-                 "close_issue", "start_run", "read", "board", "refused", "ledger_event")
+                 "close_issue", "delete_branch", "start_run", "read", "board", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
         # root's follower alone, never a Bot.

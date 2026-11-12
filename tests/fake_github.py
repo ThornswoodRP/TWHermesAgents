@@ -260,6 +260,12 @@ class FakeGitHub:
             rules = [] if not names or page > 1 else [{"type": "required_status_checks", "parameters": {
                 "required_status_checks": [{"context": n, "integration_id": 15368} for n in names]}}]
             return Response(200, rules, {})
+        if rest[:3] == ["git", "refs", "heads"] and method == "DELETE":
+            branch = urllib.parse.unquote("/".join(rest[3:]))
+            if not self.ref(repo, branch):
+                return Response(422, {"message": "Reference does not exist"}, {})
+            subprocess.run(["git", "-C", str(self.remote(repo)), "update-ref", "-d", f"refs/heads/{branch}"], check=True)
+            return Response(204, None, {})
         if rest[:3] == ["git", "ref", "heads"]:
             branch = urllib.parse.unquote("/".join(rest[3:]))
             sha = self.ref(repo, branch)

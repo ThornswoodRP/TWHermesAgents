@@ -90,6 +90,12 @@ In all three:
   10:38 PM and 11:01 PM UTC: Bramble wrote the same red-check note twice on
   issue #5538 about a thread's pull request #5540 at one head, 79196d9,
   because this line read as every pull request on every wake.)
+- A Bot's branch whose work is finished and that has no open pull request
+  (its work went into another pull request, or it never got one) goes:
+  read its head (`GET /repos/<repo>/git/ref/heads/<branch>`), then
+  `tw_git delete_branch` with that `sha` (Ops #286: rift/4509-hide-weapon-
+  recipes stayed after its test went onto #5731's branch). GitHub deletes
+  a merged pull request's branch itself.
 - No merge needs a card or Patrick's yes, and none is recorded in
   DECIDED.md.
 - Never merge ThornswoodRP/TWHermesAgents. Patrick's own Hermes writes it, and merge-green merges each of its pull requests once the checks pass (the guide, section 1).

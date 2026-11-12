@@ -860,6 +860,45 @@ class AutoMerge(unittest.TestCase):
         self.assertEqual(len(w.fake.auto_merged), 2)
 
 
+class DeleteBranch(unittest.TestCase):
+    """Ops #286: a Bot's branch with no pull request stayed for good
+    (rift/4509-hide-weapon-recipes, 10 Nov 2026). Bramble deletes one at the
+    head it read, and only a Bot's, with no open pull request."""
+
+    def delete(self, w, **args):
+        base = {"bot": "bramble", "repo": APP, "task": "4509", "branch": "rift/4509-hide-weapon-recipes"}
+        return w.git.delete_branch("hermes", dict(base, **args))
+
+    def test_bramble_deletes_a_bots_branch_with_no_pull_request(self):
+        w = World()
+        sha = w.push("rift", "rift/4509-hide-weapon-recipes", {"a": "a\n"})["sha"]
+        out = self.delete(w, sha=sha)
+        self.assertTrue(out["done"], out)
+        self.assertIsNone(w.fake.ref(APP, "rift/4509-hide-weapon-recipes"))
+        deletes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
+        self.assertTrue(deletes)
+
+    def test_what_is_refused(self):
+        w = World()
+        sha = w.push("rift", "rift/4509-hide-weapon-recipes", {"a": "a\n"})["sha"]
+        w.push("sprocket", "sprocket/3561-path-fence", {"b": "b\n"})
+        w.fake.add_pr(APP, 42, head_ref="sprocket/3561-path-fence", head_sha=w.fake.ref(APP, "sprocket/3561-path-fence"),
+                      files=["b"])
+        for bad, why in (({"bot": "rift", "sha": sha}, "only Bramble"),
+                         ({"sha": "e" * 40}, "read it again"),
+                         ({}, "head you read"),
+                         ({"branch": "main", "sha": sha}, "not a Bot's branch"),
+                         ({"branch": "claude/5381-avalonia", "sha": sha}, "not a Bot's branch"),
+                         ({"branch": "rift/9-gone", "sha": sha}, "has no branch"),
+                         ({"branch": "sprocket/3561-path-fence", "sha": w.fake.ref(APP, "sprocket/3561-path-fence")},
+                          "open pull request #42")):
+            with self.subTest(bad=bad), self.assertRaises(Refused) as e:
+                self.delete(w, **bad)
+            self.assertIn(why, str(e.exception))
+        self.assertEqual(w.fake.ref(APP, "rift/4509-hide-weapon-recipes"), sha)
+        self.assertEqual(w.fake.writes("DELETE"), [])
+
+
 class MirrorFetches(unittest.TestCase):
     """Ops #293, 11 Nov 2026: two fetches of one mirror moved the same refs
     under each other ("cannot lock ref 'refs/remotes/origin/main': is at
@@ -1553,6 +1592,7 @@ class OneExecutor(unittest.TestCase):
             "close_pr": {"bot": "bramble", "repo": APP, "task": "t", "number": 42},
             "close_issue": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "reason": "duplicate",
                             "duplicate_of": 41, "body": "Same."},
+            "delete_branch": {"bot": "bramble", "repo": APP, "task": "t", "branch": "sprocket/3561-path-fence", "sha": sha},
             "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml",
                           "commit": main, "inputs": {}},
         }
