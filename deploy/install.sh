@@ -538,6 +538,9 @@ systemctl enable --quiet tw-limits-check.service
 systemctl restart tw-limits-check.service
 systemctl enable --quiet --now tw-checks.socket tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
   tw-offsite.timer tw-offsite.path tw-follow-main.timer
+# A path unit watches what it was started with, so a changed one is started
+# again to watch what it says now (12 Nov: PathChanged became PathExistsGlob).
+systemctl restart tw-offsite.path
 # Each broker allows 3 starts in 15 minutes (StartLimitBurst), so a crash loop
 # stops. An install's restart is not a crash: four installs inside 15 minutes
 # (2 Nov, 10:06 PM) hit the limit, the brokers stayed down and the put-back's

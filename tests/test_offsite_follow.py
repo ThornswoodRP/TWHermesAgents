@@ -203,7 +203,10 @@ class TheDropJail(unittest.TestCase):
     def test_drive_and_the_units(self):
         self.assertEqual(unit("tw-offsite.service")["User"], ["tw-offsite"])
         self.assertEqual(unit("tw-offsite.service")["ExecStartPre"], ["+/opt/thornswood-hermes/bin/tw-offsite intake"])
-        self.assertEqual(unit("tw-offsite.path")["PathChanged"], ["/srv/tw/boxdrop/in"])
+        # Markers, not the folder: a PathChanged during a run is dropped
+        # (12 Nov: 4 of 7 drops waited), a glob is looked at again after it.
+        self.assertEqual(unit("tw-offsite.path")["PathExistsGlob"], ["/srv/tw/boxdrop/in/*.done"])
+        self.assertNotIn("PathChanged", unit("tw-offsite.path"))
         self.assertEqual(unit("tw-offsite.timer")["OnCalendar"], ["*-*-* 04:30:00 America/Denver"])
         self.assertEqual(unit("tw-follow-main.timer")["OnUnitInactiveSec"], ["10min"])
 
