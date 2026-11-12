@@ -46,7 +46,7 @@ The brokers in `src/thornswood_brokers/` run as their own users, each from a roo
 | `tw-files` | `tw-files` | Each worker's trees under `/srv/tw/work/<bot>`. It walks every path from a folder handle without following links, and runs checks through `tw-run-check` as the Bot's own user, with no network and only that tree visible |
 | `tw-proxy` | `tw-proxy` | The admission proxy on `127.0.0.1:8611`, for model routes that need a key only it can read. It admits a route only once a pull request sets it ready in `admission_proxy.ready` |
 
-The gateway reaches them only through their sockets under `/run/tw/`, each open to a named group. Checks run in `tw-sandbox.slice`, started through `tw-checks.socket` so `tw-files` never needs sudo.
+The gateway reaches them only through their sockets under `/run/tw-brokers/` (and tw-proxy on 127.0.0.1:8611), each open to a named group. systemd holds those sockets (`tw-policy.socket` and the rest), so a broker that starts again for an install takes the same socket back and a call made meanwhile waits for it instead of being refused. Checks run in `tw-sandbox.slice`, started through `tw-checks.socket` so `tw-files` never needs sudo.
 
 ### How a Bot's merge reaches GitHub
 

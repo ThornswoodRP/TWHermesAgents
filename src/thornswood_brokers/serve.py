@@ -37,6 +37,29 @@ def _asker(policy: Policy):
     return ask
 
 
+# The first socket systemd passes (sd_listen_fds(3)).
+LISTEN_FDS_START = 3
+
+
+def listen_fd(environ=os.environ, pid: int | None = None) -> int | None:
+    """The listening socket systemd passed this process, from its socket unit
+    (#162); None when it was started without one (by hand, or by a release
+    from before the socket units). The variables are taken out, so nothing
+    this process starts takes them for its own."""
+    if environ.get("LISTEN_PID") != str(pid if pid is not None else os.getpid()):
+        return None
+    n = int(environ.get("LISTEN_FDS") or 0)
+    for key in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
+        environ.pop(key, None)
+    if n == 0:
+        return None
+    if n != 1:
+        raise SystemExit(f"systemd passed {n} sockets; a broker listens on one")
+    # Nothing this broker runs (tw-git's git, tw-files's checks) holds it.
+    os.set_inheritable(LISTEN_FDS_START, False)
+    return LISTEN_FDS_START
+
+
 def _serve(policy: Policy, name: str, ops: dict) -> None:
     sock = policy.data["brokers"]["sockets"][name]
     allowed = set(sock["clients"])
@@ -44,8 +67,12 @@ def _serve(policy: Policy, name: str, ops: dict) -> None:
         extra = users - allowed
         if extra:
             raise SystemExit(f"{name}: op {op} names {sorted(extra)}, who may not connect to its socket")
-    server = wire.Server(sock["path"], ops, mode=0o660, group=sock.get("group"))
-    logger.info("tw-%s listening on %s", name, sock["path"])
+    fd = listen_fd()
+    try:
+        server = wire.Server(sock["path"], ops, mode=0o660, group=sock.get("group"), fd=fd)
+    except wire.Refused as e:
+        raise SystemExit(f"tw-{name}: {e}")
+    logger.info("tw-%s listening on %s%s", name, sock["path"], " (systemd's socket)" if fd is not None else "")
     run_until_stopped(server, f"tw-{name}")
 
 
@@ -133,8 +160,12 @@ def main(argv: list[str]) -> None:
         if not tokens:
             logger.warning("no proxy tokens yet; every request is refused until the install makes them")
         proxy = Proxy(policy, _asker(policy), env, tokens)
-        server = Server(cfg["listen"], proxy)
-        logger.info("tw-proxy listening on %s", cfg["listen"])
+        fd = listen_fd()
+        try:
+            server = Server(cfg["listen"], proxy, fd=fd)
+        except ValueError as e:
+            raise SystemExit(f"tw-proxy: {e}")
+        logger.info("tw-proxy listening on %s%s", cfg["listen"], " (systemd's socket)" if fd is not None else "")
         run_until_stopped(server, "tw-proxy")
 
 

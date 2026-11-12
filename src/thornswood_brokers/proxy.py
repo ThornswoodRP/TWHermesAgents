@@ -491,14 +491,29 @@ class _Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, listen: str, proxy: Proxy):
+    def __init__(self, listen: str, proxy: Proxy, fd: int | None = None):
+        """fd: the socket systemd holds on `listen` (tw-proxy.socket, #162),
+        so a model call made while the proxy starts again waits for it."""
         host, _, port = listen.rpartition(":")
         if host not in ("127.0.0.1", "::1", "localhost"):
             raise ValueError(f"the admission proxy listens on loopback only, not {host}")
         self.proxy = proxy
         if host == "::1":
             self.address_family = socket.AF_INET6
-        super().__init__((host, int(port)), _Handler)
+        if fd is None:
+            super().__init__((host, int(port)), _Handler)
+            return
+        super().__init__((host, int(port)), _Handler, bind_and_activate=False)
+        self.socket.close()
+        self.socket = socket.socket(fileno=fd)
+        got = self.socket.getsockname()
+        if self.socket.family not in (socket.AF_INET, socket.AF_INET6) or got[1] != int(port) \
+                or got[0] not in ("127.0.0.1", "::1"):
+            self.socket.detach()
+            raise ValueError(f"the socket systemd passed listens on {got!r}, not {listen}; "
+                             "tw-proxy.socket and the policy disagree")
+        self.server_address = got[:2]
+        self.server_name, self.server_port = got[0], got[1]
 
 
 def check_environment(environ: dict) -> list[str]:

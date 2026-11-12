@@ -525,10 +525,16 @@ fi
 # first .path unit, tw-offsite.path, was left out by a list of suffixes, and
 # enabling it failed).
 unit_dir=/etc/systemd/system
+# A broker's socket unit that changed while it listens is started again below
+# with its broker, so it listens as the new file says (#162).
+changed_sockets=""
 for f in "$here"/deploy/systemd/*; do
   name="$(basename "$f")"
   case "$name" in
     tw-hermes-gateway.service.in|user-hermes.slice.conf|tw-hermes-gateway-webhook.conf) ;;  # placed below
+    tw-policy.socket|tw-git.socket|tw-files.socket|tw-proxy.socket)
+      if [[ -f "$unit_dir/$name" ]] && ! cmp -s "$f" "$unit_dir/$name"; then changed_sockets+=" $name"; fi
+      install -m 0644 "$f" "$unit_dir/$name" ;;
     *.service|*.timer|*.slice|*.path|*.socket|*.target)
       sed "s/user@1002\.service/user@$hermes_uid.service/g" "$f" > "$unit_dir/$name" ;;
     *) stop "deploy/systemd/$name is not a kind of unit file the install places; add it to step 8." ;;
@@ -542,7 +548,15 @@ install -m 0644 "$here/deploy/systemd/tw-hermes-gateway-webhook.conf" /etc/syste
 systemctl daemon-reload
 systemctl enable --quiet tw-limits-check.service
 systemctl restart tw-limits-check.service
-systemctl enable --quiet --now tw-checks.socket tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
+# The first install with the brokers' socket units (#162): a broker started
+# before them made its own socket, and tw-proxy holds the port its socket unit
+# binds, so each such broker stops before its socket unit starts. It starts
+# again below, on the socket.
+for sock in tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket; do
+  systemctl is-active --quiet "$sock" || systemctl stop "${sock%.socket}.service"
+done
+systemctl enable --quiet --now tw-checks.socket tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket \
+  tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
   tw-offsite.timer tw-offsite.path tw-follow-main.timer
 # A path unit watches what it was started with, so a changed one is started
 # again to watch what it says now (12 Nov: PathChanged became PathExistsGlob).
@@ -555,13 +569,23 @@ systemctl restart tw-offsite.path
 if [[ -n "$keep_brokers" ]]; then
   # Nothing they load changed, so the running brokers already hold this
   # release's code; enable --now above started any that was not running.
-  for unit in tw-policy.service tw-git.service tw-files.service tw-proxy.service; do
+  for unit in tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket tw-policy.service tw-git.service tw-files.service tw-proxy.service; do
     systemctl is-active --quiet "$unit" || stop "$unit is not running after its start; journalctl -u $unit says why."
   done
   ok "brokers kept running: nothing they load changed"
 else
+  # Each broker takes its socket back from systemd as it starts (#162). A
+  # socket unit whose file changed is stopped with its broker and started
+  # again first; that one alone refuses calls while it is down.
+  for sock in $changed_sockets; do
+    systemctl stop "${sock%.socket}.service" "$sock"
+    systemctl start "$sock"
+  done
   systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
   systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
+  for unit in tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket; do
+    systemctl is-active --quiet "$unit" || stop "$unit is not listening: journalctl -u $unit says why."
+  done
 fi
 ok "units in place and started"
 

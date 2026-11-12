@@ -35,7 +35,9 @@ PACKAGES = ("thornswood_guard", "thornswood_brokers", "thornswood_decisions", "t
 PROCESSES = {
     "brokers": {"modules": ["thornswood_brokers.serve"],
                 "files": ["deploy/bin/tw-serve", "deploy/systemd/tw-policy.service", "deploy/systemd/tw-git.service",
-                          "deploy/systemd/tw-files.service", "deploy/systemd/tw-proxy.service"]},
+                          "deploy/systemd/tw-files.service", "deploy/systemd/tw-proxy.service",
+                          "deploy/systemd/tw-policy.socket", "deploy/systemd/tw-git.socket",
+                          "deploy/systemd/tw-files.socket", "deploy/systemd/tw-proxy.socket"]},
     "connector": {"modules": ["thornswood_decisions.connector"],
                   "files": ["deploy/decisions/tw-decide-connector", "deploy/decisions/tw-decide-connector.service"]},
 }

@@ -106,18 +106,33 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
     def __init__(self, path: str | Path, ops: dict[str, tuple[Callable, set[str]]], *,
-                 mode: int = 0o660, group: str | None = None):
-        """ops maps an op name to (handler(caller, args), users allowed to call it)."""
+                 mode: int = 0o660, group: str | None = None, fd: int | None = None):
+        """ops maps an op name to (handler(caller, args), users allowed to call it).
+
+        fd: the listening socket systemd holds for this path (its .socket
+        unit, #162). It is taken as it is; systemd made the path, its mode and
+        its group, and keeps the socket open while this process starts again,
+        so a call made meanwhile waits instead of being refused."""
         self.path = Path(path)
         self.ops = ops
-        if self.path.exists() or self.path.is_symlink():
-            self.path.unlink()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        super().__init__(str(self.path), Handler)
-        os.chmod(self.path, mode)
-        if group:
-            import grp
-            os.chown(self.path, -1, grp.getgrnam(group).gr_gid)
+        if fd is not None:
+            super().__init__(str(self.path), Handler, bind_and_activate=False)
+            self.socket.close()
+            self.socket = socket.socket(fileno=fd)
+            if self.socket.family != socket.AF_UNIX or self.socket.getsockname() != str(self.path):
+                got = self.socket.getsockname()
+                self.socket.detach()
+                raise Refused(f"the socket systemd passed listens on {got!r}, not {self.path}; "
+                              "the socket unit and the policy disagree")
+        else:
+            if self.path.exists() or self.path.is_symlink():
+                self.path.unlink()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            super().__init__(str(self.path), Handler)
+            os.chmod(self.path, mode)
+            if group:
+                import grp
+                os.chown(self.path, -1, grp.getgrnam(group).gr_gid)
         self._lock = threading.Lock()
         self._busy = 0
         self._idle = threading.Condition()

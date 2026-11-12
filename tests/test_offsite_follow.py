@@ -402,15 +402,34 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(vm.ran(f"start {follow_main.CONNECTOR}"), [], "the connector was never stopped")
         self.assertIn("new turns are not held: the install stops nothing a running turn needs", self.said)
 
-    def test_a_release_that_changes_what_the_brokers_load_starts_them_and_the_connector_again(self):
+    def test_brokers_starting_again_behind_systemds_sockets_leave_the_connector_running(self):
+        # #162: a call made while a broker starts again waits in its socket.
         vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
         f = self.follower(vm)
         self.releases(f, {"src/thornswood_brokers/git_service.py": "\n# changed\n"})
         self.assertEqual(f.follow(), 0, self.said)
-        self.assertEqual((self.drained, self.holds_ended), (1, 1))
+        self.assertEqual((self.drained, self.holds_ended), (0, 0), self.said)
         self.assertTrue(vm.ran("deploy/install.sh")[0].endswith(f"deploy/install.sh {NEW}"), vm.calls)
+        self.assertTrue(vm.ran("decisions/install.sh")[0].endswith("--keep-connector"), vm.calls)
+
+    def test_brokers_that_make_their_own_sockets_start_the_connector_again(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_brokers/git_service.py": "\n# changed\n"})
+        for name in follow_main.Follower.BROKER_SOCKETS:
+            (f.opt / "releases" / OLD / "deploy" / "systemd" / name).unlink()
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (1, 1))
         self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
-        self.assertTrue(any("the connector starts again: the brokers start again" in l for l in self.said), self.said)
+        self.assertTrue(any("the connector starts again: the brokers start again without systemd holding their sockets"
+                            in l for l in self.said), self.said)
+
+    def test_a_changed_socket_unit_starts_the_connector_again(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"deploy/systemd/tw-policy.socket": "\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.drained, 1)
 
     def test_a_release_that_changes_a_helper_the_connector_runs_starts_it_again(self):
         # room_send.py is run by path, never imported.
@@ -444,7 +463,7 @@ class FollowMain(unittest.TestCase):
             unit = f.root / "etc" / "systemd" / "system" / name
             unit.parent.mkdir(parents=True, exist_ok=True)
             unit.write_text("[Socket]\n")
-            (f.opt / "releases" / NEW / "deploy" / "systemd" / name).write_text("[Socket]\n")
+            (f.opt / "releases" / OLD / "deploy" / "systemd" / name).unlink(missing_ok=True)
         self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / OLD), list(follow_main.Follower.BROKER_SOCKETS))
         self.assertEqual(vm.ran("disable --quiet --now tw-policy.socket"),
                          ["systemctl disable --quiet --now " + " ".join(follow_main.Follower.BROKER_SOCKETS)])

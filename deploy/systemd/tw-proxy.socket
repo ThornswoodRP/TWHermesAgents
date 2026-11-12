@@ -1,0 +1,12 @@
+# tw-proxy's socket, held by systemd (#162): the Bots' model calls go here
+# (each profile's base_url), and a call made while the proxy starts again for
+# an install waits for it instead of being refused. The address is the
+# policy's (admission_proxy.listen).
+[Unit]
+Description=Thornswood tw-proxy socket
+
+[Socket]
+ListenStream=127.0.0.1:8611
+
+[Install]
+WantedBy=sockets.target

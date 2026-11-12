@@ -502,17 +502,20 @@ brokers:
   # credentials on every connection.
   # The group is only who may connect; each op still checks the caller's
   # user from SO_PEERCRED.
+  # tw-policy, tw-git and tw-files listen on sockets systemd holds
+  # (deploy/systemd/tw-*.socket), so a broker starting again for an install
+  # refuses no call: calls wait in the socket until it answers (#162).
   sockets:
     policy:
-      path: /run/tw/policy/policy.sock
+      path: /run/tw-brokers/policy.sock
       group: tw-policy-clients
       clients: [hermes, tw-git, tw-files, tw-proxy, root]
     git:
-      path: /run/tw/git/git.sock
+      path: /run/tw-brokers/git.sock
       group: tw-git-clients
       clients: [hermes, root]
     files:
-      path: /run/tw/files/files.sock
+      path: /run/tw-brokers/files.sock
       group: tw-files-clients
       clients: [hermes, root]
     # The Bots' route to the decision core (#49), served by tw-decide-bots as

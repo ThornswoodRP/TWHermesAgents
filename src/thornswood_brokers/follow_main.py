@@ -339,8 +339,9 @@ class Follower:
     def keeps(self, before: str | None, dest: Path) -> dict[str, bool]:
         """What the install may leave running (restart_plan): the brokers when
         nothing they load changed, and the connector, with every Bot turn it
-        runs, when nothing it or the brokers load changed and the core's store
-        does not migrate (a migration stops every worker of the core, 1 Nov).
+        runs, when nothing it loads changed, the core's store does not migrate
+        (a migration stops every worker of the core, 1 Nov), and the brokers
+        either keep running or start again behind sockets systemd holds.
         A release that cannot be read keeps nothing."""
         try:
             old = self.opt / "releases" / before if before else None
@@ -349,18 +350,34 @@ class Follower:
             self.say(f"NOTE what this release changes could not be read ({e}); every process starts again")
             return {"brokers": False, "connector": False}
         migrates = self.migrates(dest)
-        # A broker starting again refuses calls for a second or two, and a turn
-        # whose ticket check (tw-policy's touch) is refused is refused for the
-        # rest of the turn (thornswood_guard.brokers.TurnGate). So the
-        # connector's turns go on only while the brokers do too.
+        # A broker that made its own socket refused calls for a second or two
+        # while it started again, and a turn whose ticket check (tw-policy's
+        # touch) is refused is refused for the rest of the turn
+        # (thornswood_guard.brokers.TurnGate). With systemd holding the
+        # brokers' sockets in both releases, unchanged, a call waits for the
+        # broker instead (#162), so the connector's turns go on through it.
+        held = self.sockets_held(old, dest)
         keep = {"brokers": not changed["brokers"],
-                "connector": not changed["brokers"] and not changed["connector"] and not migrates}
-        why = [w for w, yes in (("what it loads changed", changed["connector"]), ("the brokers start again", changed["brokers"]),
+                "connector": not changed["connector"] and not migrates and (not changed["brokers"] or held)}
+        why = [w for w, yes in (("what it loads changed", changed["connector"]),
+                                ("the brokers start again without systemd holding their sockets",
+                                 changed["brokers"] and not held),
                                 ("the core's store migrates", migrates)) if yes]
         self.say("the brokers " + ("keep running: nothing they load changed" if keep["brokers"] else "start again")
                  + "; the connector " + (f"starts again: {', '.join(why)}" if why else
                                          "keeps running: nothing it or the brokers load changed and the store does not migrate"))
         return keep
+
+    def sockets_held(self, old: Path | None, dest: Path) -> bool:
+        """Whether systemd holds every broker's socket across this install:
+        both releases ship the same socket units, so none is started again."""
+        if old is None:
+            return False
+        for name in self.BROKER_SOCKETS:
+            a, b = old / "deploy" / "systemd" / name, dest / "deploy" / "systemd" / name
+            if not (a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes()):
+                return False
+        return True
 
     def migrates(self, dest: Path) -> bool:
         """Whether the core's store moves to another schema at this release; a
