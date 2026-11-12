@@ -7,7 +7,7 @@ Some problems the Bots hit are caused in [Hermes Agent](https://github.com/NousR
 | Folder | What it holds |
 |---|---|
 | `v0.22.5/` | The patches made against Hermes v0.22.5 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). They apply in number order |
-| `v0.23.0/` | The patches made against Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`). 0011 and 0012 also apply to upstream `main` as they are |
+| `v0.23.0/` | The patches made against Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`). 0011, 0012 and 0013 also apply to upstream `main` as they are |
 | `main/` | The patches remade on upstream `main`, where upstream had changed the same lines. 0002, 0003 and 0004 apply to upstream `main` as they are, so they have no copy here |
 | `followups/` | Commits for the upstream pull request branches that answer upstream's code health check, each at its cause |
 
@@ -22,7 +22,7 @@ git am v0.22.5/*.patch
 The VM and Patrick's Desktop run Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`), the version `src/thornswood_decisions/contracts.json` pins. None of these fixes is in v0.23.0 yet. Applied one after another with `git am --3way`, these apply on it as they are:
 
 ```bash
-git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-headers-logged.patch v0.22.5/0003-spill-fallback-posix-path.patch v0.22.5/0004-aux-codex-pick-by-model.patch v0.22.5/0005-desktop-relay-local-source-once-it-signals.patch main/0006-desktop-scheduled-jobs-every-gateway.patch v0.22.5/0008-desktop-ready-wait-on-remote.patch main/0007-webhook-coalesce-survives-restart.patch main/0010-display-watch-profile-scope.patch v0.23.0/0011-cron-gated-fire-ends-session.patch v0.23.0/0012-anthropic-quota-early-reopen.patch
+git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-headers-logged.patch v0.22.5/0003-spill-fallback-posix-path.patch v0.22.5/0004-aux-codex-pick-by-model.patch v0.22.5/0005-desktop-relay-local-source-once-it-signals.patch main/0006-desktop-scheduled-jobs-every-gateway.patch v0.22.5/0008-desktop-ready-wait-on-remote.patch main/0007-webhook-coalesce-survives-restart.patch main/0010-display-watch-profile-scope.patch v0.23.0/0011-cron-gated-fire-ends-session.patch v0.23.0/0012-anthropic-quota-early-reopen.patch v0.23.0/0013-turn-left-early-ends.patch
 ```
 
 The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already has the upstream code their `main/` copies were made for. Neither does 0009: v0.23.0 has upstream's rewrite of that flow.
@@ -43,6 +43,7 @@ The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already 
 | 0010 | The Bot Screen watcher reads each home under its own terminal policy | not opened yet | `013bde47` (only on `main`; the file is the same in v0.22.5) |
 | 0011 | A cron fire a gate stopped ends the session its owner admitted | not opened yet | made on v0.23.0; applies to `main` as is |
 | 0012 | A Claude subscription limit that reopens before its reset lets the Bots back on Claude | not opened yet | made on v0.23.0; applies to `main` as is |
+| 0013 | A turn that leaves the loop early still fires on_session_end | not opened yet | made on v0.23.0; applies to `main` (`ddc5d27e`, 11 Nov 2026) as is |
 
 GitHub allows an account without write access five open pull requests in a repository, so the later patches open as the earlier ones merge or close.
 
@@ -162,6 +163,20 @@ Its tests (`tests/agent/test_anthropic_quota_early_reopen.py`) run against a rea
 git am v0.23.0/0012-anthropic-quota-early-reopen.patch
 python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
 HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/agent/test_anthropic_quota_early_reopen.py tests/agent/test_credential_pool.py -q -rfE
+```
+
+## 0013: a turn that leaves the loop early still fires on_session_end
+
+**Cause.** `on_session_end` is Hermes's per-turn end hook, and `finalize_turn` fires it. The terminal failure paths (a non-retryable API error, retry exhaustion, a preflight timeout, a content-policy refusal) return their envelope from inside the loop and never reach `finalize_turn`, so for them the hook never fired. On 11 Nov 2026, from 7:48 to 8:48 PM UTC, twelve of Bramble's turns hit Anthropic's 429 for Patrick's weekly limit. None had a fallback it could use (the credits route was refused as not Anthropic, there is no Codex login on the VM, and the admission proxy refuses Qwen any tools). Each ended in 1 to 258 seconds with "Non-retryable client error", and SessionDB closed each one. `thornswood_live`, which drops a turn on `on_session_end`, kept all twelve as "Thinking" on the app's Board for hours, until the gateway restarted. The turn gate's tickets for them were not given back either, and each held its place in the fleet queue until its ten minutes ran out.
+
+**Fix.** `run_conversation` fires `on_session_end` once, with `completed`, `failed`, `interrupted` and the exit reason from the envelope, when `finalize_turn` did not. `finalize_turn` marks the turns it ended. A turn with persistence off gets no hook, as in `finalize_turn`.
+
+Its tests (`tests/agent/test_turn_end_hook_early_exit.py`) have not been run here: the session that wrote it could not install Hermes. The patch adds lines to `agent/conversation_loop.py`, which upstream's code health check caps by size; if the check refuses it, the helper moves to a sibling file.
+
+```bash
+git am v0.23.0/0013-turn-left-early-ends.patch
+python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
+HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/agent/test_turn_end_hook_early_exit.py tests/agent/test_turn_finalizer_cleanup_guard.py -q -rfE
 ```
 
 ## The follow-up commits
