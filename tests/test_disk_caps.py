@@ -78,7 +78,7 @@ class TheInstall(unittest.TestCase):
         block = step[step.index("if quotas_on; then\n"):]
         fake = Path(tempfile.mkdtemp())
         log = fake / "setquota.log"
-        groups = {"tw-work-rift": 2001, "tw-work-wisp": 2002, "tw-decide-voice": 963}
+        groups = {"tw-work-rift": 2001, "tw-work-wisp": 2002, "tw-decide-voice": 963, "grok-lanes": 990}
         tools = {
             "repquota": f"cat <<'EOF'\n{report}EOF\n",
             "setquota": f'echo "$*" >> {log}\n',
@@ -91,7 +91,8 @@ class TheInstall(unittest.TestCase):
             (fake / name).chmod(0o755)
         script = ('set -euo pipefail\nstop() { echo "STOP: $*"; exit 1; }\nok() { echo "ok $*"; }\n'
                   'quotas_on() { true; }\n'
-                  f'srv_mnt=/\nbots="rift wisp"\nhere={REPO}\n' + block)
+                  f'srv_mnt=/\nbots="rift wisp"\ngrok_user=grok-lanes\nhere={REPO}\n'
+                  + text[text.index("pol() {"):text.index("\n\n", text.index("pol() {"))] + "\n" + block)
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                            env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"})
         return r, (log.read_text().splitlines() if log.exists() else [])
@@ -102,7 +103,10 @@ class TheInstall(unittest.TestCase):
         gb = json.loads((REPO / "src" / "thornswood_guard" / "policy.json").read_text())["brokers"]["files"]["disk_quota_gb"]
         self.assertEqual(calls[:2], [f"-g tw-work-{b} 0 {gb.get(b, gb['default']) * 1024 * 1024} 0 0 /"
                                      for b in ("rift", "wisp")])
-        self.assertEqual(calls[2:], ["-g 962 0 0 0 0 /", "-g 963 0 0 0 0 /", "-g 2003 0 0 0 0 /"])
+        # The Grok lanes' account has its cap too (Thornswood #5933), and it is kept.
+        grok = json.loads((REPO / "src" / "thornswood_guard" / "policy.json").read_text())["grok_lanes"]["disk_quota_gb"]
+        self.assertEqual(calls[2], f"-g grok-lanes 0 {grok * 1024 * 1024} 0 0 /")
+        self.assertEqual(calls[3:], ["-g 962 0 0 0 0 /", "-g 963 0 0 0 0 /", "-g 2003 0 0 0 0 /"])
         self.assertIn("took the cap off gid 963 (tw-decide-voice)", r.stdout)
         self.assertIn("took the cap off gid 962 (no group has it now)", r.stdout)
 
@@ -110,7 +114,7 @@ class TheInstall(unittest.TestCase):
         r, calls = self._run_step("#963 -- 3M 0 32M 41 0 0\n")
         self.assertEqual(r.returncode, 1)
         self.assertIn("STOP: the group quotas on / could not be read", r.stdout)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
 
 
 class TheCanary(unittest.TestCase):

@@ -724,6 +724,14 @@ slices:
     CPUWeight: 50
     CPUQuota: 100%
     TasksMax: 1024
+  # The Grok lanes' computer (grok_lanes below): the Grok Bot app and its
+  # virtual screen, as grok-lanes.
+  tw-grok.slice:
+    MemoryHigh: 1536M
+    MemoryMax: 2G
+    CPUWeight: 20
+    CPUQuota: 100%
+    TasksMax: 512
   # Tier A: the hermes user's own manager runs the rootless podman containers,
   # so its user slice (user-<uid of hermes>.slice) carries the sandbox caps too.
   hermes-user.slice:
@@ -731,6 +739,42 @@ slices:
     MemoryMax: 4G
     CPUQuota: 100%
     TasksMax: 1024
+
+# The Grok lanes' computer (Patrick's answer A on q-5933-lanes-fallback,
+# 12 Nov 2026; ThornswoodRP/Thornswood#5933). The Grok Bot lanes audit on
+# Grok Bot's own cloud computer; when its included usage runs out they do
+# read-only work on a computer of Patrick's through the Grok Bot app. That
+# was One; it is this VM, so nothing of theirs runs on One. xAI's Grok Bot for
+# Linux runs as grok-lanes on a virtual screen (tw-grok-lanes.service), from
+# xAI's signed apt repository, whose key is pinned here by fingerprint. The
+# account has no sudo, no ssh key, no group of the brokers or the Bots, and
+# its unit cannot see /home (Patrick's own Hermes's box key is there), the
+# brokers' state or /etc/thornswood. Patrick signs in once through the
+# screen (tw-grok-screen.service): a noVNC page on the VM's Tailscale address
+# only, open while the app has no local computer registered and for
+# screen_minutes after an install that finds screen_open true.
+grok_lanes:
+  user: grok-lanes
+  home: /srv/tw/grok-lanes
+  apt_key: deploy/grok-lanes/grok-bot.asc
+  apt_key_fingerprint: 380FF4BCDC34A4BD92A3565342A1772E62E492D6
+  apt_uri: https://downloads.cursor.com/aptrepo
+  apt_suite: grok-bot
+  package: grok-bot
+  app: /opt/Grok Bot/grok-bot
+  # What says the app's local computer is registered (it is there once
+  # Patrick has signed in and turned on Execution on this computer).
+  ready_file: .grokbot/local-exec-daemon-credential.json
+  display: 71
+  screen_port: 6080
+  screen_minutes: 120
+  # true opens the screen for screen_minutes at the next install, for a
+  # change in the app's settings after the sign-in. Back to false after.
+  screen_open: false
+  disk_quota_gb: 8
+  # Public: whether the local computer is registered and whether the screen
+  # is open, put on the ledger with an installed result. Never an address.
+  status_file: /var/lib/thornswood/grok-lanes.json
 
 # Backups (02 section 7, OPEN item 7). Encrypted on the VM to Patrick's age
 # public key. Never in an archive: sign-ins, .env files, keys. Until 31 Oct

@@ -36,7 +36,7 @@ This comes before every other line here. It is word for word the rule every Clau
 
 | Bot | Owns | Hands to |
 |---|---|---|
-| **Bramble** (router) | Picking and admitting work, claims, briefs, reviews in the end, turning auto-merge on for the Bots' pull requests and merging Ops, the release ledger, every release step (Dev releases, Ships, deploys and signing, all started on the box's and GitHub's runners), Main when Patrick says, the decision page, `ops/status.md`, the run notes, the working rooms, the two weekly reviews | Patrick, for decisions and Main |
+| **Bramble** (router) | Picking and admitting work, claims, briefs, reviews in the end, turning auto-merge on for the Bots' pull requests and merging Ops, the release ledger, every release step (Dev releases, Ships, deploys and signing, all started on the box's and GitHub's runners), Main when Patrick says, the decision page, `ops/status.md`, the Desk's list, the working rooms, the two weekly reviews | Patrick, for decisions and Main |
 | **Rift** | The Nexus collection, load order, plugin and mod permissions, `records/` for content, generated content inputs | Bramble, for any publish or Vortex step |
 | **Sprocket** | `launcher/`, `installer/`, update and feed behavior on the client, packaging scripts, their tests | Bramble |
 | **Echo** | `site/`, `bot/`, `voice/`, public pages, Discord layout and posts as code, lore and help text | Bramble, for every deploy and every live Discord change |
@@ -80,7 +80,7 @@ This comes before every other line here. It is word for word the rule every Clau
    - `Refs #N` for a fix people would notice. The issue stays open, goes to Done on merge, and closes with its Main test task when a main Ship carries it.
    - `Closes #N` only for a change nobody would notice in the game.
    - The test task text for the issue (section 9), in the PR, ready to post.
-6. If the change needs a run (a deploy, a Ship, a box step, a Nexus step), commit a run note to Thornswood-Ops beside it (the ops skill, section 7).
+6. If the change needs something done once it is deployed, add a step file under `deploy/after/` in the same PR (its README has the shape): a gate verb the box deploy agent runs after the Deployment, or a check in the game, which becomes a `check: in game` issue. Never a run note: Thornswood-Ops has had none since 12 Nov 2026 (#5186).
 7. What you find on the way: anything wrong that this issue does not cover (another bug, a band-aid, a stale doc, a missing test) goes on the board, never into this PR. Search first as in section 2; if an issue already holds it, add what you found there as a plain comment. If none does, `tw_git open_issue` it: a plain title, two to five lines saying what is wrong and where, and a last line `Done when:` with one thing somebody can check, unclaimed. Name each one in your hand-back.
 8. Hand back to Bramble: PR number, exact head SHA, the CI runs, the tests you ran and what they printed, the files touched, what is left. Never merge your own work.
 9. Then take your next issue yourself, in the same turn; do not wait for Bramble to send one. Your issue now waits on its checks and review, and waiting is never a reason to sit idle (section 3). Until 12 Nov 2026 every worker stopped here and waited for Bramble's next sweep to brief it, and Bramble sweeps one at a time: at 12:15 PM Mountain Rift and Wisp had sat 17 minutes since their hand-backs, and at 2:02 PM three of the five had just handed back, so the Board showed two Bots working. In the work hours (section 3; outside them, stop):
@@ -107,7 +107,7 @@ GitHub's auto-merge merges in Thornswood and the fork (Patrick, 2 Nov 2026: "He 
 3. Ops (private, no auto-merge on GitHub Free): Bramble merges with `tw_git` op `merge` only when `check` is a success on that exact head. Skipped is not success. Red is never merged past, and a red check is never re-run in the hope it passes: find its cause (section 11).
    Fork PRs merge with `merge_method=merge`, into `thornswood/engine-changes`. Ops PRs: squash.
 4. Read it back: auto-merge on, or merged with its merge commit and target.
-5. After the merge, in one sitting: run what the PR's "Which parts it touches" says through the gate (Dev only), run its Dev run note, update the ledger (section 7), tell the owner the merge commit, and make sure the branch and any worktree are gone.
+5. After the merge, in one sitting: run what the PR's "Which parts it touches" says through the gate (Dev only), update the ledger (section 7), tell the owner the merge commit, and make sure the branch and any worktree are gone.
 
 ## 7. Dev releases and the ledger (Bramble)
 
@@ -118,14 +118,14 @@ GitHub's auto-merge merges in Thornswood and the fork (Patrick, 2 Nov 2026: "He 
 - **Bramble runs every step**, by starting runs on `main` on the box's and GitHub's runners. Keys and signing stay there. Patrick runs none of it.
 - **In this order**, each through its gate verb or workflow (today the gate has verbs only for `Deploy-DevGamemode`, `Install-Bot`, `Install-Voice`, `Deploy-Docs`, `Get-Logs` and `Request-Restart`; a step with no verb is a stop, filed for Magpie, never run another way): `Publish-Server -Channel dev` if the engine pin moved; `Deploy-DevGamemode` (with `-LoadOrder -ShipFollows` if the content plugin changed); `Build-Generated -Channel dev` if a ship root was refreshed; `release.yml` if a launcher change is in it (it builds and signs the launcher on GitHub's runner); the dev Ship (`Ship.ps1 -Channel dev -FromFeed`); `Install-Bot -CodeOnly`, `Install-Voice`, `Deploy-Docs` as the PRs' ticks say.
 - **Check it:** the dev feed serves the new release, hashes and signature match, the engine pin and load order are right, `online.json` answers on 7788, the voice health answers, nothing on Main changed.
-- **Record it:** the release on each issue it carries, the Dev test tasks that need a human dev, `ops/status.md`, the run notes deleted, and the ledger's counted issues marked used. A failed release uses nothing, and the count stays.
+- **Record it:** the release on each issue it carries, the Dev test tasks that need a human dev, `ops/status.md`, and the ledger's counted issues marked used. A failed release uses nothing, and the count stays.
 
 ## 8. Main
 
 - Never ask Patrick whether Main is ready, and open no card for it. While the policy's `runs.main_without_patrick` is true (Patrick, 31 Oct to 2 Nov: main releases without a yes for each, and no card for agreed work), Bramble promotes the exact Dev build it names the same way as Dev, on the box's and GitHub's runners. If he sets it false, Main goes only on his word for that exact build, used once.
 - Today no gate verb runs `Deploy-Server -GamemodeOnly`, and no workflow runs `Ship.ps1`. Until Magpie builds them, a Main step with no verb or workflow is a stop, filed for Magpie, never run another way.
 - Main never Ships straight after a dev Ship. The live server's gamemode goes first (`Deploy-Server -GamemodeOnly`), the content plugin goes to the live server first when it changed, the version moves by its own PR (`Bump-Version.ps1`), then `Ship.ps1 -Channel main`, then the live pieces the PRs touched (Developer-Guide.md section 4).
-- After it: the Main test tasks posted and the issues closed (section 9), `Scrub-Feed`, `Check-ProdParity`, health checks, and the Main run notes (`test-tasks-at-main.md`, `2578-prod-parity.md` and the rest).
+- After it: the Main test tasks posted and the issues closed (section 9), `Scrub-Feed`, `Check-ProdParity`, health checks.
 - Anything that would change the approved build (a new merge, a different revision) needs a new answer.
 
 ## 9. Test tasks, known issues and closing
@@ -176,9 +176,9 @@ The shapes are in Developer-Guide.md "Test tasks and known issues". The bot post
 ## 14. Taking over from Claude, ChatGPT and the lanes
 
 - At cutover every open issue still labelled `claimed: Claude` with no open thread or PR, every `claimed: ChatGPT` and `claimed: Codex` issue, and every lane claim comes to the Bots.
-- For each one Bramble reads the whole history, picks the owner, swaps the old label for the Bot's, and writes a hand-over comment: what was measured, what exists (branches, PRs, run notes), what is left.
+- For each one Bramble reads the whole history, picks the owner, swaps the old label for the Bot's, and writes a hand-over comment: what was measured, what exists (branches, PRs, evidence in Ops `issues/<n>.md`), what is left.
 - An existing PR is taken over, not redone: the owner continues on its branch. A PR that should not land is closed with the reason. Djinn's and Jhinswife's work stays theirs.
-- Read the Ops run notes and `ops/status.md` first. If a note is still in the queue, it hasn't run yet.
+- Read the issue's evidence in Ops (`issues/<n>.md`) and `ops/status.md` first.
 
 ## 15. The two weekly reviews (Bramble's routines)
 

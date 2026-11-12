@@ -258,6 +258,9 @@ class Follower:
         box = self.box_access() if result == "installed" else None
         if box:
             pending["box"] = box
+        grok = self.grok_lanes() if result == "installed" else None
+        if grok:
+            pending["grok"] = grok
         self.record(report_pending=pending)
         self.send_report()
 
@@ -270,6 +273,22 @@ class Follower:
         except (OSError, ValueError):
             return None
         return data if isinstance(data, dict) else None
+
+    def grok_lanes(self) -> dict | None:
+        """What this install wrote of the Grok lanes' computer (deploy/install.sh 6c, 8a; Thornswood
+        #5933): whether its local computer is registered, whether its screen is open, the app's
+        version and any problem. None when the file is not there or not JSON; tw-git holds each
+        field to its form, and only those fields go out."""
+        where = (self.p.data.get("grok_lanes") or {}).get("status_file")
+        if not where:
+            return None
+        try:
+            data = json.loads(self._at(where).read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {k: data.get(k) for k in ("ready", "screen", "version", "problem")}
 
     def send_report(self) -> None:
         pending = self.state().get("report_pending")

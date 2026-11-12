@@ -988,6 +988,25 @@ class Reports(unittest.TestCase):
         self.assertEqual(f.follow(), 0, self.said)
         self.assertEqual(self.reports[0]["box"], box)
 
+    def test_an_install_puts_the_grok_lanes_computer_in_its_report_and_nothing_more(self):
+        # deploy/install.sh 8a writes grok_lanes.status_file; only its four public fields go out
+        # (Thornswood #5933), never what the install keeps to know when to restart the app.
+        f = self.follower(FakeVM(NEW))
+        at = f._at(f.p.data["grok_lanes"]["status_file"])
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text(json.dumps({"ready": False, "screen": "open", "version": "1.0.1", "runs": "ab" * 32, "problem": None}))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.reports[0]["grok"], {"ready": False, "screen": "open", "version": "1.0.1", "problem": None})
+
+    def test_a_report_with_no_grok_status_or_a_broken_one_carries_none(self):
+        f = self.follower(FakeVM(NEW))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertNotIn("grok", self.reports[0])
+        at = f._at(f.p.data["grok_lanes"]["status_file"])
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text("[1, 2]")
+        self.assertIsNone(f.grok_lanes())
+
     def test_a_report_with_no_box_file_or_a_broken_one_carries_no_box(self):
         f = self.follower(FakeVM(NEW))
         self.assertEqual(f.follow(), 0, self.said)

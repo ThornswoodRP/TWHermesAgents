@@ -95,7 +95,7 @@ class TheRoute(unittest.TestCase):
 
     def test_the_prompt_says_a_wake_is_a_whole_sweep(self):
         for must in ("over all of them and not only this commit", "Thornswood-Ops", "the fork",
-                     "Ops run notes", "the latest of the events since your last wake"):
+                     "the Desk's list in Thornswood-Ops", "the latest of the events since your last wake"):
             self.assertIn(must, WAKE_PROMPT)
 
     def test_the_prompt_holds_only_githubs_own_fields(self):

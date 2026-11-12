@@ -38,6 +38,7 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 BOX_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 BOX_PUBLIC = re.compile(r"^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$")
 BOX_SHA = re.compile(r"^[0-9a-f]{64}$")
+GROK_VERSION = re.compile(r"^[0-9][0-9A-Za-z.+~-]{0,39}$")
 RESULTS = {
     "installed": "installed",
     "not installed": "not installed: the tests or the release stopped it before anything changed",
@@ -108,7 +109,27 @@ class VmReport:
         if result in STOPS and not out["reason"]:
             raise Refused("a stop says why")
         out["box"] = self._box(args.get("box"))
+        out["grok"] = self._grok(args.get("grok"))
         return out
+
+    @staticmethod
+    def _grok(v) -> dict | None:
+        """The Grok lanes' computer (deploy/install.sh 8a): never an address or a link."""
+        if v in (None, {}):
+            return None
+        if not isinstance(v, dict):
+            raise Refused("grok is whether the lanes' computer is ready, its screen, its version and any problem")
+        ready, screen, version = v.get("ready"), v.get("screen"), v.get("version")
+        if not isinstance(ready, bool):
+            raise Refused("grok ready is true or false")
+        if screen not in ("open", "closed"):
+            raise Refused("grok screen is open or closed")
+        if version not in (None, "") and not (isinstance(version, str) and GROK_VERSION.match(version)):
+            raise Refused("grok version is a package version")
+        problem = v.get("problem")
+        if problem is not None and not isinstance(problem, str):
+            raise Refused("grok problem is one line")
+        return {"ready": ready, "screen": screen, "version": version or None, "problem": one_line(problem, 200)}
 
     @staticmethod
     def _box(v) -> dict | None:
@@ -145,6 +166,11 @@ class VmReport:
             b = r["box"]
             line += (f" Box key for {b['name']}: `{b['public']}`, token sha256 `{b['token_sha256']}`;"
                      f" login: {b['login'] or 'not tried'}.")
+        if r.get("grok"):
+            g = r["grok"]
+            line += (f" Grok lanes' computer: Grok Bot {g['version'] or 'not installed'},"
+                     f" local computer {'registered' if g['ready'] else 'not registered yet'}, screen {g['screen']}")
+            line += f"; {g['problem']}." if g["problem"] else "."
         return line
 
     def _marker(self, r: dict) -> str:

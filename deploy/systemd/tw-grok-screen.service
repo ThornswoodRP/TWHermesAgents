@@ -1,0 +1,43 @@
+# The Grok lanes' screen, for Patrick's sign-in (deploy/grok-lanes/screen):
+# the app's virtual screen as noVNC, and the sign-in link, on the VM's
+# Tailscale address alone. It shares tw-grok-lanes.service's /tmp, where the
+# virtual screen's socket is, and stops by itself after RuntimeMaxSec
+# (policy.yaml grok_lanes.screen_minutes). The install starts it while the
+# app has no local computer registered, or when screen_open is true.
+[Unit]
+Description=Thornswood: the Grok lanes' screen, for the sign-in
+After=tw-grok-lanes.service tailscaled.service
+Requires=tw-grok-lanes.service
+JoinsNamespaceOf=tw-grok-lanes.service
+
+[Service]
+Type=simple
+User=grok-lanes
+Group=grok-lanes
+Slice=tw-grok.slice
+Environment=HOME=/srv/tw/grok-lanes
+WorkingDirectory=/srv/tw/grok-lanes
+ExecStart=/opt/thornswood-hermes/current/deploy/grok-lanes/screen 71 6080
+RuntimeMaxSec=120min
+ReadWritePaths=/srv/tw/grok-lanes
+InaccessiblePaths=-/srv/tw/backups -/srv/tw/boxbackups -/srv/tw/boxdrop -/srv/tw/ci -/srv/tw/decide -/srv/tw/decide-test -/srv/tw/follow -/srv/tw/git -/srv/tw/policy -/srv/tw/push -/srv/tw/push-test -/srv/tw/snapshots -/srv/tw/spool -/srv/tw/work -/etc/thornswood -/var/lib/thornswood -/var/lib/tw-offsite -/root
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
