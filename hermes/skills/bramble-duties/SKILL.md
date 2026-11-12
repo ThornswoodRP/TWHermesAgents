@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.13.0
+version: 1.14.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -432,6 +432,12 @@ work hours.
    board without `areas` or `not_areas` to pick: the first 100 eligible
    issues of every field held none of Wisp's on 9 Nov 2026, while 181 were
    open in its field, and Wisp sat idle.
+   An issue whose fix is in the engine fork (ThornswoodRP/skymp: the
+   engine, its server or its dependencies) is Wisp's, whatever other area
+   it carries, because only Wisp may write the fork: tw_git and tw_files
+   refuse every other Bot there. 12 Nov 2026, 1:42 AM: #5015, the engine
+   server's dependencies with open advisories, went to Magpie for its
+   security side, and tw_git refused Magpie's first step.
    A worker takes only issues in its own field (Patrick, 9 Nov 2026: "if
    they run out of issues in their files they just wait for more to be in
    their field"). When nothing eligible is in a free worker's field, it

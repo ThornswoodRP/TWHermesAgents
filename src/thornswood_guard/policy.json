@@ -456,7 +456,7 @@
     },
     "sockets": {
       "policy": {
-        "path": "/run/tw/policy/policy.sock",
+        "path": "/run/tw-brokers/policy.sock",
         "group": "tw-policy-clients",
         "clients": [
           "hermes",
@@ -467,7 +467,7 @@
         ]
       },
       "git": {
-        "path": "/run/tw/git/git.sock",
+        "path": "/run/tw-brokers/git.sock",
         "group": "tw-git-clients",
         "clients": [
           "hermes",
@@ -475,7 +475,7 @@
         ]
       },
       "files": {
-        "path": "/run/tw/files/files.sock",
+        "path": "/run/tw-brokers/files.sock",
         "group": "tw-files-clients",
         "clients": [
           "hermes",
