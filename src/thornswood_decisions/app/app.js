@@ -865,7 +865,10 @@ async function boardView() {
     agent: d.bot, title: NAMES[d.bot] || d.bot,
     lines: [d.title ? el('span', { class: 'quiet' }, d.title) : null,
       el('span', { class: 'what', 'data-doing': d.state }, doingWords(d))],
-    right: forHowLong(d.since) }))
+    // The time is the step's, for the step the row names ("Running a command, 2 min"), never the whole turn's
+    // (Patrick's Board, 11 Nov 8:25 PM: 45 min was the turn's, not the command's). A row with no step time
+    // says none.
+    right: d.step_since ? forHowLong(d.step_since) : null }))
     : el('p', { class: 'quiet' }, 'No Bot is working right now.'))
 }
 

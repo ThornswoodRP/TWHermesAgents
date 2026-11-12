@@ -56,6 +56,12 @@ BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:0
           "since": "2026-11-01T17:50:00+00:00"},
          {"bot": "sprocket", "title": "Launcher news", "state": "tool", "tool": "browser_navigate",
           "since": "2026-11-01T17:55:00+00:00"}]
+# Each row says since when it does what it names (thornswood_live step_since); Rift's turn has run since
+# 1 Nov, but its command started two minutes ago, and the Board's time is the command's.
+for d in BOARD:
+    d["step_since"] = d["since"]
+import datetime as _dt
+BOARD[1]["step_since"] = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=2)).isoformat()
 f.put(w.ws, "work", tw, {"source_time": "2026-11-01T18:00:00+00:00", "doing": BOARD})
 BOARD_NEXT = Path(tempfile.mkdtemp()) / "board-next"
 # A Bot's message in Markdown, longer than a list line: the Rooms list shows its plain words, cut at a word.

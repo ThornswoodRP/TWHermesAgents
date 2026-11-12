@@ -715,7 +715,7 @@ class FeedsIn(unittest.TestCase):
         snap = Feeds(self.w.store).get(self.w.ws, "work")
         self.assertEqual(snap["as_of"], "2026-11-01T18:00:00+00:00")
         row = snap["work"]["doing"][0]
-        self.assertEqual(set(row), {"bot", "title", "state", "tool", "since", "platform", "session_id"})
+        self.assertEqual(set(row), {"bot", "title", "state", "tool", "since", "step_since", "platform", "session_id"})
         self.assertEqual((len(row["title"]), row["state"], row["tool"], row["session_id"]), (200, "tool", "terminal", "s1"))
         self.assertNotIn("secret", snap["work"])
         self.put("work", {"source_time": "2026-11-01T18:01:00+00:00", "doing": []})

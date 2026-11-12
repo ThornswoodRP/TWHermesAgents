@@ -1165,7 +1165,9 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(rows))
     // Bramble, Magpie and Wisp run nothing: no row, no heading, no history.
     if (await page.locator('[data-bot="bramble"], [data-bot="magpie"], [data-bot="wisp"]').count()) throw new Error('an idle Bot')
-    if (!/^(just now|\d+ min|\d+ h \d+ min)$/.test(await page.locator('.row.doing .w').first().textContent())) throw new Error('how long')
+    // The time is the step's, not the turn's: Rift's turn has run since 1 Nov, its command for two minutes.
+    const rift = await page.locator('.row.doing[data-bot="rift"] .w').textContent()
+    if (!/^[23] min$/.test(rift)) throw new Error('how long: ' + rift)
   })
   await step('the Board follows a change by itself, with no tap', async () => {
     require('fs').writeFileSync(boardNext, '')

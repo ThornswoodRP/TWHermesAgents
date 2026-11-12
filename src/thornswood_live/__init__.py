@@ -104,6 +104,14 @@ def _set(session_id, *, start=False, tool=None, call=None, done=None, platform=N
                             if v == done:
                                 turn["running"].pop(k)
                                 break
+                # Since when the turn has done what it says now (step_since), beside since when the turn has
+                # run (since): the Board's time is the step's, for the step it names. Patrick's Board, 11 Nov
+                # 8:25 PM, said "Running a command, 45 min" for Sprocket when the turn had run 45 minutes,
+                # not the command (measured on the VM).
+                tools = list(turn["running"].values())
+                shown = tools[-1] if tools else None
+                if "step_since" not in turn or turn.get("shown") != shown:
+                    turn["shown"], turn["step_since"] = shown, _now()
             _write(home, {k: _public(t) for k, t in turns.items()})
     except Exception as e:  # an observer never breaks a turn
         where = type(e).__name__
@@ -114,8 +122,8 @@ def _set(session_id, *, start=False, tool=None, call=None, done=None, platform=N
 
 def _public(turn: dict) -> dict:
     tools = list(turn["running"].values())
-    return {"session_id": turn["session_id"], "since": turn["since"], "platform": turn["platform"],
-            "state": "tool" if tools else "thinking", "tool": tools[-1] if tools else None}
+    return {"session_id": turn["session_id"], "since": turn["since"], "step_since": turn.get("step_since", turn["since"]),
+            "platform": turn["platform"], "state": "tool" if tools else "thinking", "tool": tools[-1] if tools else None}
 
 
 def on_turn_start(session_id=None, platform=None, **_):
