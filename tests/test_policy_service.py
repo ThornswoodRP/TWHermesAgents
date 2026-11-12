@@ -368,8 +368,33 @@ class OwedWakes(unittest.TestCase):
         got = s.bot_turns("hermes", {})["bots"]
         self.assertEqual(got["sprocket"]["running"], False)
         self.assertEqual(datetime.fromisoformat(got["sprocket"]["last"]), clock.t)
-        self.assertEqual(got["wisp"], {"running": False, "waiting": False, "last": None})
+        self.assertEqual(got["wisp"], {"running": False, "waiting": False, "last": None, "sweep_done": None})
         self.assertEqual(s.ops()["bot_turns"][1], {s.policy.data["brokers"]["users"]["gateway"]})
+
+    def test_bot_turns_says_when_the_newest_scheduled_sweep_that_ran_to_its_end_began(self):
+        # 11 Nov 2026: the free worker look's sweep was turned away, and its
+        # lines reached no sweep. Only a scheduled sweep carries them.
+        import copy
+        data = copy.deepcopy(policy().data)
+        data["admission"]["stage"] = "after"
+        clock = Clock()
+        s = service(clock=clock, data=data)
+        hook = s.admit("hermes", {"bot": "bramble", "task": "w", "source": "webhook", "sweep": True})["ticket"]
+        s.finish("hermes", {"bot": "bramble", "ticket": hook})
+        self.assertIsNone(s.bot_turns("hermes", {})["bots"]["bramble"]["sweep_done"], "a GitHub sweep never saw them")
+        clock.advance(minutes=1)
+        cron = s.admit("hermes", {"bot": "bramble", "task": "c", "source": "cron", "sweep": True})["ticket"]
+        began = clock.t
+        self.assertIsNone(s.bot_turns("hermes", {})["bots"]["bramble"]["sweep_done"], "still running")
+        clock.advance(minutes=2)
+        s.finish("hermes", {"bot": "bramble", "ticket": cron})
+        self.assertEqual(datetime.fromisoformat(s.bot_turns("hermes", {})["bots"]["bramble"]["sweep_done"]), began)
+        clock.advance(minutes=1)
+        cut = s.admit("hermes", {"bot": "bramble", "task": "c2", "source": "cron", "sweep": True})["ticket"]
+        s.release_turns("root", {"why": "the Bots were reloaded"})
+        self.assertEqual(datetime.fromisoformat(s.bot_turns("hermes", {})["bots"]["bramble"]["sweep_done"]), began,
+                         "one cut off by a reload is not done")
+        self.assertTrue(cut)
 
     def test_bot_turns_says_a_turn_waiting_in_line(self):
         # 11 Nov 2026: a turn in line is coming, so its Bot is not stopped; one

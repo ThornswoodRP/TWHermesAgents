@@ -396,6 +396,8 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("rift hold an active issue but have no turn running", out[-1])
         self.assertTrue(b.reads(), "the look ran, a quarter hour after the last one")
         n = len(b.reads())
+        b.turns["bramble"] = {"running": False, "last": handed,
+                              "sweep_done": datetime.fromtimestamp(NOON + 905, timezone.utc).isoformat()}
         out = owed_wake.check(home, "bramble", b, now=NOON + 1200, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), "the hand-back was looked at; the next look is the hourly one")
         self.assertEqual(len(b.reads()), n)
@@ -406,6 +408,61 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(home, "bramble", b, now=NOON + 1500, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), "a worker whose next brief is queued has its turn on the way")
         self.assertEqual(len(b.reads()), n)
+
+    def test_a_look_whose_sweep_never_ran_looks_again_and_its_lines_ride_the_next_wake(self):
+        # 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
+        # Sprocket, Echo and Wisp free. Its sweep was turned away (another was
+        # running), a GitHub sweep paid the wake it owed without its lines, the
+        # 6:44 PM sweep carried only an Ops issue, and no worker got work.
+        home = self.day()
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE),
+                        {"morning": "2026-11-09", "alert_checked": NOON + 60})
+        claimed = dict(BUSY, **{"claimed: Sprocket": 0})
+        b = Idle(claimed=claimed, open_={'"area: Launcher","area: Packaging"': 3})
+        out = owed_wake.check(home, "bramble", b, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("in the field of sprocket", out[-1])
+        # The sweep it woke was turned away: no ticket. GitHub sweeps ran.
+        later = datetime.fromtimestamp(NOON + 200, timezone.utc).isoformat()
+        b.turns = {"bramble": {"running": False, "last": later, "sweep_done": None}}
+        b.asked.clear()
+        due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "another sweep is running"}
+
+        def owed(broker, op, args):
+            return due if op == "wake_due" else b(broker, op, args)
+        out = owed_wake.check(home, "bramble", owed, now=NOON + 240, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("turned away", out[0])
+        self.assertIn("no sweep has carried to its end", "\n".join(out), "the owed sweep carries the look's lines")
+        self.assertIn("in the field of sprocket", out[-1])
+        self.assertEqual(b.reads(), [], "carrying them reads nothing")
+        # A GitHub sweep paid the owed wake: nothing is owed, and the look runs again.
+        out = owed_wake.check(home, "bramble", b, now=NOON + 300, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("no sweep carried its lines", "\n".join(out))
+        self.assertIn("in the field of sprocket", out[-1])
+        self.assertTrue(b.reads(), "a fresh look")
+        # While Bramble runs a turn, which may be that sweep, nothing runs.
+        b.asked.clear()
+        b.turns["bramble"] = {"running": True, "last": later, "sweep_done": None}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 600, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertEqual(b.reads(), [])
+        # The sweep ran to its end: its lines are gone, and the next look is the hourly one.
+        b.turns["bramble"] = {"running": False, "last": later,
+                              "sweep_done": datetime.fromtimestamp(NOON + 305, timezone.utc).isoformat()}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 900, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertNotIn("said_at", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)))
+        out = owed_wake.check(home, "bramble", b, now=NOON + 1200, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertEqual([a for a in b.reads() if "/pulls?" in a["path"]], [])
+
+    def test_a_look_that_finds_nothing_leaves_nothing_to_carry(self):
+        home = self.day()
+        out = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=NOON, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertNotIn("said_at", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)))
 
     def test_a_free_worker_after_a_hand_back_gets_its_next_issue_at_the_next_check(self):
         home = self.day()

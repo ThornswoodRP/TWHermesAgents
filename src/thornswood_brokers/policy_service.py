@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS owed_wakes (
 """
 
 TICKET_SEEN_TIMEOUT = timedelta(minutes=10)
+# The platform a scheduled job's turn comes from (thornswood_guard.brokers.SCHEDULED).
+SCHEDULED_SOURCES = ("cron",)
 WAITING_TIMEOUT = timedelta(hours=24)
 # The longest tw-reload-bots may hold new turns while running ones end
 # (hold_turns). It ends sooner when the reload says so; a reload that died
@@ -472,7 +474,15 @@ class PolicyService:
 
         waiting says a turn of the Bot's is in line and still asking (seen in
         the last TICKET_SEEN_TIMEOUT): it starts once the queue has room, so
-        the Bot is not stopped, and a message it was sent is being answered."""
+        the Bot is not stopped, and a message it was sent is being answered.
+
+        sweep_done is when the newest of the Bot's scheduled sweeps that ran
+        to its end was admitted: a wake check's sweep, which carries the
+        check's lines. One turned away, cut off by a reload or gone silent
+        is not done. The wake check reads it to tell whether the sweep it
+        woke for its free worker look ever ran (11 Nov 2026: the 6:31 PM
+        look's sweep was turned away, the wake it owed was paid by a GitHub
+        sweep that never saw the look's lines, and no worker got work)."""
         with self._tx():
             self._expire_silent()
             fresh = iso(self.clock() - TICKET_SEEN_TIMEOUT)
@@ -484,7 +494,11 @@ class PolicyService:
                 waiting = self.db.execute(
                     "SELECT COUNT(*) FROM tickets WHERE bot=? AND kind='turn' AND state='waiting' "
                     "AND COALESCE(seen_at, created_at) >= ?", (bot, fresh)).fetchone()[0]
-                out[bot] = {"running": bool(row[1]), "waiting": bool(waiting), "last": row[0]}
+                swept = self.db.execute(
+                    "SELECT MAX(admitted_at) FROM tickets WHERE bot=? AND kind='turn' AND sweep=1 AND source IN "
+                    f"({','.join('?' * len(SCHEDULED_SOURCES))}) AND state='done' AND reason IS NULL "
+                    "AND admitted_at IS NOT NULL", (bot, *SCHEDULED_SOURCES)).fetchone()[0]
+                out[bot] = {"running": bool(row[1]), "waiting": bool(waiting), "last": row[0], "sweep_done": swept}
         return {"bots": out}
 
     def set_task_risk(self, caller: str, args: dict) -> dict:
