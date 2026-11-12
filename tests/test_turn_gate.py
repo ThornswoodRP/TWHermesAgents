@@ -212,6 +212,47 @@ class Gate(unittest.TestCase):
         rift.stopped(session_key="r1")
         self.assertIsNone(wisp.before_llm(session_id="w1", task_id="9"))
 
+    def test_a_waiting_turn_tw_policy_then_refuses_gives_its_ticket_back(self):
+        # 12 Nov 2026, 9:14 PM Mountain: the install restarted tw-policy while
+        # two of Bramble's turns waited out the hold. Each was refused and
+        # forgot its ticket, and the two tickets held every Bot's turn in line
+        # for ten minutes after the hold ended.
+        f = Fleet()
+        rift = gate(f, "rift")
+        rift.before_llm(session_id="r1", task_id="12")
+        bounce = {"on": False}
+
+        def ask(broker, op, args):
+            if bounce["on"] and op == "admit":
+                raise BrokerRefused("the broker at /run/tw/policy/policy.sock is not answering")
+            return f.ask(broker, op, args)
+        wisp = TurnGate(ready_policy(), "wisp", ask, wait_seconds=0, sleep=lambda s: None)
+        self.assertIn("not admitted", wisp.before_llm(session_id="w1", task_id="9")["context"])
+        bounce["on"] = True
+        self.assertIn("not answering", wisp.before_llm(session_id="w1", task_id="9")["context"])
+        bounce["on"] = False
+        wisp.after_turn(session_id="w1")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='wisp'").fetchall(), [("done",)])
+        rift.after_turn(session_id="r1")
+        self.assertIsNone(gate(f, "echo").before_llm(session_id="e1", task_id="3"),
+                          "no ticket of a refused turn holds the line")
+
+    def test_an_admitted_turn_whose_touch_is_refused_gives_its_ticket_back(self):
+        f = Fleet()
+        bounce = {"on": False}
+
+        def ask(broker, op, args):
+            if bounce["on"] and op == "touch":
+                raise BrokerRefused("the broker at /run/tw/policy/policy.sock is not answering")
+            return f.ask(broker, op, args)
+        rift = TurnGate(ready_policy(), "rift", ask, wait_seconds=0, sleep=lambda s: None)
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        bounce["on"] = True
+        self.assertIn("not answering", rift.before_tool("read_file", session_id="r1"))
+        bounce["on"] = False
+        rift.after_turn(session_id="r1")
+        self.assertIsNone(gate(f, "wisp").before_llm(session_id="w1", task_id="9"))
+
     def test_waiting_asks_again_with_the_same_ticket(self):
         f = Fleet()
         gate(f, "rift").before_llm(session_id="r1")
