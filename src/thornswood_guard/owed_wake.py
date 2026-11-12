@@ -167,8 +167,17 @@ def _check(home: Path, bot: str, ask: Caller, now: float, policy: dict | None) -
     if due.get("owed") and not due.get("due"):
         return [f"a wake is owed since {due.get('since')}, but the queue has no room yet: {due.get('why_not')}", SLEEP]
     if due.get("owed"):
-        return [f"{due.get('refused')} wake(s) since {due.get('since')} were turned away by the fleet queue "
+        owed = [f"{due.get('refused')} wake(s) since {due.get('since')} were turned away by the fleet queue "
                 f"(the last because {due.get('reason')}). The queue has room now."]
+        if policy is None:
+            return owed
+        # The free worker look and the alert look ride an owed wake too.
+        # 12 Nov 2026: a wake was owed nearly all evening (GitHub's wakes
+        # turned away while another sweep ran), this returned before the
+        # look, and no look ran from 7:32 PM Mountain on, so Rift, Sprocket
+        # and Echo sat with no issue from 9:15 PM.
+        looked = _idle(home, bot, ask, now, policy)
+        return owed if looked[-1] == SLEEP else [*owed, *looked]
     if policy is None:
         return ["no wake is owed", SLEEP]
     return ["no wake is owed", *_idle(home, bot, ask, now, policy)]

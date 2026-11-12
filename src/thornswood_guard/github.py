@@ -113,12 +113,12 @@ class GitHubRules:
             return Verdict.no(f"only Wisp works in the engine fork, not {p.bot_name(owner)}")
         if owner == bot:
             if workflow_files_changed and p.app_of(bot) == "workers":
-                return Verdict.no("the workers' App has no Workflows permission; Magpie hands the workflow change to Bramble, whose App pushes it to Magpie's branch")
+                return Verdict.no(f"the workers' App has no Workflows permission; {p.bot_name(bot)} hands the workflow change to Bramble, whose App pushes it to {branch}")
             return Verdict.yes(f"{p.bot_name(bot)} pushes its own branch {branch}")
         if bot == "bramble" and owner in p.data["branches"]["bramble_may_push_for"]:
             if not workflow_files_changed:
-                return Verdict.no("Bramble pushes to Magpie's branch only to carry a workflow change Magpie wrote")
-            return Verdict.yes(f"Bramble's App pushes Magpie's workflow change to {branch}")
+                return Verdict.no(f"Bramble pushes to {p.bot_name(owner)}'s branch only to carry a workflow change {p.bot_name(owner)} wrote")
+            return Verdict.yes(f"Bramble's App pushes {p.bot_name(owner)}'s workflow change to {branch}")
         return Verdict.no(f"{branch} belongs to {p.bot_name(owner)}; a Bot pushes only its own branch")
 
     # Pull requests
