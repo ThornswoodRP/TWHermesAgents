@@ -46,7 +46,8 @@ BOT_MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
 ROLES = ("user", "assistant", "notice")
 # The live Board (live_reader.py): one row for each turn running now.
 MAX_DOING = 60
-DOING_FIELDS = {"bot": 64, "title": 200, "since": 40, "platform": 32}
+# since: when the turn started; step_since: when it started what it is doing now (thornswood_live).
+DOING_FIELDS = {"bot": 64, "title": 200, "since": 40, "step_since": 40, "platform": 32}
 SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 # A room thread's id, as Hermes takes one (gateway/hosted_rooms_common.py IDENTIFIER_RE, 128 characters at most).
 THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # own.SESSION_ID: the row opens that session

@@ -94,6 +94,26 @@ class TheHooks(unittest.TestCase):
         self.assertEqual((turn["state"], turn["tool"]), ("thinking", None))
         self.assertNotEqual(turn["since"], first)
 
+    def test_each_step_says_since_when_beside_since_when_the_turn_has_run(self):
+        """Patrick's Board, 11 Nov 8:25 PM: "Running a command, 45 min" for Sprocket, when the turn had run 45
+        minutes and not the command. A turn keeps its start; what it is doing now has its own."""
+        now = ["2026-11-12T03:00:00+00:00"]
+        with mock.patch.object(live, "_now", lambda: now[0]):
+            live.on_turn_start(session_id="s1")
+            now[0] = "2026-11-12T03:01:00+00:00"
+            live.on_tool_start(tool_name="terminal", session_id="s1", tool_call_id="a")
+            turn = self.h.written("rift")["turns"][0]
+            self.assertEqual((turn["since"], turn["step_since"]), ("2026-11-12T03:00:00+00:00", "2026-11-12T03:01:00+00:00"))
+            now[0] = "2026-11-12T03:30:00+00:00"
+            live.on_tool_start(tool_name="terminal", session_id="s1", tool_call_id="b")  # the same step goes on
+            live.on_tool_end(tool_name="terminal", session_id="s1", tool_call_id="b")
+            self.assertEqual(self.h.written("rift")["turns"][0]["step_since"], "2026-11-12T03:01:00+00:00")
+            now[0] = "2026-11-12T03:45:00+00:00"
+            live.on_tool_end(tool_name="terminal", session_id="s1", tool_call_id="a")    # thinking again
+            turn = self.h.written("rift")["turns"][0]
+            self.assertEqual((turn["state"], turn["since"], turn["step_since"]),
+                             ("thinking", "2026-11-12T03:00:00+00:00", "2026-11-12T03:45:00+00:00"))
+
     def test_each_profile_has_its_own_file(self):
         live.on_turn_start(session_id="s1")
         self.h.current = self.h.hh / "profiles" / "echo"
@@ -143,7 +163,7 @@ class TheReader(unittest.TestCase):
 
     def test_only_turns_whose_process_still_runs(self):
         self.write("rift", 10, [{"session_id": "s1", "state": "tool", "tool": "terminal", "since": "2026-11-02T19:58:00+00:00",
-                                 "platform": "cron"}])
+                                 "step_since": "2026-11-02T19:59:30+00:00", "platform": "cron"}])
         self.write("echo", 11, [{"session_id": "s2", "state": "thinking", "since": "2026-11-02T19:59:00+00:00"}])
         self.write("wisp", 12, [{"session_id": "s3", "state": "thinking", "since": "x"}], start="999")
         self.titles("rift", [("s1", "Rebuild the load order")])
@@ -152,9 +172,9 @@ class TheReader(unittest.TestCase):
         self.assertEqual(snap["source_time"], NOW.isoformat())
         self.assertEqual(snap["doing"], [
             {"bot": "rift", "title": "Rebuild the load order", "session_id": "s1", "state": "tool", "tool": "terminal",
-             "since": "2026-11-02T19:58:00+00:00", "platform": "cron"},
+             "since": "2026-11-02T19:58:00+00:00", "step_since": "2026-11-02T19:59:30+00:00", "platform": "cron"},
             {"bot": "echo", "title": "", "session_id": "s2", "state": "thinking", "tool": None,
-             "since": "2026-11-02T19:59:00+00:00", "platform": ""}])
+             "since": "2026-11-02T19:59:00+00:00", "step_since": "", "platform": ""}])
 
     def test_nothing_running_is_no_rows(self):
         self.write("rift", 10, [])
