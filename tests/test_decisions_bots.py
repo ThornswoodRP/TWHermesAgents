@@ -36,7 +36,7 @@ class Route(unittest.TestCase):
     def setUp(self):
         self.w = World()
         self.addCleanup(self.w.close)
-        self.route = BotRoute(self.w.path, "test")
+        self.route = BotRoute(self.w.path, "test", clock=self.w.clock)
         self.addCleanup(self.route.close)
         self.ops = self.route.ops()
 
@@ -175,7 +175,7 @@ class OutsideAnswers(unittest.TestCase):
     def setUp(self):
         self.w = World()
         self.addCleanup(self.w.close)
-        self.route = BotRoute(self.w.path, "test")
+        self.route = BotRoute(self.w.path, "test", clock=self.w.clock)
         self.addCleanup(self.route.close)
         self.ops = self.route.ops()
 
@@ -265,7 +265,7 @@ class MainAnswers(unittest.TestCase):
     def setUp(self):
         self.w = World()
         self.addCleanup(self.w.close)
-        self.route = BotRoute(self.w.path, "test")
+        self.route = BotRoute(self.w.path, "test", clock=self.w.clock)
         self.addCleanup(self.route.close)
 
     def open(self, bot="bramble"):

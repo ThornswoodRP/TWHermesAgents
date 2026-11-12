@@ -65,11 +65,14 @@ OUTSIDE_ACTIONS = {"allow": "Auto-Merge", "merge": "Merge", "close": "Close"}
 
 
 class BotRoute:
-    def __init__(self, db_path: Path | str, workspace: str):
+    def __init__(self, db_path: Path | str, workspace: str, *, clock=None):
         self.db_path = Path(db_path)
         self.workspace = workspace
         self.bots = tuple(contracts.load()["profiles"]["ids"])
-        self.store = Store(self.db_path)
+        # The clock is the store's: the wall clock on the VM, a test's own
+        # clock in the tests, so a brief's work hours do not hang on when
+        # the suite runs (a1e61654's run failed at 11:21 PM, 11 Nov).
+        self.store = Store(self.db_path, clock=clock) if clock else Store(self.db_path)
         self.core = DecisionCore(self.store)
         row = self.store.db.execute("SELECT id FROM workspaces WHERE name = ?", (workspace,)).fetchone()
         if not row:
