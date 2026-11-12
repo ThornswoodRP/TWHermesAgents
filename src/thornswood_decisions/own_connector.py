@@ -477,11 +477,50 @@ BOT_CHAT_SQL = "SELECT id FROM sessions WHERE title = ? AND hidden = 1 AND archi
 # A list line comes from the newest message that has words: a turn whose newest row is a tool call or
 # an image alone once left his Hermes's Bot Chat with an empty line (2 Nov).
 LINE_LOOK = 20
-FIRST_SQL = ("SELECT content FROM messages WHERE session_id = ? AND active = 1 AND role = 'user' "
-             "AND content IS NOT NULL AND content != '' ORDER BY id LIMIT ?")
-MESSAGES_SQL = ("SELECT role, content, timestamp FROM messages WHERE session_id = ? AND active = 1 "
-                "AND role IN ('user', 'assistant') AND content IS NOT NULL AND content != '' "
-                "ORDER BY id DESC LIMIT ?")
+FIRST_SQL = ("SELECT m.content, {marks} FROM messages m WHERE m.session_id = ? AND m.active = 1 AND m.role = 'user' "
+             "AND m.content IS NOT NULL AND m.content != '' {shown}ORDER BY m.id LIMIT ?")
+MESSAGES_SQL = ("SELECT m.role, m.content, m.timestamp, {marks} FROM messages m WHERE m.session_id = ? AND m.active = 1 "
+                "AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL AND m.content != '' {shown}"
+                "ORDER BY m.id DESC LIMIT ?")
+
+# The rows of role user that nobody wrote (Patrick's screenshot, 11 Nov 8:25 PM: Magpie's line in the Bots
+# list read "You: [IMPORTANT: Background process proc_..."). Hermes puts a turn it starts by itself (a
+# background command's notice, a delegation's result, a heartbeat) in the chat as a user row and marks it
+# with display_kind (Hermes v0.23.0 gateway/run_turn_prepare.py display_kind_for_event, the kinds of
+# gateway/response_filters.py MACHINERY_DISPLAY_KINDS); Desktop draws those as notices, never as his. A row
+# marked "hidden" is one Hermes never draws at all (hermes_state_common.py _PREVIEW_ELIGIBLE_SQL). The phone
+# does the same: such a row is role "notice", in Hermes's own short words when it kept them (display_text),
+# and is never a chat's line or name; a hidden row is not read.
+NOTICE_KINDS = ("internal_notification", "process_complete", "async_delegation_complete")
+HIDDEN_KIND = "hidden"
+
+
+def with_marks(con: sqlite3.Connection, sql: str) -> str:
+    """FIRST_SQL or MESSAGES_SQL as this store can run it: its rows' display_kind and display_metadata as
+    `kind` and `meta`, and no hidden row. A store from before Hermes kept them marks nothing."""
+    cols = _columns(con, "messages")
+    kind = "m.display_kind" if "display_kind" in cols else "NULL"
+    meta = "m.display_metadata" if "display_metadata" in cols else "NULL"
+    shown = f"AND coalesce(m.display_kind, '') != '{HIDDEN_KIND}' " if "display_kind" in cols else ""
+    return sql.format(marks=f"{kind} AS kind, {meta} AS meta", shown=shown)
+
+
+def role_of(row) -> str:
+    """A row's role as the phone shows it: "notice" for a user row Hermes put in itself."""
+    return "notice" if row["role"] == "user" and row["kind"] in NOTICE_KINDS else row["role"]
+
+
+def said_text(row) -> str:
+    """What a row says: a notice in the words Hermes keeps for showing it, when it kept them."""
+    if role_of(row) == "notice":
+        try:
+            meta = json.loads(row["meta"]) if isinstance(row["meta"], str) else None
+        except json.JSONDecodeError:
+            meta = None
+        shown = meta.get("display_text") if isinstance(meta, dict) else None
+        if isinstance(shown, str) and shown.strip():
+            return shown.strip()
+    return _text(row["content"])
 
 
 def _ro(path: Path) -> sqlite3.Connection:
@@ -540,8 +579,8 @@ def snapshot(state_db: Path, wanted: list[str], now: datetime, messages: int = M
         open_ids += [w for w in wanted if w not in open_ids]
         opened = []
         for sid in open_ids:
-            msgs = con.execute(MESSAGES_SQL, (sid, messages)).fetchall()
-            opened.append({"id": sid, "messages": [{"role": m["role"], "text": _text(m["content"])[:TEXT],
+            msgs = con.execute(with_marks(con, MESSAGES_SQL), (sid, messages)).fetchall()
+            opened.append({"id": sid, "messages": [{"role": role_of(m), "text": said_text(m)[:TEXT],
                                                     "at": _iso(m["timestamp"])} for m in reversed(msgs)]})
     finally:
         con.close()
@@ -586,9 +625,13 @@ def bot_chat(con: sqlite3.Connection) -> dict | None:
 
 
 def _line(con: sqlite3.Connection, ids: list[str]) -> str:
-    """A chat's list line: the newest of its last LINE_LOOK messages that has words (line_of)."""
+    """A chat's list line: the newest of its last LINE_LOOK messages that has words (line_of), and was said by
+    him or Hermes: a notice is never the line."""
     marks = ",".join("?" * len(ids))
-    for m in con.execute(MESSAGES_SQL.replace("session_id = ?", f"session_id IN ({marks})"), (*ids, LINE_LOOK)):
+    sql = with_marks(con, MESSAGES_SQL).replace("m.session_id = ?", f"m.session_id IN ({marks})")
+    for m in con.execute(sql, (*ids, LINE_LOOK)):
+        if role_of(m) == "notice":
+            continue
         line = line_of(_text(m["content"]))
         if line:
             return line[:200]
@@ -605,8 +648,8 @@ def _row(con: sqlite3.Connection, r: sqlite3.Row) -> dict:
     if "last_read" in r.keys():
         row = _read(row, r["last_at"], r["last_read"], "last_read_at" in _columns(con, "sessions"))
     if not row["title"]:
-        for m in con.execute(FIRST_SQL, (r["id"], 5)):
-            first = line_of(_text(m["content"]))
+        for m in con.execute(with_marks(con, FIRST_SQL), (r["id"], 5)):
+            first = "" if role_of({"role": "user", "kind": m["kind"]}) == "notice" else line_of(_text(m["content"]))
             if first:
                 row["first"] = first[:120]
                 break
@@ -754,11 +797,10 @@ def messages_page(state_db: Path, session_id: str, before: int | None, n: int = 
                           "ORDER BY d.depth DESC, s.started_at DESC LIMIT 1", (session_id, session_id)).fetchone()[0]
         cols = _columns(con, "messages")
         summary = "AND m._compressed_summary = 0 " if "_compressed_summary" in cols else ""
-        meta = "m.display_metadata" if "display_metadata" in cols else "NULL"
         rows = con.execute(
-            LINEAGE_SQL + f"SELECT m.id, m.role, m.content, m.timestamp, {meta} AS meta FROM messages m "
+            LINEAGE_SQL + with_marks(con, "SELECT m.id, m.role, m.content, m.timestamp, {marks} FROM messages m "
             "WHERE m.session_id IN (SELECT id FROM ancestors UNION SELECT id FROM descendants) AND m.active = 1 "
-            "AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL AND m.content != '' " + summary +
+            "AND m.role IN ('user', 'assistant') AND m.content IS NOT NULL AND m.content != '' {shown}") + summary +
             "AND (? IS NULL OR m.id < ?) ORDER BY m.id DESC LIMIT ?",
             (session_id, session_id, before, before, n + 1)).fetchall()
         shown = list(reversed(rows[:n]))
@@ -767,7 +809,7 @@ def messages_page(state_db: Path, session_id: str, before: int | None, n: int = 
         con.close()
     msgs = []
     for r in shown:
-        m = {"mid": r["id"], "role": r["role"], "text": _text(r["content"])[:PAGE_TEXT], "at": _iso(r["timestamp"]),
+        m = {"mid": r["id"], "role": role_of(r), "text": said_text(r)[:PAGE_TEXT], "at": _iso(r["timestamp"]),
              "reactions": reactions(r["meta"])}
         if r["id"] in ran:
             m["tools"], more = ran[r["id"]][-TOOLS_SHOWN:], len(ran[r["id"]]) - TOOLS_SHOWN
