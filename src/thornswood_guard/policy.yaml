@@ -152,6 +152,23 @@ merge:
   # (Thornswood #5544). tw-git refuses to merge one that credits nobody with a
   # Co-authored-by line, because then the work's author cannot be read.
   outside_label: "outside work"
+  # What merges only on Patrick's yes on a Main card for that pull request at
+  # its exact head, release link merge:<owner>/<repo>@<head>#<pull request>:
+  # a change to what runs on the live box or in CI (Patrick, 2 Nov 2026,
+  # dec_IL6elJT7TwyCVC_wzMIveA: "Auto-merge skips a pull request that changes
+  # workflows, the gate or its verb scripts unless it is Patrick's"). The same
+  # files as Thornswood's scripts/ops/Auto-Merge.js holds: every file under
+  # dirs, each verb list, and each script and 'reads' entry a verb of the
+  # base branch's lists names (an entry ending in / is a folder). tw_git merge
+  # turned auto-merge on for Thornswood #5665 (a verb script, 9 Nov 2026) and
+  # skymp #150 (workflows, 12 Nov 2026) with no card answered: Ops #276.
+  patrick_paths:
+    ThornswoodRP/Thornswood:
+      dirs: [".github/workflows/", "scripts/vps/gate/"]
+      verb_lists: ["scripts/vps/gate/verbs.json", "scripts/release/nexus-verbs.json"]
+    ThornswoodRP/skymp:
+      dirs: [".github/workflows/"]
+      verb_lists: []
 
 # What Bramble's release tooling may start. Nothing else, on main only.
 runs:

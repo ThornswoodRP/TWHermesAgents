@@ -204,6 +204,24 @@ class Policy:
         m = NOREPLY.fullmatch((email or "").strip().lower())
         return m.group(1) if m else None
 
+    def patrick_files(self, repo: str, files: list[str], verb_paths: list[str]) -> list[str]:
+        """The files of a pull request that merge only on Patrick's yes for it
+        at its head (merge.patrick_paths): under one of the repo's dirs, one
+        of its verb lists, or a script or 'reads' entry a verb of the base
+        branch's lists names (verb_paths; one ending in / is a folder)."""
+        rule = self.data["merge"].get("patrick_paths", {}).get(repo) or {}
+        dirs, lists = rule.get("dirs") or [], rule.get("verb_lists") or []
+
+        def held(f: str) -> bool:
+            return (any(f.startswith(d) for d in dirs) or f in lists
+                    or any(f.startswith(v) if v.endswith("/") else f == v for v in verb_paths))
+        return [f for f in dict.fromkeys(files) if held(f)]
+
+    def patrick_verb_lists(self, repo: str) -> list[str]:
+        """The verb lists, read from the base branch, whose verbs' scripts and
+        reads merge only on Patrick's yes (merge.patrick_paths)."""
+        return list((self.data["merge"].get("patrick_paths", {}).get(repo) or {}).get("verb_lists") or [])
+
     def rule_checks(self, repo: str) -> list[str]:
         """The checks GitHub's rules on the base branch must require before
         auto-merge is turned on there."""

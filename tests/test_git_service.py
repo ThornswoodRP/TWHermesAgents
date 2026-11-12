@@ -732,6 +732,112 @@ class OutsideAnswers(unittest.TestCase):
         self.assertIn("no route", str(e.exception))
 
 
+class PatrickMerges(unittest.TestCase):
+    """Ops #276: a pull request that changes a workflow, the deploy gate or a
+    verb script merges only on Patrick's authorize on a Main card for it at
+    its exact head (his decision of 2 Nov 2026, dec_IL6elJT7TwyCVC_wzMIveA).
+    tw_git merge turned auto-merge on for Thornswood #5665 (9 Nov 2026, a
+    verb script) and skymp #150 (12 Nov 2026, workflows) with none."""
+
+    def world(self, verbs: bool = True) -> World:
+        w = World()
+        if verbs:
+            for name, raw in (("scripts/vps/gate/verbs.json", FIXTURES / "verbs.json"),
+                              ("scripts/release/nexus-verbs.json", FIXTURES / "nexus-verbs.json")):
+                w.fake.contents[(APP, "main", name)] = raw.read_bytes()
+        return w
+
+    def card(self, w: World, repo: str, sha: str, number: int = 42, did: str = "dec_mergecard00001", **kw) -> str:
+        a = {"decision_id": did, "for": "merge", "repo": repo, "commit": sha, "pr": number, "revision": 1,
+             "option": "authorize", "answered_at": w.policy.clock().isoformat(), "restored": False}
+        a.update(kw)
+        w.mains[did] = a
+        return did
+
+    def refused(self, w: World, repo: str, sha: str, says: str, **extra) -> None:
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=repo, **extra)
+        self.assertIn(says, str(e.exception))
+        self.assertEqual(w.fake.auto_merged, [])
+
+    def test_a_workflow_change_is_refused_without_a_card(self):
+        for repo, branch, path in ((APP, "magpie/5665-tunnel", ".github/workflows/build-pr.yml"),
+                                   (APP, "magpie/5665-tunnel", "scripts/vps/gate/Gate.ps1"),
+                                   (APP, "magpie/5665-tunnel", "scripts/vps/gate/verbs.json"),
+                                   (APP, "magpie/5665-tunnel", "scripts/release/nexus-verbs.json"),
+                                   (FORK, "wisp/2760-pr-write-guard", ".github/workflows/thornswood-pr-windows.yml")):
+            w = self.world()
+            sha = w.green_pr(repo=repo, branch=branch, checks=False, files=["README.md", path])
+            self.refused(w, repo, sha, f"changes {path}")
+            self.refused(w, repo, sha, f"release link merge:{repo}@{sha}#42")
+
+    def test_a_script_a_verb_runs_is_refused_without_a_card(self):
+        # Thornswood #5665 changed scripts/deploy/Install-Tunnel.ps1.
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=["scripts/deploy/Deploy-Docs.ps1"])
+        self.refused(w, APP, sha, "changes scripts/deploy/Deploy-Docs.ps1")
+
+    def test_a_folder_a_verb_reads_counts_and_the_lists_come_from_the_base(self):
+        w = self.world(verbs=False)
+        w.fake.contents[(APP, "main", "scripts/vps/gate/verbs.json")] = json.dumps(
+            {"verbs": {"Grant-BoxKey": {"script": "scripts/vps/Grant-BoxKey.ps1", "reads": ["keys/box/"]}}}).encode()
+        sha = w.green_pr(repo=APP, checks=False, files=["keys/box/patrick.pub"])
+        self.refused(w, APP, sha, "changes keys/box/patrick.pub")
+        w2 = self.world(verbs=False)
+        sha = w2.green_pr(repo=APP, checks=False, files=["keys/box/patrick.pub"])
+        self.assertTrue(w2.merge(sha=sha, repo=APP)["auto_merge"], "main names no verb that reads it")
+
+    def test_patricks_authorize_at_the_head_puts_it_on_once(self):
+        w = self.world()
+        sha = w.green_pr(repo=FORK, branch="wisp/2760-pr-write-guard", checks=False,
+                         files=[".github/workflows/thornswood-pr-windows.yml"])
+        did = self.card(w, FORK, sha)
+        out = w.merge(sha=sha, repo=FORK, decision_id=did)
+        self.assertTrue(out["auto_merge"])
+        self.assertEqual(w.fake.auto_merged, [(FORK, 42, sha, "MERGE")])
+        self.assertIsNotNone(w.policy._decision(did).used_at, "the yes is used")
+
+    def test_a_card_for_another_head_pr_or_kind_or_no_answer_is_refused(self):
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        cases = (
+            (self.card(w, APP, "e" * 40, did="dec_otherhead00001"), "a new head needs a new yes"),
+            (self.card(w, APP, sha, number=43, did="dec_otherpr0000001"), "not PR 42"),
+            (self.card(w, APP, sha, did="dec_publishcard001", **{"for": "publish"}), "approves a publish"),
+            (self.card(w, APP, sha, did="dec_closeanswer001", option="hold"), "authorizes nothing"),
+            ("dec_neveranswered1", "has not answered"),
+            (None, "no decision record"),
+        )
+        for did, says in cases:
+            extra = {"decision_id": did} if did else {}
+            self.refused(w, APP, sha, says, **extra)
+
+    def test_a_used_yes_does_not_put_it_on_again(self):
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        did = self.card(w, APP, sha)
+        w.ask("decision_import", {"answer": w.mains[did]})
+        w.ask("decision_use", {"id": did})
+        self.refused(w, APP, sha, "used once", decision_id=did)
+
+    def test_unreadable_verb_lists_refuse(self):
+        w = self.world(verbs=False)
+        w.fake.contents[(APP, "main", "scripts/vps/gate/verbs.json")] = b"not json"
+        sha = w.green_pr(repo=APP, checks=False)
+        self.refused(w, APP, sha, "could not be read as a verb list")
+
+    def test_other_files_need_no_card(self):
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=["launcher/PathFence.cs", "docs/x.md"])
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+
+    def test_ops_is_not_held(self):
+        # Ops #276 names Thornswood and the fork; Ops has no patrick_paths.
+        w = self.world()
+        sha = w.green_pr(repo=OPS, files=[".github/workflows/box-run.yml"])
+        self.assertTrue(w.merge(sha=sha, repo=OPS)["done"])
+
+
 class AutoMerge(unittest.TestCase):
     """Patrick, 2 Nov 2026: "He shouldn't have to be merging to begin with".
     In Thornswood and the fork tw-git turns GitHub's auto-merge on for a Bot's
@@ -741,7 +847,7 @@ class AutoMerge(unittest.TestCase):
     def test_a_bots_pr_goes_on_auto_merge_and_nothing_merges_directly(self):
         w = World()
         w.fake.merge_queues.add((APP, "main"))
-        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        sha = w.green_pr(repo=APP, checks=False)
         out = w.merge(sha=sha, repo=APP)
         self.assertTrue(out["done"])
         self.assertTrue(out["auto_merge"])
