@@ -447,8 +447,8 @@ class GitService:
         it. Bramble cannot make it: its own tree is not the worker's, and the
         push must carry the worker's commit as it is. Until 12 Nov 2026 only
         Bramble's spool was read, so every such push was refused ("is not a
-        bundle in bramble's spool", Ops #277), and Magpie's workflow fixes
-        (#4135, #5765 and five more) could never reach GitHub. Whether the push
+        bundle in bramble's spool", Ops #277), and the workers' workflow fixes
+        (#4135, #5765, #2760, #5706 and more) could never reach GitHub. Whether the push
         may go at all is still the push rule's (github.py push): Bramble pushes
         to that branch only a change to a workflow file."""
         owner = self.policy.branch_owner(branch)

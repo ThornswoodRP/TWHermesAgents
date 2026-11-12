@@ -204,8 +204,12 @@ runs:
 # Branches: a worker pushes only its own, named <bot>/<issue>-<what>.
 branches:
   pattern: "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$"
-  # Bramble's App pushes the workflow change Magpie wrote to Magpie's branch.
-  bramble_may_push_for: [magpie]
+  # Bramble's App pushes a workflow change a worker wrote to that worker's
+  # branch: the workers' App has no Workflows permission. Magpie only until
+  # 12 Nov 2026; then every worker (Patrick's answer A on
+  # q-277-bramble-workflow-push, Ops #277), because Wisp's and Sprocket's
+  # workflow fixes had no route.
+  bramble_may_push_for: [rift, sprocket, echo, magpie, wisp]
 
 claims:
   prefix: "claimed: "

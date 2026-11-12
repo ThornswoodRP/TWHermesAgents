@@ -185,13 +185,16 @@ class Push(unittest.TestCase):
         writes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
         self.assertEqual(writes[-1]["permissions"].get("workflows"), "write")
 
-    def test_bramble_reads_no_other_bots_spool(self):
+    def test_bramble_carries_any_workers_workflow_bundle_and_nothing_else(self):
+        # Ops #277, 12 Nov 2026: Sprocket's #5765 and Wisp's #5706 workflow
+        # fixes were refused ("not a bundle in bramble's spool"); Patrick's
+        # answer A on q-277-bramble-workflow-push lets Bramble carry any
+        # worker's workflow change.
         w = World()
-        name, _ = w.bundle("sprocket", "sprocket/9-ci", {".github/workflows/build.yml": "on: push\n"}, name="s.bundle")
-        with self.assertRaises(Refused) as e:
-            w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "sprocket/9-ci",
-                                  "bundle": name})
-        self.assertIn("not a bundle in bramble's spool", str(e.exception))
+        name, head = w.bundle("sprocket", "sprocket/9-ci", {".github/workflows/build.yml": "on: push\n"}, name="s.bundle")
+        out = w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "sprocket/9-ci",
+                                    "bundle": name})
+        self.assertEqual(out["sha"], head, "the push carries Sprocket's commit as Sprocket made it")
         name, _ = w.bundle("magpie", "magpie/9-docs", {"docs/x.md": "x\n"}, name="m.bundle")
         with self.assertRaises(Refused) as e:
             w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "magpie/9-docs",

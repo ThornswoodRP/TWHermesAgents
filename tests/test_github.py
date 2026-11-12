@@ -57,8 +57,22 @@ class Pushes(unittest.TestCase):
     def test_bramble_pushes_to_magpie_only_for_a_workflow_change(self):
         self.assertFalse(self.r.push("bramble", APP, "refs/heads/magpie/4060-gate").allowed)
 
+    def test_11_bramble_carries_every_workers_workflow_change_and_nothing_else(self):
+        # Ops #277: Wisp's #5706 and Sprocket's #5765 workflow fixes had no
+        # route (Patrick's answer A on q-277-bramble-workflow-push, 12 Nov 2026).
+        for bot, ref in (("wisp", "refs/heads/wisp/5706-release-note"), ("sprocket", "refs/heads/sprocket/5765-vpk-reason"),
+                         ("rift", "refs/heads/rift/1-x"), ("echo", "refs/heads/echo/1-x")):
+            v = self.r.push("bramble", APP, ref, workflow_files_changed=True)
+            self.assertTrue(v.allowed, (bot, v.reason))
+            self.assertFalse(self.r.push("bramble", APP, ref).allowed, bot)
+            refused = self.r.push(bot, APP, ref, workflow_files_changed=True)
+            self.assertFalse(refused.allowed)
+            self.assertIn("hands the workflow change to Bramble", refused.reason)
+        self.assertFalse(self.r.push("bramble", APP, "refs/heads/feature/x", workflow_files_changed=True).allowed)
+
     def test_bramble_does_not_push_other_workers_branches(self):
-        self.assertFalse(self.r.push("bramble", APP, "refs/heads/echo/12-site", workflow_files_changed=True).allowed)
+        # Only a workflow change, since 12 Nov 2026 for every worker (Ops #277).
+        self.assertFalse(self.r.push("bramble", APP, "refs/heads/echo/12-site").allowed)
 
     def test_only_wisp_works_in_the_fork(self):
         fork = "ThornswoodRP/skymp"

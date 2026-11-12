@@ -173,7 +173,11 @@
   "branches": {
     "pattern": "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$",
     "bramble_may_push_for": [
-      "magpie"
+      "rift",
+      "sprocket",
+      "echo",
+      "magpie",
+      "wisp"
     ]
   },
   "claims": {

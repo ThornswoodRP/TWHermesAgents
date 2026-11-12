@@ -356,8 +356,8 @@ TW_GIT_SCHEMA = {
     "description": (
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
         "guard rails before the write. Ops: base (get the base branch for a new tree), push (push your branch from "
-        "the bundle tw_files made; Bramble carrying Magpie's workflow change names Magpie's branch and the bundle "
-        "Magpie's tw_files made, by its file name), open_pr, edit_pr, open_issue (a new issue, unclaimed, with a plain title and "
+        "the bundle tw_files made; Bramble carrying a worker's workflow change names that worker's branch and the "
+        "bundle the worker's tw_files made, by its file name), open_pr, edit_pr, open_issue (a new issue, unclaimed, with a plain title and "
         "body: no footer, no session link, no closing --- line), comment, label (add or remove), claim_labels (Bramble only: "
         "make the six Bot claim labels in one repo as the policy names them, and read them back), merge (Bramble only: "
         "in Thornswood and the fork it turns GitHub's auto-merge on for a Bot's pull request at its exact head, and "
