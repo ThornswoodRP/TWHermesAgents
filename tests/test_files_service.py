@@ -236,6 +236,47 @@ class Work(unittest.TestCase):
         self.assertEqual(names, ["README.md", "tests"])
         self.assertIn("README.md:1:Thornswood", w.files.search("hermes", w.a(pattern="Thorns"))["matches"])
 
+    def test_a_search_that_runs_long_is_stopped_and_frees_the_bots_lane(self):
+        # Ops #310, 12 Nov 2026: Rift's '.*' search over recipes.json, 6 MB on
+        # one line, held Rift's lock for hours and every tw_files op of
+        # Rift's timed out behind it.
+        import threading
+        import time
+        from unittest import mock
+        from thornswood_brokers import files_service
+        w = World()
+        w.checkout()
+        one_line = "[" + ",".join('{"keyword":"CraftingSmithingForge","name":"Iron Arrow %d"}' % i
+                                  for i in range(40000)) + "]"
+        (w.tree() / "recipes.json").write_text(one_line)
+        got = {}
+
+        def search():
+            try:
+                w.files.search("hermes", w.a(pattern="Forge.*Bow"))
+            except Refused as e:
+                got["refused"] = str(e)
+        with mock.patch.object(files_service, "SEARCH_SECONDS", 1):
+            t0 = time.monotonic()
+            th = threading.Thread(target=search)
+            th.start()
+            th.join(20)
+            took = time.monotonic() - t0
+        self.assertFalse(th.is_alive(), "the search was not stopped")
+        self.assertLess(took, 10)
+        self.assertIn("ran past 1 seconds and was stopped", got.get("refused", ""))
+        t0 = time.monotonic()
+        self.assertIn("README.md:1:Thornswood", w.files.search("hermes", w.a(pattern="Thorns"))["matches"])
+        self.assertLess(time.monotonic() - t0, 5, "the Bot's next op answers at once")
+
+    def test_a_search_matching_everything_is_cut_not_held_in_memory(self):
+        w = World()
+        w.checkout()
+        (w.tree() / "big.txt").write_text("line\n" * 300_000)
+        out = w.files.search("hermes", w.a(pattern="."))
+        self.assertTrue(out["cut"])
+        self.assertLessEqual(len(out["matches"]), 200_000)
+
     def test_sizes(self):
         w = World()
         w.checkout()

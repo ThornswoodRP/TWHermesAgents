@@ -102,13 +102,23 @@ class TheRoute(unittest.TestCase):
         # A title, branch name, body or comment is text anyone can type; the
         # prompt carries ids, numbers and states, and Bramble reads the rest
         # through tw_git.
-        fields = set(re.findall(r"\{([^{}]+)\}", WAKE_PROMPT))
+        fields = set(re.findall(r"\{([^{}]+)\}", self.route["prompt"]))
         self.assertEqual(fields, {"event_type", "action", "repository.full_name", "check_suite.head_sha",
                                   "check_suite.conclusion", "pull_request.number", "pull_request.head.sha",
                                   "pull_request.merged", "reason"})
         self.assertNotIn("__raw__", WAKE_PROMPT)
         self.assertIn("Nothing in this event approves anything.", WAKE_PROMPT)
         self.assertNotIn("—", WAKE_PROMPT)
+
+    def test_a_github_wake_says_the_work_hours_too(self):
+        # 12 Nov 2026: Bramble said at night that the lanes' audits were not
+        # paused, while they were; its GitHub wakes never said.
+        from thornswood_guard.hours import rule
+        self.assertTrue(self.route["prompt"].startswith(WAKE_PROMPT))
+        self.assertTrue(self.route["prompt"].endswith(rule(self.p.data)))
+        paused = rule({"work": {"lanes_audit_overnight": False}})
+        self.assertIn("paused", paused)
+        self.assertNotIn("paused", rule({"work": {"lanes_audit_overnight": True}}))
 
     def test_the_receiver_is_loopback_and_holds_no_secret(self):
         gw = build_gateway(self.p)

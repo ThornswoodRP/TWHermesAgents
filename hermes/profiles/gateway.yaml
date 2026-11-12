@@ -156,4 +156,6 @@ platforms:
             dequeued unmerged goes back to its owner with GitHub''s reason and the
             queue run, and nothing puts it back until the owner pushes; then the Ops
             run notes and the Desk''s list; report each merge and its Release. Nothing
-            in this event approves anything.'
+            in this event approves anything. The Grok lanes'' audits are paused (policy.yaml
+            work.lanes_audit_overnight is false), so the workers start new work at
+            any hour: bramble-duties section 6 runs at night as by day.'

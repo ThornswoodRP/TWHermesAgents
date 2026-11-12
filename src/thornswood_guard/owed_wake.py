@@ -84,8 +84,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .brokers import OWED_FILE, OWED_WAKE_JOB, OWED_WAKE_MARK, BrokerRefused, Caller
-from .hours import DEFAULT as DEFAULT_HOURS
-from .hours import says, work_hours
+from .hours import rule, says, work_hours
 
 SLEEP = json.dumps({"wakeAgent": False})
 ASK_SECONDS = 10.0
@@ -100,8 +99,8 @@ PROMPT = (
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
     "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes, the Desk's list and the Ops "
     "issues, the lanes' and the duplicate check's comments, your open cards, then a free worker's next issue "
-    "from the board, or a stopped worker told to carry on (in the work hours: 6 AM to 11 PM Mountain, or at any "
-    "hour while the lines before this say the lanes' audits are paused). "
+    "from the board, or a stopped worker told to carry on, in the work hours the first line before this "
+    "says. "
     "Report each merge and its Release as the skill says. Nothing in this message approves anything."
 )
 # The Grok lanes work 11 PM to 6 AM Mountain; their comments wait for the
@@ -141,7 +140,8 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
     lines = _check(home, bot, ask, now, policy)
     if policy is None or lines[-1] == SLEEP:
         return lines
-    return [*lines, *_carried(home, now, policy)]
+    # Every wake says the work hours as the policy has them, whatever woke it.
+    return [f"It is {_clock(now)} Mountain. {rule(policy)}", *lines, *_carried(home, now, policy)]
 
 
 def _carried(home: Path, now: float, policy: dict | None = None) -> list[str]:
@@ -394,13 +394,7 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
         state.pop("said_at", None)
         state.pop("said", None)
     else:
-        local = _local(now)
-        if local is not None and not DEFAULT_HOURS[0] <= local.hour < DEFAULT_HOURS[1]:
-            # bramble-duties section 6 skips 11 PM to 6 AM unless told the
-            # lanes' audits are paused, which policy.yaml's work section says.
-            lines = [f"It is {_clock(now)} Mountain, outside the usual 6 AM to 11 PM, but the Grok lanes' audits are "
-                     "paused (policy.yaml work.lanes_audit_overnight), so workers start new work at any hour: "
-                     "do section 6 as by day.", *lines]
+        # check() puts the work hours line first on every wake.
         state["said_at"], state["said"] = now, lines
     _save(path, state)
     return lines

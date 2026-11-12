@@ -446,7 +446,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
             return due if op == "wake_due" else b(broker, op, args)
         out = owed_wake.check(home, "bramble", owed, now=NOON + 240, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
-        self.assertIn("turned away", out[0])
+        self.assertIn("turned away", out[1])
         # The owed wake runs the look too (12 Nov 2026: a wake owed all
         # evening kept every look from running), fresh, so its lines ride it.
         self.assertIn("no sweep carried its lines", "\n".join(out), "the owed sweep carries the look's lines")
@@ -629,7 +629,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
             return due if op == "wake_due" else b(broker, op, args)
         out = owed_wake.check(self.day(), "bramble", owed, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
-        self.assertIn("turned away", out[0])
+        self.assertIn("turned away", out[1])
         self.assertIn("in the field of sprocket", out[-1])
         # With every worker busy the owed wake still wakes, with its own line only.
         b2 = Idle(claimed=BUSY)
@@ -638,13 +638,29 @@ class MorningAndFreeWorkers(unittest.TestCase):
             return due if op == "wake_due" else b2(broker, op, args)
         out = owed_wake.check(self.day(), "bramble", owed2, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
-        self.assertEqual(len(out), 1, out)
+        self.assertEqual(len(out), 2, out)
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
         out = owed_wake.check(self.home(), "bramble", Broker(due), now=AFTER_SIX, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)))
-        self.assertIn("turned away", out[0])
+        self.assertIn("turned away", out[1], "first after the work hours line")
+
+    def test_every_wake_says_the_work_hours_first(self):
+        # 12 Nov 2026: twice at night a sweep whose wake had no free worker
+        # lines told Patrick the lanes' audits were not paused, while they were.
+        due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
+        night = AFTER_SIX + 16 * 3600  # 11:30 PM
+        paused = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": False})
+        out = owed_wake.check(self.home(), "bramble", Broker(due), now=night, policy=paused)
+        self.assertIn("It is 11:30 PM Mountain. The Grok lanes' audits are paused", out[0])
+        lanes = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": True})
+        out = owed_wake.check(self.home(), "bramble", Broker(due), now=night, policy=lanes)
+        self.assertIn("only from 6 AM to 11 PM Mountain", out[0])
+        self.assertNotIn("paused", out[0])
+        asleep = owed_wake.check(self.home(), "bramble", Broker({"owed": False}), now=night, policy=lanes)
+        self.assertFalse(wakes("\n".join(asleep)))
+        self.assertNotIn("Mountain. The workers", asleep[0], "a check that sleeps adds nothing")
 
 
 def urllib_q(args):

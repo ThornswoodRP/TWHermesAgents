@@ -425,7 +425,7 @@ TW_FILES_SCHEMA = {
     "description": (
         "Your work trees, through the file broker: one tree per task under your own name, nothing outside it. "
         "Ops: trees (your trees: each one's repo, task name and branch; needs no repo or task), checkout (a new tree on your branch from the base bundle tw_git gave you), read, write, edit (replace "
-        "text found exactly once), delete, list, status, diff, search, commit, bundle (your branch, for tw_git push), "
+        "text found exactly once), delete, list, status, diff, search (git grep; stopped after 30 seconds, so '.*' over a big one-line JSON file is refused, not waited on), commit, bundle (your branch, for tw_git push), "
         "remove (after the PR merged or closed), run_check (one test harness, or a builder that writes a generated "
         "file into your tree: node scripts/dev/Build-Gamemode.js after a change to game/gamemode/*.ts, python3 "
         "scripts/mods/Add-ContentRecords.py after a change to that builder; commit what it wrote with the change). "

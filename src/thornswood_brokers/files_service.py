@@ -45,6 +45,13 @@ from .wire import Refused, call
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,60}")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
 OUT_CAP = 200_000
+# How long one search may run. A search holds its Bot's lock, so every other
+# op of that Bot waits behind it. 12 Nov 2026 (Ops #310): Rift's search with
+# '.*' over game/data/recipes.json, a 6 MB file on one line, ran git grep's
+# regex for hours (a 6 MB line and 'Forge.*Bow' took past 60 seconds of CPU
+# here without finishing), and every tw_files op of Rift's timed out
+# behind it while Bramble's answered.
+SEARCH_SECONDS = 30
 # No setgid bit in the mode: tw-files runs with RestrictSUIDSGID=yes, whose
 # filter refuses a mkdir that asks for one with EPERM, before it even looks
 # whether the folder is there (31 Oct, Rift's first checkout). The install
@@ -378,7 +385,8 @@ class FilesService:
         return gd
 
     def _git(self, tree: Path, *args: str, check: bool = True, allow_file: bool = False,
-             identity: tuple[str, str] | None = None) -> subprocess.CompletedProcess:
+             identity: tuple[str, str] | None = None, timeout: float | None = None,
+             cap: int | None = None) -> subprocess.CompletedProcess:
         gd = self._git_ok(tree)
         safe = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=",
                 "-c", "submodule.recurse=false", "-c", f"protocol.file.allow={'always' if allow_file else 'never'}",
@@ -387,8 +395,11 @@ class FilesService:
                 "-c", "core.untrackedCache=false", "-c", "transfer.fsckObjects=true"]
         if identity:
             safe += ["-c", f"user.name={identity[0]}", "-c", f"user.email={identity[1]}"]
-        r = subprocess.run(["git", f"--git-dir={gd}", f"--work-tree={tree}", *safe, *args],
-                           capture_output=True, text=True, env=_git_env(tree), cwd=tree)
+        argv = ["git", f"--git-dir={gd}", f"--work-tree={tree}", *safe, *args]
+        if timeout is not None:
+            r = _bounded(argv, env=_git_env(tree), cwd=tree, timeout=timeout, cap=cap or OUT_CAP)
+        else:
+            r = subprocess.run(argv, capture_output=True, text=True, env=_git_env(tree), cwd=tree)
         if check and r.returncode != 0:
             raise Refused(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[-400:]}")
         return r
@@ -492,10 +503,17 @@ class FilesService:
         if not pattern or len(pattern) > 500:
             raise Refused("search takes a pattern of up to 500 characters")
         with self._lock(bot):
-            r = self._git(tree, "grep", "-n", "-I", "--no-color", "--untracked", "-e", pattern, "--", check=False)
-        if r.returncode not in (0, 1):
+            try:
+                r = self._git(tree, "grep", "-n", "-I", "--no-color", "--untracked", "-e", pattern, "--", check=False,
+                              timeout=SEARCH_SECONDS, cap=OUT_CAP)
+            except subprocess.TimeoutExpired:
+                raise Refused(f"search ran past {SEARCH_SECONDS} seconds and was stopped, so nothing else of yours "
+                              "waits behind it: a pattern like '.*' on a file that is one long line (a big JSON "
+                              "file) takes far longer than that; narrow the pattern, or read that file in parts "
+                              "with read's offset and limit") from None
+        if r.returncode not in (0, 1) and not r.cut:
             raise Refused(f"search failed: {r.stderr.strip()[-300:]}")
-        return {"matches": r.stdout[:OUT_CAP], "cut": len(r.stdout) > OUT_CAP}
+        return {"matches": r.stdout[:OUT_CAP], "cut": r.cut or len(r.stdout) > OUT_CAP}
 
     def commit(self, caller: str, args: dict) -> dict:
         bot, repo, tree = self._tree(args)
@@ -643,6 +661,51 @@ def _git_env(tree: Path) -> dict:
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tree), "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
             "LC_ALL": "C.UTF-8"}
+
+
+def _bounded(argv: list[str], *, env: dict, cwd: Path, timeout: float, cap: int) -> subprocess.CompletedProcess:
+    """Run argv for at most timeout seconds, keeping at most cap bytes of its
+    output. Past either, it is killed: TimeoutExpired past the time; past the
+    cap, what was read comes back with cut set (a search for '.*' would
+    otherwise copy every line of the tree into the broker's memory)."""
+    import selectors
+    import time
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=env, cwd=cwd)
+    out, err, cut = bytearray(), bytearray(), False
+    deadline = time.monotonic() + timeout
+    sel = selectors.DefaultSelector()
+    sel.register(p.stdout, selectors.EVENT_READ, out)
+    sel.register(p.stderr, selectors.EVENT_READ, err)
+    try:
+        while sel.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _ in sel.select(left):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fileobj)
+                    continue
+                key.data.extend(chunk)
+            if len(out) > cap:
+                cut = True
+                break
+        if cut:
+            p.kill()
+        p.wait(timeout=max(deadline - time.monotonic(), 1))
+    except BaseException:
+        p.kill()
+        p.wait()
+        raise
+    finally:
+        sel.close()
+        p.stdout.close()
+        p.stderr.close()
+    r = subprocess.CompletedProcess(argv, p.returncode, out[:cap + 1].decode(errors="replace"),
+                                    err[-4000:].decode(errors="replace"))
+    r.cut = cut
+    return r
 
 
 def _run(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
