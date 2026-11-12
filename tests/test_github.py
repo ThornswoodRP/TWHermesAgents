@@ -216,11 +216,13 @@ class AutoMerges(unittest.TestCase):
 
     def setUp(self):
         self.p = policy()
-        self.r = rules(self.p, store(self.p))
+        self.s = store(self.p)
+        self.r = rules(self.p, self.s)
 
-    def merge(self, p=None, checks=None, branch_checks=APP_RULES, method="squash"):
+    def merge(self, p=None, checks=None, branch_checks=APP_RULES, method="squash", verb_paths=(), decision_id=None):
         return self.r.merge("bramble", p or pr(), HEAD, method, [] if checks is None else checks,
-                            branch_checks=branch_checks)
+                            branch_checks=branch_checks, decision_id=decision_id,
+                            verb_paths=None if verb_paths is None else list(verb_paths))
 
     def test_the_shipped_policy_has_auto_merge_in_thornswood_and_the_fork_only(self):
         self.assertTrue(self.p.auto_merge(APP))
@@ -244,7 +246,7 @@ class AutoMerges(unittest.TestCase):
     def test_a_robots_pr_goes_on_auto_merge_like_a_bots(self):
         for login, ref in (("dependabot[bot]", "dependabot/github_actions/actions-abc"),
                            ("thornswood-pin-robot[bot]", "engine-pin/next")):
-            p = pr(head_ref=ref, author_bot=None, author_login=login, files=[".github/workflows/build-pr.yml"])
+            p = pr(head_ref=ref, author_bot=None, author_login=login, files=["engine/skymp"])
             v = self.merge(p=p)
             self.assertTrue(v.allowed, f"{login}: {v.reason}")
 
@@ -263,13 +265,37 @@ class AutoMerges(unittest.TestCase):
     def test_red_on_an_old_head_does_not_hold_the_new_one(self):
         self.assertTrue(self.merge(checks=green(sha=OTHER, conclusion="failure")).allowed)
 
-    def test_11_a_workflow_gate_or_verb_script_change_needs_no_yes(self):
-        # Patrick, 2 Nov 2026: "I shouldn't need to approve".
+    def test_11_a_workflow_gate_or_verb_script_change_needs_patricks_yes_at_its_head(self):
+        # Patrick, 2 Nov 2026 (dec_IL6elJT7TwyCVC_wzMIveA): "Auto-merge skips a
+        # pull request that changes workflows, the gate or its verb scripts
+        # unless it is Patrick's". tw_git merge put Thornswood #5665 and skymp
+        # #150 on auto-merge with no card (Ops #276).
+        verbs = ["scripts/deploy/Deploy-DevGamemode.ps1", "keys/box/"]
         for f in (".github/workflows/box-run.yml", "scripts/vps/gate/GateRules.ps1",
-                  "scripts/release/nexus-verbs.json", "scripts/deploy/Deploy-DevGamemode.ps1"):
-            p = pr(head_ref="magpie/4060-gate", author_bot="magpie", files=[f])
-            v = self.merge(p=p)
-            self.assertTrue(v.allowed, f"{f}: {v.reason}")
+                  "scripts/release/nexus-verbs.json", "scripts/deploy/Deploy-DevGamemode.ps1", "keys/box/p.pub"):
+            p = pr(head_ref="magpie/4060-gate", author_bot="magpie", files=["docs/x.md", f])
+            v = self.merge(p=p, verb_paths=verbs)
+            self.assertFalse(v.allowed, f)
+            self.assertIn(f"changes {f}", v.reason)
+            self.assertIn(f"merge:{APP}@{HEAD}#42", v.reason)
+        p = pr(head_ref="magpie/4060-gate", author_bot="magpie", files=[".github/workflows/box-run.yml"])
+        for did, kind, number in (("pub", "publish", 42), ("other", "merge", 43)):
+            decide(self.s, id=did, kind=kind, pr_number=number)
+            self.assertFalse(self.merge(p=p, decision_id=did).allowed, did)
+        decide(self.s, id="yes", kind="merge", pr_number=42)
+        v = self.merge(p=p, decision_id="yes")
+        self.assertTrue(v.allowed, v.reason)
+        self.assertTrue(self.r.patrick_merge(p, HEAD, [], "yes").allowed)
+        self.assertIn("Patrick's decision yes", self.r.patrick_merge(p, HEAD, [], "yes").reason)
+
+    def test_unread_verb_lists_hold_thornswood_not_the_fork(self):
+        v = self.merge(verb_paths=None)
+        self.assertFalse(v.allowed)
+        self.assertIn("were not read", v.reason)
+        fork_pr = pr(repo=FORK, base_ref="thornswood/engine-changes", head_ref="wisp/77-equip-drop", author_bot="wisp")
+        self.assertTrue(self.merge(p=fork_pr, method="merge", branch_checks=FORK_RULES, verb_paths=None).allowed)
+        fork_pr.files = [".github/workflows/thornswood-pr-windows.yml"]
+        self.assertFalse(self.merge(p=fork_pr, method="merge", branch_checks=FORK_RULES, verb_paths=None).allowed)
 
     def test_the_fork_goes_on_auto_merge_with_a_merge_commit(self):
         fork_pr = pr(repo=FORK, base_ref="thornswood/engine-changes", head_ref="wisp/77-equip-drop", author_bot="wisp")
@@ -296,7 +322,7 @@ class OutsideWork(unittest.TestCase):
     def merge(self, p, repo=APP):
         if repo == OPS:
             return self.r.merge("bramble", p, HEAD, "squash", green(name="check"))
-        return self.r.merge("bramble", p, HEAD, "squash", [], branch_checks=APP_RULES)
+        return self.r.merge("bramble", p, HEAD, "squash", [], branch_checks=APP_RULES, verb_paths=[])
 
     def test_the_shipped_list_is_patrick_and_his_team(self):
         self.assertEqual(self.p.data["merge"]["auto_merge_people"], ["EvilPatrick06", "WiccanDjinn"])
@@ -346,7 +372,7 @@ class OutsideWork(unittest.TestCase):
         data["merge"]["auto_merge_people"].append("rahul05ranjan")
         r = rules(Policy(data))
         p = pr(credits=[self.bot_commit(), self.RAHUL], labels=["outside work"])
-        v = r.merge("bramble", p, HEAD, "squash", [], branch_checks=APP_RULES)
+        v = r.merge("bramble", p, HEAD, "squash", [], branch_checks=APP_RULES, verb_paths=[])
         self.assertTrue(v.allowed, v.reason)
 
     def test_the_label_without_a_credit_is_refused(self):
