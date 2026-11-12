@@ -268,6 +268,10 @@ class ConnectorSide(unittest.TestCase):
         self.assertIn("assigned you task 5547", items[0]["text"])
         self.assertIn("Name the failing check from the log.", items[0]["text"])
         self.assertIn("approves nothing by itself", items[0]["text"])
+        # 12 Nov 2026: a worker's long chat kept an older guide and stopped at the hand-back. The turn's own
+        # words load the guide afresh and name the step after the hand-back.
+        self.assertIn("Load the thornswood-guide skill again now", items[0]["text"])
+        self.assertIn("take your own next issue as section 4 step 9 says", items[0]["text"])
         self.chat.result(self.w.ws, self.tok, items[0]["id"], "confirmed", "turn finished")
         self.assertEqual(self.w.store.db.execute("SELECT status FROM connector_outbox WHERE id = ?",
                                                  (items[0]["id"],)).fetchone()[0], "sent")
