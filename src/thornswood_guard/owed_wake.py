@@ -53,6 +53,15 @@ while Wisp alone worked. The look waits while Bramble has a turn running,
 in line or queued, because a hand-back is answered in that turn and the
 look must read what it did; the hourly look runs whatever Bramble is doing.
 
+A look that wakes Bramble keeps its lines in IDLE_FILE until a scheduled
+sweep admitted after it runs to its end (tw-policy's sweep_done): those are
+the only sweeps that carry them. Until then every wake this check gives
+carries them too, and while Bramble has no turn running the look runs again,
+fresh. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
+Sprocket, Echo and Wisp free; its sweep was turned away because another was
+running, a GitHub sweep paid the wake it owed without its lines, the 6:44 PM
+sweep carried only an Ops issue, and no worker got work for the next hour.
+
 Bramble itself works around the clock (Patrick, 9 Nov 2026, 1:27 AM:
 "Bramble should still be working and always be working and alert"); only
 the workers' new issues wait for 6 AM. So the alert wake looks every
@@ -71,7 +80,7 @@ import re
 import tempfile
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .brokers import OWED_FILE, OWED_WAKE_JOB, OWED_WAKE_MARK, BrokerRefused, Caller
@@ -121,6 +130,31 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
     """The lines to print. The last one is SLEEP unless the sweep should run now.
     policy is the installed policy's data; without it only owed wakes are
     looked at."""
+    now = time.time() if now is None else now
+    lines = _check(home, bot, ask, now, policy)
+    if policy is None or lines[-1] == SLEEP:
+        return lines
+    return [*lines, *_carried(home, now)]
+
+
+def _carried(home: Path, now: float) -> list[str]:
+    """The free worker look's lines that no sweep has yet carried to its end,
+    added to any wake from 6 AM to 11 PM: an owed wake, the alert wake, the
+    morning wake. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped
+    and Sprocket, Echo and Wisp free; its sweep was turned away (another was
+    running), a GitHub sweep paid the wake it owed without its lines, the
+    6:44 PM sweep carried only an Ops issue, and no worker got work. The lines
+    go once a scheduled sweep admitted after the look ran to its end
+    (_idle)."""
+    state = _load(home.joinpath(*IDLE_FILE))
+    at, said = state.get("said_at"), state.get("said")
+    if not at or not said or float(at) == now or not _working(now):
+        return []
+    return [f"What the free worker look at {_clock(float(at))} Mountain said, which no sweep has carried to its "
+            "end yet (bramble-duties, section 6):", *said]
+
+
+def _check(home: Path, bot: str, ask: Caller, now: float, policy: dict | None) -> list[str]:
     outbox = home.joinpath(*OWED_FILE)
     try:
         if outbox.exists():
@@ -137,7 +171,26 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
                 f"(the last because {due.get('reason')}). The queue has room now."]
     if policy is None:
         return ["no wake is owed", SLEEP]
-    return ["no wake is owed", *_idle(home, bot, ask, time.time() if now is None else now, policy)]
+    return ["no wake is owed", *_idle(home, bot, ask, now, policy)]
+
+
+def _local(now: float):
+    """now as Mountain time, or None when the time zone data cannot be read."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(now, ZoneInfo(MOUNTAIN))
+    except Exception:
+        return None
+
+
+def _working(now: float) -> bool:
+    local = _local(now)
+    return local is not None and WORK_HOURS[0] <= local.hour < WORK_HOURS[1]
+
+
+def _clock(t: float) -> str:
+    local = _local(t)
+    return local.strftime("%I:%M %p").lstrip("0") if local else datetime.fromtimestamp(t, timezone.utc).strftime("%H:%M UTC")
 
 
 def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[str]:
@@ -159,6 +212,11 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
                                         "new work from 11 PM to 6 AM, while the Grok lanes audit")
     ended_said = None
+    if state.get("said_at"):
+        unheard, ended_said = _unheard(bot, ask, state)
+        if not unheard:
+            _save(path, state)
+        idle_due = idle_due or (working and unheard)
     if working and not idle_due:
         ended, ended_said = _turns_ended(bot, ask, policy, float(state.get("idle_checked") or 0))
         idle_due = bool(ended)
@@ -211,6 +269,33 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         return [*said, "the free worker check is due and runs at the next check, apart from this one's searches",
                 SLEEP]
     return [*said, *([ended_said] if ended_said else []), *_free_workers(bot, ask, now, policy, path, state)]
+
+
+def _unheard(bot: str, ask: Caller, state: dict) -> tuple[bool, str | None]:
+    """Whether the last free worker look that woke Bramble was never carried
+    to the end of a sweep: no scheduled sweep admitted since it ran to its
+    end (tw-policy's sweep_done), and Bramble has no turn running or in line
+    that may be that sweep. Then the look runs again, fresh, at this check.
+    Once one has, the look's lines leave state. tw-policy not answering
+    keeps them and runs nothing: the next check asks again."""
+    try:
+        mine = ((ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}).get(bot) or {}
+    except BrokerRefused:
+        return False, None
+    at = float(state["said_at"])
+    done = mine.get("sweep_done")
+    try:
+        carried = bool(done) and datetime.fromisoformat(done).timestamp() >= at
+    except (TypeError, ValueError):
+        carried = False
+    if carried:
+        state.pop("said_at", None)
+        state.pop("said", None)
+        return False, None
+    if mine.get("running") or mine.get("waiting"):
+        return False, None
+    return True, (f"the free worker look at {_clock(at)} Mountain woke you, but no sweep carried its lines to the "
+                  "end (it was turned away, or a sweep that never saw them paid its wake): it looks again now")
 
 
 def _workers(policy: dict) -> list[str]:
@@ -284,9 +369,16 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     repo = policy["repos"]["app"]
     asked = _asked(bot, ask)
     try:
-        return _look(bot, ask, now, policy, workers, repo, asked)
+        lines = _look(bot, ask, now, policy, workers, repo, asked)
     except BrokerRefused as e:
         return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
+    if lines[-1] == SLEEP:
+        state.pop("said_at", None)
+        state.pop("said", None)
+    else:
+        state["said_at"], state["said"] = now, lines
+    _save(path, state)
+    return lines
 
 
 def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, str], repo: str,
