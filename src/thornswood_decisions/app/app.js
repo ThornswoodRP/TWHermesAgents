@@ -350,7 +350,7 @@ async function addFingerprint() {
     fingerprintTried = true
     const app = done.body.maker || 'your passkey app'
     return { ok: false, message: `That key was saved in ${app}, so it is kept as a passkey and signs in through ${app}. ` +
-      'The fingerprint sign-in was not added. ' + SAVE_WHERE + ' Then tap Use my fingerprint again.' }
+      'The fingerprint sign-in was not added, and this phone is not offered it again.' }
   }
   if (!keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })) {
     return { ok: false, message: 'This browser would not keep the fingerprint\'s name, so the app cannot ask for it. Remove it in Settings.' }
@@ -4082,15 +4082,14 @@ async function settingsView(note) {
     held = null
     status.textContent = "This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add it again here."
   }
+  // A phone whose try its passkey app took is not offered it again (Patrick's answer C on
+  // q-hermes-fingerprint-provider, 12 Nov: his Pixel prefers Bitwarden, Android saves every new key there,
+  // and he keeps signing in through it). Its passkey list says where that key is kept.
   const tried = !held && r.status === 200 && (await canUseFingerprint()) && (await triedFingerprint())
   const finger = held
     ? [el('p', { class: 'quiet' }, 'On. This phone signs in and answers high-risk cards with your fingerprint.')]
-    : (await canUseFingerprint())
-      ? [el('p', { class: 'quiet' }, tried
-          ? 'This phone saved its fingerprint key in your passkey app, so you sign in through that app. ' +
-            'To sign in right here instead, try again. ' + SAVE_WHERE
-          : 'Sign in with your fingerprint right here instead of going out to your passkey app. ' +
-            SAVE_WHERE),
+    : !tried && (await canUseFingerprint())
+      ? [el('p', { class: 'quiet' }, 'Sign in with your fingerprint right here instead of going out to your passkey app. ' + SAVE_WHERE),
         el('button', { class: 'primary', type: 'button', onclick: async () => {
           status.textContent = ''
           const k = await addFingerprint()
