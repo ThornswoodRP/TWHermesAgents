@@ -44,6 +44,26 @@ from .wire import Refused, call
 
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,60}")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+
+
+def _word(want: str) -> re.Pattern:
+    """One word of a check form as a pattern: {name} is a harness's name
+    (NAME), {tests} is the shared tests folder or a product's own one below
+    the top (game/tests, launcher/tests), where Thornswood keeps a product's
+    harnesses beside its code (Thornswood #5341). Neither takes a dot or a
+    second slash, so a form never reaches outside the tree; the rest of the
+    word is matched as written."""
+    out = []
+    for part in re.split(r"(\{name\}|\{tests\})", want):
+        if part == "{name}":
+            out.append(NAME.pattern)
+        elif part == "{tests}":
+            out.append("(?:" + NAME.pattern + "/)?tests")
+        else:
+            out.append(re.escape(part))
+    return re.compile("".join(out))
+
+
 OUT_CAP = 200_000
 # How long one search may run. A search holds its Bot's lock, so every other
 # op of that Bot waits behind it. 12 Nov 2026 (Ops #310): Rift's search with
@@ -587,17 +607,10 @@ class FilesService:
         for form in self.cfg["check_commands"]:
             if len(form) != len(cmd):
                 continue
-            ok = True
-            for want, got in zip(form, cmd):
-                if "{name}" in want:
-                    pre, post = want.split("{name}")
-                    mid = got[len(pre):len(got) - len(post)] if got.startswith(pre) and got.endswith(post) else ""
-                    ok = ok and bool(NAME.fullmatch(mid)) and len(got) == len(pre) + len(mid) + len(post)
-                else:
-                    ok = ok and want == got
-            if ok:
+            if all(_word(want).fullmatch(got) for want, got in zip(form, cmd)):
                 return cmd
-        raise Refused("a check runs one harness in the forms CLAUDE.md names, Check-Words.ps1, or one of the two "
+        raise Refused("a check runs one harness in the forms CLAUDE.md names, from tests or a product's own tests "
+                      "folder (game/tests), Check-Words.ps1, or one of the two "
                       "builders (node scripts/dev/Build-Gamemode.js, python3 scripts/mods/Add-ContentRecords.py); "
                       "nothing else")
 

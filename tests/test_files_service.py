@@ -588,12 +588,19 @@ class Checks(unittest.TestCase):
     def test_only_the_harness_forms_run(self):
         f = World().files
         for cmd in (["node", "tests/test-fence.js"], ["pwsh", "-NoProfile", "-File", "tests/test-3561-path.ps1"],
-                    ["python3", "tests/test-x.py"], ["pwsh", "scripts/dev/Check-Words.ps1"]):
+                    ["python3", "tests/test-x.py"], ["pwsh", "scripts/dev/Check-Words.ps1"],
+                    # A product's own tests folder (Thornswood #5341).
+                    ["node", "game/tests/test-farming.js"], ["python3", "bot/tests/test-3111-trust.py"],
+                    ["pwsh", "-NoProfile", "-File", "launcher/tests/test-498-msbuild.ps1"]):
             with self.subTest(cmd=cmd):
                 self.assertEqual(f.check_command(cmd), cmd)
         for cmd in (["pwsh", "scripts/dev/Run-Gate.ps1"], ["node", "tests/test-../../x.js"], ["node", "-e", "x"],
                     ["bash", "-c", "id"], ["node", "tests/test-a.js", "--extra"], ["python3", "tests/test-A.py"],
-                    "node tests/test-x.js"):
+                    "node tests/test-x.js",
+                    # Only one folder above tests, by a plain name: no climb, no second level, no other folder.
+                    ["node", "../tests/test-x.js"], ["node", "a/b/tests/test-x.js"], ["node", "game/test-x.js"],
+                    ["node", "/tests/test-x.js"], ["node", "Game/tests/test-x.js"], ["node", "game/tests/../x.js"],
+                    ["node", "game/tests/test-x.js/"], ["node", "game/testsx/test-x.js"]):
             with self.subTest(cmd=cmd), self.assertRaises(Refused):
                 f.check_command(cmd)
 

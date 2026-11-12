@@ -593,10 +593,14 @@ brokers:
     # over a write's size and the plugin is not text, so no Bot could land
     # a gamemode or plugin change. A builder runs code from the Bot's own
     # tree, as every harness already does, so it gives a Bot nothing more.
+    # {tests} is tests or a product's own tests folder one below the top
+    # (game/tests, launcher/tests): Thornswood keeps a product's harnesses
+    # beside its code (Thornswood #5341), and a form that named only tests
+    # left the Bots unable to run any of them.
     check_commands:
-      - ["node", "tests/test-{name}.js"]
-      - ["pwsh", "-NoProfile", "-File", "tests/test-{name}.ps1"]
-      - ["python3", "tests/test-{name}.py"]
+      - ["node", "{tests}/test-{name}.js"]
+      - ["pwsh", "-NoProfile", "-File", "{tests}/test-{name}.ps1"]
+      - ["python3", "{tests}/test-{name}.py"]
       - ["pwsh", "scripts/dev/Check-Words.ps1"]
       - ["node", "scripts/dev/Build-Gamemode.js"]
       - ["python3", "scripts/mods/Add-ContentRecords.py"]
