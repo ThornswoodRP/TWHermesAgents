@@ -80,6 +80,10 @@ UNSENT_FOR = timedelta(days=1)
 ATTACH_ID = re.compile(r"^att_[A-Za-z0-9_-]{8,64}$")
 MIME = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}$")
 MAX_CLAIM = 3
+# Messages whose turn the connector could not see end (status uncertain), handed back with each claim so the
+# connector can read how Hermes itself ended that turn and settle them (own_connector.hermes_verdict). The
+# newest first, this many at a time.
+UNSETTLED_HANDED = 10
 MAX_CHATS = 50
 MAX_OPEN = 8
 # Hermes's projects a new chat can start in (#110): each folder by its project's name.
@@ -1089,8 +1093,10 @@ class OwnChat:
             raise CoreError(404, "no_item", "no message of yours to One by that id")
         out = {"message_id": message_id, "status": row["status"], "reason": row["reason"],
                "created_at": row["created_at"], "updated_at": row["updated_at"]}
-        cx = self.s.db.execute("SELECT body_json FROM connector_outbox WHERE idempotency_key = ?",
-                               (f"one:{message_id}",)).fetchone()
+        # The newest word on it: a message left uncertain may be settled later from Hermes's own record.
+        cx = self.s.db.execute("SELECT body_json FROM connector_outbox WHERE idempotency_key IN (?, ?) "
+                               "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                               (f"one:{message_id}", f"one:{message_id}:settled")).fetchone()
         if cx:
             out["answer"] = json.loads(cx["body_json"]).get("reply")
         return out
@@ -1581,11 +1587,23 @@ class OwnChat:
             sessions = OwnSessions(self.s).hand(db, workspace_id, gw) if ready else []
         return {"items": items, "wanted": self._wanted(workspace_id, gw),
                 "pages": PAGES.hand(workspace_id, gw, self.s.clock()), "reactions": reactions, "sessions": sessions,
-                "rewinds": rewinds,
+                "rewinds": rewinds, "uncertain": self._uncertain(workspace_id, gw) if ready else [],
                 "controls": CONTROLS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "jobs": JOBS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "tails": TAILS.hand(workspace_id, gw, self.s.clock()) if ready else [],
                 "orders": ORDERS.hand(workspace_id, gw, self.s.clock()), "release": RELEASE}
+
+    def _uncertain(self, workspace_id: str, gw: str) -> list[dict]:
+        """This gateway's messages left uncertain whose chat is known: the connector reads how Hermes ended
+        each one's turn and settles it (result with settled). 11 Nov 2026: Wisp's step for One met Anthropic's
+        429 at 12:40 PM and then One slept; the connector stopped watching after its 15 minutes and said
+        uncertain, Hermes closed the turn at 5:40 PM as "not processed", and the core kept the message as
+        waiting while Wisp had been told not to send it again, so nothing ever ran it."""
+        rows = self.s.db.execute(
+            "SELECT id, coalesce(session_id, made_session_id) AS sid, text FROM own_messages WHERE workspace_id = ? "
+            "AND gateway = ? AND status = 'uncertain' AND coalesce(session_id, made_session_id) IS NOT NULL "
+            "ORDER BY updated_at DESC, rowid DESC LIMIT ?", (workspace_id, gw, UNSETTLED_HANDED)).fetchall()
+        return [{"id": r["id"], "session_id": r["sid"], "text": r["text"]} for r in rows]
 
     def _made(self, db, workspace_id: str, gw: str) -> None:
         """A new chat's id, as the connector says it the moment Hermes made the chat, is kept on its first
@@ -1655,10 +1673,15 @@ class OwnChat:
         return {"kept": LIVE.put(workspace_id, turns, self.s.clock())}
 
     def result(self, workspace_id: str, gw: str, token: str | None, item_id: str, outcome: str, ref: str = "",
-               reason: str = "", session_id=None, reply=None) -> dict:
+               reason: str = "", session_id=None, reply=None, settled=False) -> dict:
+        """What came of a message's turn. `settled`: a message left uncertain, settled later from how Hermes
+        itself ended its turn (own_connector.hermes_verdict): confirmed when Hermes completed it, failed when
+        Hermes ended it before anything ran."""
         self._check_token(workspace_id, gw, token)
         if outcome not in OUTCOMES:
             raise CoreError(400, "bad_outcome", "an outcome is confirmed, failed or uncertain")
+        if settled is not False and (settled is not True or outcome == "uncertain"):
+            raise CoreError(400, "bad_outcome", "a settled message is confirmed or failed")
         made = _sid(session_id) if session_id else None
         ref, reason = str(ref)[:128], str(reason)[:200]
         state = OUTCOMES[outcome]
@@ -1669,7 +1692,9 @@ class OwnChat:
             raise CoreError(404, "no_item", "no such message")
         if row["status"] == state:
             return {"id": item_id, "status": state, "replayed": True}
-        if row["status"] != "leased":
+        if settled and row["status"] != "uncertain":
+            raise CoreError(409, "not_uncertain", f"that message is {row['status']}, not uncertain")
+        if not settled and row["status"] != "leased":
             raise CoreError(409, "not_leased", f"that message is {row['status']}, not leased")
         # The turn is over and its answer is in Hermes: the chat's newest page is read again, not shown
         # from memory for up to PAGE_FRESH without it.
@@ -1680,7 +1705,8 @@ class OwnChat:
             db.execute("UPDATE own_messages SET status = ?, lease_until = NULL, reason = ?, updated_at = ?, "
                        "made_session_id = coalesce(made_session_id, ?) WHERE id = ?",
                        (state, reason or None, self.s.now(), made if row["session_id"] is None else None, item_id))
-            self.s.event(db, workspace_id, f"own.{state}", item_id, f"own connector ({gw})", {"ref": ref})
+            self.s.event(db, workspace_id, f"own.{state}", item_id, f"own connector ({gw})",
+                         {"ref": ref} | ({"settled": True} if settled else {}))
             if row["bot"]:
                 # A Bot's message: what came of it, and One's answer, go back to that Bot in its own Bot Chat
                 # (Chat.claim, _one_text). One's words are kept as long as a card's answer is.
@@ -1690,7 +1716,7 @@ class OwnChat:
                            (new_id("cx"), workspace_id, row["bot"],
                             canonical({"message_id": item_id, "outcome": outcome, "reason": reason,
                                        "reply": reply[-BOT_REPLY:] if isinstance(reply, str) else None}),
-                            f"one:{item_id}", self.s.now(), self.s.now()))
+                            f"one:{item_id}:settled" if settled else f"one:{item_id}", self.s.now(), self.s.now()))
                 self.s.wake(workspace_id, "bots")
             else:
                 # The turn he started ended, with its answer or without one: one line on his phone (alerts.py),
