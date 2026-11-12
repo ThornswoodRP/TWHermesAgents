@@ -6,6 +6,15 @@ connector with every Bot Chat turn it ran, and restarted all four brokers,
 whatever the release changed.
 """
 
+import sys as _sys
+import unittest as _unittest
+
+if not _sys.platform.startswith("linux"):
+    # The brokers are Linux code (Unix sockets with SO_PEERCRED, pwd): they run
+    # only on the Oracle VM, and these tests run in the VM half of
+    # scripts/test-at-head.sh.
+    raise _unittest.SkipTest("the brokers run only on the Oracle VM; their tests run there")
+
 import shutil
 import socket
 import tempfile
