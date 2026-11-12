@@ -794,6 +794,10 @@ class PatrickMerges(unittest.TestCase):
         did = self.card(w, FORK, sha)
         out = w.merge(sha=sha, repo=FORK, decision_id=did)
         self.assertTrue(out["auto_merge"])
+        # GitHub merges a workflow change only for a token with workflows
+        # write (Ops #313); the fake refuses one without it, as GitHub did.
+        self.assertTrue([t for t in w.fake.tokens if t["permissions"].get("workflows") == "write"
+                         and t["permissions"].get("pull_requests") == "write"])
         self.assertEqual(w.fake.auto_merged, [(FORK, 42, sha, "MERGE")])
         self.assertIsNotNone(w.policy._decision(did).used_at, "the yes is used")
 
@@ -943,6 +947,38 @@ class AutoMerge(unittest.TestCase):
             w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
         self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), sha)
         self.assertTrue(w.fake.prs[(APP, 42)]["auto_merge"])
+
+    def test_a_queued_pull_request_leaves_the_queue_before_its_new_head_goes_up(self):
+        """12 Nov 2026, 12:10 PM Mountain: GitHub refused Sprocket's fix to
+        #5905 because #5905 was in the merge queue at 69ac0d2."""
+        w = World()
+        w.fake.merge_queues.add((APP, "main"))
+        sha = w.green_pr(repo=APP, checks=False)
+        w.fake.prs[(APP, 42)]["in_queue"] = True
+        new = w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"},
+                     repo=APP, task="t-2")["sha"]
+        self.assertEqual(w.fake.dequeued, [(APP, 42, sha)])
+        self.assertFalse(w.fake.prs[(APP, 42)]["in_queue"])
+        self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), new)
+
+    def test_a_push_whose_pull_request_cannot_leave_the_queue_does_not_go(self):
+        w = World()
+        w.fake.merge_queues.add((APP, "main"))
+        sha = w.green_pr(repo=APP, checks=False)
+        w.fake.prs[(APP, 42)]["in_queue"] = True
+        w.fake.refuse_dequeue = True
+        with self.assertRaises(Refused):
+            w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), sha)
+        self.assertTrue(w.fake.prs[(APP, 42)]["in_queue"])
+
+    def test_a_workflow_merge_asks_for_the_workflows_permission_and_others_do_not(self):
+        """Ops #313: #5916 (nightly.yml) and #5923 (test-tasks.yml) were
+        refused by GitHub with Patrick's authorize in hand, 12 Nov 2026."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.merge(sha=sha, repo=APP)
+        self.assertFalse([t for t in w.fake.tokens if t["permissions"].get("workflows")])
 
     def test_a_push_to_a_branch_without_auto_merge_turns_nothing_off(self):
         w = World()

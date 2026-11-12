@@ -61,6 +61,7 @@ WRITE = {
     "push_workflows": {"contents": "write", "workflows": "write", "metadata": "read"},
     "pulls": {"pull_requests": "write", "contents": "read", "metadata": "read"},
     "merge": {"contents": "write", "pull_requests": "write", "metadata": "read"},
+    "merge_workflows": {"contents": "write", "pull_requests": "write", "workflows": "write", "metadata": "read"},
     "issues": {"issues": "write", "metadata": "read"},
     # A label or a comment on a pull request goes through the issues API but
     # GitHub holds it to pull_requests write: issues write alone is a 403
@@ -94,6 +95,11 @@ AUTO_MERGE = """mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMerg
 # pull request has it on, since GitHub leaves it on for a pusher with write.
 AUTO_MERGE_OFF = """mutation($pr: ID!) {
   disablePullRequestAutoMerge(input: {pullRequestId: $pr}) { pullRequest { autoMergeRequest { enabledAt } } }
+}"""
+# Out of the merge queue again, before a new head goes on its branch (GitHub
+# refuses a push to a queued branch).
+DEQUEUE = """mutation($pr: ID!) {
+  dequeuePullRequest(input: {id: $pr}) { mergeQueueEntry { id } }
 }"""
 WORKFLOW_DIR = ".github/workflows/"
 # A Co-authored-by line in a commit message: the credit for someone else's work.
@@ -497,23 +503,40 @@ class GitService:
         return out
 
     def _auto_merge_off(self, bot: str, task: str, repo: str, branch: str, head: str) -> None:
-        """Before a new head goes on a branch, auto-merge comes off its open
-        pull request, so nothing merges at a head Bramble did not merge.
+        """Before a new head goes on a branch, its open pull request comes out
+        of the merge queue and off auto-merge, so nothing merges at a head
+        Bramble did not merge, and the push is not refused.
         Bramble turns auto-merge on at one exact head, but GitHub leaves it on
         when someone with write access pushes again, and the workers' App has
         contents write: Thornswood #5651 (9 Nov 2026) went into the merge
         queue at a new head before anyone read it, and #5744 (11 Nov) merged
-        at a head Bramble had said it was holding (Ops #272). A merge at the
-        new head is a new merge op. When it cannot be turned off, the push
-        does not go."""
+        at a head Bramble had said it was holding (Ops #272). And GitHub
+        refuses a push to a branch whose pull request is in the merge queue:
+        Sprocket's fix to #5905, queued at 69ac0d2, could not go up (12 Nov
+        2026, 12:10 PM Mountain). A merge at the new head is a new merge op.
+        When either cannot be done, the push does not go."""
         owner = repo.split("/", 1)[0]
         for raw in self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls?state=open&head={quote(owner + ':' + branch)}"):
-            if raw.get("state") != "open" or (raw.get("head") or {}).get("ref") != branch or not raw.get("auto_merge"):
+            if raw.get("state") != "open" or (raw.get("head") or {}).get("ref") != branch:
                 continue
             number = int(raw["number"])
-            node = self._queue_state(repo, number, raw["base"]["ref"])["id"]
+            base = raw["base"]["ref"]
+            state = self._queue_state(repo, number, base)
+            if state["queued"]:
+                def write(node=state["id"]):
+                    data = self.gh.graphql("bramble", repo, WRITE["merge"], DEQUEUE, {"pr": node})
+                    return {"dequeued": bool((data.get("dequeuePullRequest") or {}).get("mergeQueueEntry"))}
 
-            def write(node=node):
+                def read_back(number=number):
+                    return {"queued": False} if not self._queue_state(repo, number, base)["queued"] else None
+
+                self._guarded_write(bot, task, "dequeue", repo, f"pr/{number}", head,
+                                    write=write, read_back=read_back, undone=True)
+                state = self._queue_state(repo, number, base)
+            if not state["auto"]:
+                continue
+
+            def write(node=state["id"]):
                 data = self.gh.graphql("bramble", repo, WRITE["merge"], AUTO_MERGE_OFF, {"pr": node})
                 return {"auto_merge": bool((((data.get("disablePullRequestAutoMerge") or {}).get("pullRequest") or {})
                                             .get("autoMergeRequest")))}
@@ -934,17 +957,24 @@ class GitService:
         # (Ops #272).
         undone = state["head"] == sha and not (state["merged"] or state["queued"] or state["auto"])
 
+        # GitHub refuses to merge a change to a workflow file for an App whose
+        # token lacks workflows permission, auto-merge and queue included:
+        # #5916 (nightly.yml) and #5923 (test-tasks.yml) were refused with
+        # Patrick's authorize in hand, 12 Nov 2026 (Ops #313). Bramble's App
+        # holds it; the token asks for it only for such a pull request.
+        perms = WRITE["merge_workflows"] if any(f.startswith(WORKFLOW_DIR) for f in pr.files) else WRITE["merge"]
+
         def write():
             if auto:
                 variables = {"pr": state["id"], "head": sha, "method": None if queue else method.upper()}
-                data = self.gh.graphql("bramble", repo, WRITE["merge"], AUTO_MERGE, variables)
+                data = self.gh.graphql("bramble", repo, perms, AUTO_MERGE, variables)
                 pr_now = ((data.get("enablePullRequestAutoMerge") or {}).get("pullRequest") or {})
                 return {"auto_merge": bool(pr_now.get("autoMergeRequest"))}
             if queue is not None:
-                data = self.gh.graphql("bramble", repo, WRITE["merge"], ENQUEUE,
+                data = self.gh.graphql("bramble", repo, perms, ENQUEUE,
                                        {"pr": state["id"], "head": sha})
                 return {"queued": bool((data.get("enqueuePullRequest") or {}).get("mergeQueueEntry"))}
-            r = self.gh.call("bramble", repo, WRITE["merge"], "PUT", f"/repos/{repo}/pulls/{number}/merge",
+            r = self.gh.call("bramble", repo, perms, "PUT", f"/repos/{repo}/pulls/{number}/merge",
                              {"sha": sha, "merge_method": method})
             if r.status != 200:
                 raise GitHubError(r.status, str((r.body or {}).get("message") if isinstance(r.body, dict) else r.body))
