@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.9.0
+version: 1.10.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -65,6 +65,7 @@ This comes before every other line here. It is word for word the rule every Clau
 - Hours (Patrick, 9 Nov 2026): a worker starts new work only from 6 AM to 11 PM Mountain, and in those hours it is always working through an issue in its own field. From 11 PM to 6 AM the Grok lanes audit; a worker already on an issue at 11 PM finishes it, and starts nothing new until 6 AM. A worker whose field has nothing eligible waits for an issue there, and never takes one from another field. While Patrick has the lanes' audits paused (policy.yaml `work.lanes_audit_overnight: false`, 11 Nov 2026), there is no night stop: workers start new work at any hour. Bramble works around the clock: merges, runs, Ops issues, duplicates and cards are its own at any hour.
 - One issue in active work at a time per Bot, and waiting is never a reason to sit idle (Patrick, 9 Nov 2026). An issue waiting on a check, review, merge, release, update or Patrick's answer is waiting, not active: its Bot starts its next issue meanwhile, and goes back to the waiting one first the moment it needs work (a red check, a review ask, an answer). tw-git opens one pull request per issue per Bot.
 - Claim with the Bot's label (`claimed: Rift` and so on). The card goes to In Progress by itself within a minute, because its Status follows the claim (Thornswood docs/guide/the-board.md); nobody moves a card. No claim comment. People stay the only assignees.
+- A worker picks and claims its own next issue at each hand-back, in its own field, by these same rules (section 4, step 9). Bramble picks for a worker only when it is free with no turn running: it found nothing at its hand-back, or it stopped.
 - Send the owner a brief: the issue, the cause or what to measure, the files, the tests, what not to touch, and what to hand back.
 
 ## 4. The work (each specialist)
@@ -81,7 +82,13 @@ This comes before every other line here. It is word for word the rule every Clau
    - The test task text for the issue (section 9), in the PR, ready to post.
 6. If the change needs something done once it is deployed, add a step file under `deploy/after/` in the same PR (its README has the shape): a gate verb the box deploy agent runs after the Deployment, or a check in the game, which becomes a `check: in game` issue. Never a run note: Thornswood-Ops has had none since 12 Nov 2026 (#5186).
 7. What you find on the way: anything wrong that this issue does not cover (another bug, a band-aid, a stale doc, a missing test) goes on the board, never into this PR. Search first as in section 2; if an issue already holds it, add what you found there as a plain comment. If none does, `tw_git open_issue` it: a plain title, two to five lines saying what is wrong and where, and a last line `Done when:` with one thing somebody can check, unclaimed. Name each one in your hand-back.
-8. Hand back to Bramble: PR number, exact head SHA, the CI runs, the tests you ran and what they printed, the files touched, what is left. Then stop. Never merge your own work.
+8. Hand back to Bramble: PR number, exact head SHA, the CI runs, the tests you ran and what they printed, the files touched, what is left. Never merge your own work.
+9. Then take your next issue yourself, in the same turn; do not wait for Bramble to send one. Your issue now waits on its checks and review, and waiting is never a reason to sit idle (section 3). Until 12 Nov 2026 every worker stopped here and waited for Bramble's next sweep to brief it, and Bramble sweeps one at a time: at 12:15 PM Mountain Rift and Wisp had sat 17 minutes since their hand-backs, and at 2:02 PM three of the five had just handed back, so the Board showed two Bots working. In the work hours (section 3; outside them, stop):
+   - `tw_git board` with `eligible` true, `areas` your own field (section 1), `limit` 20. Take the first issue, lowest Order first, that is yours by section 1, is not covered by an open pull request (`tw_git read` `/search/issues?q=repo:<repo> is:pr is:open <number>`), and whose decisions are answered. Read it whole (section 2).
+   - Claim it with your own label: `tw_git label` add `claimed: <you>`. When that is refused (another Bot claimed it, or it waits on an open issue), take the next one.
+   - Start it at step 1. Name it in your hand-back so Bramble's Bot Chat shows what you took.
+   - When nothing eligible is in your field, say so in the hand-back and stop; Bramble's wake check sends you one when something lands there.
+   - A hand-back with no pull request (the issue is blocked, or not what it said): comment on the issue what it waits on ("Waits on #N", or `Thornswood-Ops #N`, `owner/repo#N`), take your claim off with `tw_git label` remove, hand back, then take your next issue the same way.
 
 ## 5. Review
 
