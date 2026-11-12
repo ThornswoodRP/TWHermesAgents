@@ -20,9 +20,15 @@ ln -sfnT /usr/share/novnc "$web/novnc"
 install -m 0644 "$here/index.html" "$web/index.html"
 rm -f "$sock"
 export XAUTHORITY="$HOME/.Xauthority"
-x11vnc -display ":$display" -rfbport 0 -unixsock "$sock" -forever -shared -nopw -quiet &
+# The app ends itself to restart (after a sign-in or an update), and its
+# virtual screen ends with it; -loop has x11vnc wait for the next one and
+# show it, instead of leaving the page on a screen that is gone (12 Nov).
+x11vnc -display ":$display" -rfbport 0 -unixsock "$sock" -forever -shared -nopw -quiet -loop2000 &
 vnc=$!
-trap 'kill "$vnc" 2>/dev/null || true' EXIT
-for _ in $(seq 1 50); do [[ -S "$sock" ]] && break; sleep 0.2; done
-[[ -S "$sock" ]] || { echo "x11vnc did not make its socket; is tw-grok-lanes.service running?"; exit 1; }
-websockify --web "$web" --unix-target "$sock" "$ts:$port"
+websockify --web "$web" --unix-target "$sock" "$ts:$port" &
+ws=$!
+trap 'kill "$vnc" "$ws" 2>/dev/null || true' EXIT
+# Either one ending ends the screen, so the unit says it stopped.
+wait -n "$vnc" "$ws"
+echo "the screen stopped: x11vnc or websockify ended"
+exit 1
