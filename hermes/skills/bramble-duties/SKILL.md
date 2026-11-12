@@ -438,7 +438,12 @@ section then, and let a worker already on an issue finish it (Patrick, 9 Nov
    next issue now: a blocked worker is free, never "waiting" with its claim
    kept (9 Nov 2026: Wisp kept #4155 and sat idle from 9:21 AM on Ops #266).
    An issue whose newest comment says it waits on an open issue is not
-   eligible until that issue closes.
+   eligible until that issue closes. Write it as "Waits on" and the issue
+   (`#N` in the same repo, `Thornswood-Ops #N`, or `owner/repo#N`):
+   `tw_git label` reads the newest comment and refuses a claim while an
+   issue it says the issue waits on is open (11 Nov 2026: #4482 was claimed
+   again at 2:37 PM Mountain while Ops #275, which it waits on, was open).
+   On that refusal, take the next issue.
 6. A worker that holds an active issue but has run no turn for an hour has
    stopped: its turn was turned away or ended, and nothing wakes it by
    itself (9 Nov 2026: Sprocket stopped on #4329 at 9:23 AM, Magpie on

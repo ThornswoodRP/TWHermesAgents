@@ -807,6 +807,52 @@ class PullRequestsAndIssues(unittest.TestCase):
         self.assertTrue(again["done"] and again["already"], again)
         self.assertEqual(len(w.fake.writes()), writes, "a label already as asked needs no write")
 
+    def test_an_issue_that_waits_on_an_open_issue_takes_no_claim(self):
+        # 11 Nov 2026: #4482's claim came off at "Waits on Thornswood-Ops
+        # #275", and went on again at 2:37 PM Mountain while #275 was open.
+        w = World()
+        w.fake.add_issue(APP, 4482, labels=["area: Gamemode"])
+        w.fake.add_issue(OPS, 275)
+        # The newest comment at 2:37 PM, as Bramble wrote it.
+        w.fake.comments[(APP, 4482)] = [{"id": 1, "body": "Waits on Thornswood-Ops #275: the wording fix is made in "
+                                                          "game/gamemode/*.ts."},
+                                        {"id": 2, "body": "Measured on main 2b7694e: the Tireless sentence lives in "
+                                                          "three places. The fix is one sentence in each place plus "
+                                                          "the test-1385 lines, and it waits on Thornswood-Ops #275."}]
+        args = {"bot": "bramble", "repo": APP, "task": "ThornswoodRP/Thornswood#4482", "number": 4482,
+                "label": "claimed: Wisp", "action": "add"}
+        with self.assertRaises(Refused) as e:
+            w.git.label("hermes", args)
+        self.assertIn("waits on ThornswoodRP/Thornswood-Ops#275", str(e.exception))
+        self.assertEqual(w.fake.writes(contains="/labels"), [])
+        w.fake.issues[(OPS, 275)]["state"] = "closed"
+        self.assertTrue(w.git.label("hermes", args)["done"])
+        self.assertIn("claimed: Wisp", [l["name"] for l in w.fake.issues[(APP, 4482)]["labels"]])
+
+    def test_a_wait_counts_only_while_it_is_the_newest_comment(self):
+        w = World()
+        w.fake.add_issue(APP, 4482)
+        w.fake.add_issue(APP, 4400)
+        w.fake.comments[(APP, 4482)] = [{"id": 1, "body": "Waits on #4400."}]
+        args = {"bot": "bramble", "repo": APP, "task": "t", "number": 4482, "label": "claimed: Wisp", "action": "add"}
+        with self.assertRaises(Refused) as e:
+            w.git.label("hermes", args)
+        self.assertIn("ThornswoodRP/Thornswood#4400", str(e.exception))
+        w.fake.comments[(APP, 4482)].append({"id": 2, "body": "Waits on PR #4400 now."})
+        with self.assertRaises(Refused):
+            w.git.label("hermes", args)
+        w.fake.comments[(APP, 4482)].append({"id": 3, "body": "Patrick: go ahead without it."})
+        self.assertTrue(w.git.label("hermes", args)["done"])
+
+    def test_a_wait_on_a_repo_tw_git_does_not_read_is_refused(self):
+        w = World()
+        w.fake.add_issue(APP, 4482)
+        w.fake.comments[(APP, 4482)] = [{"id": 1, "body": "Waits on someone/else#3."}]
+        with self.assertRaises(Refused) as e:
+            w.git.label("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": 4482,
+                                   "label": "claimed: Wisp", "action": "add"})
+        self.assertIn("not a repo tw-git reads", str(e.exception))
+
     def test_a_comment_on_an_issue_keeps_issues_write(self):
         w = World()
         w.fake.add_issue(APP, 3150, labels=["claimed: Sprocket"])

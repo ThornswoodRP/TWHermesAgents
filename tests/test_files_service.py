@@ -519,6 +519,52 @@ class Checks(unittest.TestCase):
             with self.subTest(cmd=cmd), self.assertRaises(Refused):
                 f.check_command(cmd)
 
+    def test_the_two_builders_run_and_nothing_else_of_them(self):
+        # Thornswood-Ops #275: the gate holds game/gamemode.js and the content
+        # plugin to what their builders write, and no Bot could run either.
+        f = World().files
+        for cmd in (["node", "scripts/dev/Build-Gamemode.js"], ["python3", "scripts/mods/Add-ContentRecords.py"]):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(f.check_command(cmd), cmd)
+        for cmd in (["node", "scripts/dev/Build-Gamemode.js", "--write", "x"],
+                    ["node", "scripts/dev/Build-Gamemode.js", "--source", "x"],
+                    ["python3", "scripts/mods/Add-ContentRecords.py", "--masters", "/srv"],
+                    ["node", "scripts/dev/Build-Other.js"], ["python3", "scripts/mods/Add-ContentRecords.py.x"]):
+            with self.subTest(cmd=cmd), self.assertRaises(Refused):
+                f.check_command(cmd)
+
+    @unittest.skipUnless(__import__("shutil").which("node"), "node is not on PATH")
+    def test_a_built_file_over_a_writes_size_is_committed(self):
+        # The builder writes the file in the Bot's tree, as a check, and the
+        # commit carries it: game/gamemode.js is 4 MB, twice a write's size.
+        data = copy.deepcopy(policy().data)
+        data["admission"]["stage"] = "after"
+
+        def runner(argv, timeout):
+            bot, tree, cmd = argv[1], argv[2], argv[3:]
+            return subprocess.run(cmd, cwd=tree, capture_output=True, text=True, timeout=timeout)
+
+        w = World(data=data, runner=runner)
+        w.policy.limits_record("root", {"ok": True, "problems": []})
+        w.checkout()
+        cap = w.p.data["brokers"]["files"]["max_write_bytes"]
+        w.files.write("hermes", w.a(path="game/gamemode/a.ts", content="const x = 1;\n"))
+        w.files.write("hermes", w.a(path="scripts/dev/Build-Gamemode.js", content=(
+            "const fs = require('fs');\n"
+            "const part = fs.readFileSync('game/gamemode/a.ts', 'utf8');\n"
+            f"fs.writeFileSync('game/gamemode.js', part.repeat(Math.ceil({2 * cap} / part.length)));\n"
+            "console.log('wrote game/gamemode.js from 1 parts');\n")))
+        with self.assertRaises(Refused):
+            w.files.write("hermes", w.a(path="game/gamemode.js", content="x" * (cap + 1)))
+        out = w.files.run_check("hermes", w.a(command=["node", "scripts/dev/Build-Gamemode.js"]))
+        self.assertEqual(out["exit"], 0, out)
+        self.assertIn("wrote game/gamemode.js", out["tail"])
+        c = w.files.commit("hermes", w.a(message="The part and what it builds"))
+        self.assertEqual(c["files"], 3)
+        size = subprocess.run(["git", "-C", str(w.tree()), "cat-file", "-s", "HEAD:game/gamemode.js"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.assertGreater(int(size), cap)
+
     def test_no_check_runs_in_the_pilot(self):
         ran = []
         w = World(runner=lambda argv, t: ran.append(argv))

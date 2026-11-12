@@ -50,6 +50,11 @@ query($org: String!, $number: Int!, $after: String, $status: String!, $order: St
 
 logger = logging.getLogger(__name__)
 
+# What an issue's comment says it waits on, as Bramble writes it when a claim
+# comes off (bramble-duties, section 6, item 5): "Waits on #N", "waits on
+# Thornswood-Ops #N", "Waits on ThornswoodRP/skymp#N", anywhere in it.
+WAITS_ON = re.compile(r"\bwaits on\s+(?:([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?)\s*)?#(\d+)", re.I)
+
 WRITE = {
     "push": {"contents": "write", "metadata": "read"},
     "push_workflows": {"contents": "write", "workflows": "write", "metadata": "read"},
@@ -631,6 +636,11 @@ class GitService:
         # an older receipt for the same label says (Thornswood-Ops #280).
         if (label in issue.labels) == (action == "add"):
             return {"done": True, "already": True, "receipt": {"label": label, "on": action == "add"}}
+        if action == "add" and label in self.policy.claim_labels() and not issue.pull_request:
+            waits = self._waits_on(repo, number)
+            if waits:
+                raise Refused(f"#{number} waits on {waits}, which is still open (the issue's newest comment says so), "
+                              f"so it is not eligible and takes no claim until that closes: pick the next issue")
         app = "bramble" if bot == "bramble" else self._app(bot)
         perms = WRITE["pr_conversation"] if issue.pull_request else WRITE["issues"]
 
@@ -649,6 +659,33 @@ class GitService:
 
         return self._guarded_write(bot, task, f"label-{action}", repo, f"issue/{number}/{label}", "", write=write,
                                    read_back=read_back, undone=True)
+
+    def _waits_on(self, repo: str, number: int) -> str | None:
+        """The open issue this issue waits on, by its newest comment, or None.
+        An issue whose newest comment says it waits on an open issue is not
+        eligible until that issue closes (bramble-duties, section 6, item 5).
+        Until 11 Nov 2026 only the skill said so, and the board's eligible
+        read cannot see a comment: Thornswood #4482's claim came off at
+        "Waits on Thornswood-Ops #275", went on again at 2:37 PM Mountain
+        while #275 was open (the newest comment then ended "it waits on
+        Thornswood-Ops #275"), and came off again. So a claim is refused
+        here, where it is made."""
+        comments = self.gh.get_all(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{int(number)}/comments")
+        newest = (comments[-1].get("body") or "") if comments else ""
+        for m in WAITS_ON.finditer(newest):
+            name, n = m.group(1), int(m.group(2))
+            # A word that names no repo ("waits on PR #5797") is this repo's;
+            # an owner/repo that tw-git does not read is refused.
+            where = repo if not name else next(
+                (r for r in self.policy.data["repos"].values() if name.lower() in (r.lower(), r.split("/")[1].lower())),
+                None if "/" in name else repo)
+            if where is None:
+                raise Refused(f"#{number}'s newest comment says it waits on {name} #{n}, which is not a repo tw-git "
+                              "reads; say on the issue what it waits on, as owner/repo#N")
+            raw = self.gh.get(self.policy.reader_for(where), where, f"/repos/{where}/issues/{n}")
+            if raw.get("state") == "open":
+                return f"{where}#{n}"
+        return None
 
     def _repo_label(self, repo: str, name: str) -> dict | None:
         try:
