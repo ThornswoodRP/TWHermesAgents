@@ -1,7 +1,8 @@
 """The guard rail tests workflow: the merge check since One left (q-hermes-tests-without-one, answer B).
 
 It must stay unable to write or hold a secret, pin its actions by commit, and
-install only hash-pinned wheels.
+install only hash-pinned wheels. CodeQL's workflow is held the same way, and
+to the security-extended suite.
 """
 
 from __future__ import annotations
@@ -94,6 +95,38 @@ class Workflow(unittest.TestCase):
         reqs = (REPO / "tests" / "requirements-ci.txt").read_text(encoding="utf-8")
         self.assertIn("pyyaml==", reqs)
         self.assertIn("--hash=sha256:", reqs)
+
+
+class CodeQL(unittest.TestCase):
+    """CodeQL reads the three languages here with the security-extended suite
+    (Patrick, 12 Nov 2026), writes only the Security tab, holds no secret and
+    names its actions by commit."""
+
+    def setUp(self):
+        self.text = (REPO / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
+        self.wf = yaml.safe_load(self.text)
+
+    def test_reads_only_and_holds_no_secret(self):
+        self.assertEqual(self.wf["permissions"], {"contents": "read"})
+        self.assertNotIn("secrets.", self.text)
+        self.assertNotIn("pull_request_target", self.text)
+        job = self.wf["jobs"]["analyze"]
+        self.assertEqual(job["permissions"], {"contents": "read", "actions": "read", "security-events": "write"})
+        checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+        self.assertIs(checkout["with"]["persist-credentials"], False)
+
+    def test_extended_suite_on_every_language_from_source(self):
+        job = self.wf["jobs"]["analyze"]
+        self.assertEqual(job["strategy"]["matrix"]["language"], ["actions", "javascript-typescript", "python"])
+        init = next(s for s in job["steps"] if s.get("uses", "").startswith("github/codeql-action/init@"))
+        self.assertEqual(init["with"]["queries"], "security-extended")
+        self.assertEqual(init["with"]["build-mode"], "none")
+
+    def test_actions_are_pinned_by_commit(self):
+        uses = re.findall(r"uses:\s*(\S+)", self.text)
+        self.assertTrue(uses)
+        for u in uses:
+            self.assertRegex(u, r"^(actions|github)/[a-z/-]+@[0-9a-f]{40}$")
 
 
 if __name__ == "__main__":
