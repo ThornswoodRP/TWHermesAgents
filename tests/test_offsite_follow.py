@@ -367,6 +367,94 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(self.follower(vm).follow(), 0, self.said)
         self.assertEqual(len(vm.ran("tw-reload-bots")), 1)
 
+    # 12 Nov 2026: every install held new turns for up to 20 minutes, stopped
+    # the connector (and every Bot Chat turn it ran) and restarted all four
+    # brokers, whatever the release changed.
+    def releases(self, f, change: dict[str, str] | None = None, drop: str = ""):
+        """OLD and NEW as real releases of this repository's code, NEW with
+        `change` (path: text appended) and without the line `drop` in its
+        install scripts; the decision core installed, its store not moving."""
+        for commit in (OLD, NEW):
+            d = f.opt / "releases" / commit
+            if d.exists():
+                shutil.rmtree(d)
+            shutil.copytree(REPO / "src", d / "src", ignore=shutil.ignore_patterns("__pycache__", "app"))
+            shutil.copytree(REPO / "deploy", d / "deploy")
+        for rel, text in (change or {}).items():
+            f_ = f.opt / "releases" / NEW / rel
+            f_.write_text(f_.read_text() + text)
+        if drop:
+            for rel in ("deploy/install.sh", "deploy/decisions/install.sh"):
+                f_ = f.opt / "releases" / NEW / rel
+                f_.write_text(f_.read_text().replace(drop, ""))
+        env = f.root / "etc" / "thornswood" / "tw-decide.env"
+        env.parent.mkdir(parents=True, exist_ok=True)
+        env.write_text("")
+
+    def test_a_release_that_changes_nothing_the_brokers_or_connector_load_stops_neither_and_holds_nothing(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/api.py": "\n# changed\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (0, 0), self.said)
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith(f"deploy/install.sh {NEW} --keep-brokers"), vm.calls)
+        self.assertTrue(vm.ran("decisions/install.sh")[0].endswith(f"{NEW} --keep-connector"), vm.calls)
+        self.assertEqual(vm.ran(f"start {follow_main.CONNECTOR}"), [], "the connector was never stopped")
+        self.assertIn("new turns are not held: the install stops nothing a running turn needs", self.said)
+
+    def test_a_release_that_changes_what_the_brokers_load_starts_them_and_the_connector_again(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_brokers/git_service.py": "\n# changed\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (1, 1))
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith(f"deploy/install.sh {NEW}"), vm.calls)
+        self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
+        self.assertTrue(any("the connector starts again: the brokers start again" in l for l in self.said), self.said)
+
+    def test_a_release_that_changes_a_helper_the_connector_runs_starts_it_again(self):
+        # room_send.py is run by path, never imported.
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/room_send.py": "\n# changed\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.drained, 1)
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith("--keep-brokers"), vm.calls)
+        self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
+
+    def test_install_scripts_that_do_not_read_the_options_are_not_given_them(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/api.py": "\n# changed\n"}, drop="--keep-brokers)")
+        f2 = f.opt / "releases" / NEW / "deploy" / "decisions" / "install.sh"
+        f2.write_text(f2.read_text().replace("--keep-connector)", ""))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith(f"deploy/install.sh {NEW}"), vm.calls)
+        self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
+        self.assertEqual(self.drained, 0, "the connector is kept as it is; only the script did not say so")
+
+    def test_a_put_back_to_a_release_without_socket_units_stops_them_first(self):
+        # The release after this one has systemd hold the brokers' sockets
+        # (#162); this follower is what puts it back if it fails, and the
+        # older tw-proxy binds the port tw-proxy.socket holds.
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.releases(f)
+        for name in follow_main.Follower.BROKER_SOCKETS:
+            unit = f.root / "etc" / "systemd" / "system" / name
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text("[Socket]\n")
+            (f.opt / "releases" / NEW / "deploy" / "systemd" / name).write_text("[Socket]\n")
+        self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / OLD), list(follow_main.Follower.BROKER_SOCKETS))
+        self.assertEqual(vm.ran("disable --quiet --now tw-policy.socket"),
+                         ["systemctl disable --quiet --now " + " ".join(follow_main.Follower.BROKER_SOCKETS)])
+        self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / NEW), [])
+
+    def test_a_release_that_cannot_be_read_keeps_nothing(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.assertEqual(f.keeps(OLD, f.opt / "releases" / NEW), {"brokers": False, "connector": False})
+
     def test_the_hold_ends_when_the_install_fails_too(self):
         vm = FakeVM(NEW, fail={"tw-canary": 1})
         self.follower(vm).follow()

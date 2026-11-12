@@ -69,9 +69,11 @@ class Queue:
 
     def __init__(self, running=(0,), down=False, held_already=False):
         self.running, self.down, self.asked, self.held_already = list(running), down, [], held_already
+        self.args = {}
 
     def __call__(self, op, args):
         self.asked.append(op)
+        self.args[op] = args
         if self.down:
             raise OSError("the broker at /run/tw/policy/policy.sock is not answering")
         if op in ("hold_turns", "turns_running"):
@@ -101,6 +103,21 @@ class Reload(unittest.TestCase):
         self.assertEqual(self.queue.asked, ["hold_turns", "turns_running", "turns_running", "end_hold"])
         self.assertTrue(any("waiting for 2 running turns" in l for l in said), said)
         self.assertTrue(any("no turn running after 20 seconds" in l for l in said), said)
+
+    def test_its_hold_spares_the_connectors_turns_which_it_never_stops(self):
+        # 12 Nov 2026: the connector's Bot Chat turns are its own processes;
+        # the reload stops the gateway and ends Desktop's sessions only.
+        host = FakeHost()
+        code, said = self.run_it(host)
+        self.assertEqual(code, 0, said)
+        self.assertTrue(self.queue.args["hold_turns"]["spare_connector"])
+
+    def test_a_running_turn_that_keeps_its_ticket_is_said(self):
+        host = FakeHost()
+        code, said = self.run_it(host, release=lambda why: {"released": 1, "kept": 2})
+        self.assertEqual(code, 0, said)
+        self.assertTrue(any("gave back 1 model turn ticket the ended turns held; 2 turns still running" in l
+                            for l in said), said)
 
     def test_a_turn_still_running_after_the_wait_is_named_and_the_hold_still_ends(self):
         code, said = self.run_it(FakeHost(), ask=Queue(running=(1,)))

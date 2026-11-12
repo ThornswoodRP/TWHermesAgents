@@ -35,7 +35,7 @@ from thornswood_guard.policy import Policy, Verdict
 from thornswood_guard.routes import credits_open, proxy_ready_in, route_allowed
 
 from . import host as hostmod
-from .wire import Refused
+from .wire import Refused, peer_pid
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   id TEXT PRIMARY KEY, bot TEXT NOT NULL, kind TEXT NOT NULL, risk TEXT NOT NULL,
   task TEXT NOT NULL, source TEXT NOT NULL, state TEXT NOT NULL,
   created_at TEXT NOT NULL, admitted_at TEXT, seen_at TEXT, finished_at TEXT, reason TEXT,
-  sweep INTEGER NOT NULL DEFAULT 0);
+  sweep INTEGER NOT NULL DEFAULT 0, process TEXT NOT NULL DEFAULT '', unit TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS tickets_state ON tickets(state, created_at);
 CREATE TABLE IF NOT EXISTS task_risk (task TEXT PRIMARY KEY, risk TEXT NOT NULL, set_by TEXT NOT NULL, set_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS operations (
@@ -71,6 +71,40 @@ WAITING_TIMEOUT = timedelta(hours=24)
 # (hold_turns). It ends sooner when the reload says so; a reload that died
 # holding leaves nothing held past this.
 HOLD_MAX = timedelta(minutes=40)
+# The unit a reload of the Bots leaves running: the connector, whose Bot Chat
+# turns are `hermes chat` processes of its own (tw-decide-connector.service).
+# A reload stops the gateway and ends Desktop's sessions, never these, so it
+# neither holds nor waits for them, and never gives back their tickets while
+# they run (12 Nov 2026).
+SPARED_UNIT = "tw-decide-connector.service"
+
+
+def holder(pid: int | None, proc: Path = Path("/proc")) -> tuple[str, str]:
+    """Who holds a turn's ticket: the process, as "<pid>:<start time>" so a
+    pid used again later is never taken for it, and the systemd unit its
+    cgroup is in. ("", "") when it cannot be read; such a ticket is treated
+    as before, held and given back by every reload."""
+    if not pid:
+        return "", ""
+    try:
+        start = (proc / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()[19]
+        cgroup = (proc / str(pid) / "cgroup").read_text()
+    except (OSError, IndexError):
+        return "", ""
+    for line in cgroup.splitlines():
+        for part in reversed(line.split(":", 2)[-1].split("/")):
+            if part.endswith((".service", ".scope")):
+                return f"{pid}:{start}", part
+    return f"{pid}:{start}", ""
+
+
+def alive(process: str, proc: Path = Path("/proc")) -> bool:
+    """Whether the process a ticket names ("<pid>:<start time>") still runs."""
+    pid, _, start = process.partition(":")
+    try:
+        return (proc / pid / "stat").read_text().rsplit(")", 1)[1].split()[19] == start
+    except (OSError, IndexError):
+        return False
 RISKS = ("low", "high")
 OUTCOMES = ("confirmed", "failed", "unknown")
 LEDGER_EVENTS = ("eligible", "reserved_for_candidate", "Dev_verified", "Main_verified",
@@ -92,8 +126,11 @@ def parse(s: str) -> datetime:
 class PolicyService:
     def __init__(self, db_path: Path | str, policy: Policy, *,
                  host_reader: Callable[[], hostmod.HostState] | None = None,
-                 clock: Callable[[], datetime] = now_utc):
+                 clock: Callable[[], datetime] = now_utc,
+                 holder: Callable[[int | None], tuple[str, str]] = holder,
+                 alive: Callable[[str], bool] = alive):
         self.policy = policy
+        self.holder, self.alive = holder, alive
         self.rules = policy.data["admission"]
         self.clock = clock
         self.host_reader = host_reader or (lambda: hostmod.read("/", srv=policy.data["brokers"]["state"]["work"].rsplit("/", 1)[0]))
@@ -124,10 +161,14 @@ class PolicyService:
 
     def _migrate(self) -> None:
         """Columns added after a store was made. tickets.sweep (2 Nov): whether
-        the ticket is one of the router's whole sweeps."""
+        the ticket is one of the router's whole sweeps. tickets.process and
+        tickets.unit (12 Nov): the process that asked for it and its unit."""
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(tickets)")}
         if "sweep" not in cols:
             self.db.execute("ALTER TABLE tickets ADD COLUMN sweep INTEGER NOT NULL DEFAULT 0")
+        for col in ("process", "unit"):
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE tickets ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
 
     def _recover(self) -> None:
         """At start: a write that was in flight when the service stopped has an
@@ -207,7 +248,7 @@ class PolicyService:
         with self._tx():
             self._expire_silent()
             if ticket:
-                row = self.db.execute("SELECT bot, kind, state, created_at FROM tickets WHERE id=?", (ticket,)).fetchone()
+                row = self.db.execute("SELECT bot, kind, state, created_at, unit FROM tickets WHERE id=?", (ticket,)).fetchone()
                 if row is None:
                     raise Refused(f"ticket {ticket} is not in the queue")
                 if row[0] != bot:
@@ -216,7 +257,7 @@ class PolicyService:
                     return {"ticket": ticket, "state": "admitted", "reason": "already admitted"}
                 if row[2] != "waiting":
                     raise Refused(f"ticket {ticket} is {row[2]}; ask for a new one")
-                kind, created = row[1], row[3]
+                kind, created, unit = row[1], row[3], row[4]
                 self.db.execute("UPDATE tickets SET seen_at=? WHERE id=?", (iso(self.clock()), ticket))
             else:
                 task = str(args.get("task") or "")
@@ -232,17 +273,19 @@ class PolicyService:
                 risk = risk_row[0] if risk_row else "high"
                 ticket = uuid.uuid4().hex
                 created = iso(self.clock())
-                self.db.execute("INSERT INTO tickets(id, bot, kind, risk, task, source, state, created_at, sweep) "
-                                "VALUES(?,?,?,?,?,?, 'waiting', ?, ?)",
-                                (ticket, bot, kind, risk, task, str(args.get("source") or "chat"), created, int(sweep)))
-            reason = self._why_not_now(kind, ticket)
+                process, unit = self.holder(peer_pid())
+                self.db.execute("INSERT INTO tickets(id, bot, kind, risk, task, source, state, created_at, sweep, process, unit) "
+                                "VALUES(?,?,?,?,?,?, 'waiting', ?, ?, ?, ?)",
+                                (ticket, bot, kind, risk, task, str(args.get("source") or "chat"), created, int(sweep),
+                                 process, unit))
+            reason = self._why_not_now(kind, ticket, unit)
             if reason:
                 self.db.execute("UPDATE tickets SET reason=? WHERE id=?", (reason, ticket))
                 # held: new turns wait for a reload, which ends every turn still
                 # waiting in the Bots' processes; the gate keeps such a turn's
                 # message at once instead of waiting with it (brokers.TurnGate).
                 return {"ticket": ticket, "state": "waiting", "reason": reason,
-                        "held": kind == "turn" and bool(self._held())}
+                        "held": kind == "turn" and bool(self._held(unit))}
             t = iso(self.clock())
             self.db.execute("UPDATE tickets SET state='admitted', admitted_at=?, seen_at=?, reason=NULL WHERE id=?", (t, t, ticket))
             self._audit(caller, "admit", {"ticket": ticket, "bot": bot, "kind": kind})
@@ -278,7 +321,7 @@ class PolicyService:
             return f"{bot} started {new} turns in the last hour; each Bot starts at most {limit} an hour"
         return ""
 
-    def _why_not_now(self, kind: str, ticket: str | None) -> str:
+    def _why_not_now(self, kind: str, ticket: str | None, unit: str = "") -> str:
         if kind == "sandbox":
             limit = self._stage_limit("sandbox_jobs")
             if limit == 0:
@@ -287,7 +330,7 @@ class PolicyService:
                 return "the last limits check at boot did not pass; no sandbox job runs until one does"
         else:
             limit = self._stage_limit("model_turns")
-            held = self._held()
+            held = self._held(unit)
             if held:
                 return f"{held}; a new turn starts once the running ones have ended and the Bots are back"
         # Only tickets still asking hold the line: one whose turn went away
@@ -333,17 +376,21 @@ class PolicyService:
         return {"finished": bool(n)}
 
     def release_turns(self, caller: str, args: dict) -> dict:
-        """tw-reload-bots, as root, once it has ended every Bot process: each
-        model turn's ticket goes back, admitted or waiting, because the turn
-        that held it is gone. 1 Nov, 3:42 PM: the #47/#48 install reloaded the
+        """tw-reload-bots, as root, once it has ended the Bot processes it
+        reloads: each model turn's ticket whose process is gone goes back,
+        admitted or waiting. 1 Nov, 3:42 PM: the #47/#48 install reloaded the
         Bots mid-turn, and Bramble's killed turn kept the fleet's one slot for
-        ten minutes. Sandbox tickets are tw-files's and stay."""
+        ten minutes. A turn whose process still runs (the connector's, which a
+        reload leaves alone, 12 Nov) keeps its ticket; one whose process was
+        not recorded goes back as before. Sandbox tickets are tw-files's and stay."""
         with self._tx():
-            n = self.db.execute("UPDATE tickets SET state='done', finished_at=?, reason=? "
-                                "WHERE kind='turn' AND state IN ('admitted','waiting')",
-                                (iso(self.clock()), str(args.get("why") or "the Bots were reloaded"))).rowcount
-            self._audit(caller, "release_turns", {"released": n})
-        return {"released": n}
+            rows = self.db.execute("SELECT id, process FROM tickets WHERE kind='turn' "
+                                   "AND state IN ('admitted','waiting')").fetchall()
+            gone = [r[0] for r in rows if not r[1] or not self.alive(r[1])]
+            self.db.executemany("UPDATE tickets SET state='done', finished_at=?, reason=? WHERE id=?",
+                                [(iso(self.clock()), str(args.get("why") or "the Bots were reloaded"), t) for t in gone])
+            self._audit(caller, "release_turns", {"released": len(gone), "kept": len(rows) - len(gone)})
+        return {"released": len(gone), "kept": len(rows) - len(gone)}
 
     # Holding new turns for a reload (TWHermesAgents #52). From 1 Nov to 9 Nov
     # 2026 the gateway was stopped 64 times, mostly by follow-main's reload
@@ -351,14 +398,23 @@ class PolicyService:
     # mid-work. tw-reload-bots now holds new turns, waits for the running
     # ones to end, and only then stops the gateway.
 
-    def _held(self) -> str:
+    def _held(self, unit: str = "") -> str:
+        """Why a new turn in `unit` is held now, or "". A hold that spares the
+        connector (a reload's) holds no turn the connector runs."""
         until = self._meta("hold_until")
         if until and parse(until) > self.clock():
+            spared = self._meta("hold_spares") or ""
+            if spared and unit == spared:
+                return ""
             return self._meta("hold_why") or "the Bots are being reloaded"
         return ""
 
     def _turns_running(self) -> int:
-        return self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='admitted' AND kind='turn'").fetchone()[0]
+        """The running turns the hold waits for: every one, or with a hold
+        that spares the connector, those outside it."""
+        spared = self._meta("hold_spares") or ""
+        return self.db.execute("SELECT COUNT(*) FROM tickets WHERE state='admitted' AND kind='turn' AND unit != ?",
+                               (spared or "\0",)).fetchone()[0]
 
     def hold_turns(self, caller: str, args: dict) -> dict:
         """tw-reload-bots, as root: no new model turn is admitted (it waits in
@@ -371,13 +427,19 @@ class PolicyService:
         seconds = int(args.get("seconds") or HOLD_MAX.total_seconds())
         seconds = max(60, min(seconds, int(HOLD_MAX.total_seconds())))
         why = str(args.get("why") or "the Bots are being reloaded")[:200]
+        # spare_connector: tw-reload-bots, which stops the gateway and ends
+        # Desktop's sessions but leaves the connector and its turns running.
+        spares = SPARED_UNIT if args.get("spare_connector") else ""
         with self._tx():
             self._expire_silent()
             already = bool(self._held())
+            if already and not (self._meta("hold_spares") or ""):
+                spares = ""  # a hold on every turn already stands; a narrower one never loosens it
             until = iso(self.clock() + timedelta(seconds=seconds))
             self._set_meta("hold_until", until)
             self._set_meta("hold_why", why)
-            self._audit(caller, "hold_turns", {"until": until, "why": why})
+            self._set_meta("hold_spares", spares)
+            self._audit(caller, "hold_turns", {"until": until, "why": why, "spares": spares})
             return {"running": self._turns_running(), "until": until, "held_already": already}
 
     def turns_running(self, caller: str, args: dict) -> dict:
@@ -387,7 +449,7 @@ class PolicyService:
 
     def end_hold(self, caller: str, args: dict) -> dict:
         with self._tx():
-            n = self.db.execute("DELETE FROM meta WHERE key IN ('hold_until', 'hold_why')").rowcount
+            n = self.db.execute("DELETE FROM meta WHERE key IN ('hold_until', 'hold_why', 'hold_spares')").rowcount
             if n:
                 self._audit(caller, "end_hold", {})
         return {"ended": bool(n)}
