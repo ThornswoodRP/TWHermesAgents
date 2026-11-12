@@ -1222,6 +1222,22 @@ class CloseIssue(unittest.TestCase):
         w.fake.prs[(APP, 42)]["merged"] = True
         self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
 
+    def test_a_merged_pull_request_over_250_commits_finishes_it(self):
+        # Ops #307: PR 5381 had 280 commits, GitHub lists 250, and the full
+        # read refused it, so #4536 could not be closed as done by it.
+        w = World()
+        w.fake.add_issue(APP, 5585)
+        w.green_pr(repo=APP)
+        w.fake.prs[(APP, 42)].update(merged=True, commits=280)
+        self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
+        self.assertEqual(w.fake.issues[(APP, 5585)]["state_reason"], "completed")
+        # Still only a merged one.
+        w.fake.add_issue(APP, 5586)
+        w.fake.prs[(APP, 42)]["merged"] = False
+        with self.assertRaises(Refused) as e:
+            self.close(w, reason="completed", done_by_pr=42, number=5586)
+        self.assertIn("has not merged", str(e.exception))
+
     def test_what_is_refused(self):
         w = World()
         w.fake.add_issue(APP, 5585)

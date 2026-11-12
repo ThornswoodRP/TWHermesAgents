@@ -338,6 +338,18 @@ class GitService:
                            draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits,
                            carried_from=carried_from, body_carried_from=body_carried)
 
+    def _merged_pr(self, repo: str, number: int) -> PullRequest:
+        """A pull request as it stands, without its files and commits: all
+        that closing an issue as done by it asks is whether it merged. _pr
+        reads every file and commit so that nothing merges unseen, and it
+        refused a merged pull request over 250 commits, so its issue could
+        not be closed (Ops #307, 12 Nov 2026: Thornswood #4536 and PR 5381,
+        280 commits)."""
+        raw = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{int(number)}")
+        return PullRequest(repo=repo, number=int(number), head_sha=raw["head"]["sha"], head_ref=raw["head"]["ref"],
+                           base_ref=raw["base"]["ref"], author_bot=None, author_login=raw["user"]["login"],
+                           merged=bool(raw.get("merged")))
+
     def _checks(self, repo: str, sha: str) -> list[CheckRun]:
         runs = self.gh.get_all("bramble", repo, f"/repos/{repo}/commits/{sha}/check-runs?filter=all", key="check_runs")
         # Only GitHub Actions' own runs count: an App that can post checks
@@ -979,7 +991,7 @@ class GitService:
         if args.get("duplicate_of") is not None:
             duplicate = self._issue(repo, int(args["duplicate_of"]))
         if args.get("done_by_pr") is not None:
-            done_pr = self._pr(repo, int(args["done_by_pr"]))
+            done_pr = self._merged_pr(repo, int(args["done_by_pr"]))
         if args.get("done_by_run") is not None:
             run_repo = str(args.get("run_repo") or repo)
             if self.policy.data["merge"]["base"].get(run_repo) is None:
