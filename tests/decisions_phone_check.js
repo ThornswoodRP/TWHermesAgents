@@ -1161,7 +1161,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     const rows = await page.locator('.row.doing').evaluateAll(rs => rs.map(r => [r.dataset.bot,
       r.querySelector('.what').textContent, (r.querySelector('.t .quiet') || {}).textContent || '']))
     const want = [['rift', 'Running a command', 'Rebuild the <b>load order</b>'], ['sprocket', 'Reading a file', 'Installer log'],
-      ['sprocket', 'Using the browser', 'Launcher news'], ['echo', 'Thinking', '']]
+      ['sprocket', 'Using the browser', 'Launcher news'], ['echo', 'Thinking', 'Scheduled job']]
     if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(rows))
     // Bramble, Magpie and Wisp run nothing: no row, no heading, no history.
     if (await page.locator('[data-bot="bramble"], [data-bot="magpie"], [data-bot="wisp"]').count()) throw new Error('an idle Bot')

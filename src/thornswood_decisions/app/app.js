@@ -849,6 +849,15 @@ function forHowLong(iso) {
   return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`
 }
 
+// What started a turn whose session has no title, by Hermes's platform for it (thornswood_live), so no Board
+// row is a bare name. Patrick's Board, 12 Nov 3:06 PM: two rows said only "Bramble", one under Bot Chat and one
+// with nothing, and nothing said that the second was Bramble's scheduled sweep running beside its chat.
+const STARTED_BY = { cron: 'Scheduled job', webhook: 'GitHub event' }
+
+function rowTitle(d) {
+  return d.title || STARTED_BY[d.platform] || ''
+}
+
 async function boardView() {
   setTab('board')
   const r = await call('GET', '/work')
@@ -868,7 +877,7 @@ async function boardView() {
   // open that exact session not like a new one or their list of sessions").
   show(bar, rows.length ? rows.map(d => listRow({ class: 'doing', 'data-bot': d.bot, onclick: () => go(sessionPath(d)) }, {
     agent: d.bot, title: NAMES[d.bot] || d.bot,
-    lines: [d.title ? el('span', { class: 'quiet' }, d.title) : null,
+    lines: [rowTitle(d) ? el('span', { class: 'quiet' }, rowTitle(d)) : null,
       el('span', { class: 'what', 'data-doing': d.state }, doingWords(d))],
     // The time is the step's, for the step the row names ("Running a command, 2 min"), never the whole turn's
     // (Patrick's Board, 11 Nov 8:25 PM: 45 min was the turn's, not the command's). A row with no step time
@@ -3797,7 +3806,7 @@ async function chatView(target, tab, sid, thread) {
     if (branched && seqNow === viewSeq) return openSession(branched)
     const items = h.items.concat(pendingItems(v.mine.filter(inThread), readAt, room ? null : name))
     const top = [
-      sid ? chatBar(() => go('/m/board'), 'Board', name, work && work.title ? work.title : 'Session', v.target, name,
+      sid ? chatBar(() => go('/m/board'), 'Board', name, work && rowTitle(work) ? rowTitle(work) : 'Session', v.target, name,
         null, botLive(v.live))
         : thread ? chatBar(() => go('/m/rooms/' + v.target), 'Back to ' + name, shownThread && shownThread.title
           ? snippet(shownThread.title, 1) : 'Thread', name)
