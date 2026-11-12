@@ -327,6 +327,24 @@ class FollowMain(unittest.TestCase):
         self.assertTrue([l for l in self.said if l.startswith("PASS") and "every Bot process reloaded" in l], self.said)
         self.assertEqual(self.holds_ended, 1)
 
+    def test_the_reload_does_not_hold_and_wait_a_second_time(self):
+        # 12 Nov 2026: the install held new turns at 7:40 PM Mountain and
+        # waited 20 minutes for Sprocket's turn, then the reload held them
+        # again at 8:01 PM and waited 20 more for the same turn.
+        vm = FakeVM(NEW, apply_says="RELOAD: needed; 1 file a running Bot holds changed: profiles/rift/config.yaml\n")
+        f = self.follower(vm)
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.drained, 1)
+        self.assertTrue(vm.ran("tw-reload-bots")[0].endswith("tw-reload-bots --held"), vm.ran("tw-reload-bots"))
+        self.assertEqual(self.holds_ended, 1, "follow-main, which held them, ends the hold")
+
+    def test_when_tw_policy_held_nothing_the_reload_holds_and_waits_itself(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: needed; 1 file a running Bot holds changed: profiles/rift/config.yaml\n")
+        f = self.follower(vm)
+        f.drain_ = lambda: False  # reload.drain: tw-policy did not answer
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertTrue(vm.ran("tw-reload-bots")[0].endswith("tw-reload-bots"), vm.ran("tw-reload-bots"))
+
     def test_a_changed_gateway_unit_reloads_them_even_when_apply_changed_nothing(self):
         vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
         f = self.follower(vm)

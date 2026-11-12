@@ -113,6 +113,20 @@ class Reload(unittest.TestCase):
         self.assertEqual(code, 1, said)
         self.assertEqual(self.queue.asked[-1], "end_hold")
 
+    def test_a_reload_whose_caller_holds_turns_neither_waits_nor_ends_the_hold(self):
+        # 12 Nov 2026: a second 20-minute wait for the same turn, after
+        # follow-main's own, kept every Bot from starting a turn for 40 minutes.
+        said, q = [], Queue(running=(1,))
+        code = reload_bots(run=FakeHost(), sleep=lambda s: None, say=said.append,
+                           release=lambda why: {"released": 1}, ask=q, already_held=True)
+        self.assertEqual(code, 0, said)
+        self.assertEqual(q.asked, [], "no second hold, no wait, and the caller ends its own hold")
+        self.assertIn("new turns are held already, and the running ones had their wait; reloading now", said)
+
+    def test_the_command_takes_only_the_held_flag(self):
+        from thornswood_brokers import reload as r
+        self.assertEqual(r.main(["--now"]), 1)
+
     def test_tw_policy_down_still_reloads(self):
         code, said = self.run_it(FakeHost(), ask=Queue(down=True))
         self.assertEqual(code, 0, said)

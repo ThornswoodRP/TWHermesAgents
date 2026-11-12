@@ -166,6 +166,8 @@ class Follower:
         self.hermes_releases = self._at(self.r["hermes_releases"])
         self.logs = self.state_file.parent / "follow-main"
         self.log: Path | None = None
+        # Whether this run holds new turns (its drain), so the reload need not.
+        self.held = False
 
     def _end_hold(self) -> None:
         try:
@@ -416,7 +418,10 @@ class Follower:
         # The installed release's own tw-reload-bots (src/thornswood_brokers/reload.py),
         # the step every apply ends with: it ends the hermes user's login
         # sessions, restarts the gateway and says STOP unless it is active.
-        self.sh("reload", [str(self.opt / "bin" / "tw-reload-bots")])
+        # When this run's drain holds new turns, the reload is told so and does
+        # not hold and wait a second time (12 Nov 2026: two 20-minute waits for
+        # one running turn kept every Bot from starting a turn for 40 minutes).
+        self.sh("reload", [str(self.opt / "bin" / "tw-reload-bots"), *([reload.HELD_FLAG] if self.held else [])])
 
     def store_schema(self) -> int | None:
         """The schema number the core's store is at, read only; None with no core."""
@@ -531,7 +536,9 @@ class Follower:
             self.report("not installed", commit=tip, step=e.step, reason=e.reason, before=before)
             return 1
         try:
-            self.drain_()
+            # reload.drain says False when tw-policy did not hold new turns;
+            # then the reload holds and waits itself.
+            self.held = self.drain_() is not False
             unit = self.gateway_unit()
             self.install(dest, tip)
             needed = self.apply(dest, tip)
