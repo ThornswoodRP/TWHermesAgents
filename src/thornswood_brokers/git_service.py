@@ -328,11 +328,15 @@ class GitService:
             for r, n in CARRIED_FROM.findall(body.get("message") or ""):
                 if (r, int(n)) not in carried_from:
                     carried_from.append((r, int(n)))
+        body_carried = []
+        for r, n in CARRIED_FROM.findall(raw.get("body") or ""):
+            if (r, int(n)) not in body_carried:
+                body_carried.append((r, int(n)))
         return PullRequest(repo=repo, number=int(number), head_sha=raw["head"]["sha"], head_ref=head_ref,
                            base_ref=raw["base"]["ref"], author_bot=author_bot, author_login=raw["user"]["login"],
                            files=files, labels=[l["name"] for l in raw.get("labels", [])],
                            draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits,
-                           carried_from=carried_from)
+                           carried_from=carried_from, body_carried_from=body_carried)
 
     def _checks(self, repo: str, sha: str) -> list[CheckRun]:
         runs = self.gh.get_all("bramble", repo, f"/repos/{repo}/commits/{sha}/check-runs?filter=all", key="check_runs")
@@ -902,15 +906,21 @@ class GitService:
                 merged[key] = bool(got.get("merged"))
         # A merged pull request named as what replaced it counts only when its
         # own commits say, in a Carried-from line, that they carry this one.
-        replaced = False
+        # A Bot's own pull request, with no outside work in it, may be named in
+        # the merged one's body too (GitHubRules.close_pr says when).
+        replaced, other = False, None
         if args.get("replaced_by") is not None:
             other = self._pr(repo, int(args["replaced_by"]))
             if not other.merged:
                 raise Refused(f"#{other.number} has not merged, so it has not replaced PR {number}")
-            if (repo, number) not in other.carried_from:
-                raise Refused(f"#{other.number} has no Carried-from line naming {repo}#{number}")
-            replaced = True
-        self._check(self.rules.close_pr(bot, pr, answers, merged, raw.get("state") == "open", replaced))
+            team = pr.author_bot is not None and other.author_bot is not None and not self.rules.outside_credits(pr)
+            if (repo, number) in other.carried_from:
+                replaced = True
+            elif not (team and (repo, number) in other.body_carried_from):
+                where = "its commits or its body" if team else "its commits"
+                raise Refused(f"#{other.number} has no Carried-from line naming {repo}#{number} in {where}")
+        self._check(self.rules.close_pr(bot, pr, answers, merged, raw.get("state") == "open", replaced,
+                                        replaced_by=other))
 
         def write():
             r = self.gh.call("bramble", repo, WRITE["pulls"], "PATCH", f"/repos/{repo}/pulls/{number}",

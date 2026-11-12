@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.12.0
+version: 1.13.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -236,6 +236,16 @@ The review, of the exact head:
    Then `report_work_done` and say it in the Workbench room. tw_git refuses
    a close or a merge that his answer does not cover; that refusal is a
    stop, never a reason to ask him again.
+
+A Bot's own pull request that another Bot pull request carried again (a new
+branch with a fix on top) closes without a card once the new one has
+merged: give the new one's commits, or at least its body, the line
+`Carried-from: <owner>/<repo>#<old number>` before it merges, then
+`tw_git close_pr` the old one with `replaced_by` the merged one and one
+comment linking it. tw_git reads the line in the merged pull request's
+commits or body, and only for Bots' pull requests with no outside work in
+them (Patrick, 12 Nov 2026, q-bramble-close-replaced: #5828 was refused
+eleven times after #5832 carried it and merged).
 
 ## 4. The run notes and the Desk's list
 
