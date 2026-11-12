@@ -562,6 +562,42 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertFalse(wakes("\n".join(out)), out)
         self.assertIn("every worker is on an active issue", out[-2])
 
+    def test_a_merged_fix_past_the_first_page_of_pull_requests_still_counts(self):
+        # 12 Nov 2026: Echo's #4330, #4333 and #4327 had fixes merged on 9 Nov,
+        # waiting for the main Ship, but the look read only the 100 most
+        # recently updated pull requests and called them parked.
+        claimed = dict(BUSY, **{"claimed: Echo": 1})
+        echo = 100 * (1 + list(claimed).index("claimed: Echo"))
+        newer = [{"head": {"ref": f"magpie/{5000 + i}-x"}, "state": "closed", "merged_at": "2026-11-11T10:00:00Z",
+                  "created_at": "2026-11-11T09:00:00Z", "updated_at": "2026-11-11T10:00:00Z"} for i in range(99)]
+        newer.append({"head": {"ref": "echo/5800-later"}, "state": "open", "created_at": "2026-11-11T08:00:00Z",
+                      "updated_at": "2026-11-11T08:00:00Z"})
+        older = [{"head": {"ref": f"echo/{echo}-age-check"}, "state": "closed", "merged_at": "2026-11-09T13:35:00Z",
+                  "created_at": "2026-11-09T12:00:00Z", "updated_at": "2026-11-09T13:35:00Z"}]
+        b = Idle(claimed=claimed, open_={'"area: Website","area: Discord","area: Voice"': 4})
+        pages = []
+
+        def ask(broker, op, args):
+            if op == "read" and "/pulls?" in args["path"]:
+                b.asked.append((broker, op, args))
+                if args["repo"] == POLICY["repos"]["fork"]:
+                    return {"body": []}
+                page = int(args["path"].rsplit("page=", 1)[1])
+                pages.append(page)
+                return {"body": {1: newer, 2: older}.get(page, [])}
+            r = b(broker, op, args)
+            if op == "read" and "/search/issues" in args["path"]:
+                for i in r["body"].get("items") or []:
+                    if {"name": "claimed: Echo"} in i.get("labels", []):
+                        i["updated_at"], i["created_at"] = "2026-11-09T13:35:36Z", "2026-10-30T04:47:01Z"
+            return r
+        out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
+        self.assertEqual(pages, [1, 2])
+        # Its claim waits on the Ship: not parked, so no "take the claim off".
+        self.assertNotIn(f"echo #{echo}", "\n".join(out))
+        self.assertNotIn("take the claim off", "\n".join(out))
+        self.assertIn("in the field of echo", out[-1])
+
     def test_a_free_worker_look_sends_few_searches(self):
         # 10 Nov 2026: one search per worker's claims and one per free worker's
         # field, after the alert look's three, passed GitHub's secondary rate

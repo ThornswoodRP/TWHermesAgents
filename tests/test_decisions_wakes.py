@@ -226,10 +226,14 @@ class TheBotsConnectorClaimsWhileATurnRuns(unittest.TestCase):
         self.assertEqual(self.c.lives, {})
         self.assertEqual(self.c.unsaid, [])
 
-    def test_with_every_slot_busy_it_claims_none_but_still_sets_reactions(self):
-        for i, bot in enumerate(("wisp", "rift", "echo")):
+    def test_every_bot_has_a_turn_at_once_and_a_second_message_waits_for_its_own_bot(self):
+        # 12 Nov 2026: PARALLEL was 3, so with five briefs queued at 12:07 AM
+        # Magpie and Wisp waited for another Bot's turn to end.
+        bots = ("bramble", "rift", "sprocket", "echo", "magpie", "wisp")
+        self.assertGreaterEqual(connector.PARALLEL, len(bots) + 1, "one for each Bot and the room")
+        for i, bot in enumerate(bots):
             self.send(bot, "busy", f"key-wake-003{i}")
-        self.assertEqual(self.c.round(), connector.PARALLEL)
+        self.assertEqual(self.c.round(), len(bots))
         last = self.send("magpie", "wait your turn", "key-wake-0039")
         self.assertEqual(self.c.round(), 0)
         self.assertEqual(self.status(last), "queued")
