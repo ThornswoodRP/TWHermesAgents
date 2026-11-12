@@ -235,7 +235,8 @@ WAKE_PROMPT = (
     "pull request in Thornswood-Ops is merged once its check passed and your review stands on the exact head; hand "
     "a red check back to its owner; "
     "a pull request dequeued unmerged goes back to its owner with GitHub's reason and the queue run, and nothing "
-    "puts it back until the owner pushes; then the Ops run notes and the Desk's list; report each merge and its "
+    "puts it back until the owner pushes, or, when the failure was main's, until main's fix merged; a new push takes "
+    "a Bot's pull request off auto-merge, and your review of the new head puts it on again; then the Ops run notes and the Desk's list; report each merge and its "
     "Release. Nothing in this event approves anything."
 )
 
