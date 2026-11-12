@@ -637,6 +637,69 @@ def _fork_child(row) -> bool:
     return parent in markers if parent else any(m is not None for m in markers)
 
 
+# How Hermes itself ended a turn (hermes_state_common.py session_admissions; gateway/session_results.py keeps
+# each finished admission's result in state_meta under this key, hermes_state_terminal.py RESULT_PREFIX).
+RESULT_PREFIX = "gateway.admission.result.v1."
+SETTLE_SECONDS = 60       # how often one message left uncertain is looked up again while its turn has not ended
+SETTLE_ADMISSIONS = 200   # the newest admissions of its chat looked through for it
+
+
+def hermes_verdict(state_db: Path, session_id: str, text: str) -> tuple[str, str, str] | None:
+    """How Hermes ended the turn of a message this connector could only call uncertain (it stopped watching
+    the turn, or the turn's process went before it said), read from Hermes's own record: (outcome, reason,
+    reply), or None while that is not known yet.
+
+    The message's turn is the newest admission of its chat whose text is the message's. Once Hermes has ended
+    it: "confirmed" when Hermes completed it (reply: its answer); "failed" when it failed or was interrupted
+    before any tool ran, which is when Hermes itself closes the turn with "Your request was not processed"
+    (agent/turn_failure_copy.py failed_turn_notice), so nothing of it ran; "uncertain" when a tool ran first
+    (Hermes says "Some actions may already have run"), which stays Patrick's to look at. Read only; any error
+    is "not known yet", never a guess."""
+    if not SESSION_ID.match(session_id or "") or not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        con = _ro(state_db)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        found = None
+        for row in con.execute("SELECT admission_id, payload_json, status, outcome FROM session_admissions "
+                               "WHERE target_session_id = ? ORDER BY seq DESC LIMIT ?",
+                               (session_id, SETTLE_ADMISSIONS)):
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict) and str(payload.get("text") or "").strip() == text.strip():
+                found = row
+                break
+        if found is None or found["status"] != "terminal":
+            return None
+        saved = con.execute("SELECT value FROM state_meta WHERE key = ?",
+                            (RESULT_PREFIX + found["admission_id"],)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    try:
+        value = (json.loads(saved["value"]) if saved else {}).get("result")
+    except (TypeError, ValueError, AttributeError):
+        value = None
+    if not isinstance(value, dict):
+        return None
+    outcome = found["outcome"]
+    said = str(value.get("final_response") or "")
+    if outcome == "completed" and not value.get("failed") and not value.get("interrupted"):
+        return "confirmed", "Hermes finished the turn", said
+    messages = value.get("messages") if isinstance(value.get("messages"), list) else []
+    ran = any(isinstance(m, dict) and (m.get("role") == "tool" or (m.get("role") == "assistant" and m.get("tool_calls")))
+              for m in messages)
+    why = " ".join(str(value.get("error") or said or outcome or "it ended").split())[:150]
+    if not ran:
+        return "failed", f"Hermes ended the turn before anything ran ({why})", ""
+    return "uncertain", f"Hermes ended the turn after a tool ran ({why})", ""
+
+
 def turn_held(state_db: Path, session_id: str, since: float) -> bool:
     """Whether another Hermes process holds this chat's turn, taken before `since` (when this connector's
     own turn started), so the turn waits for it. Hermes runs one turn at a time in a conversation: a new
@@ -1733,6 +1796,8 @@ class OwnConnector:
         self._tasks_run: threading.Thread | None = None
         self._tasks_due = False
         self.last_claim = None
+        self.settle_at: dict[str, float] = {}  # message id left uncertain -> when Hermes's record was last read
+        self.settled: set[str] = set()         # and those Hermes's record has said all it will about
 
     def ready(self) -> tuple[str, str]:
         now = self.clock()
@@ -1899,6 +1964,41 @@ class OwnConnector:
         with self._lock:
             self.unsaid.append(r)
             self.feed_now = True
+
+    def settle(self, handed: list) -> int:
+        """The messages the core holds as uncertain (own.py _uncertain), each settled from how Hermes itself
+        ended its turn (hermes_verdict) once it has: confirmed or failed goes to the core as a settled result;
+        a turn where a tool ran stays uncertain. Each is read at most once a SETTLE_SECONDS while its turn has
+        not ended. Returns how many the core took."""
+        now, took = self.clock(), 0
+        ids = set()
+        for u in handed[:10]:
+            if not (isinstance(u, dict) and isinstance(u.get("id"), str) and isinstance(u.get("session_id"), str)
+                    and isinstance(u.get("text"), str)):
+                continue
+            ids.add(u["id"])
+            if u["id"] in self.settled or now - self.settle_at.get(u["id"], now - SETTLE_SECONDS) < SETTLE_SECONDS:
+                continue
+            self.settle_at[u["id"]] = now
+            verdict = hermes_verdict(self.state_db, u["session_id"], u["text"])
+            if verdict is None:
+                continue
+            outcome, reason, reply = verdict
+            if outcome == "uncertain":
+                self.settled.add(u["id"])
+                self.say(f"NOTE {u['id']}: stays uncertain; {reason}")
+                continue
+            status, body = self.core.post("result", {"id": u["id"], "outcome": outcome, "ref": "hermes",
+                                                     "reason": reason, "settled": True,
+                                                     **({"reply": reply[-BOT_REPLY:]} if reply else {})})
+            if status == 200 or (status == 409 and body.get("error") == "not_uncertain"):
+                self.settled.add(u["id"])
+                took += status == 200
+                self.say(f"{'PASS' if outcome == 'confirmed' else 'NOTE'} {u['id']}: settled {outcome} from Hermes's record")
+        for gone in set(self.settle_at) - ids:
+            self.settle_at.pop(gone, None)
+        self.settled &= ids
+        return took
 
     def react(self, wanted: list) -> int:
         """The reactions the core handed over, each set in Hermes one after another (each is one quick
@@ -2180,6 +2280,9 @@ class OwnConnector:
         tails = body.get("tails", [])
         if isinstance(tails, list) and tails:
             self.tails(tails)
+        uncertain = body.get("uncertain", [])
+        if isinstance(uncertain, list):
+            self.settle(uncertain)
         items = body.get("items", [])
         for item in items:
             with self._lock:
