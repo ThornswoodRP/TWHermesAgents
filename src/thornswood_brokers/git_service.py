@@ -89,6 +89,11 @@ AUTO_MERGE = """mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMerg
     pullRequest { autoMergeRequest { enabledAt } }
   }
 }"""
+# Auto-merge off again (Ops #272): before a new head goes on a branch whose
+# pull request has it on, since GitHub leaves it on for a pusher with write.
+AUTO_MERGE_OFF = """mutation($pr: ID!) {
+  disablePullRequestAutoMerge(input: {pullRequestId: $pr}) { pullRequest { autoMergeRequest { enabledAt } } }
+}"""
 WORKFLOW_DIR = ".github/workflows/"
 # A Co-authored-by line in a commit message: the credit for someone else's work.
 CO_AUTHOR = re.compile(r"^co-authored-by:[ \t]*(.*?)[ \t]*<([^>\n]+)>[ \t]*$", re.IGNORECASE | re.MULTILINE)
@@ -452,9 +457,42 @@ class GitService:
         def read_back():
             return {"ref": f"refs/heads/{branch}", "sha": new} if self._ref_sha(repo, branch) == new else None
 
+        if remote and remote != new:
+            self._auto_merge_off(bot, task, repo, branch, remote)
         out = self._guarded_write(bot, task, "push", repo, f"refs/heads/{branch}", new, write=write, read_back=read_back)
         out.update({"sha": new, "changed_files": len(changed), "workflow_change": workflows})
         return out
+
+    def _auto_merge_off(self, bot: str, task: str, repo: str, branch: str, head: str) -> None:
+        """Before a new head goes on a branch, auto-merge comes off its open
+        pull request, so nothing merges at a head Bramble did not merge.
+        Bramble turns auto-merge on at one exact head, but GitHub leaves it on
+        when someone with write access pushes again, and the workers' App has
+        contents write: Thornswood #5651 (9 Nov 2026) went into the merge
+        queue at a new head before anyone read it, and #5744 (11 Nov) merged
+        at a head Bramble had said it was holding (Ops #272). A merge at the
+        new head is a new merge op. When it cannot be turned off, the push
+        does not go."""
+        owner = repo.split("/", 1)[0]
+        for raw in self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls?state=open&head={quote(owner + ':' + branch)}"):
+            if raw.get("state") != "open" or (raw.get("head") or {}).get("ref") != branch or not raw.get("auto_merge"):
+                continue
+            number = int(raw["number"])
+            node = self._queue_state(repo, number, raw["base"]["ref"])["id"]
+
+            def write(node=node):
+                data = self.gh.graphql("bramble", repo, WRITE["merge"], AUTO_MERGE_OFF, {"pr": node})
+                return {"auto_merge": bool((((data.get("disablePullRequestAutoMerge") or {}).get("pullRequest") or {})
+                                            .get("autoMergeRequest")))}
+
+            def read_back(number=number):
+                now = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{number}")
+                return {"auto_merge": False} if not now.get("auto_merge") else None
+
+            # undone: it was read on just now, so an earlier "off" at this
+            # head is of a past state (Bramble turned it on again since).
+            self._guarded_write(bot, task, "auto-merge-off", repo, f"pr/{number}", head,
+                                write=write, read_back=read_back, undone=True)
 
     def _carried_bundle(self, bot: str, branch: str, name: str) -> Path:
         """The bundle a push sends: from the Bot's own spool, or, when Bramble
@@ -851,6 +889,12 @@ class GitService:
         # time, so the queue can come and go in either order with this code.
         state = self._queue_state(repo, number, pr.base_ref)
         queue = state["queue"]
+        # GitHub took it off since our receipt (out of the merge queue on a
+        # red queue run turns auto-merge off at the same head), so "already
+        # done" would describe the past: Thornswood #5856, 12 Nov 2026, read
+        # auto_merge null at 5b8162c and the merge op there answered done
+        # (Ops #272).
+        undone = state["head"] == sha and not (state["merged"] or state["queued"] or state["auto"])
 
         def write():
             if auto:
@@ -868,7 +912,8 @@ class GitService:
                 raise GitHubError(r.status, str((r.body or {}).get("message") if isinstance(r.body, dict) else r.body))
             return {"merged": True}
 
-        out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back)
+        out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back,
+                                  undone=undone)
         receipt = out.get("receipt") or {}
         if receipt.get("queued"):
             out["queued"] = True

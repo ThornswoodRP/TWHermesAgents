@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.15.0
+version: 1.16.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -65,7 +65,10 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    when those rules do not require every check the policy names, or when one
    is already red.
 4. A new push to a Bot's pull request after its review needs your review of
-   the new head, then `tw_git merge` again.
+   the new head, then `tw_git merge` again. `tw_git push` takes auto-merge
+   off the pull request before the new head goes up, so nothing merges at a
+   head you have not read (Ops #272: #5651 went into the queue at an unread
+   head on 9 Nov 2026), and the merge op at the new head is a new one.
 
 In ThornswoodRP/Thornswood-Ops:
 
@@ -110,7 +113,12 @@ CI_TIMEOUT.
 3. Do not put it back yourself. There is no timer and no retry. When the
    owner pushes the fix, the owner turns auto-merge on again; for a Bot's
    pull request that is you, through step 1, once your review of the new
-   head stands.
+   head stands. When the cause was not in the pull request but on main
+   (a job main broke, fixed on main since), there is nothing for the owner
+   to push: once main's fix has merged, `tw_git merge` at the same head
+   puts it on again, once, and says so in one comment naming main's fix
+   (12 Nov 2026: #5856 left the queue on #5860's failure, which #5866
+   fixed on main; until Ops #272 the merge op answered "already done").
 
 ## 3. Pull requests from outside the team
 

@@ -809,6 +809,56 @@ class AutoMerge(unittest.TestCase):
         self.assertEqual(out["receipt"], {"auto_merge": True})
         self.assertEqual(len(w2.fake.auto_merged), 1)
 
+    def test_a_new_head_takes_auto_merge_off_before_it_is_pushed(self):
+        """Ops #272: GitHub leaves auto-merge on when a pusher with write access
+        pushes again, so #5651 (9 Nov 2026) went into the merge queue at a
+        head nobody had read. The push takes it off first, and the new head
+        needs its own merge op."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+        new = w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"},
+                     repo=APP, task="t-2")["sha"]
+        self.assertNotEqual(new, sha)
+        self.assertEqual(w.fake.auto_merge_off, [(APP, 42, sha)])
+        self.assertIsNone(w.fake.prs[(APP, 42)]["auto_merge"])
+        w.fake.prs[(APP, 42)]["head"]["sha"] = new
+        for name in w.CHECKS[APP]:
+            w.fake.add_check(APP, new, name)
+        self.assertTrue(w.merge(sha=new, repo=APP)["auto_merge"])
+        self.assertEqual([h for _, _, h, _ in w.fake.auto_merged], [sha, new])
+
+    def test_a_push_whose_auto_merge_cannot_come_off_does_not_go(self):
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.merge(sha=sha, repo=APP)
+        w.fake.refuse_auto_merge_off = True
+        with self.assertRaises(Refused):
+            w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), sha)
+        self.assertTrue(w.fake.prs[(APP, 42)]["auto_merge"])
+
+    def test_a_push_to_a_branch_without_auto_merge_turns_nothing_off(self):
+        w = World()
+        w.green_pr(repo=APP, checks=False)
+        w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.auto_merge_off, [])
+
+    def test_auto_merge_github_took_off_goes_on_again_at_the_same_head(self):
+        """Ops #272, 12 Nov 2026: #5856 left the merge queue on a red queue
+        run, GitHub turned its auto-merge off at the same head 5b8162c, and
+        the merge op there answered "already done"."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("already done", str(e.exception))
+        w.fake.prs[(APP, 42)]["auto_merge"] = None
+        out = w.merge(sha=sha, repo=APP)
+        self.assertTrue(out["auto_merge"], out)
+        self.assertEqual(len(w.fake.auto_merged), 2)
+
 
 class PullRequestsAndIssues(unittest.TestCase):
     def test_a_worker_opens_a_pr_from_its_own_branch_once(self):

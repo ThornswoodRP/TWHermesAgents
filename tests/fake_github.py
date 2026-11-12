@@ -55,6 +55,8 @@ class FakeGitHub:
         # (repo, branch) -> the status checks the branch's rules require
         self.branch_rules: dict[tuple[str, str], list[str]] = {}
         self.auto_merged: list[tuple[str, int, str, str | None]] = []  # (repo, number, head, method) put on auto-merge
+        self.auto_merge_off: list[tuple[str, int, str]] = []  # (repo, number, head) taken off auto-merge
+        self.refuse_auto_merge_off = False
         # Where each App's installation is, as on GitHub (policy github_apps.<app>.repos):
         # a token asked for any other repository gets GitHub's 422, as the VM's install
         # reports did after the workers' App came off Ops (8 Nov 2026).
@@ -207,6 +209,14 @@ class FakeGitHub:
                 raise Lost("connection reset after auto-merge was turned on")
             return Response(200, {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
                 "autoMergeRequest": {"enabledAt": "2099-01-01T00:00:00Z"}}}}}, {})
+        if "disablePullRequestAutoMerge" in q:
+            repo, number = v["pr"].split("#")
+            pr = self.prs[(repo, int(number))]
+            if self.refuse_auto_merge_off:
+                return Response(200, {"errors": [{"message": "Resource not accessible by integration"}]}, {})
+            pr["auto_merge"] = None
+            self.auto_merge_off.append((repo, int(number), pr["head"]["sha"]))
+            return Response(200, {"data": {"disablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": None}}}}, {})
         if "enqueuePullRequest" in q:
             repo, number = v["pr"].split("#")
             pr = self.prs[(repo, int(number))]
