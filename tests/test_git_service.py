@@ -860,6 +860,49 @@ class AutoMerge(unittest.TestCase):
         self.assertEqual(len(w.fake.auto_merged), 2)
 
 
+class MirrorFetches(unittest.TestCase):
+    """Ops #293, 11 Nov 2026: two fetches of one mirror moved the same refs
+    under each other ("cannot lock ref 'refs/remotes/origin/main': is at
+    472ffbd but expected f6ae996") and Echo's push failed before it was sent."""
+
+    def test_two_fetches_of_one_mirror_never_overlap_and_both_finish(self):
+        import threading
+        import time
+        w = World()
+        real, active, most, lock = w.git._git, [0], [0], threading.Lock()
+
+        def slow_git(path, *args, **kw):
+            if args[:1] != ("fetch",):
+                return real(path, *args, **kw)
+            with lock:
+                active[0] += 1
+                most[0] = max(most[0], active[0])
+            try:
+                time.sleep(0.2)
+                return real(path, *args, **kw)
+            finally:
+                with lock:
+                    active[0] -= 1
+
+        w.git._git = slow_git
+        done, errors = [], []
+
+        def fetch():
+            try:
+                done.append(w.git._mirror(APP, "workers"))
+            except Exception as e:  # noqa: BLE001 - the test reports it
+                errors.append(e)
+
+        threads = [threading.Thread(target=fetch) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(done), 3)
+        self.assertEqual(most[0], 1, "a second fetch of the mirror started while one was running")
+
+
 class PullRequestsAndIssues(unittest.TestCase):
     def test_a_worker_opens_a_pr_from_its_own_branch_once(self):
         w = World()

@@ -18,6 +18,7 @@ to write again.
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import logging
@@ -246,11 +247,19 @@ class GitService:
 
     def _mirror(self, repo: str, app: str) -> Path:
         path = self.mirrors / (repo.replace("/", "__") + ".git")
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True, capture_output=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         auth = [] if self.git_base.startswith("file:") else [f"http.extraHeader={self.gh.git_auth_header(app, repo, {'contents': 'read', 'metadata': 'read'})}"]
-        self._git(path, "fetch", "-q", "--prune", self._url(repo), "+refs/heads/*:refs/remotes/origin/*", extra_config=auth)
+        # One fetch of a mirror at a time. tw-git answers each call on its own
+        # thread, and two fetches of the same mirror moved the same refs under
+        # each other: a push of echo/4394-hub-signout-target failed on 11 Nov
+        # 2026 with "cannot lock ref 'refs/remotes/origin/main': is at 472ffbd
+        # but expected f6ae996" (Ops #293). The second waits for the first.
+        with open(path.parent / (path.name + ".fetching"), "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            if not path.exists():
+                subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True, capture_output=True)
+            self._git(path, "fetch", "-q", "--prune", self._url(repo), "+refs/heads/*:refs/remotes/origin/*",
+                      extra_config=auth)
         return path
 
     def _url(self, repo: str) -> str:
