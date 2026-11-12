@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.18.0
+version: 1.19.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -442,7 +442,13 @@ work hours.
    active issue is busy; a worker whose claimed issues are all waiting or
    parked is free and gets its next issue. When a waiting issue needs the worker again (a red check, a
    review ask, Patrick's answer), that comes before anything new.
-2. For each worker that is free, `tw_git board` with `eligible` true,
+   A worker takes its own next issue at its hand-back, in the same turn
+   (the guide, section 4 step 9; 12 Nov 2026: workers that waited for this
+   sweep sat idle 17 minutes and more). So pick for a worker here only when
+   it is free and has no turn running and none in line: it stopped, found
+   nothing in its field at its hand-back, or was turned away. Read its last
+   hand-back first: an issue it named as taken is its active one.
+2. For each worker that is free that way, `tw_git board` with `eligible` true,
    `areas` that worker's field (the list below, e.g. `["Gamemode",
    "Engine", "In-game"]` for Wisp) and `limit` 20, and take the first
    issue, lowest Order first, that is that worker's by the guide's section
@@ -482,8 +488,10 @@ work hours.
    chat and starts its turn.
 5. When a worker hands back, its pull request comes to you through section
    1. If it hands back without one (blocked, or the issue is not what it
-   said), comment that on the issue, take the claim off with `tw_git label`
-   remove, and pick again. Blocked includes waiting on another issue, a
+   said), it comments what the issue waits on, takes its own claim off and
+   takes its next issue (the guide, section 4 step 9). Where it left either
+   undone, do it: comment that on the issue, take the claim off with
+   `tw_git label` remove, and pick for it as above. Blocked includes waiting on another issue, a
    run no Bot can read, or a step only Patrick or the box can take. The
    comment names what it waits on ("Waits on #N"), and the worker gets its
    next issue now: a blocked worker is free, never "waiting" with its claim
