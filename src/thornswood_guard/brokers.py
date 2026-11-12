@@ -229,6 +229,18 @@ class TurnGate:
                         self._owe(why)
                         return {"context": self._owed(why)}
                     kept = self._keep(kwargs, why)
+                    if kept:
+                        # The decision core brings the message back as a new
+                        # turn, which asks for a ticket of its own, so this
+                        # one goes back at the turn's end. 12 Nov 2026: kept
+                        # turns of Bramble's Bot Chat left their tickets
+                        # waiting, nothing asked with them again, and each one
+                        # held every Bot's turn in line for ten minutes
+                        # (TICKET_SEEN_TIMEOUT); the core's own deliveries
+                        # waited behind them too, and every Bot sat idle from
+                        # 9:15 PM Mountain on.
+                        with self.lock:
+                            self.turns[key] = {"ticket": ticket, "state": "kept", "reason": got.get("reason")}
                     self._note_turned_away(kwargs, why, kept)
                     return {"context": self._kept(why) if kept else self._queued(why)}
                 self.sleep(pause)
@@ -305,7 +317,9 @@ class TurnGate:
             # session has no next turn, so its waiting ticket goes back too
             # (1 Nov: each refused rerun left one in the line). A turn tw-policy
             # refused gives back the ticket it held: nothing asks with it again.
-            give_back = turn and (turn.get("state") in ("admitted", "refused") or turn.get("scheduled"))
+            # So does a kept turn's: the decision core brings its message back
+            # as a new turn, which asks for its own.
+            give_back = turn and (turn.get("state") in ("admitted", "refused", "kept") or turn.get("scheduled"))
             if turn and (turn.get("state") != "waiting" or turn.get("scheduled")):
                 self.turns.pop(key, None)
         if give_back and turn.get("ticket"):

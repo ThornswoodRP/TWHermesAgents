@@ -156,6 +156,35 @@ class Gate(unittest.TestCase):
         self.assertEqual([(k["bot"], k["text"]) for k in kept], [("bramble", text)])
         self.assertFalse(self.owed_any(f), "a message is kept, not owed as a sweep")
 
+    def test_a_kept_turn_gives_its_ticket_back_and_holds_nobody_in_line(self):
+        # 12 Nov 2026, 9:15 PM Mountain on: kept turns of Bramble's Bot Chat
+        # left their tickets waiting, nothing asked with them again, and the
+        # line held every Bot's turn behind them until each went silent for
+        # ten minutes, so every Bot sat idle.
+        f = Fleet()
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        bramble = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None)
+        out = bramble.before_llm(session_id="20261101_154903_0aec22", platform="desktop",
+                                 user_message="Message from sprocket (@sprocket): #4431 is done.")
+        self.assertIn("The message is kept", out["context"])
+        self.assertIn("Refused by the Thornswood queue", bramble.before_tool("terminal", session_id="20261101_154903_0aec22"))
+        bramble.after_turn(session_id="20261101_154903_0aec22")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='bramble'").fetchall(), [("done",)])
+        rift.after_turn(session_id="r1")
+        self.assertIsNone(gate(f, "wisp").before_llm(session_id="w1", task_id="9"),
+                          "the next Bot is admitted at once, not after ten minutes")
+
+    def test_a_turn_turned_away_and_not_kept_keeps_its_place(self):
+        f = Fleet()
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        wisp = gate(f, "wisp")
+        self.assertIn("nothing starts it again", wisp.before_llm(session_id="room-1", platform="raft",
+                                                                  user_message="hello room")["context"])
+        wisp.after_turn(session_id="room-1")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='wisp'").fetchall(), [("waiting",)])
+
     def owed_any(self, f):
         return [a for b, op, a in f.seen if op == "owe_wake"]
 
