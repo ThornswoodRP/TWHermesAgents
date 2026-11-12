@@ -91,6 +91,19 @@ class Route(unittest.TestCase):
         closed = self.call("close_card", "bramble", decision_id=card["id"], status="cancelled", reason="not needed")
         self.assertEqual(closed["status"], "cancelled")
 
+    def test_bramble_reads_what_waits_in_the_connectors_queue_for_each_bot(self):
+        # 11 Nov 2026: the wake check names a worker with no turn running as
+        # stopped; a brief already queued for it is its next turn on the way.
+        self.assertEqual(self.call("queued_for", "bramble"), {"bots": {}})
+        self.call("assign_task", "bramble", task="ThornswoodRP/Thornswood#1", assign_to="rift", brief="Fix #1.")
+        self.call("keep_turned_away", "bramble", text="Rift: #4980 is blocked, handing back.", reason="held",
+                  session="s1")
+        self.assertEqual(self.call("queued_for", "bramble"), {"bots": {"rift": 1, "bramble": 1}})
+        self.w.store.db.execute("UPDATE connector_outbox SET status = 'sent' WHERE target = 'rift'")
+        self.assertEqual(self.call("queued_for", "bramble"), {"bots": {"bramble": 1}})
+        with self.assertRaisesRegex(Exception, "not_bramble"):
+            self.call("queued_for", "rift")
+
     def test_no_bot_answers_a_card_and_no_op_does(self):
         self.assertNotIn("answer", self.ops)
         self.assertEqual(sorted(self.ops), sorted(BotRoute.OPS))

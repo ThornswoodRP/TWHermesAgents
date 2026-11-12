@@ -141,6 +141,24 @@ class Gate(unittest.TestCase):
         self.assertEqual([op for b, op, a in f.seen if b == "decide"], [])
         self.assertFalse(json.loads((notes / "room-1.json").read_text(encoding="utf-8"))["kept"])
 
+    def test_a_bots_message_into_a_bot_chat_made_in_desktop_is_kept(self):
+        # 11 Nov 2026: Magpie's and Rift's hand-backs reached Bramble's Bot Chat,
+        # a desktop session, while the Bots reloaded; neither was kept, and both
+        # were told to send it again after their own turns had ended.
+        f = Fleet()
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        bramble = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None)
+        text = "Message from magpie (@magpie): #5765: blocked on the push, and no PR exists."
+        out = bramble.before_llm(session_id="20261101_154903_0aec22", platform="desktop", user_message=text)
+        self.assertIn("The message is kept", out["context"])
+        kept = [a for b, op, a in f.seen if (b, op) == ("decide", "keep_turned_away")]
+        self.assertEqual([(k["bot"], k["text"]) for k in kept], [("bramble", text)])
+        self.assertFalse(self.owed_any(f), "a message is kept, not owed as a sweep")
+
+    def owed_any(self, f):
+        return [a for b, op, a in f.seen if op == "owe_wake"]
+
     def test_a_message_the_core_would_not_keep_says_it_needs_asking_again(self):
         f = Fleet()
         rift = gate(f, "rift")
