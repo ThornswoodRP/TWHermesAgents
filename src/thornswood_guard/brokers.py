@@ -376,7 +376,7 @@ TW_GIT_SCHEMA = {
     "name": "tw_git",
     "description": (
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
-        "guard rails before the write. Ops: base (get the base branch for a new tree), push (push your branch from "
+        "guard rails before the write. Ops: base (get the base branch for a new tree; with branch, one of your own branches GitHub has, the tree tw_files checkout opens with that bundle starts at that branch's head, to add a fix on top of an open pull request), push (push your branch from "
         "the bundle tw_files made; Bramble carrying a worker's workflow change names that worker's branch and the "
         "bundle the worker's tw_files made, by its file name), open_pr, edit_pr, open_issue (a new issue, unclaimed, with a plain title and "
         "body: no footer, no session link, no closing --- line), comment, label (add or remove), claim_labels (Bramble only: "

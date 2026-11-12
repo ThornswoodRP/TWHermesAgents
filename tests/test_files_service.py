@@ -19,6 +19,7 @@ import copy
 import errno
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -118,6 +119,42 @@ class Work(unittest.TestCase):
         self.assertEqual(out["head"], b["sha"])
         with self.assertRaises(Refused):
             w.git.base("hermes", {"bot": "rift", "repo": FORK})
+
+    def test_a_tree_opens_at_the_head_of_the_bots_own_open_branch(self):
+        # Ops #311, 12 Nov 2026: Magpie's one-line fix to its open #5865 had to
+        # be rebuilt on main and force-pushed, because base gave only main.
+        w = World()
+        w.checkout(task="77-fix")
+        self._send(w, "77-fix")
+        head = w.fake.ref(APP, "sprocket/77-fix")
+        shutil.rmtree(w.tree(task="77-fix"))
+        b = w.git.base("hermes", {"bot": "sprocket", "repo": APP, "branch": "sprocket/77-fix"})
+        self.assertEqual((b["branch"], b["branch_sha"]), ("sprocket/77-fix", head))
+        out = w.files.checkout("hermes", {"bot": "sprocket", "repo": APP, "task": "77-fix", "bundle": b["bundle"],
+                                          "branch": "sprocket/77-fix"})
+        self.assertEqual((out["head"], out["from"]), (head, "branch"))
+        self.assertIn("77-fix.txt", [e["name"] for e in w.files.list("hermes", w.a(task="77-fix"))["entries"]])
+        w.files.write("hermes", w.a(task="77-fix", path="more.txt", content="more\n"))
+        w.files.commit("hermes", w.a(task="77-fix", message="One more line"))
+        sent = w.files.bundle("hermes", w.a(task="77-fix"))
+        w.git.push("hermes", {"bot": "sprocket", "repo": APP, "task": "77", "branch": sent["branch"],
+                              "bundle": sent["bundle"]})
+        self.assertEqual(git(w.fake.remote(APP), "rev-parse", "sprocket/77-fix~1"), head, "on top of its head")
+        self.assertEqual(sorted(p.name for p in (w.spool / "in" / "sprocket").glob("Thornswood-*.bundle")),
+                         [b["bundle"]], "one bundle in its base's line, pruned like any other")
+
+    def test_base_opens_only_the_bots_own_branch_that_github_has(self):
+        w = World()
+        w.checkout(bot="rift", task="12-load-order")
+        for bot, branch, says in (("sprocket", "rift/12-load-order", "not Sprocket's"),
+                                  ("sprocket", "sprocket/99-never-pushed", "GitHub has no branch"),
+                                  ("sprocket", "main", "not Sprocket's")):
+            with self.subTest(branch=branch), self.assertRaises(Refused) as e:
+                w.git.base("hermes", {"bot": bot, "repo": APP, "branch": branch})
+            self.assertIn(says, str(e.exception))
+        mirror = w.root / "mirrors" / "ThornswoodRP__Thornswood.git"
+        self.assertEqual(git(mirror, "for-each-ref", "refs/heads/"), git(mirror, "for-each-ref", "refs/heads/main"),
+                         "no branch ref is left in the mirror")
 
     def test_a_newer_base_replaces_the_bots_older_one(self):
         # 11 Nov 2026: no base bundle was ever deleted; 16 GB of them took the

@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.7.0
+version: 1.8.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -139,6 +139,7 @@ The shapes are in Developer-Guide.md "Test tasks and known issues". The bot post
 
 ## 11. When something fails
 
+- **A fix to your own open pull request** goes on top of its head, never rebuilt on today's base and force-pushed: if its tree is gone, `tw_git base` with `branch` set to that pull request's branch, then `tw_files checkout` with that bundle and the same branch opens the tree at its head (Ops #311).
 - **A red check:** reproduce it, find where it comes from (your change, the base, a dependency, the runner, the network) and fix it there, in its own PR if it isn't yours. If you can't fix it, it goes on the board with what was measured. Never re-run to fish for green, never merge past it.
 - **A refusal** (the gate, a broker, a permission): stop. Say what was refused and why. File what's missing for its owner. Never route around it or hand it to another Bot.
 - **Quota or capacity:** the task waits in the queue with its reason. No paid route. A check that gets no runner because Actions minutes or billing ran out is quota too: the pull request waits, and it is never a card about billing (docs/DECIDED.md, "No paid Actions usage").
