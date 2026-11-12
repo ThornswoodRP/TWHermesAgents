@@ -47,6 +47,9 @@ class PullRequest:
     merged: bool = False
     credits: list[Credit] = field(default_factory=list)   # every commit's author and co-authors
     carried_from: list[tuple[str, int]] = field(default_factory=list)  # Carried-from lines: the outside PRs it carries
+    # Carried-from lines in its body. Only a Bot's own replaced pull request
+    # is closed on these (close_pr); outside work binds to its commits alone.
+    body_carried_from: list[tuple[str, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -262,14 +265,20 @@ class GitHubRules:
         return Verdict.yes(f"auto-merge on at {sha[:12]}: GitHub merges once {', '.join(rule)} pass there")
 
     def close_pr(self, bot: str, pr: PullRequest, answers: list[dict], merged: dict[tuple[str, int], bool],
-                 open_now: bool, replaced: bool = False) -> Verdict:
+                 open_now: bool, replaced: bool = False, replaced_by: PullRequest | None = None) -> Verdict:
         """Bramble closes a pull request only on Patrick's answer (#132): his
         "close" on the outside pull request card that names it, as the outside
         pull request or as a Bot's pull request carrying its work; or his
         "allow" or "merge" on that card once the work carried from it merged,
         which replaced it. answers: the decision core's outside answers, read
         by tw-git; merged: whether each carried pull request merged; replaced:
-        tw-git read a merged pull request whose Carried-from line names it."""
+        tw-git read a merged pull request whose Carried-from line names it.
+
+        A Bot's own pull request with no outside work in it also closes when
+        replaced_by, a merged Bot pull request in the same repository, names
+        it on a Carried-from line in its commits or its body (Patrick, 12 Nov
+        2026, q-bramble-close-replaced: #5828 was refused eleven times after
+        #5832 carried it and merged, with his answer on #5832's card)."""
         p = self.policy
         if not p.is_router(bot):
             return Verdict.no(f"only Bramble closes a pull request, and only on Patrick's answer; "
@@ -281,6 +290,13 @@ class GitHubRules:
         if pr.merged or not open_now:
             return Verdict.no(f"PR {pr.number} is not open")
         here = (pr.repo, pr.number)
+        if replaced_by is not None and pr.author_bot is not None and not self.outside_credits(pr):
+            if not replaced_by.merged or replaced_by.repo != pr.repo or replaced_by.author_bot is None:
+                return Verdict.no(f"#{replaced_by.number} is not a merged Bot pull request in {pr.repo}, so it has "
+                                  f"not replaced PR {pr.number}")
+            if here in replaced_by.carried_from or here in replaced_by.body_carried_from:
+                return Verdict.yes(f"replaced by #{replaced_by.number}, a merged Bot pull request whose "
+                                   f"Carried-from line names it")
         for a in reversed(answers):
             carried = [(c["repo"], c["number"]) for c in a.get("carried") or []]
             names_it = here == (a["repo"], a["number"])

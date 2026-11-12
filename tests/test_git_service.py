@@ -513,6 +513,80 @@ class OutsideWork(unittest.TestCase):
             w.merge(number=5517, sha="e" * 40, repo=APP)
 
 
+class ReplacedBotPullRequest(unittest.TestCase):
+    """Patrick, 12 Nov 2026 (q-bramble-close-replaced): Bramble closes a Bot's
+    own pull request once a merged Bot pull request in the same repository
+    names it on a Carried-from line, in its commits or its body. #5828 was
+    refused eleven times after #5832 carried it and merged, because #5832's
+    line was only in its body. Outside work still binds to commits alone."""
+
+    def pr(self, w: World, number: int, *, commit_line: str = "", body: str = "b", author: str | None = None) -> str:
+        branch = f"magpie/5765-try-{number}"
+        sha = w.push("magpie", branch, {f"scripts/said-{number}.ps1": "x\n"}, repo=APP)["sha"]
+        w.fake.add_pr(APP, number, head_ref=branch, head_sha=sha, files=[f"scripts/said-{number}.ps1"])
+        w.fake.prs[(APP, number)]["body"] = body
+        w.fake.pr_commits[(APP, number)] = [{"sha": sha, "author": None, "commit": {
+            "author": author and {"name": "Rahul", "email": "12345+rahul05ranjan@users.noreply.github.com"}
+            or {"name": "Magpie (Thornswood Bot)", "email": "magpie@bots.thornswood.invalid"},
+            "message": f"Say vpk's reason\n\n{commit_line}"}}]
+        return sha
+
+    def close(self, w: World, number=5828, replaced_by=5832, bot="bramble"):
+        return w.git.close_pr("hermes", {"bot": bot, "repo": APP, "task": "5765", "number": number,
+                                         "replaced_by": replaced_by})
+
+    def test_a_bots_pull_request_closes_when_the_merged_ones_body_names_it(self):
+        w = World()
+        self.pr(w, 5828)
+        self.pr(w, 5832, body=f"This replaces #5828.\n\nCarried-from: {APP}#5828\n")
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("not merged", str(e.exception))
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused):
+            self.close(w, bot="magpie")
+        self.assertTrue(self.close(w)["done"])
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "closed")
+
+    def test_or_its_commits_name_it(self):
+        w = World()
+        self.pr(w, 5828)
+        self.pr(w, 5832, commit_line=f"Carried-from: {APP}#5828\n")
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        self.assertTrue(self.close(w)["done"])
+
+    def test_a_merged_pull_request_that_names_something_else_replaces_nothing(self):
+        w = World()
+        self.pr(w, 5828)
+        self.pr(w, 5832, body=f"Carried-from: {APP}#5827\n")
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("in its commits or its body", str(e.exception))
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "open")
+
+    def test_a_merged_pull_request_that_is_not_a_bots_replaces_nothing(self):
+        w = World()
+        self.pr(w, 5828)
+        w.fake.add_pr(APP, 5832, head_ref="patch-1", head_sha="e" * 40, files=["a"], author="rahul05ranjan")
+        w.fake.prs[(APP, 5832)]["head"]["repo"] = {"full_name": "rahul05ranjan/Thornswood"}
+        w.fake.prs[(APP, 5832)]["body"] = f"Carried-from: {APP}#5828\n"
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused):
+            self.close(w)
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "open")
+
+    def test_outside_work_in_it_still_needs_the_line_in_commits(self):
+        w = World()
+        self.pr(w, 5828, author="rahul")
+        self.pr(w, 5832, body=f"Carried-from: {APP}#5828\n")
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("in its commits", str(e.exception))
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "open")
+
+
 class OutsideAnswers(unittest.TestCase):
     """#132: tw-git carries out Patrick's answer on an outside pull request
     card itself: "close" closes the pull request it names, "allow" lets that
