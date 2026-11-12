@@ -95,10 +95,20 @@ class TheUnits(unittest.TestCase):
     def test_the_screen_shares_the_apps_tmp_and_never_starts_at_boot(self):
         s = unit("tw-grok-screen.service")
         self.assertEqual(s["JoinsNamespaceOf"], ["tw-grok-lanes.service"])
-        self.assertEqual(s["Requires"], ["tw-grok-lanes.service"])
+        # Wants, not Requires: the app's own restarts never take the screen down.
+        self.assertEqual(s["Wants"], ["tw-grok-lanes.service"])
+        self.assertNotIn("Requires", s)
+        self.assertNotIn("BindsTo", s)
         self.assertNotIn("WantedBy", s)
         self.assertEqual(s["RestrictNamespaces"], ["yes"])
         self.assertEqual(unit("tw-grok-lanes.service")["WantedBy"], ["multi-user.target"])
+
+    def test_the_app_comes_back_after_it_ends_itself(self):
+        # 12 Nov: Patrick's sign-in restarted Grok Bot, it exited 0, and
+        # Restart=on-failure left it and its screen stopped.
+        u = unit("tw-grok-lanes.service")
+        self.assertEqual(u["Restart"], ["always"])
+        self.assertEqual(u["RestartSec"], ["5s"])
 
     def test_the_install_enables_the_app_and_never_the_screen(self):
         flat = INSTALL.replace("\\\n", " ")
@@ -116,7 +126,9 @@ class TheScripts(unittest.TestCase):
     def test_the_screen_is_a_unix_socket_served_on_tailscale_alone(self):
         text = (LANES / "screen").read_text()
         self.assertIn("-rfbport 0 -unixsock", text)
+        self.assertIn("-loop", text)
         self.assertIn('websockify --web "$web" --unix-target "$sock" "$ts:$port"', text)
+        self.assertIn('wait -n "$vnc" "$ws"', text)
         self.assertIn(r"^100\.", text)
         self.assertNotIn("0.0.0.0", text)
         self.assertNotIn("-rfbport 59", text)

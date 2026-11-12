@@ -4,10 +4,11 @@
 # virtual screen's socket is, and stops by itself after RuntimeMaxSec
 # (policy.yaml grok_lanes.screen_minutes). The install starts it while the
 # app has no local computer registered, or when screen_open is true.
+# It outlives the app's own restarts: x11vnc waits for the new screen.
 [Unit]
 Description=Thornswood: the Grok lanes' screen, for the sign-in
 After=tw-grok-lanes.service tailscaled.service
-Requires=tw-grok-lanes.service
+Wants=tw-grok-lanes.service
 JoinsNamespaceOf=tw-grok-lanes.service
 
 [Service]
