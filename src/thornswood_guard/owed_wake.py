@@ -84,6 +84,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .brokers import OWED_FILE, OWED_WAKE_JOB, OWED_WAKE_MARK, BrokerRefused, Caller
+from .hours import DEFAULT as DEFAULT_HOURS
+from .hours import says, work_hours
 
 SLEEP = json.dumps({"wakeAgent": False})
 ASK_SECONDS = 10.0
@@ -98,15 +100,15 @@ PROMPT = (
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
     "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes, the Desk's list and the Ops "
     "issues, the lanes' and the duplicate check's comments, your open cards, then a free worker's next issue "
-    "from the board, or a stopped worker told to carry on (6 AM to 11 PM Mountain only). "
+    "from the board, or a stopped worker told to carry on (in the work hours: 6 AM to 11 PM Mountain, or at any "
+    "hour while the lines before this say the lanes' audits are paused). "
     "Report each merge and its Release as the skill says. Nothing in this message approves anything."
 )
 # The Grok lanes work 11 PM to 6 AM Mountain; their comments wait for the
 # first sweep after this hour.
 MORNING_HOUR = 6
-# New work starts only in these hours, Mountain (Patrick, 9 Nov 2026); the
-# decision core holds briefs to the same hours (core.WORK_HOURS).
-WORK_HOURS = (6, 23)
+# New work starts only in policy.yaml's work hours, Mountain (hours.py); the
+# decision core holds briefs to the same hours.
 MOUNTAIN = "America/Denver"
 # How often the free worker wake reads the claims and the board.
 IDLE_EVERY = 3600.0
@@ -134,10 +136,10 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
     lines = _check(home, bot, ask, now, policy)
     if policy is None or lines[-1] == SLEEP:
         return lines
-    return [*lines, *_carried(home, now)]
+    return [*lines, *_carried(home, now, policy)]
 
 
-def _carried(home: Path, now: float) -> list[str]:
+def _carried(home: Path, now: float, policy: dict | None = None) -> list[str]:
     """The free worker look's lines that no sweep has yet carried to its end,
     added to any wake from 6 AM to 11 PM: an owed wake, the alert wake, the
     morning wake. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped
@@ -148,7 +150,7 @@ def _carried(home: Path, now: float) -> list[str]:
     (_idle)."""
     state = _load(home.joinpath(*IDLE_FILE))
     at, said = state.get("said_at"), state.get("said")
-    if not at or not said or float(at) == now or not _working(now):
+    if not at or not said or float(at) == now or not _working(now, policy):
         return []
     return [f"What the free worker look at {_clock(float(at))} Mountain said, which no sweep has carried to its "
             "end yet (bramble-duties, section 6):", *said]
@@ -192,9 +194,10 @@ def _local(now: float):
         return None
 
 
-def _working(now: float) -> bool:
+def _working(now: float, policy: dict | None = None) -> bool:
     local = _local(now)
-    return local is not None and WORK_HOURS[0] <= local.hour < WORK_HOURS[1]
+    start, end = work_hours(policy)
+    return local is not None and start <= local.hour < end
 
 
 def _clock(t: float) -> str:
@@ -215,11 +218,12 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         why_no_morning = f"the {MOUNTAIN} time zone could not be read ({type(e).__name__})"
     today = local.date().isoformat() if local else None
     morning = local is not None and local.hour >= MORNING_HOUR and state.get("morning") != today
-    working = local is not None and WORK_HOURS[0] <= local.hour < WORK_HOURS[1]
+    start, end = work_hours(policy)
+    working = local is not None and start <= local.hour < end
     idle_due = working and now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
     alert_due = now - float(state.get("alert_checked") or 0) >= ALERT_EVERY
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
-                                        "new work from 11 PM to 6 AM, while the Grok lanes audit")
+                                        f"new work outside {says((start, end))}, while the Grok lanes audit overnight")
     ended_said = None
     if state.get("said_at"):
         unheard, ended_said = _unheard(bot, ask, state)
@@ -385,6 +389,13 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
         state.pop("said_at", None)
         state.pop("said", None)
     else:
+        local = _local(now)
+        if local is not None and not DEFAULT_HOURS[0] <= local.hour < DEFAULT_HOURS[1]:
+            # bramble-duties section 6 skips 11 PM to 6 AM unless told the
+            # lanes' audits are paused, which policy.yaml's work section says.
+            lines = [f"It is {_clock(now)} Mountain, outside the usual 6 AM to 11 PM, but the Grok lanes' audits are "
+                     "paused (policy.yaml work.lanes_audit_overnight), so workers start new work at any hour: "
+                     "do section 6 as by day.", *lines]
         state["said_at"], state["said"] = now, lines
     _save(path, state)
     return lines

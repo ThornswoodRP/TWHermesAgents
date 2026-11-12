@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.11.0
+version: 1.12.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -26,7 +26,8 @@ refused and why, and do not try another route.
 You work around the clock (Patrick, 9 Nov 2026, 1:27 AM: "Bramble should
 still be working and always be working and alert"). Merges, run notes, the
 Desk's list, Ops issues, duplicates, the lanes' comments and cards are yours
-at any hour. Only the workers' new issues wait for 6 AM (section 6). Besides
+at any hour. Only the workers' new issues wait for 6 AM (section 6), and not even
+those while the lanes' audits are paused. Besides
 GitHub's wakes, the wake check looks at your own work every 15 minutes and
 wakes you when something there is new.
 
@@ -367,10 +368,14 @@ the first after 6 AM Mountain (the lanes stop then). On every sweep:
 Patrick, 9 Nov 2026: the Grok lanes find and file issues, the Bots fix them,
 and while fixing they file what else they find. Until then no Bot had ever
 claimed an issue, because nothing here picked one and an assignment reached
-nobody. On every sweep from 6 AM to 11 PM Mountain, after the sections above.
-From 11 PM to 6 AM the Grok lanes audit and no new work starts: skip this
-section then, and let a worker already on an issue finish it (Patrick, 9 Nov
-2026). `tw_decide assign_task` refuses a brief outside those hours.
+nobody. On every sweep in the work hours, after the sections above. The work
+hours are 6 AM to 11 PM Mountain while the Grok lanes audit overnight: from
+11 PM to 6 AM skip this section, and let a worker already on an issue finish
+it (Patrick, 9 Nov 2026). While Patrick has the lanes' audits paused
+(policy.yaml `work.lanes_audit_overnight: false`), the work hours are every
+hour, and the wake says so: do this section at night as by day (Patrick,
+11 Nov 2026, 11:22 PM). `tw_decide assign_task` refuses a brief outside the
+work hours.
 
 1. For each worker (Rift, Sprocket, Echo, Magpie, Wisp), see whether it
    holds an open issue: `tw_git read`

@@ -201,6 +201,17 @@ runs:
   patrick_switches:
     New-NexusRevision: [Publish]
 
+# When the workers start new work, Mountain. From 6 AM to 11 PM while the
+# Grok lanes audit overnight (Patrick, 9 Nov 2026: "have them auto work
+# between 6 am and 11 pm"). While he has the lanes' audits paused, around the
+# clock (Patrick, 11 Nov 2026, 11:22 PM: "I want my Hermes Agents to work
+# through tonight since I pauased the audits"). Set lanes_audit_overnight back
+# to true when the audits start again. owed_wake.py's free worker look and the
+# decision core's assign_task both read it (thornswood_guard/hours.py).
+work:
+  hours: [6, 23]
+  lanes_audit_overnight: false
+
 # Branches: a worker pushes only its own, named <bot>/<issue>-<what>.
 branches:
   pattern: "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$"

@@ -47,9 +47,15 @@ KEPT_HEAD = "[Thornswood queue] This message reached your Bot Chat at "
 # VPS, One and GitHub"; "If it is in the middle of something by the time it
 # may Finnish but not start on a new issue"). A brief told outside it is
 # refused, so no worker starts a new issue at night; one already working
-# finishes.
-WORK_HOURS = (6, 23)
+# finishes. The hours are policy.yaml's work section (thornswood_guard/hours.py):
+# around the clock while Patrick has the lanes' audits paused (11 Nov 2026).
 WORK_ZONE = "America/Denver"
+
+
+def _policy_hours() -> tuple[int, int]:
+    from thornswood_guard.hours import work_hours
+    from thornswood_guard.policy import Policy
+    return work_hours(Policy.load().data)
 
 DEFAULT_EXPIRY = timedelta(days=3)
 MAX_BODY_BYTES = 256 * 1024
@@ -72,8 +78,11 @@ def pushes(kind: str, urgent: bool) -> bool:
 
 
 class DecisionCore:
-    def __init__(self, store: Store, *, fault: Callable[[str], None] | None = None):
+    def __init__(self, store: Store, *, fault: Callable[[str], None] | None = None,
+                 work_hours: Callable[[], tuple[int, int]] = _policy_hours):
         self.s = store
+        # Read at each brief, so an install that changes the hours needs no restart of its own.
+        self.work_hours = work_hours
         self.auth = Auth(store)
         self._fault = fault or (lambda point: None)
 
@@ -139,9 +148,11 @@ class DecisionCore:
                 raise CoreError(413, "too_big", f"a brief is at most {MAX_BRIEF} characters")
         if brief is not None:
             local = parse(self.s.now()).astimezone(ZoneInfo(WORK_ZONE))
-            if not WORK_HOURS[0] <= local.hour < WORK_HOURS[1]:
+            start, end = self.work_hours()
+            if not start <= local.hour < end:
+                from thornswood_guard.hours import says
                 raise CoreError(409, "after_hours",
-                                f"new work starts from {WORK_HOURS[0]} AM to {WORK_HOURS[1] - 12} PM Mountain; it is "
+                                f"new work starts {says((start, end))} Mountain; it is "
                                 f"{local.strftime('%I:%M %p').lstrip('0')} there, so this waits for the morning")
         told = False
         with self.s.tx() as db:
