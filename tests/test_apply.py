@@ -307,7 +307,7 @@ class Apply(unittest.TestCase):
         text = (REPO / "hermes" / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\nname: bramble-duties\n"))
         for must in ("ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp", "dequeued", "gh-readonly-queue/main/pr-",
-                     "There is no timer and no retry", "ops/claude-queue/", "ops/bramble-list.md", "ops/status.md",
+                     "There is no timer and no retry", "deploy/after/", "ops/bramble-list.md", "ops/status.md",
                      "Never merge ThornswoodRP/TWHermesAgents", "tw_decide", "start_run"):
             self.assertIn(must, text)
         self.assertIn("whoever did it", text)

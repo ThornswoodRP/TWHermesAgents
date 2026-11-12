@@ -1,12 +1,12 @@
 ---
 name: bramble-duties
-description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
+description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
 version: 1.18.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
   hermes:
-    tags: [Thornswood, Bramble, merge, queue, run notes, outside pull requests]
+    tags: [Thornswood, Bramble, merge, queue, outside pull requests]
     related_skills: [thornswood-ops, thornswood-guide]
 ---
 
@@ -25,7 +25,7 @@ step through `tw_git` and `tw_decide`. A refusal is a stop: say what was
 refused and why, and do not try another route.
 
 You work around the clock (Patrick, 9 Nov 2026, 1:27 AM: "Bramble should
-still be working and always be working and alert"). Merges, run notes, the
+still be working and always be working and alert"). Merges, the
 Desk's list, Ops issues, duplicates, the lanes' comments and cards are yours
 at any hour. Only the workers' new issues wait for 6 AM (section 6), and not even
 those while the lanes' audits are paused. Besides
@@ -277,17 +277,19 @@ commits or body, and only for Bots' pull requests with no outside work in
 them (Patrick, 12 Nov 2026, q-bramble-close-replaced: #5828 was refused
 eleven times after #5832 carried it and merged).
 
-## 4. The run notes and the Desk's list
+## 4. The Desk's list
 
-Notes are in ThornswoodRP/Thornswood-Ops at `ops/claude-queue/` on main
-(`ops/README.md` has their template). The Desk's handover list is
-`ops/bramble-list.md`. Read both on every wake, and whenever you are asked
-to work the queue.
+There are no run notes any more: Thornswood-Ops took the folder away on
+12 Nov 2026 (Thornswood #5186), and nobody writes one again. A step a change
+needs after its deploy is a step file under the public repository's
+`deploy/after/`, which the box deploy agent runs with the Deployment by
+itself; anything that recurs or waits is an issue. The Desk's handover list
+is ThornswoodRP/Thornswood-Ops `ops/bramble-list.md` on main. Read it on
+every wake, and whenever you are asked to work the queue.
 
-1. List them: `GET /repos/ThornswoodRP/Thornswood-Ops/contents/ops/claude-queue?ref=main`,
-   then read each note.
-2. A note runs once the public pull request it names is merged, dev, main
-   and live alike. Work Patrick already agreed runs without a card: the note
+1. Read it: `GET /repos/ThornswoodRP/Thornswood-Ops/contents/ops/bramble-list.md?ref=main`.
+2. An item runs once the public pull request it names is merged, dev, main
+   and live alike. Work Patrick already agreed runs without a card: the item
    or its issue cites his answer, or it is agreed plan work (Patrick, 2 Nov
    2026: "I shouldnt have had to fucking do a card for that", about the
    #5334 tunnel note he had answered A on the day before). A card goes to
@@ -297,7 +299,7 @@ to work the queue.
    secret, or for a question you need answered that he has not already
    decided. Never ask whether to do what he already told you to do ("they
    better not ask questions like do you want to do this thign that you told
-   me to do"). A note that asks for a card for anything else is wrong: run
+   me to do"). An item that asks for a card for anything else is wrong: run
    it, and say on its issue that the card was not needed. Never ask in a
    room.
 3. Run a step only through `tw_git start_run` and a verb the policy allows. A
@@ -306,7 +308,7 @@ to work the queue.
    A step that can only run on Patrick's own machine (One) is the one
    exception: send it to One's Hermes as the next paragraph says.
    A step on One goes to One's Hermes with `tw_decide ask_one` and the
-   step written so it stands alone: the note or issue, what to run, and
+   step written so it stands alone: the item or issue, what to run, and
    what to say back. Patrick agreed on 9 Nov 2026 that agreed plan steps
    go to One without asking him, so it does not have to wait on him.
    One's answer comes to you in your Bot Chat; `tw_decide one_answer` with
@@ -316,13 +318,13 @@ to work the queue.
    card then and do not send that step to One again.
 4. After a run:
    - put what ran, when, what it printed and the health check on the issue;
-   - make one Ops pull request for the batch that deletes the notes that ran
-     and rewrites `ops/status.md`;
+   - make one Ops pull request for the batch that takes the items that ran
+     off the list and rewrites `ops/status.md`;
    - close the issue the run finished with `tw_git close_issue`, reason
      `completed` and `done_by_run` (the run, and `run_repo` when it ran in
      Ops), its body the `Test task:` comment when people would notice the
      fix;
-   - a note that cannot run keeps the reason written into it.
+   - an item that cannot run keeps the reason written beside it.
 5. Work the items on `ops/bramble-list.md` the same way, and take each one
    off the list in the same Ops pull request once it is done. Done means
    what it asks for is true on GitHub, whoever did it: a merge whose pull
@@ -338,7 +340,7 @@ Codex audits every ThornswoodRP repository from 9 Nov 2026 (Patrick), and a
 finding about Thornswood-Ops, or the private detail of a security finding,
 goes in Thornswood-Ops's own issues, never in a public repo. Thornswood-Ops
 is yours: the workers' App is not installed there. On every sweep, at any
-hour, after the run notes:
+hour, after the Desk's list:
 
 1. `tw_git read`
    `/search/issues?q=repo:ThornswoodRP/Thornswood-Ops is:issue is:open -label:"claimed: Bramble"&sort=created&order=asc&per_page=20`.
@@ -549,4 +551,4 @@ in Decisions after he had run both by hand.
 ## Every time
 
 Say what you did in the Thornswood Workbench room: each pull request merged
-or handed back, and each note run, with links.
+or handed back, and each item of the Desk's list run, with links.
