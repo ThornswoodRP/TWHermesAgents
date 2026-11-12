@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.19.0
+version: 1.20.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -486,7 +486,8 @@ work hours.
 4. `tw_decide assign_task` with `task` `<owner>/<repo>#<number>`,
    `assign_to` the worker, and `brief`: the issue's link, the cause or what
    to measure, the files, the tests, what not to touch, and "hand back to
-   Bramble with the PR number and head SHA". The brief goes to the worker's
+   Bramble with the PR number and head SHA, then take your next issue
+   yourself (the guide, section 4 step 9)". The brief goes to the worker's
    chat and starts its turn.
 5. When a worker hands back, its pull request comes to you through section
    1. If it hands back without one (blocked, or the issue is not what it
