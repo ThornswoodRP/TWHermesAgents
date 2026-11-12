@@ -1,10 +1,21 @@
 # A box backup goes to Drive as soon as its .done marker lands, not at the
-# next 4:30 AM.
+# next 4:30 AM. The box sends each file and then its marker, so a marker
+# here means its file is whole.
+#
+# A glob on the markers, not PathChanged on the folder: systemd drops a
+# PathChanged that comes while tw-offsite.service is still running, but it
+# looks at PathExistsGlob again when the service ends. On 12 Nov 2026 at
+# 9:52 PM the box sent 7 backups in a row; the intake took the 3 whose
+# markers were there when it started, and the other 4 markers landed during
+# that run and started nothing. The intake takes or sets aside every marker
+# it reads, so once none is left this stops. It no longer starts on the file
+# itself either, which ran the copy before any marker was there and failed it
+# ("there is none in /srv/tw/boxbackups", 9:52:08 PM).
 [Unit]
 Description=Thornswood box backup arrived
 
 [Path]
-PathChanged=/srv/tw/boxdrop/in
+PathExistsGlob=/srv/tw/boxdrop/in/*.done
 Unit=tw-offsite.service
 
 [Install]
