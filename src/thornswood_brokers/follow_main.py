@@ -539,6 +539,19 @@ class Follower:
             self.sh("put back", ["systemctl", "disable", "--quiet", "--now", *extra])
         return extra
 
+    BROKER_SOCKETS = ("tw-policy.socket", "tw-git.socket", "tw-files.socket", "tw-proxy.socket")
+
+    def drop_sockets_not_in(self, dest: Path) -> list[str]:
+        """Stops and disables the brokers' socket units (#162) that the release
+        going back in does not ship: its brokers bind their own sockets, and
+        tw-proxy's own bind on the port systemd holds would fail."""
+        ships = {p.name for p in (dest / "deploy" / "systemd").glob("tw-*.socket")}
+        units = self._at("/etc/systemd/system")
+        extra = [u for u in self.BROKER_SOCKETS if u not in ships and (units / u).exists()]
+        if extra:
+            self.sh("put back", ["systemctl", "disable", "--quiet", "--now", *extra])
+        return extra
+
     def canary(self) -> None:
         self.sh("canary", [str(self.opt / "bin" / "tw-canary")])
 
@@ -649,6 +662,10 @@ class Follower:
                 dropped = self.drop_units_not_in(dest)
                 if dropped:
                     self.say(f"stopped and disabled {', '.join(dropped)}, which {before[:12]} does not ship")
+            dropped = self.drop_sockets_not_in(dest)
+            if dropped:
+                self.say(f"stopped and disabled {', '.join(dropped)}, which {before[:12]} does not ship; "
+                         "its brokers make their own sockets")
             self.install(dest, before)
             self.apply(dest, before)
             self.restart()

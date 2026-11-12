@@ -433,6 +433,23 @@ class FollowMain(unittest.TestCase):
         self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
         self.assertEqual(self.drained, 0, "the connector is kept as it is; only the script did not say so")
 
+    def test_a_put_back_to_a_release_without_socket_units_stops_them_first(self):
+        # The release after this one has systemd hold the brokers' sockets
+        # (#162); this follower is what puts it back if it fails, and the
+        # older tw-proxy binds the port tw-proxy.socket holds.
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.releases(f)
+        for name in follow_main.Follower.BROKER_SOCKETS:
+            unit = f.root / "etc" / "systemd" / "system" / name
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text("[Socket]\n")
+            (f.opt / "releases" / NEW / "deploy" / "systemd" / name).write_text("[Socket]\n")
+        self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / OLD), list(follow_main.Follower.BROKER_SOCKETS))
+        self.assertEqual(vm.ran("disable --quiet --now tw-policy.socket"),
+                         ["systemctl disable --quiet --now " + " ".join(follow_main.Follower.BROKER_SOCKETS)])
+        self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / NEW), [])
+
     def test_a_release_that_cannot_be_read_keeps_nothing(self):
         vm = FakeVM(NEW)
         f = self.follower(vm)
