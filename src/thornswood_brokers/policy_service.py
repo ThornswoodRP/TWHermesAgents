@@ -359,17 +359,22 @@ class PolicyService:
     def hold_turns(self, caller: str, args: dict) -> dict:
         """tw-reload-bots, as root: no new model turn is admitted (it waits in
         line) until end_hold, or for `seconds` at most (HOLD_MAX). Returns how
-        many turns are running now."""
+        many turns are running now, and whether new turns were held already:
+        a hold still on was made by an earlier drain of the same install, whose
+        wait the running turns have had (12 Nov 2026: a release's reload, run
+        by the follow-main before it, held and waited 20 minutes a second time,
+        and the run went past its 45 minutes and was killed half done)."""
         seconds = int(args.get("seconds") or HOLD_MAX.total_seconds())
         seconds = max(60, min(seconds, int(HOLD_MAX.total_seconds())))
         why = str(args.get("why") or "the Bots are being reloaded")[:200]
         with self._tx():
             self._expire_silent()
+            already = bool(self._held())
             until = iso(self.clock() + timedelta(seconds=seconds))
             self._set_meta("hold_until", until)
             self._set_meta("hold_why", why)
             self._audit(caller, "hold_turns", {"until": until, "why": why})
-            return {"running": self._turns_running(), "until": until}
+            return {"running": self._turns_running(), "until": until, "held_already": already}
 
     def turns_running(self, caller: str, args: dict) -> dict:
         with self._tx():

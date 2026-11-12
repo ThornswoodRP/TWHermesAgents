@@ -8,7 +8,7 @@ Once the first install is done ([setup.md](setup.md)), the VM looks after itself
 
 1. A pull request merges to `main`.
 2. Within ten minutes the follower fetches it, runs the whole suite on the VM as `tw-ci` with no network, and installs nothing if a test fails.
-3. It holds new turns and waits for the running ones to end, installs the release, and applies it to the six profiles and the gateway's own profile. It reloads every Bot process only when the apply changed a file a running Bot holds (its config or a plugin) or the install changed the gateway's unit, and the reload does not hold and wait again (`tw-reload-bots --held`); skills, the owed-wake script and cron jobs are read fresh each time they are used. Then it runs the canary and ends the hold.
+3. It holds new turns and waits for the running ones to end, installs the release, and applies it to the six profiles and the gateway's own profile. It reloads every Bot process only when the apply changed a file a running Bot holds (its config or a plugin) or the install changed the gateway's unit, and the reload does not hold and wait again (`tw-reload-bots --held`, and a reload that finds new turns held already goes on without waiting, so a release's reload run by the follow-main before it waits only once too); skills, the owed-wake script and cron jobs are read fresh each time they are used. Then it runs the canary and ends the hold.
 4. If any step fails, it puts the release that ran before back the same way and says both. A commit that failed is not tried again: the fix is the next merge.
 
 ### What it did

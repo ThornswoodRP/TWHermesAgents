@@ -101,11 +101,20 @@ def drain(ask: Callable[[str, dict], dict], sleep: Callable[[float], None], say,
     hold is on (end it with end_hold); False when tw-policy did not answer,
     and the reload goes on as before."""
     try:
-        running = ask("hold_turns", {"why": "the Bots are being reloaded after an install",
-                                     "seconds": wait + 600})["running"]
+        held = ask("hold_turns", {"why": "the Bots are being reloaded after an install",
+                                  "seconds": wait + 600})
+        running = held["running"]
     except Exception as e:  # noqa: BLE001  the reload still has to happen
         say(f"FAIL: tw-policy did not hold new turns ({e}); a turn running now may be cut off")
         return False
+    if held.get("held_already"):
+        # An earlier drain of this install holds new turns and gave the running
+        # ones their wait. 12 Nov 2026: the reload a follow-main from before
+        # HELD_FLAG ran waited 20 minutes a second time, the run went past its
+        # 45 minutes, and systemd killed it with the connector stopped.
+        say(f"new turns were held already, and the running ones had their wait; going on with "
+            f"{running} turn{'s' if running != 1 else ''} running")
+        return True
     waited = 0
     while running and waited < wait:
         if waited == 0:
