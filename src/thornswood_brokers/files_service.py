@@ -426,9 +426,18 @@ class FilesService:
             if r.returncode != 0:
                 raise Refused(f"git init failed: {r.stderr.strip()[-300:]}")
             self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{base}:refs/remotes/origin/{base}", allow_file=True)
-            self._git(tree, "checkout", "-q", "-b", branch, f"refs/remotes/origin/{base}")
+            # A bundle tw-git made with this branch in it (tw_git base with
+            # branch) opens the tree at that branch's head (Ops #311).
+            heads = self._git(tree, "bundle", "list-heads", str(bundle), allow_file=True).stdout.split()
+            start = f"refs/remotes/origin/{base}"
+            if f"refs/heads/{branch}" in heads:
+                self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                          allow_file=True)
+                start = f"refs/remotes/origin/{branch}"
+            self._git(tree, "checkout", "-q", "-b", branch, start)
             head = self._git(tree, "rev-parse", "HEAD").stdout.strip()
-        out = {"tree": f"{repo} {tree.name}", "branch": branch, "base": base, "head": head}
+        out = {"tree": f"{repo} {tree.name}", "branch": branch, "base": base, "head": head,
+               "from": "branch" if start != f"refs/remotes/origin/{base}" else "base"}
         if finished:
             out["removed"] = finished
         return out

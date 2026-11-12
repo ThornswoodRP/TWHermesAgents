@@ -474,8 +474,17 @@ class GitService:
 
     def base(self, caller: str, args: dict) -> dict:
         """The base branch as a bundle in spool/in/<bot>, for tw-files to
-        start a task's tree from. Read only."""
+        start a task's tree from. Read only.
+
+        With branch, one of the Bot's own branches that GitHub has, the
+        bundle carries that branch's head too, and tw-files opens the tree
+        there: a fix to an open pull request goes on top of its head instead
+        of being rebuilt on today's base and force-pushed, which made its
+        review start over (Ops #311, 12 Nov 2026: Magpie's #5865)."""
         bot, repo = self._bot(args), self._repo(args)
+        branch = str(args.get("branch") or "")
+        if branch and not self.policy.own_branch(bot, branch):
+            raise Refused(f"{branch} is not {self.policy.bot_name(bot)}'s; a tree opens only on a branch of its own")
         if repo == self.policy.data["repos"]["fork"] and not self.policy.bots[bot].get("fork_branches"):
             raise Refused(f"only Wisp works in the engine fork, not {self.policy.bot_name(bot)}")
         if not self.policy.app_reaches(self._app(bot), repo):
@@ -484,12 +493,29 @@ class GitService:
         mirror = self._mirror(repo, self._app(bot))
         sha = self._git(mirror, "rev-parse", f"refs/remotes/origin/{base}")
         self._git(mirror, "update-ref", f"refs/heads/{base}", sha)
+        tip = None
+        if branch:
+            tip = self._git(mirror, "rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}^{{commit}}",
+                            check=False)
+            if not SHA.fullmatch(tip or ""):
+                raise Refused(f"GitHub has no branch {branch} in {repo}; leave branch out to start from {base}")
+        with_branch = bool(tip) and tip != sha
         out = self.spool / "in" / bot
         out.mkdir(parents=True, exist_ok=True)
-        name = f"{repo.split('/')[1]}-{base.replace('/', '-')}-{sha[:12]}.bundle"
+        # One line per repo and base, so a bundle with a branch in it is the
+        # newest of its line and the next base call prunes it like any other.
+        name = f"{repo.split('/')[1]}-{base.replace('/', '-')}-{(tip if with_branch else sha)[:12]}.bundle"
         if not (out / name).exists():
             tmp = out / f".{name}.tmp"
-            self._git(mirror, "bundle", "create", "-q", str(tmp), f"refs/heads/{base}")
+            if with_branch:
+                ref = f"refs/heads/{branch}"
+                self._git(mirror, "update-ref", ref, tip)
+                try:
+                    self._git(mirror, "bundle", "create", "-q", str(tmp), f"refs/heads/{base}", ref)
+                finally:
+                    self._git(mirror, "update-ref", "-d", ref, check=False)
+            else:
+                self._git(mirror, "bundle", "create", "-q", str(tmp), f"refs/heads/{base}")
             os.replace(tmp, out / name)
         prune_base_bundles(out, current=name)
         # The Bot's branches GitHub has now, read from the mirror the fetch
@@ -502,7 +528,10 @@ class GitService:
         tmp = out / f".{listed.name}.tmp"
         tmp.write_text(json.dumps({"repo": repo, "branches": on_github}))
         os.replace(tmp, listed)
-        return {"bundle": name, "base": base, "sha": sha}
+        got = {"bundle": name, "base": base, "sha": sha}
+        if branch:
+            got.update(branch=branch, branch_sha=tip)
+        return got
 
     def prune_spool_in(self) -> list[str]:
         """At start, each Bot's spool/in back to its newest base per repo."""
