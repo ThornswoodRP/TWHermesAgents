@@ -99,6 +99,16 @@ class Hold(unittest.TestCase):
         self.assertEqual(s.ops()["end_hold"][0]("root", {}), {"ended": True})
         self.assertEqual(s.admit("hermes", {"bot": "wisp", "ticket": b["ticket"]})["state"], "admitted")
 
+    def test_a_hold_says_whether_new_turns_were_held_already(self):
+        clock = Clock()
+        s = service(clock=clock)
+        self.assertFalse(s.hold_turns("root", {"seconds": 900})["held_already"])
+        self.assertTrue(s.hold_turns("root", {"seconds": 900})["held_already"])
+        s.end_hold("root", {})
+        self.assertFalse(s.hold_turns("root", {"seconds": 900})["held_already"])
+        clock.advance(minutes=16)
+        self.assertFalse(s.hold_turns("root", {"seconds": 900})["held_already"], "a hold that ran out is not on")
+
     def test_a_hold_a_dead_reload_left_ends_by_itself(self):
         clock = Clock()
         s = service(clock=clock)

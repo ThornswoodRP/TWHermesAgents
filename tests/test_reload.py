@@ -67,8 +67,8 @@ class Queue:
     """tw-policy's hold, as the reload asks it: running is how many turns
     each ask after the hold still sees."""
 
-    def __init__(self, running=(0,), down=False):
-        self.running, self.down, self.asked = list(running), down, []
+    def __init__(self, running=(0,), down=False, held_already=False):
+        self.running, self.down, self.asked, self.held_already = list(running), down, [], held_already
 
     def __call__(self, op, args):
         self.asked.append(op)
@@ -76,7 +76,7 @@ class Queue:
             raise OSError("the broker at /run/tw/policy/policy.sock is not answering")
         if op in ("hold_turns", "turns_running"):
             n = self.running.pop(0) if len(self.running) > 1 else self.running[0]
-            return {"running": n}
+            return {"running": n, **({"held_already": True} if op == "hold_turns" and self.held_already else {})}
         return {"ended": True}
 
 
@@ -122,6 +122,17 @@ class Reload(unittest.TestCase):
         self.assertEqual(code, 0, said)
         self.assertEqual(q.asked, [], "no second hold, no wait, and the caller ends its own hold")
         self.assertIn("new turns are held already, and the running ones had their wait; reloading now", said)
+
+    def test_a_hold_already_on_is_not_waited_for_a_second_time(self):
+        # 12 Nov 2026: the a98bd644 install's follow-main, from before the held
+        # flag, ran the new release's reload, which waited 20 minutes more for
+        # the turn the first drain had waited for; systemd killed the run at
+        # 45 minutes with the connector stopped and the gateway not reloaded.
+        code, said = self.run_it(FakeHost(), ask=Queue(running=(1,), held_already=True))
+        self.assertEqual(code, 0, said)
+        self.assertEqual(self.queue.asked, ["hold_turns", "end_hold"])
+        self.assertIn("new turns were held already, and the running ones had their wait; going on with 1 turn running",
+                      said)
 
     def test_the_command_takes_only_the_held_flag(self):
         from thornswood_brokers import reload as r
