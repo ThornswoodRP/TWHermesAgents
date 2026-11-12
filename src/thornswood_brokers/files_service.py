@@ -660,7 +660,17 @@ def check_argv(policy: Policy, bot: str, tree: str, cmd: list[str]) -> list[str]
     }
     argv = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec",
             f"--uid={user}", f"--gid={group}", "--slice=tw-sandbox.slice", f"--working-directory={tree}",
-            "--setenv=HOME=/tmp", "--setenv=PATH=/usr/local/bin:/usr/bin:/bin"]
+            "--setenv=HOME=/tmp", "--setenv=PATH=/usr/local/bin:/usr/bin:/bin",
+            # The tree is tw-files', the check runs as the Bot's execution
+            # user, and git refuses a repository another uid owns ("dubious
+            # ownership"), so no harness that reads the tree through git got a
+            # result (Ops #284, 10 Nov 2026: test-4161-package-notices.ps1's
+            # git ls-files). This one tree, by its own path, as command-line
+            # config, the only scope git reads safe.directory from besides
+            # the system and global files. It grants nothing the check does
+            # not have already: it runs this tree's own code as that user.
+            "--setenv=GIT_CONFIG_COUNT=1", "--setenv=GIT_CONFIG_KEY_0=safe.directory",
+            f"--setenv=GIT_CONFIG_VALUE_0={tree}"]
     for k, v in props.items():
         argv += ["-p", f"{k}={v}"]
     return argv + ["--", *cmd]
