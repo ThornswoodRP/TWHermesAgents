@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.17.0
+version: 1.18.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -66,8 +66,10 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    when those rules do not require every check the policy names, or when one
    is already red.
 4. A new push to a Bot's pull request after its review needs your review of
-   the new head, then `tw_git merge` again. `tw_git push` takes auto-merge
-   off the pull request before the new head goes up, so nothing merges at a
+   the new head, then `tw_git merge` again. `tw_git push` takes the pull request
+   out of the merge queue and off auto-merge before the new head goes up
+   (GitHub refuses a push to a queued branch: Sprocket's fix to #5905 on
+   12 Nov 2026), so nothing merges at a
    head you have not read (Ops #272: #5651 went into the queue at an unread
    head on 9 Nov 2026), and the merge op at the new head is a new one.
 5. One that changes a workflow (`.github/workflows/`), the deploy gate
