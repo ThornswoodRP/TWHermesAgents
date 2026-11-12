@@ -368,8 +368,20 @@ class OwedWakes(unittest.TestCase):
         got = s.bot_turns("hermes", {})["bots"]
         self.assertEqual(got["sprocket"]["running"], False)
         self.assertEqual(datetime.fromisoformat(got["sprocket"]["last"]), clock.t)
-        self.assertEqual(got["wisp"], {"running": False, "last": None})
+        self.assertEqual(got["wisp"], {"running": False, "waiting": False, "last": None})
         self.assertEqual(s.ops()["bot_turns"][1], {s.policy.data["brokers"]["users"]["gateway"]})
+
+    def test_bot_turns_says_a_turn_waiting_in_line(self):
+        # 11 Nov 2026: a turn in line is coming, so its Bot is not stopped; one
+        # that stopped asking ten minutes ago is gone and says nothing.
+        clock = Clock()
+        s = service(clock=clock)
+        s.db.execute("INSERT INTO tickets(id, bot, kind, risk, task, source, state, created_at, sweep) "
+                     "VALUES('w', 'rift', 'turn', 'high', 't', 'cli', 'waiting', ?, 0)", (clock.t.isoformat(),))
+        got = s.bot_turns("hermes", {})["bots"]["rift"]
+        self.assertEqual((got["running"], got["waiting"]), (False, True))
+        clock.advance(minutes=11)
+        self.assertFalse(s.bot_turns("hermes", {})["bots"]["rift"]["waiting"])
 
     def test_the_hours_cap_is_patricks_50_turns_per_bot(self):
         # Patrick, 9 Nov 2026, on q-fleet-hour-cap. It changes only with his word.

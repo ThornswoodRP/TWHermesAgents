@@ -120,7 +120,15 @@ TURNED_AWAY_DIR = ("local", "thornswood-hermes", "turned-away")
 # were turned away under the old fleet hour cap, and nothing sent them again).
 # The note says it was kept, so the connector does not put its own copy back
 # as well: one owner for each message.
-LOCAL_CHAT = ("cli",)
+# A Bot Chat made in Desktop keeps Desktop's platform when a message is
+# resumed into it, so its turns come as "desktop": every Bot's message to
+# Bramble lands in Bramble's Bot Chat, a desktop session since 1 Nov 2026.
+# Until 12 Nov 2026 only "cli" was kept, and on 11 Nov Magpie's hand-back of
+# #5765 (22:58 UTC) and Rift's of #4980 (23:07 UTC), turned away while the
+# Bots reloaded after an install, were told "send it again" after their
+# senders' turns had ended, so nobody did, and both workers sat with no next
+# issue.
+LOCAL_CHAT = ("cli", "desktop")
 SESSION_FILE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 

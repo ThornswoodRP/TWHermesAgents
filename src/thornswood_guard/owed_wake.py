@@ -37,6 +37,22 @@ and Sprocket and Magpie stayed stopped with nothing left to say so.
 Both ask tw-policy for room first and are taken only when it has some; what
 each saw last is kept in IDLE_FILE in the profile.
 
+The free worker look also runs at the first check after a worker's turn
+ends, not only on the hour: every check reads tw-policy's bot_turns, which
+spends no GitHub read, and a worker with no turn running or in line whose
+last turn ended after the last look is a hand-back, a stop or a finish that
+Bramble acts on now. And such a worker, holding a claimed issue with no
+pull request, is named at once, not after an hour of quiet: a worker runs
+an issue only inside a turn, so one with no turn running, none in line and
+no message queued for it in the decision core (tw-decide queued_for) is
+not working anything. 11 Nov 2026: Rift handed back #4980 blocked at 4:00
+PM and Magpie #5765 at 3:59 PM; the 4:52 PM look counted both busy on
+their claims, quiet just under the hour it then needed, and the next look
+was an hour away, so four of the five workers sat with no turn from 4 PM
+while Wisp alone worked. The look waits while Bramble has a turn running,
+in line or queued, because a hand-back is answered in that turn and the
+look must read what it did; the hourly look runs whatever Bramble is doing.
+
 Bramble itself works around the clock (Patrick, 9 Nov 2026, 1:27 AM:
 "Bramble should still be working and always be working and alert"); only
 the workers' new issues wait for 6 AM. So the alert wake looks every
@@ -69,7 +85,7 @@ SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
     "fleet queue turned away, the morning after the Grok lanes stop, new work of your own, a free worker with "
-    "work on the board, or a worker that stopped mid-issue). "
+    "work on the board, or a worker that handed back or stopped mid-issue). "
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
     "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes, the Desk's list and the Ops "
     "issues, the lanes' and the duplicate check's comments, your open cards, then a free worker's next issue "
@@ -142,12 +158,17 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     alert_due = now - float(state.get("alert_checked") or 0) >= ALERT_EVERY
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
                                         "new work from 11 PM to 6 AM, while the Grok lanes audit")
+    ended_said = None
+    if working and not idle_due:
+        ended, ended_said = _turns_ended(bot, ask, policy, float(state.get("idle_checked") or 0))
+        idle_due = bool(ended)
     if not morning and not idle_due and not alert_due:
         if local is None:
             return [why_no_morning, SLEEP]
         if not working:
             return [night, SLEEP]
-        return ["the morning sweep has run, and neither the alert check nor the free worker check is due", SLEEP]
+        return [*([ended_said] if ended_said else []),
+                "the morning sweep has run, and neither the alert check nor the free worker check is due", SLEEP]
     try:
         room = ask("policy", "turn_room", {"bot": bot, "sweep": True})
     except BrokerRefused as e:
@@ -189,7 +210,50 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         # runs at the next check, five minutes on.
         return [*said, "the free worker check is due and runs at the next check, apart from this one's searches",
                 SLEEP]
-    return [*said, *_free_workers(bot, ask, now, policy, path, state)]
+    return [*said, *([ended_said] if ended_said else []), *_free_workers(bot, ask, now, policy, path, state)]
+
+
+def _workers(policy: dict) -> list[str]:
+    return [name for name, b in policy["bots"].items() if b.get("role") == "worker"]
+
+
+def _turns_ended(bot: str, ask: Caller, policy: dict, since: float) -> tuple[list[str], str | None]:
+    """The workers whose last turn ended after since (the last free worker
+    look) and that have no turn running, none in line and no message queued
+    for them: each handed back, stopped or finished, and the look runs now.
+    Empty, with why, while Bramble has a turn running, in line or queued (it
+    is answering a hand-back, and the look reads what that turn did), and
+    empty when tw-policy or tw-decide does not answer (the hourly look still
+    runs). Spends no GitHub read."""
+    try:
+        turns = (ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}
+    except BrokerRefused:
+        return [], None
+    ended = []
+    for w in _workers(policy):
+        t = turns.get(w)
+        if not isinstance(t, dict) or t.get("running") or t.get("waiting") or not t.get("last"):
+            continue
+        try:
+            if datetime.fromisoformat(t["last"]).timestamp() > since:
+                ended.append(w)
+        except (TypeError, ValueError):
+            continue
+    if not ended:
+        return [], None
+    try:
+        queued = (ask("decide", "queued_for", {"bot": bot}) or {}).get("bots") or {}
+    except BrokerRefused as e:
+        return [], f"{', '.join(ended)} ended a turn, but tw-decide did not answer ({e}); the free worker look waits"
+    ended = [w for w in ended if not queued.get(w)]
+    mine = turns.get(bot) if isinstance(turns.get(bot), dict) else {}
+    if ended and (mine.get("running") or mine.get("waiting") or queued.get(bot)):
+        return [], (f"{', '.join(ended)} ended a turn since the last look; the free worker look runs once your own "
+                    "turn that is running, in line or queued has ended, so it reads what that turn did")
+    if not ended:
+        return [], None
+    return ended, (f"{', '.join(ended)} ended a turn since the last look and has no turn running, in line or queued: "
+                   "the free worker look runs now, not on the hour")
 
 
 def _own_work(bot: str, ask: Caller, policy: dict) -> list[str]:
@@ -216,7 +280,7 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     state["idle_checked"] = now
     state.pop("stopped", None)
     _save(path, state)
-    workers = {name: b["claim_label"] for name, b in policy["bots"].items() if b.get("role") == "worker"}
+    workers = {name: policy["bots"][name]["claim_label"] for name in _workers(policy)}
     repo = policy["repos"]["app"]
     asked = _asked(bot, ask)
     try:
@@ -258,11 +322,13 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                     "comment what it waits on and take the claim off, or send it back to the worker as its "
                     "next issue (bramble-duties, section 6, items 1 and 5). The worker counts as free.")
     if stopped:
-        said.append(f"{', '.join(sorted(stopped))} hold an active issue but have run no turn since "
-                    f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each stopped "
-                    "mid-issue and nothing wakes it by itself; tell each to carry on, or take its claim off "
-                    "if it is blocked (bramble-duties, section 6, items 5 and 6). This is said at every "
-                    "hourly look until it runs a turn or its claim comes off.")
+        said.append(f"{', '.join(sorted(stopped))} hold an active issue but have no turn running, none in line and "
+                    "nothing queued for them, the last ended "
+                    f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each handed back "
+                    "with no pull request or stopped mid-issue, and nothing wakes it by itself. If its hand-back "
+                    "says it is blocked, comment what it waits on, take the claim off and give it its next issue; "
+                    "otherwise tell it to carry on (bramble-duties, section 6, items 5 and 6). This is said at "
+                    "every look until it runs a turn or its claim comes off.")
     if not free:
         return said or ["every worker is on an active issue", SLEEP]
     # Open, unclaimed, and nobody's whose work is hands off: the board's
@@ -397,27 +463,27 @@ def _when(iso: str) -> float:
 
 
 def _stopped(bot: str, ask: Caller, busy: list[str], now: float) -> dict[str, str | None]:
-    """Each busy worker with no model turn running and none heard from in
-    IDLE_EVERY seconds, with when its last turn was heard from (None when it
-    never ran one). tw-policy not answering finds none: that costs one look."""
+    """Each busy worker with no model turn running, none in line and no
+    message queued for it in the decision core, with when its last turn was
+    heard from (None when it never ran one). A worker works an issue only
+    inside a turn, so such a worker is not working it, however recently its
+    turn ended (until 11 Nov 2026 it also had to be quiet for IDLE_EVERY,
+    and a worker that handed back blocked waited up to two hours for its
+    next issue). tw-policy or tw-decide not answering finds none: that costs
+    one look."""
     if not busy:
         return {}
     try:
         turns = (ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}
+        queued = (ask("decide", "queued_for", {"bot": bot}) or {}).get("bots") or {}
     except BrokerRefused:
         return {}
     out = {}
     for w in busy:
         t = turns.get(w)
-        if not isinstance(t, dict) or t.get("running"):
+        if not isinstance(t, dict) or t.get("running") or t.get("waiting") or queued.get(w):
             continue
-        last = t.get("last")
-        try:
-            quiet = last is None or now - datetime.fromisoformat(last).timestamp() >= IDLE_EVERY
-        except (TypeError, ValueError):
-            continue
-        if quiet:
-            out[w] = last
+        out[w] = t.get("last")
     return out
 
 

@@ -468,15 +468,23 @@ class PolicyService:
         Asks nothing of the queue and spends nothing. Bramble's wake check reads
         it to find a worker that holds an active issue but has stopped: on 9 Nov
         2026 Sprocket's turn was turned away at 9:23 AM mid-issue, its claim
-        still read as active work, and nothing woke it again."""
+        still read as active work, and nothing woke it again.
+
+        waiting says a turn of the Bot's is in line and still asking (seen in
+        the last TICKET_SEEN_TIMEOUT): it starts once the queue has room, so
+        the Bot is not stopped, and a message it was sent is being answered."""
         with self._tx():
             self._expire_silent()
+            fresh = iso(self.clock() - TICKET_SEEN_TIMEOUT)
             out = {}
             for bot in self.policy.data["bots"]:
                 row = self.db.execute(
                     "SELECT MAX(COALESCE(finished_at, seen_at, admitted_at)), SUM(state='admitted') FROM tickets "
                     "WHERE bot=? AND kind='turn' AND admitted_at IS NOT NULL", (bot,)).fetchone()
-                out[bot] = {"running": bool(row[1]), "last": row[0]}
+                waiting = self.db.execute(
+                    "SELECT COUNT(*) FROM tickets WHERE bot=? AND kind='turn' AND state='waiting' "
+                    "AND COALESCE(seen_at, created_at) >= ?", (bot, fresh)).fetchone()[0]
+                out[bot] = {"running": bool(row[1]), "waiting": bool(waiting), "last": row[0]}
         return {"bots": out}
 
     def set_task_risk(self, caller: str, args: dict) -> dict:
