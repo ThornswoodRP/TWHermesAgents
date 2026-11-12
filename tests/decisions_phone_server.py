@@ -47,9 +47,10 @@ f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"
     # Magpie's Bot Chat holds only a notice Hermes put in by itself (a background command matched its watch),
     # as on Patrick's phone on 11 Nov: never his line ("You: [IMPORTANT: ..."), never the Bot's.
     {"bot": "magpie", "session_id": "s_mp", "messages": [{"role": "notice", "text": "[IMPORTANT: Background process proc_c2c7919eddb2 matched watch pattern \"done\".]", "at": "2026-11-01T17:05:00+00:00"}]}]})
-# The live Board: Rift running a command in a session with a title, Echo thinking with none, and Sprocket's
+# The live Board: Rift running a command in a session with a title, Echo thinking in a scheduled job's session
+# with none, and Sprocket's
 # two turns at once. When the test makes the file BOARD_NEXT, Rift's command has ended and it is thinking.
-BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:00"},
+BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:00", "platform": "cron"},
          {"bot": "rift", "title": "Rebuild the <b>load order</b>", "state": "tool", "tool": "terminal",
           "since": "2026-11-01T17:40:00+00:00", "session_id": "s_rift_lo"},
          {"bot": "sprocket", "title": "Installer log", "state": "tool", "tool": "read_file",
