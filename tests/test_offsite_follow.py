@@ -22,6 +22,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import REPO, policy
 
@@ -468,6 +469,28 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(vm.ran("disable --quiet --now tw-policy.socket"),
                          ["systemctl disable --quiet --now " + " ".join(follow_main.Follower.BROKER_SOCKETS)])
         self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / NEW), [])
+
+    def test_the_brokers_are_asked_where_the_installed_release_says_they_are(self):
+        # 12 Nov 2026: #164 moved the sockets, and the run that installed it,
+        # started on the release before, ended its hold on the old path.
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.releases(f)
+        moved = f.opt / "releases" / NEW / "src" / "thornswood_guard" / "policy.json"
+        data = json.loads(moved.read_text())
+        data["brokers"]["sockets"]["policy"]["path"] = "/run/tw-moved/policy.sock"
+        moved.write_text(json.dumps(data))
+        self.assertEqual(f.socket("policy"), policy().data["brokers"]["sockets"]["policy"]["path"])
+        (f.opt / "current").unlink()
+        (f.opt / "current").symlink_to(f.opt / "releases" / NEW)
+        self.assertEqual(f.socket("policy"), "/run/tw-moved/policy.sock")
+        asked = []
+        plain = follow_main.Follower(policy(), run=vm, root=f.root, say=self.said.append)
+        with mock.patch.object(follow_main.wire, "call", lambda path, op, args, **kw: asked.append((path, op))):
+            plain.end_hold_()
+            plain.report_({"result": "installed"})
+        self.assertEqual(asked, [("/run/tw-moved/policy.sock", "end_hold"),
+                                 (policy().data["brokers"]["sockets"]["git"]["path"], "vm_install")])
 
     def test_a_release_that_cannot_be_read_keeps_nothing(self):
         vm = FakeVM(NEW)
