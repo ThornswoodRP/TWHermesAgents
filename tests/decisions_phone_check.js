@@ -1485,7 +1485,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (res.status !== 200 || refused !== 1) throw new Error(JSON.stringify([res.status, refused]))
     if (await page.evaluate(() => localStorage.getItem('hermes.phoneKey.v1'))) throw new Error('the key in the app is still kept')
     const said = await page.evaluate(() => flash)
-    if (!/saved in your passkey app, so it opened that app.*pick Google Password Manager/.test(said)) throw new Error(said)
+    if (!/saved in your passkey app, so it opened that app.*Preferred service to Google/.test(said)) throw new Error(said)
   })
   // 9 Nov: Android saved both of Patrick's fingerprint tries in Bitwarden, and the Decisions list went on
   // offering the fingerprint. A try a passkey app took is kept as a passkey, and the offer goes.
