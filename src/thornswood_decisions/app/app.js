@@ -285,8 +285,13 @@ function forgetPhoneKey() {
 const LOST_KEY = "This phone's fingerprint sign-in is no longer on the core, so your passkey signs in. Add the fingerprint again below."
 // The core has the key but it was not made by the phone itself (8 Nov: it was saved in Bitwarden, so
 // the fingerprint button opened Bitwarden). Same way on, with the reason.
+// Where Android saves the new key is the phone's choice, not the page's: no WebAuthn option names a
+// provider. 12 Nov: his Pixel prefers Bitwarden, so Android sent the key there without the "Save passkey
+// to" sheet the old words told him to pick from, and the key landed in Bitwarden again.
+const SAVE_WHERE = 'Android saves it in the passkey service your phone prefers, without asking. If that is a passkey app ' +
+  'such as Bitwarden, first set Preferred service to Google in Android Settings, Passwords, passkeys & accounts.'
 const KEY_IN_APP = "This phone's fingerprint key was saved in your passkey app, so it opened that app. Your passkey signs in now. " +
-  'Add the fingerprint again below and pick Google Password Manager when Android asks where to save it.'
+  'Add the fingerprint again below. ' + SAVE_WHERE
 function lostPhoneKey(why = LOST_KEY) {
   forgetPhoneKey()
   try { localStorage.removeItem(FINGERPRINT_LATER) } catch (e) {}
@@ -345,7 +350,7 @@ async function addFingerprint() {
     fingerprintTried = true
     const app = done.body.maker || 'your passkey app'
     return { ok: false, message: `That key was saved in ${app}, so it is kept as a passkey and signs in through ${app}. ` +
-      'The fingerprint sign-in was not added: tap Use my fingerprint again and pick Google Password Manager when Android asks where to save it.' }
+      'The fingerprint sign-in was not added. ' + SAVE_WHERE + ' Then tap Use my fingerprint again.' }
   }
   if (!keepPhoneKey({ credential_id: done.body.credential_id, passkey_id: done.body.passkey_id })) {
     return { ok: false, message: 'This browser would not keep the fingerprint\'s name, so the app cannot ask for it. Remove it in Settings.' }
@@ -581,7 +586,7 @@ async function fingerprintOffer() {
   const part = el('div', { class: 'card' },
     el('p', {}, el('strong', {}, 'Sign in with your fingerprint')),
     el('p', { class: 'quiet' }, 'The fingerprint opens right here, without going out to your passkey app. ' +
-      'When Android asks where to save it, pick Google Password Manager. Your passkey stays for a Desktop.'),
+      SAVE_WHERE + ' Your passkey stays for a Desktop.'),
     el('button', { class: 'primary', type: 'button', onclick: async () => {
       note.textContent = ''
       const k = await addFingerprint()
@@ -4083,9 +4088,9 @@ async function settingsView(note) {
     : (await canUseFingerprint())
       ? [el('p', { class: 'quiet' }, tried
           ? 'This phone saved its fingerprint key in your passkey app, so you sign in through that app. ' +
-            'To sign in right here instead, try again and pick Google Password Manager when Android asks where to save it.'
+            'To sign in right here instead, try again. ' + SAVE_WHERE
           : 'Sign in with your fingerprint right here instead of going out to your passkey app. ' +
-            'When Android asks where to save it, pick Google Password Manager.'),
+            SAVE_WHERE),
         el('button', { class: 'primary', type: 'button', onclick: async () => {
           status.textContent = ''
           const k = await addFingerprint()
