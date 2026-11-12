@@ -255,6 +255,7 @@ def _found(profile: str):
 TASK_CHATS = 40      # the live chats whose subagents and background commands it reads, the newest first
 TASK_ROWS = 30       # at most this many of each kind for one Hermes
 TASK_SECONDS = 10    # one Hermes's gateway answers its part in this, or that part says it did not
+UPCOMING = 14        # a job's next runs, enough for the app to say its pattern in words (tasks.py "upcoming")
 
 
 def _home(profile: str):
@@ -280,11 +281,13 @@ def _jobs(profile: str) -> list:
     token = set_hermes_home_override(str(home))
     try:
         with cron_jobs.use_cron_store(home):
-            rows = cron_jobs.list_jobs(include_disabled=True)
+            rows = cron_jobs.list_jobs(include_disabled=True)[:TASK_ROWS]
+            # In that home too: a job's times follow its own zone, else that profile's (hermes_time).
+            upcoming = [_upcoming(cron_jobs, j) for j in rows]
     finally:
         reset_hermes_home_override(token)
     out = []
-    for j in rows[:TASK_ROWS]:
+    for j, (runs, left) in zip(rows, upcoming):
         run = j.get("latest_execution") if isinstance(j.get("latest_execution"), dict) else {}
         err = j.get("last_error")
         out.append({"id": _cut(j.get("id"), 64), "name": _cut(j.get("name"), 120),
@@ -294,8 +297,31 @@ def _jobs(profile: str) -> list:
                     # _format_job's own redaction (tools/cronjob_job_args.py)
                     "last_error": _cut(redact_sensitive_text(err, force=True, redact_url_credentials=True), 200)
                     if err else None,
-                    "running": run.get("status") in ("claimed", "running")})
+                    "running": run.get("status") in ("claimed", "running"),
+                    "upcoming": [_cut(t, 40) for t in runs], "left": left})
     return out
+
+
+def _upcoming(cron_jobs, j: dict) -> tuple[list, int | None]:
+    """A job's next runs as instants, the first its next_run_at and each after it from Hermes's own
+    compute_next_run in the job's zone, as the scheduler advances it; and how many runs it has left when its
+    repeat count ends it (None while it repeats for ever). The app says the schedule in words in Patrick's
+    own time from these (Patrick, 11 Nov 8:25 PM: the Tasks tab showed the raw "20 11 2 11 *"); the cron
+    line alone is in the zone Hermes keeps, which the app does not know. A finished job has none."""
+    rep = j.get("repeat") if isinstance(j.get("repeat"), dict) else {}
+    times, done = rep.get("times"), rep.get("completed") or 0
+    finite = isinstance(times, int) and not isinstance(times, bool) and times > 0
+    left = max(0, times - done) if finite and isinstance(done, int) else None
+    first = j.get("next_run_at")
+    if j.get("state") == "completed" or not isinstance(first, str) or not first or left == 0:
+        return [], left
+    runs = [first]
+    while len(runs) < min(UPCOMING, left if left is not None else UPCOMING):
+        later = cron_jobs.compute_next_run(j.get("schedule"), runs[-1], timezone=j.get("timezone"))
+        if not isinstance(later, str) or later == runs[-1]:
+            break
+        runs.append(later)
+    return runs, left
 
 
 async def _live(endpoint) -> dict:

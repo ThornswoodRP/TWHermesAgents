@@ -34,7 +34,7 @@ _KINDS = {
     "processes": {"id": 64, "chat": 128, "chat_title": 120, "command": 200, "status": 20, "why": 40,
                   "exit_code": int, "started": float, "ended": float},
     "jobs": {"id": 64, "name": 120, "schedule": 80, "state": 20, "next": 40, "last": 40, "last_status": 30,
-             "last_error": 200, "running": bool},
+             "last_error": 200, "running": bool, "upcoming": (40, 14), "left": int},
 }
 
 
@@ -46,6 +46,10 @@ def _value(v, kind):
     """One field as its kind, or None. Text is cut to its length on one line."""
     if v is None:
         return None
+    if isinstance(kind, tuple):  # a list of times (room_send.py _upcoming): (each one's length, how many)
+        if not isinstance(v, list) or len(v) > kind[1]:
+            raise _bad(f"a list of times holds at most {kind[1]}")
+        return [t for t in (_value(x, kind[0]) for x in v) if t]
     if kind is bool:
         if not isinstance(v, bool):
             raise _bad("a yes-or-no field is true or false")

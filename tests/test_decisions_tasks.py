@@ -134,6 +134,14 @@ STUB_JOBS = textwrap.dedent('''
         if os.environ.get("TW_STUB_JOBS_BROKEN") == _STORE[-1].name:
             raise RuntimeError("Cron database corrupted and unrepairable")
         return json.loads(path.read_text()) if path.exists() else []
+    def compute_next_run(schedule, last_run_at=None, *, timezone=None):
+        # Hermes's own: the run after last_run_at; here an interval in minutes, read in that profile's home.
+        from datetime import datetime, timedelta
+        assert hermes_constants.HOME and Path(hermes_constants.HOME[-1]) == _STORE[-1]
+        if not isinstance(schedule, dict) or schedule.get("kind") != "interval":
+            return None
+        later = datetime.fromisoformat(last_run_at) + timedelta(minutes=schedule["minutes"])
+        return later.isoformat()
 ''')
 
 STUB_REDACT = "def redact_sensitive_text(text, **kw):\n    return text.replace('hunter2', '***')\n"
@@ -162,7 +170,15 @@ class Helper(unittest.TestCase):
              "latest_execution": {"status": "completed"}},
             {"id": "j2", "name": "Board review", "schedule_display": "every Monday", "state": "paused",
              "next_run_at": None, "last_run_at": None, "last_status": None, "last_error": None,
-             "latest_execution": {"status": "running"}}]), encoding="utf-8")
+             "latest_execution": {"status": "running"}},
+            # Every six hours, three runs left of five; and a one-time job Hermes finished on a failed run.
+            {"id": "j3", "name": "Watch the build", "schedule_display": "every 360m", "state": "scheduled",
+             "schedule": {"kind": "interval", "minutes": 360}, "repeat": {"times": 5, "completed": 2},
+             "next_run_at": "2026-11-12T06:00:00-07:00", "last_run_at": None, "last_status": None, "last_error": None},
+            {"id": "j4", "name": "Check the purge", "schedule_display": "20 11 6 11 *", "state": "completed",
+             "schedule": {"kind": "cron", "expr": "20 11 6 11 *"}, "repeat": {"times": 1, "completed": 1},
+             "next_run_at": None, "last_run_at": "2026-11-06T11:20:00-07:00", "last_status": "error",
+             "last_error": "RuntimeError: Request timed out."}]), encoding="utf-8")
 
     def run_helper(self, req: dict, **env) -> tuple[int, dict]:
         out = subprocess.run([sys.executable, "-I", str(HELPER), "--hermes-root", str(self.src)],
@@ -201,17 +217,30 @@ class Helper(unittest.TestCase):
         self.assertEqual(jobs[0], {"id": "j1", "name": "Nightly sweep", "schedule": "0 3 * * *", "state": "scheduled",
                                    "next": "2026-11-04T03:00:00-07:00", "last": "2026-11-03T03:00:00-07:00",
                                    "last_status": "error", "last_error": "token *** refused at line 2",
-                                   "running": False})
+                                   "running": False, "upcoming": ["2026-11-04T03:00:00-07:00"], "left": None})
         self.assertEqual((jobs[1]["state"], jobs[1]["running"]), ("paused", True))
+        self.assertEqual((jobs[1]["upcoming"], jobs[1]["left"]), ([], None))
         # His own Hermes (profile empty) is the root home, which has no jobs here.
         self.assertEqual(out["tasks"][""]["jobs"], [])
+
+    def test_a_jobs_next_runs_come_from_hermess_own_schedule_and_end_with_its_repeat_count(self):
+        """Patrick, 11 Nov 8:25 PM: the Tasks tab showed Hermes's cron line ("20 11 2 11 *"). The app says a
+        schedule in words from its next runs as instants, which Hermes's own compute_next_run gives in the
+        job's zone; a job that ends after a count has only the runs it has left, and a finished one none."""
+        _, out = self.run_helper({"op": "tasks", "profiles": ["bramble"]})
+        jobs = {j["id"]: j for j in out["tasks"]["bramble"]["jobs"]}
+        self.assertEqual(jobs["j3"]["upcoming"], ["2026-11-12T06:00:00-07:00", "2026-11-12T12:00:00-07:00",
+                                                  "2026-11-12T18:00:00-07:00"])
+        self.assertEqual(jobs["j3"]["left"], 3)
+        self.assertEqual((jobs["j4"]["upcoming"], jobs["j4"]["left"], jobs["j4"]["state"], jobs["j4"]["last_status"]),
+                         ([], 0, "completed", "error"))
 
     def test_a_gateway_that_is_not_running_has_no_live_part_and_says_its_state(self):
         _, out = self.run_helper({"op": "tasks", "profiles": ["bramble"]}, TW_STUB_DOWN="bramble")
         got = out["tasks"]["bramble"]
         self.assertEqual((got["state"], got["subagents"], got["processes"]), ("absent", None, None))
         self.assertEqual(got["live_why"], "its gateway is absent")
-        self.assertEqual(len(got["jobs"]), 2)
+        self.assertEqual(len(got["jobs"]), 4)
         self.assertEqual(self.rpcs(), [])
 
     def test_a_part_it_could_not_read_is_null_with_its_reason(self):
@@ -282,7 +311,9 @@ class Core(unittest.TestCase):
 
     def test_a_report_is_checked_field_by_field(self):
         bad = [report(subagents=[{"tools": "3"}]), report(jobs=[{"running": 1}]), report(processes=[{"started": "x"}]),
-               report(jobs=[{"name": 5}]), report(jobs=[{}] * 31), report(jobs="none"), "no", report(state=["x"])]
+               report(jobs=[{"name": 5}]), report(jobs=[{}] * 31), report(jobs="none"), "no", report(state=["x"]),
+               report(jobs=[{"upcoming": "2026-11-12T06:00:00-07:00"}]), report(jobs=[{"upcoming": ["t"] * 15}]),
+               report(jobs=[{"upcoming": [5]}]), report(jobs=[{"left": "3"}])]
         for r in bad:
             with self.subTest(r=str(r)[:60]), self.assertRaises(CoreError) as e:
                 self.chat.tasks(self.w.ws, self.tc, {"tasks": {"rift": r}})
@@ -290,6 +321,11 @@ class Core(unittest.TestCase):
         self.chat.tasks(self.w.ws, self.tc, {"tasks": {"rift": report(jobs=[{"name": "n" * 500, "extra": "dropped"}])}})
         job = self.view()["rift"]["jobs"][0]
         self.assertEqual((len(job["name"]), "extra" in job, job["running"]), (120, False, None))
+        # A job's next runs: at most 14 times, each cut to its length; how many runs it has left.
+        runs = ["2026-11-12T06:00:00-07:00 " + "x" * 60] * 14
+        self.chat.tasks(self.w.ws, self.tc, {"tasks": {"rift": report(jobs=[{"name": "n", "upcoming": runs, "left": 2}])}})
+        job = self.view()["rift"]["jobs"][0]
+        self.assertEqual((len(job["upcoming"]), len(job["upcoming"][0]), job["left"]), (14, 40, 2))
 
     def test_the_bots_connector_names_bound_bots_only_with_its_own_token(self):
         with self.assertRaises(CoreError) as e:

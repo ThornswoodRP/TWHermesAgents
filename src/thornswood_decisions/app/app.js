@@ -887,9 +887,9 @@ function botSessionView(bot, sid) {
 // "I wanted to see the subagents, jobs, and background tasks on the Mobile and Desktop app." Every Hermes
 // keeps these per profile, so this one list holds all of them at once: Hermes, One and the six Bots, each
 // row with its agent's avatar, and a row of names to look at one of them only. What each part says comes
-// from that Hermes itself, read the way Hermes Desktop reads it (contracts.json "tasks"); a Hermes the core
-// has not heard from lately, or whose part could not be read, says so in one line at the foot, and none of
-// its rows are shown as though they were current.
+// from that Hermes itself, read the way Hermes Desktop reads it (contracts.json "tasks"); a part that could not
+// be read says so in one line at the foot. A Hermes the core has not heard from lately shows none of its rows
+// as though they were current, and the Bots tab, not this one, says which it is.
 let tasksOnly = null   // the agent the list is narrowed to, for this visit; null is all of them
 
 function agentName(id) {
@@ -917,13 +917,94 @@ function nextWords(iso) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-// A job's state on the right: green only while it runs, as the other lists' dots; red when Hermes stopped it.
+// A job's state on the right: green only while it runs, as the other lists' dots; red when Hermes stopped it,
+// or when a job that will not run again ended on a failed run. Hermes calls a job "completed" once it has no
+// run left, however its last run went (cron/jobs.py _advance_after_run), so Done is only for one whose last
+// run went well (Patrick, 11 Nov 8:25 PM: "Done" over "Last run failed: RuntimeError: Request timed out").
 function jobLine(j) {
   if (j.running) return liveLine({ cls: 'on', words: 'Running now' })
   if (j.state === 'error') return el('span', { class: 'rec off' }, 'Stopped')
   if (j.state === 'paused') return el('span', { class: 'rec' }, 'Paused')
-  if (j.state === 'completed') return el('span', { class: 'rec' }, 'Done')
+  if (j.state === 'completed') {
+    const how = lastRun(j)
+    return how === 'ok' ? el('span', { class: 'rec' }, 'Done') : how === 'stopped' ? el('span', { class: 'rec' }, 'Stopped')
+      : el('span', { class: 'rec off' }, how === 'undelivered' ? 'Not delivered' : 'Failed')
+  }
   return el('span', { class: 'rec' }, j.next ? 'Next ' + nextWords(j.next) : 'Scheduled')
+}
+
+// How a job's last run went, from Hermes's last_status (cron/jobs.py _record_run_outcome): ok, stopped by
+// hand (cancelled, which Hermes does not count as a failure), ran but its message was not delivered, or
+// failed (error, or a status Hermes set for a run it refused, as blocked_config). No run yet counts as ok.
+function lastRun(j) {
+  const s = j.last_status
+  if (!s || s === 'ok') return 'ok'
+  if (s === 'cancelled') return 'stopped'
+  return s === 'delivery_failed' ? 'undelivered' : 'failed'
+}
+
+// When a job runs, in plain words and the phone's own time (Patrick, 11 Nov 8:25 PM: the Tasks tab showed
+// Hermes's cron line "20 11 2 11 *"). The core sends its next runs as instants (room_send.py _upcoming, from
+// Hermes's own compute_next_run in the job's zone), so the words are right whatever zone Hermes keeps:
+// "Every day at 9:00 AM", "Every Monday and Friday at 4:30 PM", "Every 15 minutes", "Once, Fri, Nov 6 at
+// 11:20 AM". A pattern the runs do not show plainly says when the next one is; a finished job says when
+// it last ran.
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+function dayAt(d) {
+  const year = d.getFullYear() !== new Date().getFullYear() ? { year: 'numeric' } : {}
+  return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', ...year }) + ' at ' +
+    d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+function ordinal(n) {
+  const tail = n % 100 >= 11 && n % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th')
+  return n + tail
+}
+function everyWords(ms) {
+  const min = Math.round(ms / 6e4)
+  if (min % 60) return min === 1 ? 'Every minute' : `Every ${min} minutes`
+  return min === 60 ? 'Every hour' : `Every ${min / 60} hours`
+}
+function patternWords(runs) {
+  if (runs.length < 2) return null
+  const gaps = runs.slice(1).map((d, i) => d - runs[i])
+  if (gaps.every(g => g === gaps[0]) && gaps[0] > 0 && gaps[0] < 864e5 && gaps[0] % 6e4 === 0) return everyWords(gaps[0])
+  const time = d => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const t = time(runs[0])
+  if (!runs.every(d => time(d) === t)) return null
+  const dayNo = d => Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 864e5)
+  const steps = runs.slice(1).map((d, i) => dayNo(d) - dayNo(runs[i]))
+  if (steps.every(n => n === 1)) return `Every day at ${t}`
+  // The same days of the week, in order, each week: every run's next is the next of those days.
+  const days = [...new Set(runs.map(d => d.getDay()))].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7))
+  const weekly = steps.every((n, i) => {
+    const from = runs[i].getDay()
+    const next = days.map(w => (w - from + 7) % 7 || 7).reduce((a, b) => Math.min(a, b))
+    return n === next
+  })
+  if (weekly && runs.length > days.length) {
+    if (days.join() === '1,2,3,4,5') return `Every weekday at ${t}`
+    return `Every ${andList(days.map(w => WEEKDAYS[w]))} at ${t}`
+  }
+  const months = runs.slice(1).map((d, i) => (d.getFullYear() - runs[i].getFullYear()) * 12 + d.getMonth() - runs[i].getMonth())
+  if (runs.every(d => d.getDate() === runs[0].getDate())) {
+    if (months.every(n => n === 1)) return `On the ${ordinal(runs[0].getDate())} of every month at ${t}`
+    if (months.every(n => n === 12)) {
+      return `Every year on ${runs[0].toLocaleDateString([], { month: 'short', day: 'numeric' })} at ${t}`
+    }
+  }
+  return null
+}
+function scheduleWords(j) {
+  const runs = (j.upcoming || []).map(x => new Date(x)).filter(d => !isNaN(d))
+  if (!runs.length) {
+    const last = j.last ? new Date(j.last) : null
+    if (last && !isNaN(last)) return 'Last ran ' + dayAt(last)
+    return j.state === 'completed' ? 'It will not run again' : 'No run is set'
+  }
+  if (runs.length === 1 && (j.left === 1 || j.left === null || j.left === undefined)) return 'Once, ' + dayAt(runs[0])
+  const words = patternWords(runs)
+  if (!words) return 'Next ' + dayAt(runs[0])
+  return typeof j.left === 'number' ? `${words}, ${j.left === 1 ? 'one more time' : j.left + ' more times'}` : words
 }
 
 // The newest change he asked of one of his own jobs, and how it went (own_jobs.py), under the job.
@@ -965,7 +1046,7 @@ function jobSheet(j, until) {
       : (r.body.message || said(r.body))
   }
   const head = [el('p', {}, el('strong', {}, j.name || 'A job')),
-    el('p', { class: 'quiet' }, `${name} · ${j.schedule || ''}`),
+    el('p', { class: 'quiet' }, `${name} · ${scheduleWords(j)}`),
     signed ? null : el('p', { class: 'quiet' }, `Changing a job needs your ${signInWord()}. Its prompt opens when you press one.`)]
   const close = el('button', { class: 'secondary', type: 'button', onclick: closeSheet }, 'Close')
   function confirmRemove() {
@@ -975,7 +1056,8 @@ function jobSheet(j, until) {
       note)
   }
   const main = () => [head,
-    j.state === 'completed' ? el('p', { class: 'quiet' }, 'This job is done and will not run again.') : [
+    j.state === 'completed' ? el('p', { class: 'quiet' }, lastRun(j) === 'ok' ? 'This job is done and will not run again.'
+      : 'Its last run did not go through, and it will not run again.') : [
       j.state === 'paused'
         ? el('button', { class: 'secondary', type: 'button', 'data-job': 'resume', onclick: () => ask('resume') }, 'Resume')
         : el('button', { class: 'secondary', type: 'button', 'data-job': 'pause', onclick: () => ask('pause') }, 'Pause'),
@@ -1044,10 +1126,13 @@ function subagentSheet(t) {
 }
 
 function taskRows(agents) {
-  const subs = [], procs = [], jobs = [], unheard = [], silent = []
+  const subs = [], procs = [], jobs = [], unheard = []
+  let silent = 0
   for (const a of agents) {
     const name = agentName(a.id)
-    if (!a.heard) { silent.push(name + (a.since ? ' (since ' + at(a.since) + ')' : '')); continue }
+    // One the core has not heard from lately shows no rows, never old ones as though they were current. Which
+    // ones those are the Bots tab says beside each; the Tasks tab does not say it again (Patrick, 11 Nov 8:25 PM).
+    if (!a.heard) { silent++; continue }
     if (a.why) { unheard.push(`${name}: ${a.why}`); continue }
     if (a.subagents === null || a.processes === null) unheard.push(`${name}: ${a.live_why || 'its gateway could not be read'}`)
     if (a.jobs === null) unheard.push(`${name}: ${a.jobs_why || 'its scheduled jobs could not be read'}`)
@@ -1055,9 +1140,7 @@ function taskRows(agents) {
     for (const r of a.processes || []) procs.push({ agent: a.id, ...r })
     for (const r of a.jobs || []) jobs.push({ agent: a.id, change: (a.job_changes || {})[r.id] || null, ...r })
   }
-  // The ones not heard from, in one sentence, before what the others could not read.
-  if (silent.length) unheard.unshift('Not heard from: ' + andList(silent))
-  return { subs, procs, jobs, unheard }
+  return { subs, procs, jobs, unheard, silent }
 }
 
 async function tasksView() {
@@ -1098,18 +1181,20 @@ async function tasksView() {
             t.exit_code === 0 ? 'Done' : t.exit_code === null ? 'Stopped' : `Failed (exit ${t.exit_code})`),
           at(epochIso(t.ended))] }))] : null,
     jobs.length ? [el('h2', { class: 'section' }, 'Scheduled jobs'), jobs.map(j => {
-      const failed = j.last_status && j.last_status !== 'ok'
+      const how = lastRun(j)
       // His own Hermes's and One's jobs open their actions; a Bot's open that Bot's chat, read only.
       return listRow({ 'data-task': 'job', onclick: () => GATEWAY[j.agent] ? jobSheet(j, r.body.jobs_until) : go(taskChat(j.agent, null)) }, {
-        agent: j.agent, title: j.name || 'A job', lines: [el('span', { class: 'quiet' }, `${name(j)} · ${j.schedule || ''}`),
-          failed ? el('span', { class: 'warn' }, `Last run ${j.last_status === 'delivery_failed' ? 'was not delivered' : 'failed'}` +
-            (j.last_error ? `: ${j.last_error}` : '')) : null,
+        agent: j.agent, title: j.name || 'A job', lines: [el('span', { class: 'quiet' }, `${name(j)} · ${scheduleWords(j)}`),
+          how === 'stopped' ? el('span', { class: 'quiet' }, 'Its last run was stopped.')
+            : how !== 'ok' ? el('span', { class: 'warn' }, `Last run ${how === 'undelivered' ? 'was not delivered' : 'failed'}` +
+              (j.last_error ? `: ${j.last_error}` : '')) : null,
           jobChangeLine(j)],
         right: [jobLine(j)] })
     })] : null,
     subs.length || procs.length || jobs.length ? null
       : el('p', { class: 'quiet' }, tasksOnly ? `${agentName(tasksOnly)} has nothing running and no scheduled jobs.`
-        : 'Nothing is running, and there are no scheduled jobs.'),
+        : all.silent ? 'Of the ones heard from lately, none has anything running or any scheduled jobs.'
+          : 'Nothing is running, and there are no scheduled jobs.'),
     all.unheard.length ? el('p', { class: 'warn', role: 'status' }, all.unheard.join('. ') + '.') : null)
 }
 
@@ -1705,6 +1790,14 @@ function bubbles(items) {
       day = d.toDateString()
       last = null
       out.push(el('div', { class: 'day' }, dayWords(d)))
+    }
+    // A notice Hermes put in the chat by itself (a background command finished, a subagent's result), as
+    // Desktop draws one: a quiet line in the middle, never his bubble or the Bot's (Patrick, 11 Nov 8:25 PM).
+    if (m.notice) {
+      out.push(el('div', { class: 'notice', role: 'note', 'data-mid': m.mid === undefined || m.mid === null ? null : String(m.mid) },
+        snippet(m.text, 3)))
+      last = null
+      continue
     }
     const by = m.mine ? null : m.who
     const attrs = { class: 'msg ' + (m.mine ? 'mine' : 'theirs') }
@@ -2692,7 +2785,7 @@ function historyPart(gw, sid, t, name, feed) {
   if (t.error) return { notes: [el('p', { class: 'warn' }, t.error)], items: [], gone: false }
   if (!t.newest) {
     // Before the first page: the last messages the connector's feed sent, when it sent this chat's.
-    const items = (feed || []).map((m, k) => fromBot({ mine: m.role === 'user', who: name, at: m.at, text: m.text, mid: 'feed' + k,
+    const items = (feed || []).map((m, k) => fromBot({ mine: m.role === 'user', notice: m.role === 'notice', who: name, at: m.at, text: m.text, mid: 'feed' + k,
       noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from ' + name + '.' }))
     return { notes: [el('p', { class: 'quiet' }, items.length ? `Asking ${name} for the rest of this chat.`
       : `Asking ${name} for this chat. It shows here within half a minute.`)], items, gone: false }
@@ -2721,7 +2814,7 @@ function historyPart(gw, sid, t, name, feed) {
       route()
     } }, 'Older messages'), olderNote)
   }
-  const items = msgs.map(m => fromBot({ mine: m.role === 'user', user: m.role === 'user', who: name, at: m.at, text: m.text,
+  const items = msgs.map(m => fromBot({ mine: m.role === 'user', user: m.role === 'user', notice: m.role === 'notice', who: name, at: m.at, text: m.text,
     mid: m.mid, reactions: m.reactions || [], tools: m.tools, toolsMore: m.tools_more }))
   if (!items.length) notes.push(el('p', { class: 'quiet' }, 'Nothing here yet.'))
   return { notes, items, gone: false }
@@ -3633,7 +3726,7 @@ async function chatView(target, tab, sid, thread) {
     }
     if (!t.newest || t.newest.gone) {
       // Before the first page, or a Bot with no Bot Chat yet: what the feed last sent.
-      return { notes: [], items: v.history.filter(inThread).map((m, k) => ({ mine: m.role === 'user', who: m.who, at: m.at,
+      return { notes: [], items: v.history.filter(inThread).map((m, k) => ({ mine: m.role === 'user', notice: m.role === 'notice', who: m.who, at: m.at,
         text: m.text, mid: 'feed' + k, thread: m.thread,
         noReact: 'This is the last copy the feed sent. A reaction can be set once the chat is read from Hermes.' })), keyed: false }
     }
@@ -3662,9 +3755,9 @@ async function chatView(target, tab, sid, thread) {
     const items = raw.map(m => room
       ? { mine: m.kind === 'message.user', who: m.actor || 'someone', at: m.at, text: m.text, mid: m.seq, noReact: noRoom,
           thread: m.thread }
-      : sid ? { mine: m.role === 'user', user: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
+      : sid ? { mine: m.role === 'user', user: m.role === 'user', notice: m.role === 'notice', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
         noReact: noSession, tools: m.tools, toolsMore: m.tools_more }
-        : { mine: m.role === 'user', user: m.role === 'user', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
+        : { mine: m.role === 'user', user: m.role === 'user', notice: m.role === 'notice', who: name, agent: name, at: m.at, text: m.text, mid: m.mid,
           reactions: m.reactions, tools: m.tools, toolsMore: m.tools_more })
     if (!room && !sid) {
       withReactions(items, v.reactions, t.newest.handed_at ? new Date(t.newest.handed_at) : null, v.can_send
@@ -4396,7 +4489,7 @@ function voiceSaw(key, items) {
   const c = openComposer()
   if (!c || c.chat !== key || c.key !== voice.key) return
   for (const m of items) {
-    if (m.mine || m.status || !m.text) continue
+    if (m.mine || m.notice || m.status || !m.text) continue
     const sig = String(m.text).trim()
     if (voice.heard.has(sig)) continue
     voice.heard.add(sig)
@@ -4500,7 +4593,7 @@ function setAloud(key, on) {
 }
 
 function aloudReplies(items) {
-  return items.filter(m => !m.mine && !m.status && m.text)
+  return items.filter(m => !m.mine && !m.notice && !m.status && m.text)
 }
 
 function aloudAt(m) {

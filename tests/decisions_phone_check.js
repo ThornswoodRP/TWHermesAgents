@@ -239,13 +239,22 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     const want = [['subagent', 'O', 'Read the launcher log and find the crash', 'Running'],
       ['process', 'O', 'npm run build -- --watch', 'Running'], ['process', 'B', 'pytest -q', 'Done'],
       ['job', 'O', 'Morning summary', got.rows[3] && got.rows[3][3]], ['job', 'B', 'Nightly merge sweep', got.rows[4] && got.rows[4][3]],
-      ['job', 'B', 'Weekly board review', 'Paused']]
+      ['job', 'B', 'Weekly board review', 'Paused'], ['job', 'B', 'Check the purge', 'Failed']]
     if (JSON.stringify(got.rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(got.rows))
     if (!/^Next /.test(got.rows[3][3])) throw new Error('a scheduled job says ' + got.rows[3][3])
     await page.getByText('Last run failed: the fork was not reachable').waitFor({ timeout: 2000 })
-    for (const said of ['Not heard from: Hermes, Sprocket, Echo, Magpie and Wisp.', 'Rift: its gateway is absent.']) {
-      if (!got.warn.includes(said)) throw new Error('the foot does not say ' + said + ': ' + got.warn)
-    }
+    // Patrick, 11 Nov 8:25 PM: a job whose only run failed said Done; a schedule showed as Hermes's cron line;
+    // and the foot said again which Bots were not heard from, which the Bots tab says beside each.
+    const failed = page.locator('#view button.row[data-task="job"]', { hasText: 'Check the purge' })
+    if (!(await failed.locator('.rec.off', { hasText: 'Failed' }).count())) throw new Error('the failed job is not red')
+    await failed.getByText('Last run failed: RuntimeError: Request timed out.').waitFor({ timeout: 2000 })
+    const when = await page.evaluate(() => [...document.querySelectorAll('#view button.row[data-task="job"] .quiet')]
+      .map(e => e.textContent))
+    if (when.some(t => /\*|\d+ \d+ \d+/.test(t))) throw new Error('a raw cron line: ' + JSON.stringify(when))
+    const day = new Date('2026-11-04T10:00:00Z').toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    if (!when.includes('Bramble · Every day at ' + day)) throw new Error(JSON.stringify(when))
+    if (!when.some(t => /^Bramble · Last ran Fri, Nov 6 at /.test(t))) throw new Error(JSON.stringify(when))
+    if (got.warn !== 'Rift: its gateway is absent.') throw new Error('the foot says: ' + got.warn)
     if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Tasks') throw new Error('not on the Tasks tab')
   })
   await page.screenshot({ path: require('os').tmpdir() + '/tw-phone-tasks.png', fullPage: true })
@@ -268,7 +277,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.locator('#view .pick-one', { hasText: 'Bramble' }).click()
     await page.locator('#view .pick-one[aria-pressed="true"]', { hasText: 'Bramble' }).waitFor({ timeout: 3000 })
     const shown = await page.locator('#view button.row strong').allTextContents()
-    if (JSON.stringify(shown) !== JSON.stringify(['pytest -q', 'Nightly merge sweep', 'Weekly board review'])) throw new Error(JSON.stringify(shown))
+    if (JSON.stringify(shown) !== JSON.stringify(['pytest -q', 'Nightly merge sweep', 'Weekly board review', 'Check the purge'])) throw new Error(JSON.stringify(shown))
     await page.locator('#view .pick-one', { hasText: 'All' }).click()
     await page.getByText('Read the launcher log and find the crash').click()
     const sheet = page.getByRole('dialog', { name: 'Subagent' })
@@ -288,6 +297,9 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     if (JSON.stringify(rows) !== JSON.stringify(want)) throw new Error(JSON.stringify(rows))
     const line = await page.locator('#view > button.row[data-bot="wisp"] .snip').textContent()
     if (line !== 'You: how is the gamemode build?') throw new Error(line)
+    // A notice Hermes put in Magpie's Bot Chat by itself is not his line (Patrick, 11 Nov 8:25 PM).
+    const mp = await page.locator('#view > button.row[data-bot="magpie"]').textContent()
+    if (/You:|IMPORTANT/.test(mp) || !mp.includes('No messages yet.')) throw new Error(mp)
     await page.getByText('your own Hermes on the VM', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('your Hermes on One', { exact: true }).waitFor({ timeout: 3000 })
     await page.getByText('router, merges', { exact: true }).waitFor({ timeout: 3000 })
@@ -369,6 +381,11 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   await step("Bramble's first path still opens its chat, under Bots", async () => {
     await page.getByLabel('Message to Bramble').waitFor({ timeout: 5000 })
     if ((await page.locator('#tabs a[aria-current="page"]').textContent()) !== 'Bots') throw new Error('not on the Bots tab')
+  })
+  await page.goto(base + '/m/bots/magpie')
+  await step("a notice Hermes put in a Bot Chat by itself shows as a quiet line, never as his message", async () => {
+    await page.locator('#view .notice', { hasText: 'Background process proc_c2c7919eddb2' }).waitFor({ timeout: 5000 })
+    if (await page.locator('#view .msg').count()) throw new Error('the notice is a message bubble')
   })
   await page.getByRole('link', { name: 'Bots' }).click()
   await page.getByText('Rift', { exact: true }).click()

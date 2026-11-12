@@ -43,7 +43,10 @@ w.core.assign_task(w.bramble, "load-order", "rift")
 w.card(by=w.rift, task="load-order", title="Rebuild the load order now?", source_key="rift-1")
 f = Feeds(w.store)
 tw = f.new_token(w.ws, "work", by="t"); tr = f.new_token(w.ws, "room", by="t"); tb = f.new_token(w.ws, "bots", by="t")
-f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}], "route": {"model": "gpt-5.5", "provider": "openai-codex", "fallback": True, "at": "2026-11-01T17:01:00+00:00"}}]})
+f.put(w.ws, "bots", tb, {"source_time": "2026-11-01T18:00:00+00:00", "bots": [{"bot": "bramble", "session_id": "s1", "messages": [{"role": "user", "text": "How is the nightly?", "at": "2026-11-01T17:00:00+00:00"}, {"role": "assistant", "text": "All green <i>tonight</i>.", "at": "2026-11-01T17:01:00+00:00"}], "route": {"model": "gpt-5.5", "provider": "openai-codex", "fallback": True, "at": "2026-11-01T17:01:00+00:00"}},
+    # Magpie's Bot Chat holds only a notice Hermes put in by itself (a background command matched its watch),
+    # as on Patrick's phone on 11 Nov: never his line ("You: [IMPORTANT: ..."), never the Bot's.
+    {"bot": "magpie", "session_id": "s_mp", "messages": [{"role": "notice", "text": "[IMPORTANT: Background process proc_c2c7919eddb2 matched watch pattern \"done\".]", "at": "2026-11-01T17:05:00+00:00"}]}]})
 # The live Board: Rift running a command in a session with a title, Echo thinking with none, and Sprocket's
 # two turns at once. When the test makes the file BOARD_NEXT, Rift's command has ended and it is thinking.
 BOARD = [{"bot": "echo", "state": "thinking", "since": "2026-11-01T17:59:30+00:00"},
@@ -483,9 +486,15 @@ def tasks_feed():
                  "exit_code": 0, "started": TASK_T0 - 900, "ended": TASK_T0 - 600, "why": "exited"}],
                 "jobs": [{"id": "j2", "name": "Nightly merge sweep", "schedule": "0 3 * * *", "state": "scheduled",
                           "next": "2026-11-04T10:00:00+00:00", "last": "2026-11-03T10:00:00+00:00",
-                          "last_status": "error", "last_error": "the fork was not reachable", "running": False},
+                          "last_status": "error", "last_error": "the fork was not reachable", "running": False,
+                          # Its next runs, as room_send.py _upcoming reads them from Hermes: 3 AM Mountain.
+                          "upcoming": [f"2026-11-{4 + i:02d}T10:00:00+00:00" for i in range(14)], "left": None},
                          {"id": "j3", "name": "Weekly board review", "schedule": "every Monday", "state": "paused",
-                          "next": None, "last": None, "last_status": None, "last_error": None, "running": False}]},
+                          "next": None, "last": None, "last_status": None, "last_error": None, "running": False},
+                         # A one-time job Hermes calls completed although its only run failed (11 Nov 8:25 PM).
+                         {"id": "j4", "name": "Check the purge", "schedule": "20 11 6 11 *", "state": "completed",
+                          "next": None, "last": "2026-11-06T18:20:00+00:00", "last_status": "error",
+                          "last_error": "RuntimeError: Request timed out.", "running": False, "upcoming": [], "left": 0}]},
             "rift": {"state": "absent", "subagents": None, "processes": None, "jobs": [],
                      "live_why": "its gateway is absent"}}})
         time.sleep(1)

@@ -589,8 +589,10 @@ class Chat:
         out = []
         live = self.live_states(p.workspace_id)
         for bot in self.bots(p.workspace_id):
-            msgs = chats.get(bot, {}).get("messages", [])
-            out.append({"bot": bot, "last": self._last(p.workspace_id, bot, msgs[-1] if msgs else None),
+            # The line is the newest thing he or the Bot said: a notice Hermes put in by itself is never
+            # shown as his ("You: [IMPORTANT: Background process ...", 11 Nov), nor as the Bot's.
+            said = [m for m in chats.get(bot, {}).get("messages", []) if m["role"] in ("user", "assistant")]
+            out.append({"bot": bot, "last": self._last(p.workspace_id, bot, said[-1] if said else None),
                         "unsettled": self._unsettled(p.workspace_id, bot), "live": live.get(bot),
                         "route": chats.get(bot, {}).get("route")})
         room_snap = feeds.get(p.workspace_id, "room")

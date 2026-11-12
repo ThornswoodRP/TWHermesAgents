@@ -95,7 +95,8 @@ OUTCOMES = {"confirmed": "sent", "failed": "dead", "uncertain": "uncertain"}
 CHAT_FIELDS = {"id": 128, "title": 120, "last_at": 40, "preview": 200}
 FIRST = 120   # a chat Hermes has not titled: its first message, which names it (own_connector._row)
 MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
-ROLES = ("user", "assistant")
+# A notice is a row Hermes put in the chat by itself, never his words (own_connector.NOTICE_KINDS).
+ROLES = ("user", "assistant", "notice")
 # What a connector says of its Hermes (migration 8): running, its gateway not running, or the
 # readiness check itself failing. Anything else it sends is read as no word at all.
 STATES = ("ready", "gateway_down", "check_failed")
@@ -336,7 +337,7 @@ def clean(body) -> dict:
         for m in msgs:
             row = {k: _text(m.get(k) if isinstance(m, dict) else None, n) for k, n in MESSAGE_FIELDS.items()}
             if row["role"] not in ROLES:
-                raise CoreError(400, "bad_feed", "a message is from the user or the assistant")
+                raise CoreError(400, "bad_feed", "a message is from the user or the assistant, or a notice")
             kept.append(row)
         out_open.append({"id": _sid(o.get("id")), "messages": kept})
     if len({o["id"] for o in out_open}) != len(out_open):
@@ -638,7 +639,7 @@ def clean_page(kind: str, body) -> dict:
         row = {"mid": mid, "role": _text(m.get("role"), 16), "text": _text(m.get("text"), PAGE_TEXT),
                "at": _text(m.get("at"), 40)}
         if row["role"] not in ROLES:
-            raise CoreError(400, "bad_page", "a message is from the user or the assistant")
+            raise CoreError(400, "bad_page", "a message is from the user or the assistant, or a notice")
         reactions = m.get("reactions", [])
         if not isinstance(reactions, list):
             raise CoreError(400, "bad_page", "a message's reactions are a list")
