@@ -115,6 +115,11 @@ IDLE_EVERY = 3600.0
 IDLE_FILE = ("local", "thornswood-hermes", "idle-wake.json")
 # How often the alert wake looks at Bramble's own work, at any hour.
 ALERT_EVERY = 900.0
+# The free worker look's pull request pages (_worked): REST reads, not
+# searches, so GitHub's search limits do not count them. Ten pages are the
+# thousand most recently updated pull requests; a claim whose pull request
+# is older than that is read as having none.
+PR_PAGES = 10
 # bramble-duties section 6: the area labels with one owner. An issue with
 # none of these is picked by the part it names, so any free worker may take
 # it; one whose only area is Release is Bramble's own.
@@ -413,9 +418,13 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     # Wisp's engine fixes are (10 Nov 2026: #4513's fix merged as fork
     # #148 at 5:49 AM, and Wisp, seen as still working it, got nothing
     # from 9:44 AM on, with 179 issues open in its field).
-    prs = {**_worked(bot, ask, policy["repos"]["fork"]), **_worked(bot, ask, repo)}
     claims = _claims(bot, ask, repo, list(workers.values()))
     fork_claims = _claims(bot, ask, policy["repos"]["fork"], [workers["wisp"]]) if "wisp" in workers else {}
+    # The pull requests are read back to the oldest claimed issue's creation,
+    # since a pull request for an issue is opened after it.
+    since = min((str(i["created_at"]) for items in (*claims.values(), *fork_claims.values())
+                 for i in items if i.get("created_at")), default="")
+    prs = {**_worked(bot, ask, policy["repos"]["fork"], since), **_worked(bot, ask, repo, since)}
     parked: dict[str, list[int]] = {}
     free = []
     for w in workers:
@@ -506,18 +515,27 @@ def _claims(bot: str, ask: Caller, repo: str, labels: list[str]) -> dict[str, li
     return out
 
 
-def _worked(bot: str, ask: Caller, repo: str) -> dict[tuple[str, int], str]:
-    """(worker, issue) for each of the repo's 100 most recently updated pull
-    requests that is open or merged, from its <bot>/<issue>-<what> branch,
-    with when the pull request was opened (newest when there are several)."""
-    pulls = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/repos/{repo}/pulls?state=all&sort=updated"
-                                 "&direction=desc&per_page=100"}) or {}).get("body") or []
+def _worked(bot: str, ask: Caller, repo: str, since: str = "") -> dict[tuple[str, int], str]:
+    """(worker, issue) for each of the repo's pull requests that is open or
+    merged, from its <bot>/<issue>-<what> branch, with when the pull request
+    was opened (newest when there are several). Read newest updated first, a
+    page of 100 at a time, back to since (the oldest claimed issue's
+    creation), at most PR_PAGES pages. 12 Nov 2026: it read one page, and
+    Echo's #4330, #4333 and #4327, whose fixes merged on 9 Nov and wait for
+    the main Ship, fell off it and were called parked."""
     out: dict[tuple[str, int], str] = {}
-    for p in pulls if isinstance(pulls, list) else []:
-        m = re.match(r"^([a-z]+)/(\d+)-", ((p.get("head") or {}).get("ref") or ""))
-        if m and (p.get("state") == "open" or p.get("merged_at")):
-            key = (m.group(1), int(m.group(2)))
-            out[key] = max(out.get(key, ""), str(p.get("created_at") or ""))
+    for page in range(1, PR_PAGES + 1):
+        pulls = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/repos/{repo}/pulls?state=all&sort=updated"
+                                     f"&direction=desc&per_page=100&page={page}"}) or {}).get("body") or []
+        pulls = pulls if isinstance(pulls, list) else []
+        for p in pulls:
+            m = re.match(r"^([a-z]+)/(\d+)-", ((p.get("head") or {}).get("ref") or ""))
+            if m and (p.get("state") == "open" or p.get("merged_at")):
+                key = (m.group(1), int(m.group(2)))
+                out[key] = max(out.get(key, ""), str(p.get("created_at") or ""))
+        oldest = min((str(p.get("updated_at") or "") for p in pulls), default="")
+        if len(pulls) < 100 or not since or not oldest or _when(oldest) < _when(since):
+            break
     return out
 
 
