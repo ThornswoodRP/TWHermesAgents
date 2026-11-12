@@ -262,15 +262,29 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("tw-git did not answer", out[-2])
 
     def test_no_free_worker_check_from_11_pm_to_6_am(self):
-        # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain.
+        # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain,
+        # while the Grok lanes audit overnight.
+        lanes = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": True})
         for t in (BEFORE_SIX, AFTER_SIX + 16 * 3600):  # 3:30 AM, 11:30 PM
             with self.subTest(t=t):
                 b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 4})
-                out = owed_wake.check(self.day(), "bramble", b, now=t, policy=POLICY)
+                out = owed_wake.check(self.day(), "bramble", b, now=t, policy=lanes)
                 self.assertFalse(wakes("\n".join(out)))
                 self.assertIn("no worker starts new work", out[-2])
                 paths = [a["path"] for a in b.reads()]
                 self.assertFalse([p for p in paths if "/pulls?" in p or "area%3A" in p], paths)
+
+    def test_while_the_lanes_audits_are_paused_the_look_runs_at_night_and_says_so(self):
+        # Patrick, 11 Nov 2026, 11:22 PM: "I want my Hermes Agents to work
+        # through tonight since I pauased the audits".
+        paused = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": False})
+        b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 4})
+        home = self.day()
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": AFTER_SIX + 16 * 3600})
+        out = owed_wake.check(home, "bramble", b, now=AFTER_SIX + 16 * 3600, policy=paused)  # 11:30 PM
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("audits are paused", "\n".join(out))
+        self.assertIn("in the field of echo", out[-1])
 
     def test_bramble_is_alert_at_any_hour_for_its_own_work(self):
         # Patrick, 9 Nov 2026, 1:27 AM: "Bramble should still be working and always be working and alert".

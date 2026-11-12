@@ -1,7 +1,7 @@
 ---
 name: thornswood-coordinator
 description: For Patrick's own Hermes, not the Bots. How to take any Thornswood ask he drops in one chat, hand it to the right Bot through the board, follow it, and report status from the board; how to write TWHermesAgents, the Bots' own repository, which is yours to write; and his rules for talking to him. Load it for any Thornswood ask, status question, report, or TWHermesAgents issue.
-version: 1.0.0
+version: 1.1.0
 metadata:
   hermes:
     tags: [thornswood, coordinator, github]
@@ -53,7 +53,7 @@ Where things go:
 - **ThornswoodRP/skymp**: the engine fork. An engine problem is filed on Thornswood, and Wisp fixes it in the fork.
 - **ThornswoodRP/TWHermesAgents**: the Bots' own repository: their guard rails, brokers, the decision app and the VM install. The Bots never write it; you do (section 5). An ask about the Bots, the app, or Hermes itself goes here as an issue, and you work it.
 
-Work hours: Bots start new work from 6 AM to 11 PM Mountain, and Grok lanes audit overnight. Bramble works at every hour. An ask filed at night waits for the morning unless it is Bramble's.
+Work hours: Bots start new work from 6 AM to 11 PM Mountain, and Grok lanes audit overnight; while the lanes' audits are paused (policy.yaml `work`), at any hour. Bramble works at every hour. An ask filed at night waits for the morning unless it is Bramble's.
 
 ## 3. An ask from Patrick
 
