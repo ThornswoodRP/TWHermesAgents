@@ -1041,6 +1041,9 @@ class PullRequestsAndIssues(unittest.TestCase):
             item(10, 10, labels=["claimed: Anvil"]), item(11, 11, state="CLOSED"),
             item(12, 12, assignees=["EvilPatrick06"]), item(13, None),
             {"status": None, "order": None, "content": {"__typename": "DraftIssue"}}]
+        for i in w.fake.board_items:
+            if i["content"].get("number"):
+                w.fake.add_issue(APP, i["content"]["number"])
         out = w.git.board("hermes", {"bot": "bramble", "limit": 4})
         self.assertEqual([r["number"] for r in out["issues"]], [5, 6, 7, 8])
         picks = w.git.board("hermes", {"bot": "rift", "eligible": True, "limit": 3})
@@ -1052,6 +1055,42 @@ class PullRequestsAndIssues(unittest.TestCase):
                       [t["permissions"] for t in w.fake.tokens])
         with self.assertRaises(Refused):
             w.git.board("hermes", {"bot": "patrick"})
+
+    def test_eligible_leaves_out_what_label_would_refuse_as_waiting(self):
+        # Ops #300 and #312: #4507 headed Wisp's eligible list while label
+        # refused it ("waits on ThornswoodRP/Thornswood#5754, which is still
+        # open"), and #4518 and #4536 were picked and briefed again.
+        w = World()
+
+        def item(n):
+            return {"status": {"name": "Todo"}, "order": {"number": n},
+                    "content": {"__typename": "Issue", "number": n, "title": f"t{n}", "state": "OPEN",
+                                "repository": {"nameWithOwner": APP}, "author": {"login": "EvilPatrick06"},
+                                "labels": {"nodes": [{"name": "area: Gamemode"}]}, "assignees": {"nodes": []}}}
+
+        w.fake.board_items = [item(n) for n in (4507, 4518, 4536, 4600, 4601, 4602)]
+        for n in (4507, 4518, 4536, 4600, 4601, 4602, 5754):
+            w.fake.add_issue(APP, n)
+        w.fake.add_issue(OPS, 306)
+        w.fake.add_issue(OPS, 307)
+        w.fake.issues[(OPS, 307)]["state"] = "closed"
+        w.fake.comments[(APP, 4507)] = [{"body": "Waits on ThornswoodRP/Thornswood#5754."}]
+        w.fake.comments[(APP, 4518)] = [{"body": "Waits on Thornswood-Ops #306. The cause can't be named yet."}]
+        w.fake.comments[(APP, 4536)] = [{"body": "Waits on Thornswood-Ops #307, a broker gap."}]
+        w.fake.comments[(APP, 4600)] = [{"body": "Waits on #5754."}, {"body": "Measured: it no longer waits."}]
+        out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "limit": 3})
+        self.assertEqual([r["number"] for r in out["issues"]], [4536, 4600, 4601], "#307 closed, so #4536 is free")
+        self.assertEqual([(r["number"], r["waits_on"]) for r in out["waiting"]],
+                         [(4507, f"{APP}#5754"), (4518, f"{OPS}#306")])
+        for n in (4507, 4518):
+            with self.subTest(n=n), self.assertRaises(Refused):
+                w.git.label("hermes", {"bot": "wisp", "repo": APP, "task": str(n), "number": n,
+                                       "label": "claimed: Wisp", "action": "add"})
+        # Only what a pick needs is read: once limit is reached, the rest is not.
+        read = [p for m, p, _ in w.fake.calls if m == "GET" and "/comments" in p]
+        self.assertFalse([p for p in read if "/issues/4602/" in p], read)
+        everything = w.git.board("hermes", {"bot": "bramble", "limit": 10})
+        self.assertNotIn("waiting", everything, "only an eligible read looks at waits")
 
     def test_the_board_reads_one_field_across_the_whole_board(self):
         # 9 Nov 2026: the first 100 eligible issues held none of Wisp's, 181 were open in its field.
@@ -1066,6 +1105,8 @@ class PullRequestsAndIssues(unittest.TestCase):
         w.fake.board_items = [item(i, ["area: Website"]) for i in range(1, 151)] + [
             item(500, ["bug", "area: Gamemode"]), item(501, ["area: In-game", "area: Performance"]),
             item(502, ["area: Docs"]), item(503)]
+        for i in w.fake.board_items:
+            w.fake.add_issue(APP, i["content"]["number"])
         out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "areas": ["Gamemode", "Engine", "In-game"],
                                      "limit": 20})
         self.assertEqual([r["number"] for r in out["issues"]], [500, 501])

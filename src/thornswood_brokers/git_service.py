@@ -1085,7 +1085,9 @@ class GitService:
         number, title, Status, Order, labels and assignees, read from the org
         project through the workers' App (organization projects read).
         eligible keeps only what a Bot may pick (the guide, section 3): Todo,
-        no claim label, assigned to nobody or to Patrick, not hands off.
+        no claim label, assigned to nobody or to Patrick, not hands off, and
+        not waiting on an open issue by its newest comment (waiting lists the
+        ones passed over for that).
         limit (at most 100) bounds what comes back; the read itself is whole,
         so the order is the board's. areas keeps only issues with one of
         those `area:` labels, and not_areas leaves out any with one, so a
@@ -1134,7 +1136,29 @@ class GitService:
                 continue
             out.append(row)
         out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
-        return {"open": len(out), "issues": out[:limit]}
+        if not eligible:
+            return {"open": len(out), "issues": out[:limit]}
+        # An issue whose newest comment says it waits on an open issue is not
+        # eligible, read as label reads it when a claim is asked for (Ops
+        # #300, #312: on 11 and 12 Nov 2026 #4507, #4518, #4536 and Magpie's
+        # field headed eligible while label refused every claim, and each was
+        # picked, briefed and re-measured again). Read in do-order until limit
+        # are found, so a pick costs one comments read per issue it passes.
+        picks, waiting = [], []
+        reads = set(self.policy.data["repos"].values())
+        for row in out:
+            if len(picks) >= limit:
+                break
+            if row["repo"] in reads:
+                try:
+                    waits = self._waits_on(row["repo"], row["number"])
+                except Refused as e:  # it names a repo tw-git does not read; label refuses it the same way
+                    waits = str(e)
+                if waits:
+                    waiting.append({"repo": row["repo"], "number": row["number"], "waits_on": waits})
+                    continue
+            picks.append(row)
+        return {"open": len(out) - len(waiting), "issues": picks, "waiting": waiting}
 
     @staticmethod
     def _areas(args: dict, key: str) -> set[str]:

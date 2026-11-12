@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.14.0
+version: 1.15.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -463,8 +463,14 @@ work hours.
    (`#N` in the same repo, `Thornswood-Ops #N`, or `owner/repo#N`):
    `tw_git label` reads the newest comment and refuses a claim while an
    issue it says the issue waits on is open (11 Nov 2026: #4482 was claimed
-   again at 2:37 PM Mountain while Ops #275, which it waits on, was open).
-   On that refusal, take the next issue.
+   again at 2:37 PM Mountain while Ops #275, which it waits on, was open),
+   and `tw_git board` with eligible leaves it out, listing it under
+   `waiting` (Ops #300, #312). A wait always names an issue: when it waits
+   on an event, not on work (a Monday upstream sync, a session in the
+   game), file one issue for that event and name it, so the wait clears
+   when that issue closes (12 Nov 2026: #5154 said "Waits on the first
+   Monday sync", which names nothing, and was picked again). On a refusal,
+   take the next issue.
 6. A worker that holds an active issue but has no turn running, none in
    line and nothing queued for it has stopped: a worker works an issue only
    inside a turn, so its turn was turned away, ended mid-issue, or was its
