@@ -549,11 +549,22 @@ brokers:
     # What a check may run (03-LINUX_WORK_SPLIT.md; the public CLAUDE.md
     # harness forms). One harness at a time; never Run-Gate.ps1, a launcher,
     # an installer or an engine build.
+    # The last two are the builders of the two generated files the pull
+    # request gate holds to their source (Thornswood-Ops #275): the built
+    # gamemode, from game/gamemode/*.ts, and the content plugin, from
+    # Add-ContentRecords.py. Each writes its file into the Bot's own tree,
+    # in the same sandbox as a harness, and the Bot commits it with the
+    # change. Until 11 Nov 2026 no form named them, the 4 MB gamemode.js is
+    # over a write's size and the plugin is not text, so no Bot could land
+    # a gamemode or plugin change. A builder runs code from the Bot's own
+    # tree, as every harness already does, so it gives a Bot nothing more.
     check_commands:
       - ["node", "tests/test-{name}.js"]
       - ["pwsh", "-NoProfile", "-File", "tests/test-{name}.ps1"]
       - ["python3", "tests/test-{name}.py"]
       - ["pwsh", "scripts/dev/Check-Words.ps1"]
+      - ["node", "scripts/dev/Build-Gamemode.js"]
+      - ["python3", "scripts/mods/Add-ContentRecords.py"]
     check_limits:
       MemoryMax: 2G
       CPUQuota: 100%

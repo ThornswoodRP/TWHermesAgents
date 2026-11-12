@@ -281,6 +281,18 @@ link_in "$here" "$opt/current"
 link_in "$here/hermes/plugins" "$opt/plugins"
 ok "$opt/current is $commit"
 
+# 6a. node, pinned by deploy/node.sh (nodejs.org's release, checked by its
+# SHA-256), at /usr/local/bin/node, which is first on a check's PATH
+# (files_service.check_argv) and on every user's. The Bots' checks run
+# Thornswood's harnesses and its gamemode builder with it; Ubuntu's own
+# nodejs is 18, which cannot run the builder (Thornswood-Ops #275).
+command -v curl >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl >/dev/null
+command -v xz >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q xz-utils >/dev/null
+nodebin="$(bash "$here/deploy/node.sh" "$opt/node")" || stop "node could not be put in $opt/node."
+link_in "$nodebin/node" /usr/local/bin/node
+[[ "$(/usr/local/bin/node --version)" == "$("$nodebin/node" --version)" ]] || stop "/usr/local/bin/node is not $nodebin/node."
+ok "node $(/usr/local/bin/node --version) at /usr/local/bin/node"
+
 # 6b. Patrick's own Hermes reaches the box (Patrick, 10 Nov 2026: B on the
 # report page's q-oracle-box-access, an Administrator key, made on the VM).
 # As patrick-hermes, once: an ed25519 key with no passphrase and a bridge
@@ -298,8 +310,7 @@ ok "$opt/current is $commit"
 box_user=patrick-hermes
 box_file="$(pol follow_main.box_file)"
 if id "$box_user" >/dev/null 2>&1; then
-  command -v node >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs >/dev/null
-  command -v node >/dev/null || stop "node could not be installed, and the box's bridge client is node."
+  # node is 6a's, which the box's bridge client runs on.
   # KnownHostsCommand, which holds the box's key to the pins, is OpenSSH 8.5 and later.
   ssh -G -o 'KnownHostsCommand=/bin/true' localhost >/dev/null 2>&1 || stop "this VM's ssh does not take KnownHostsCommand (OpenSSH 8.5), which holds the box's host key to its pins."
   bh="$(getent passwd "$box_user" | cut -d: -f6)"

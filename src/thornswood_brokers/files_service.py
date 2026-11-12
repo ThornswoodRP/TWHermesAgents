@@ -570,7 +570,9 @@ class FilesService:
                     ok = ok and want == got
             if ok:
                 return cmd
-        raise Refused("a check runs one harness in the forms CLAUDE.md names, or Check-Words.ps1; nothing else")
+        raise Refused("a check runs one harness in the forms CLAUDE.md names, Check-Words.ps1, or one of the two "
+                      "builders (node scripts/dev/Build-Gamemode.js, python3 scripts/mods/Add-ContentRecords.py); "
+                      "nothing else")
 
     def run_check(self, caller: str, args: dict) -> dict:
         bot, repo, tree = self._tree(args)

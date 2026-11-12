@@ -54,21 +54,19 @@ jobs:
           $bin = Join-Path $env:ProgramFiles 'Git\bin'
           if (-not (Test-Path -LiteralPath (Join-Path $bin 'bash.exe'))) { throw "Git for Windows has no bash.exe at $bin" }
           Add-Content -LiteralPath $env:GITHUB_PATH -Value $bin
-      # The VM's node is Ubuntu's own package, which deploy/install.sh 6b
-      # installs (18 on noble), and the suite's node tests run whatever node
-      # is first on PATH. The runner's own node is newer, so the VM's job puts
-      # Ubuntu's first: on 10 Nov 2026 a pane test that needed node 19 went
-      # red on the VM alone and stopped its installs.
-      - name: Ubuntu's node first, as on the VM
+      # The VM's node is the release deploy/node.sh pins, which
+      # deploy/install.sh 6a puts at /usr/local/bin/node, and the suite's node
+      # tests run whatever node is first on PATH. So the VM's job runs the
+      # same script and puts that node first: on 10 Nov 2026 a pane test that
+      # needed node 19 went red on the VM alone and stopped its installs,
+      # when the VM had Ubuntu's node 18 and the runner a newer one.
+      - name: The VM's node first, as on the VM
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get update -q >/dev/null
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends nodejs >/dev/null
-          mkdir -p "$RUNNER_TEMP/vm-node"
-          ln -sf /usr/bin/node "$RUNNER_TEMP/vm-node/node"
-          echo "$RUNNER_TEMP/vm-node" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/vm-node/node" --version
+          bin="$(bash deploy/node.sh "$RUNNER_TEMP/vm-node")"
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/node" --version
       - name: Libraries, by hash
         shell: bash
         run: |

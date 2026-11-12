@@ -537,6 +537,14 @@
         [
           "pwsh",
           "scripts/dev/Check-Words.ps1"
+        ],
+        [
+          "node",
+          "scripts/dev/Build-Gamemode.js"
+        ],
+        [
+          "python3",
+          "scripts/mods/Add-ContentRecords.py"
         ]
       ],
       "check_limits": {
