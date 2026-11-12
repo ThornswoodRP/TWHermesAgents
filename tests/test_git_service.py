@@ -809,6 +809,138 @@ class AutoMerge(unittest.TestCase):
         self.assertEqual(out["receipt"], {"auto_merge": True})
         self.assertEqual(len(w2.fake.auto_merged), 1)
 
+    def test_a_new_head_takes_auto_merge_off_before_it_is_pushed(self):
+        """Ops #272: GitHub leaves auto-merge on when a pusher with write access
+        pushes again, so #5651 (9 Nov 2026) went into the merge queue at a
+        head nobody had read. The push takes it off first, and the new head
+        needs its own merge op."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+        new = w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"},
+                     repo=APP, task="t-2")["sha"]
+        self.assertNotEqual(new, sha)
+        self.assertEqual(w.fake.auto_merge_off, [(APP, 42, sha)])
+        self.assertIsNone(w.fake.prs[(APP, 42)]["auto_merge"])
+        w.fake.prs[(APP, 42)]["head"]["sha"] = new
+        for name in w.CHECKS[APP]:
+            w.fake.add_check(APP, new, name)
+        self.assertTrue(w.merge(sha=new, repo=APP)["auto_merge"])
+        self.assertEqual([h for _, _, h, _ in w.fake.auto_merged], [sha, new])
+
+    def test_a_push_whose_auto_merge_cannot_come_off_does_not_go(self):
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.merge(sha=sha, repo=APP)
+        w.fake.refuse_auto_merge_off = True
+        with self.assertRaises(Refused):
+            w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), sha)
+        self.assertTrue(w.fake.prs[(APP, 42)]["auto_merge"])
+
+    def test_a_push_to_a_branch_without_auto_merge_turns_nothing_off(self):
+        w = World()
+        w.green_pr(repo=APP, checks=False)
+        w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.auto_merge_off, [])
+
+    def test_auto_merge_github_took_off_goes_on_again_at_the_same_head(self):
+        """Ops #272, 12 Nov 2026: #5856 left the merge queue on a red queue
+        run, GitHub turned its auto-merge off at the same head 5b8162c, and
+        the merge op there answered "already done"."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("already done", str(e.exception))
+        w.fake.prs[(APP, 42)]["auto_merge"] = None
+        out = w.merge(sha=sha, repo=APP)
+        self.assertTrue(out["auto_merge"], out)
+        self.assertEqual(len(w.fake.auto_merged), 2)
+
+
+class DeleteBranch(unittest.TestCase):
+    """Ops #286: a Bot's branch with no pull request stayed for good
+    (rift/4509-hide-weapon-recipes, 10 Nov 2026). Bramble deletes one at the
+    head it read, and only a Bot's, with no open pull request."""
+
+    def delete(self, w, **args):
+        base = {"bot": "bramble", "repo": APP, "task": "4509", "branch": "rift/4509-hide-weapon-recipes"}
+        return w.git.delete_branch("hermes", dict(base, **args))
+
+    def test_bramble_deletes_a_bots_branch_with_no_pull_request(self):
+        w = World()
+        sha = w.push("rift", "rift/4509-hide-weapon-recipes", {"a": "a\n"})["sha"]
+        out = self.delete(w, sha=sha)
+        self.assertTrue(out["done"], out)
+        self.assertIsNone(w.fake.ref(APP, "rift/4509-hide-weapon-recipes"))
+        deletes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
+        self.assertTrue(deletes)
+
+    def test_what_is_refused(self):
+        w = World()
+        sha = w.push("rift", "rift/4509-hide-weapon-recipes", {"a": "a\n"})["sha"]
+        w.push("sprocket", "sprocket/3561-path-fence", {"b": "b\n"})
+        w.fake.add_pr(APP, 42, head_ref="sprocket/3561-path-fence", head_sha=w.fake.ref(APP, "sprocket/3561-path-fence"),
+                      files=["b"])
+        for bad, why in (({"bot": "rift", "sha": sha}, "only Bramble"),
+                         ({"sha": "e" * 40}, "read it again"),
+                         ({}, "head you read"),
+                         ({"branch": "main", "sha": sha}, "not a Bot's branch"),
+                         ({"branch": "claude/5381-avalonia", "sha": sha}, "not a Bot's branch"),
+                         ({"branch": "rift/9-gone", "sha": sha}, "has no branch"),
+                         ({"branch": "sprocket/3561-path-fence", "sha": w.fake.ref(APP, "sprocket/3561-path-fence")},
+                          "open pull request #42")):
+            with self.subTest(bad=bad), self.assertRaises(Refused) as e:
+                self.delete(w, **bad)
+            self.assertIn(why, str(e.exception))
+        self.assertEqual(w.fake.ref(APP, "rift/4509-hide-weapon-recipes"), sha)
+        self.assertEqual(w.fake.writes("DELETE"), [])
+
+
+class MirrorFetches(unittest.TestCase):
+    """Ops #293, 11 Nov 2026: two fetches of one mirror moved the same refs
+    under each other ("cannot lock ref 'refs/remotes/origin/main': is at
+    472ffbd but expected f6ae996") and Echo's push failed before it was sent."""
+
+    def test_two_fetches_of_one_mirror_never_overlap_and_both_finish(self):
+        import threading
+        import time
+        w = World()
+        real, active, most, lock = w.git._git, [0], [0], threading.Lock()
+
+        def slow_git(path, *args, **kw):
+            if args[:1] != ("fetch",):
+                return real(path, *args, **kw)
+            with lock:
+                active[0] += 1
+                most[0] = max(most[0], active[0])
+            try:
+                time.sleep(0.2)
+                return real(path, *args, **kw)
+            finally:
+                with lock:
+                    active[0] -= 1
+
+        w.git._git = slow_git
+        done, errors = [], []
+
+        def fetch():
+            try:
+                done.append(w.git._mirror(APP, "workers"))
+            except Exception as e:  # noqa: BLE001 - the test reports it
+                errors.append(e)
+
+        threads = [threading.Thread(target=fetch) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(done), 3)
+        self.assertEqual(most[0], 1, "a second fetch of the mirror started while one was running")
+
 
 class PullRequestsAndIssues(unittest.TestCase):
     def test_a_worker_opens_a_pr_from_its_own_branch_once(self):
@@ -1041,6 +1173,9 @@ class PullRequestsAndIssues(unittest.TestCase):
             item(10, 10, labels=["claimed: Anvil"]), item(11, 11, state="CLOSED"),
             item(12, 12, assignees=["EvilPatrick06"]), item(13, None),
             {"status": None, "order": None, "content": {"__typename": "DraftIssue"}}]
+        for i in w.fake.board_items:
+            if i["content"].get("number"):
+                w.fake.add_issue(APP, i["content"]["number"])
         out = w.git.board("hermes", {"bot": "bramble", "limit": 4})
         self.assertEqual([r["number"] for r in out["issues"]], [5, 6, 7, 8])
         picks = w.git.board("hermes", {"bot": "rift", "eligible": True, "limit": 3})
@@ -1052,6 +1187,42 @@ class PullRequestsAndIssues(unittest.TestCase):
                       [t["permissions"] for t in w.fake.tokens])
         with self.assertRaises(Refused):
             w.git.board("hermes", {"bot": "patrick"})
+
+    def test_eligible_leaves_out_what_label_would_refuse_as_waiting(self):
+        # Ops #300 and #312: #4507 headed Wisp's eligible list while label
+        # refused it ("waits on ThornswoodRP/Thornswood#5754, which is still
+        # open"), and #4518 and #4536 were picked and briefed again.
+        w = World()
+
+        def item(n):
+            return {"status": {"name": "Todo"}, "order": {"number": n},
+                    "content": {"__typename": "Issue", "number": n, "title": f"t{n}", "state": "OPEN",
+                                "repository": {"nameWithOwner": APP}, "author": {"login": "EvilPatrick06"},
+                                "labels": {"nodes": [{"name": "area: Gamemode"}]}, "assignees": {"nodes": []}}}
+
+        w.fake.board_items = [item(n) for n in (4507, 4518, 4536, 4600, 4601, 4602)]
+        for n in (4507, 4518, 4536, 4600, 4601, 4602, 5754):
+            w.fake.add_issue(APP, n)
+        w.fake.add_issue(OPS, 306)
+        w.fake.add_issue(OPS, 307)
+        w.fake.issues[(OPS, 307)]["state"] = "closed"
+        w.fake.comments[(APP, 4507)] = [{"body": "Waits on ThornswoodRP/Thornswood#5754."}]
+        w.fake.comments[(APP, 4518)] = [{"body": "Waits on Thornswood-Ops #306. The cause can't be named yet."}]
+        w.fake.comments[(APP, 4536)] = [{"body": "Waits on Thornswood-Ops #307, a broker gap."}]
+        w.fake.comments[(APP, 4600)] = [{"body": "Waits on #5754."}, {"body": "Measured: it no longer waits."}]
+        out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "limit": 3})
+        self.assertEqual([r["number"] for r in out["issues"]], [4536, 4600, 4601], "#307 closed, so #4536 is free")
+        self.assertEqual([(r["number"], r["waits_on"]) for r in out["waiting"]],
+                         [(4507, f"{APP}#5754"), (4518, f"{OPS}#306")])
+        for n in (4507, 4518):
+            with self.subTest(n=n), self.assertRaises(Refused):
+                w.git.label("hermes", {"bot": "wisp", "repo": APP, "task": str(n), "number": n,
+                                       "label": "claimed: Wisp", "action": "add"})
+        # Only what a pick needs is read: once limit is reached, the rest is not.
+        read = [p for m, p, _ in w.fake.calls if m == "GET" and "/comments" in p]
+        self.assertFalse([p for p in read if "/issues/4602/" in p], read)
+        everything = w.git.board("hermes", {"bot": "bramble", "limit": 10})
+        self.assertNotIn("waiting", everything, "only an eligible read looks at waits")
 
     def test_the_board_reads_one_field_across_the_whole_board(self):
         # 9 Nov 2026: the first 100 eligible issues held none of Wisp's, 181 were open in its field.
@@ -1066,6 +1237,8 @@ class PullRequestsAndIssues(unittest.TestCase):
         w.fake.board_items = [item(i, ["area: Website"]) for i in range(1, 151)] + [
             item(500, ["bug", "area: Gamemode"]), item(501, ["area: In-game", "area: Performance"]),
             item(502, ["area: Docs"]), item(503)]
+        for i in w.fake.board_items:
+            w.fake.add_issue(APP, i["content"]["number"])
         out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "areas": ["Gamemode", "Engine", "In-game"],
                                      "limit": 20})
         self.assertEqual([r["number"] for r in out["issues"]], [500, 501])
@@ -1180,6 +1353,22 @@ class CloseIssue(unittest.TestCase):
         w.green_pr(repo=APP)
         w.fake.prs[(APP, 42)]["merged"] = True
         self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
+
+    def test_a_merged_pull_request_over_250_commits_finishes_it(self):
+        # Ops #307: PR 5381 had 280 commits, GitHub lists 250, and the full
+        # read refused it, so #4536 could not be closed as done by it.
+        w = World()
+        w.fake.add_issue(APP, 5585)
+        w.green_pr(repo=APP)
+        w.fake.prs[(APP, 42)].update(merged=True, commits=280)
+        self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
+        self.assertEqual(w.fake.issues[(APP, 5585)]["state_reason"], "completed")
+        # Still only a merged one.
+        w.fake.add_issue(APP, 5586)
+        w.fake.prs[(APP, 42)]["merged"] = False
+        with self.assertRaises(Refused) as e:
+            self.close(w, reason="completed", done_by_pr=42, number=5586)
+        self.assertIn("has not merged", str(e.exception))
 
     def test_what_is_refused(self):
         w = World()
@@ -1403,6 +1592,7 @@ class OneExecutor(unittest.TestCase):
             "close_pr": {"bot": "bramble", "repo": APP, "task": "t", "number": 42},
             "close_issue": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "reason": "duplicate",
                             "duplicate_of": 41, "body": "Same."},
+            "delete_branch": {"bot": "bramble", "repo": APP, "task": "t", "branch": "sprocket/3561-path-fence", "sha": sha},
             "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml",
                           "commit": main, "inputs": {}},
         }

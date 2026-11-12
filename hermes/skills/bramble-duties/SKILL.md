@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, run the Ops run notes and the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.14.0
+version: 1.16.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -65,7 +65,10 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    when those rules do not require every check the policy names, or when one
    is already red.
 4. A new push to a Bot's pull request after its review needs your review of
-   the new head, then `tw_git merge` again.
+   the new head, then `tw_git merge` again. `tw_git push` takes auto-merge
+   off the pull request before the new head goes up, so nothing merges at a
+   head you have not read (Ops #272: #5651 went into the queue at an unread
+   head on 9 Nov 2026), and the merge op at the new head is a new one.
 
 In ThornswoodRP/Thornswood-Ops:
 
@@ -87,6 +90,12 @@ In all three:
   10:38 PM and 11:01 PM UTC: Bramble wrote the same red-check note twice on
   issue #5538 about a thread's pull request #5540 at one head, 79196d9,
   because this line read as every pull request on every wake.)
+- A Bot's branch whose work is finished and that has no open pull request
+  (its work went into another pull request, or it never got one) goes:
+  read its head (`GET /repos/<repo>/git/ref/heads/<branch>`), then
+  `tw_git delete_branch` with that `sha` (Ops #286: rift/4509-hide-weapon-
+  recipes stayed after its test went onto #5731's branch). GitHub deletes
+  a merged pull request's branch itself.
 - No merge needs a card or Patrick's yes, and none is recorded in
   DECIDED.md.
 - Never merge ThornswoodRP/TWHermesAgents. Patrick's own Hermes writes it, and merge-green merges each of its pull requests once the checks pass (the guide, section 1).
@@ -110,7 +119,12 @@ CI_TIMEOUT.
 3. Do not put it back yourself. There is no timer and no retry. When the
    owner pushes the fix, the owner turns auto-merge on again; for a Bot's
    pull request that is you, through step 1, once your review of the new
-   head stands.
+   head stands. When the cause was not in the pull request but on main
+   (a job main broke, fixed on main since), there is nothing for the owner
+   to push: once main's fix has merged, `tw_git merge` at the same head
+   puts it on again, once, and says so in one comment naming main's fix
+   (12 Nov 2026: #5856 left the queue on #5860's failure, which #5866
+   fixed on main; until Ops #272 the merge op answered "already done").
 
 ## 3. Pull requests from outside the team
 
@@ -463,8 +477,14 @@ work hours.
    (`#N` in the same repo, `Thornswood-Ops #N`, or `owner/repo#N`):
    `tw_git label` reads the newest comment and refuses a claim while an
    issue it says the issue waits on is open (11 Nov 2026: #4482 was claimed
-   again at 2:37 PM Mountain while Ops #275, which it waits on, was open).
-   On that refusal, take the next issue.
+   again at 2:37 PM Mountain while Ops #275, which it waits on, was open),
+   and `tw_git board` with eligible leaves it out, listing it under
+   `waiting` (Ops #300, #312). A wait always names an issue: when it waits
+   on an event, not on work (a Monday upstream sync, a session in the
+   game), file one issue for that event and name it, so the wait clears
+   when that issue closes (12 Nov 2026: #5154 said "Waits on the first
+   Monday sync", which names nothing, and was picked again). On a refusal,
+   take the next issue.
 6. A worker that holds an active issue but has no turn running, none in
    line and nothing queued for it has stopped: a worker works an issue only
    inside a turn, so its turn was turned away, ended mid-issue, or was its

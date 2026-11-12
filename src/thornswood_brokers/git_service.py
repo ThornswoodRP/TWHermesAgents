@@ -18,6 +18,7 @@ to write again.
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import logging
@@ -88,6 +89,11 @@ AUTO_MERGE = """mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMerg
   enablePullRequestAutoMerge(input: {pullRequestId: $pr, expectedHeadOid: $head, mergeMethod: $method}) {
     pullRequest { autoMergeRequest { enabledAt } }
   }
+}"""
+# Auto-merge off again (Ops #272): before a new head goes on a branch whose
+# pull request has it on, since GitHub leaves it on for a pusher with write.
+AUTO_MERGE_OFF = """mutation($pr: ID!) {
+  disablePullRequestAutoMerge(input: {pullRequestId: $pr}) { pullRequest { autoMergeRequest { enabledAt } } }
 }"""
 WORKFLOW_DIR = ".github/workflows/"
 # A Co-authored-by line in a commit message: the credit for someone else's work.
@@ -241,11 +247,19 @@ class GitService:
 
     def _mirror(self, repo: str, app: str) -> Path:
         path = self.mirrors / (repo.replace("/", "__") + ".git")
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True, capture_output=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         auth = [] if self.git_base.startswith("file:") else [f"http.extraHeader={self.gh.git_auth_header(app, repo, {'contents': 'read', 'metadata': 'read'})}"]
-        self._git(path, "fetch", "-q", "--prune", self._url(repo), "+refs/heads/*:refs/remotes/origin/*", extra_config=auth)
+        # One fetch of a mirror at a time. tw-git answers each call on its own
+        # thread, and two fetches of the same mirror moved the same refs under
+        # each other: a push of echo/4394-hub-signout-target failed on 11 Nov
+        # 2026 with "cannot lock ref 'refs/remotes/origin/main': is at 472ffbd
+        # but expected f6ae996" (Ops #293). The second waits for the first.
+        with open(path.parent / (path.name + ".fetching"), "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            if not path.exists():
+                subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True, capture_output=True)
+            self._git(path, "fetch", "-q", "--prune", self._url(repo), "+refs/heads/*:refs/remotes/origin/*",
+                      extra_config=auth)
         return path
 
     def _url(self, repo: str) -> str:
@@ -337,6 +351,18 @@ class GitService:
                            files=files, labels=[l["name"] for l in raw.get("labels", [])],
                            draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits,
                            carried_from=carried_from, body_carried_from=body_carried)
+
+    def _merged_pr(self, repo: str, number: int) -> PullRequest:
+        """A pull request as it stands, without its files and commits: all
+        that closing an issue as done by it asks is whether it merged. _pr
+        reads every file and commit so that nothing merges unseen, and it
+        refused a merged pull request over 250 commits, so its issue could
+        not be closed (Ops #307, 12 Nov 2026: Thornswood #4536 and PR 5381,
+        280 commits)."""
+        raw = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{int(number)}")
+        return PullRequest(repo=repo, number=int(number), head_sha=raw["head"]["sha"], head_ref=raw["head"]["ref"],
+                           base_ref=raw["base"]["ref"], author_bot=None, author_login=raw["user"]["login"],
+                           merged=bool(raw.get("merged")))
 
     def _checks(self, repo: str, sha: str) -> list[CheckRun]:
         runs = self.gh.get_all("bramble", repo, f"/repos/{repo}/commits/{sha}/check-runs?filter=all", key="check_runs")
@@ -440,9 +466,42 @@ class GitService:
         def read_back():
             return {"ref": f"refs/heads/{branch}", "sha": new} if self._ref_sha(repo, branch) == new else None
 
+        if remote and remote != new:
+            self._auto_merge_off(bot, task, repo, branch, remote)
         out = self._guarded_write(bot, task, "push", repo, f"refs/heads/{branch}", new, write=write, read_back=read_back)
         out.update({"sha": new, "changed_files": len(changed), "workflow_change": workflows})
         return out
+
+    def _auto_merge_off(self, bot: str, task: str, repo: str, branch: str, head: str) -> None:
+        """Before a new head goes on a branch, auto-merge comes off its open
+        pull request, so nothing merges at a head Bramble did not merge.
+        Bramble turns auto-merge on at one exact head, but GitHub leaves it on
+        when someone with write access pushes again, and the workers' App has
+        contents write: Thornswood #5651 (9 Nov 2026) went into the merge
+        queue at a new head before anyone read it, and #5744 (11 Nov) merged
+        at a head Bramble had said it was holding (Ops #272). A merge at the
+        new head is a new merge op. When it cannot be turned off, the push
+        does not go."""
+        owner = repo.split("/", 1)[0]
+        for raw in self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls?state=open&head={quote(owner + ':' + branch)}"):
+            if raw.get("state") != "open" or (raw.get("head") or {}).get("ref") != branch or not raw.get("auto_merge"):
+                continue
+            number = int(raw["number"])
+            node = self._queue_state(repo, number, raw["base"]["ref"])["id"]
+
+            def write(node=node):
+                data = self.gh.graphql("bramble", repo, WRITE["merge"], AUTO_MERGE_OFF, {"pr": node})
+                return {"auto_merge": bool((((data.get("disablePullRequestAutoMerge") or {}).get("pullRequest") or {})
+                                            .get("autoMergeRequest")))}
+
+            def read_back(number=number):
+                now = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{number}")
+                return {"auto_merge": False} if not now.get("auto_merge") else None
+
+            # undone: it was read on just now, so an earlier "off" at this
+            # head is of a past state (Bramble turned it on again since).
+            self._guarded_write(bot, task, "auto-merge-off", repo, f"pr/{number}", head,
+                                write=write, read_back=read_back, undone=True)
 
     def _carried_bundle(self, bot: str, branch: str, name: str) -> Path:
         """The bundle a push sends: from the Bot's own spool, or, when Bramble
@@ -839,6 +898,12 @@ class GitService:
         # time, so the queue can come and go in either order with this code.
         state = self._queue_state(repo, number, pr.base_ref)
         queue = state["queue"]
+        # GitHub took it off since our receipt (out of the merge queue on a
+        # red queue run turns auto-merge off at the same head), so "already
+        # done" would describe the past: Thornswood #5856, 12 Nov 2026, read
+        # auto_merge null at 5b8162c and the merge op there answered done
+        # (Ops #272).
+        undone = state["head"] == sha and not (state["merged"] or state["queued"] or state["auto"])
 
         def write():
             if auto:
@@ -856,7 +921,8 @@ class GitService:
                 raise GitHubError(r.status, str((r.body or {}).get("message") if isinstance(r.body, dict) else r.body))
             return {"merged": True}
 
-        out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back)
+        out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back,
+                                  undone=undone)
         receipt = out.get("receipt") or {}
         if receipt.get("queued"):
             out["queued"] = True
@@ -979,7 +1045,7 @@ class GitService:
         if args.get("duplicate_of") is not None:
             duplicate = self._issue(repo, int(args["duplicate_of"]))
         if args.get("done_by_pr") is not None:
-            done_pr = self._pr(repo, int(args["done_by_pr"]))
+            done_pr = self._merged_pr(repo, int(args["done_by_pr"]))
         if args.get("done_by_run") is not None:
             run_repo = str(args.get("run_repo") or repo)
             if self.policy.data["merge"]["base"].get(run_repo) is None:
@@ -1012,6 +1078,47 @@ class GitService:
             return {"closed": True, "state_reason": now.get("state_reason")} if now.get("state") == "closed" else None
 
         return self._guarded_write(bot, task, "close_issue", repo, f"issue/{number}/close", "",
+                                   write=write, read_back=read_back)
+
+    def delete_branch(self, caller: str, args: dict) -> dict:
+        """Bramble deletes a Bot's branch that has no open pull request, at the
+        head it read (sha), so a branch someone pushed to since stays. GitHub
+        deletes a pull request's branch when it merges, but a branch that never
+        got one, or whose work went into another pull request, stayed for good:
+        rift/4509-hide-weapon-recipes, whose test went onto #5731's branch
+        (Ops #286, 10 Nov 2026)."""
+        bot, repo, task = self._bot(args), self._repo(args), self._task(args)
+        branch, sha = str(args.get("branch") or ""), str(args.get("sha") or "")
+        if not self.policy.is_router(bot):
+            raise Refused(f"only Bramble deletes a branch; {self.policy.bot_name(bot)} never does")
+        if (no := self.rules._outside_app(bot, repo)) is not None:
+            raise Refused(no.reason)
+        owner = self.policy.branch_owner(branch)
+        if owner is None:
+            raise Refused(f"{branch or 'that'} is not a Bot's branch (<bot>/...); only a Bot's branch is deleted")
+        if not SHA.fullmatch(sha):
+            raise Refused("name the head you read (sha), so a branch that moved since is not deleted")
+        now = self._ref_sha(repo, branch)
+        if now is None:
+            raise Refused(f"GitHub has no branch {branch} in {repo}")
+        if now != sha:
+            raise Refused(f"{branch} is at {now[:12]}, not {sha[:12]}; read it again")
+        org = repo.split("/", 1)[0]
+        open_prs = [p["number"] for p in self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls?state=open&head={quote(org + ':' + branch)}")
+                    if p.get("state") == "open" and (p.get("head") or {}).get("ref") == branch]
+        if open_prs:
+            raise Refused(f"{branch} is the head of open pull request #{open_prs[0]}; that pull request closes or merges first")
+
+        def write():
+            r = self.gh.call("bramble", repo, WRITE["push"], "DELETE", f"/repos/{repo}/git/refs/heads/{quote(branch)}")
+            if r.status != 204:
+                raise GitHubError(r.status, str(r.body))
+            return {"deleted": True}
+
+        def read_back():
+            return {"deleted": True} if self._ref_sha(repo, branch) is None else None
+
+        return self._guarded_write(bot, task, "delete_branch", repo, f"refs/heads/{branch}", sha,
                                    write=write, read_back=read_back)
 
     def start_run(self, caller: str, args: dict) -> dict:
@@ -1085,7 +1192,9 @@ class GitService:
         number, title, Status, Order, labels and assignees, read from the org
         project through the workers' App (organization projects read).
         eligible keeps only what a Bot may pick (the guide, section 3): Todo,
-        no claim label, assigned to nobody or to Patrick, not hands off.
+        no claim label, assigned to nobody or to Patrick, not hands off, and
+        not waiting on an open issue by its newest comment (waiting lists the
+        ones passed over for that).
         limit (at most 100) bounds what comes back; the read itself is whole,
         so the order is the board's. areas keeps only issues with one of
         those `area:` labels, and not_areas leaves out any with one, so a
@@ -1134,7 +1243,29 @@ class GitService:
                 continue
             out.append(row)
         out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
-        return {"open": len(out), "issues": out[:limit]}
+        if not eligible:
+            return {"open": len(out), "issues": out[:limit]}
+        # An issue whose newest comment says it waits on an open issue is not
+        # eligible, read as label reads it when a claim is asked for (Ops
+        # #300, #312: on 11 and 12 Nov 2026 #4507, #4518, #4536 and Magpie's
+        # field headed eligible while label refused every claim, and each was
+        # picked, briefed and re-measured again). Read in do-order until limit
+        # are found, so a pick costs one comments read per issue it passes.
+        picks, waiting = [], []
+        reads = set(self.policy.data["repos"].values())
+        for row in out:
+            if len(picks) >= limit:
+                break
+            if row["repo"] in reads:
+                try:
+                    waits = self._waits_on(row["repo"], row["number"])
+                except Refused as e:  # it names a repo tw-git does not read; label refuses it the same way
+                    waits = str(e)
+                if waits:
+                    waiting.append({"repo": row["repo"], "number": row["number"], "waits_on": waits})
+                    continue
+            picks.append(row)
+        return {"open": len(out) - len(waiting), "issues": picks, "waiting": waiting}
 
     @staticmethod
     def _areas(args: dict, key: str) -> set[str]:
@@ -1172,7 +1303,7 @@ class GitService:
 
     # Every op that changes something on GitHub.
     WRITES = ("push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-              "close_issue", "start_run")
+              "close_issue", "delete_branch", "start_run")
 
     def _executor_only(self, name: str, op: Callable[[str, dict], dict]) -> Callable[[str, dict], dict]:
         """One executor at a time (plan phases 4 and 5): until the cutover the
@@ -1189,7 +1320,7 @@ class GitService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-                 "close_issue", "start_run", "read", "board", "refused", "ledger_event")
+                 "close_issue", "delete_branch", "start_run", "read", "board", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
         # root's follower alone, never a Bot.

@@ -730,6 +730,16 @@ class Checks(unittest.TestCase):
             self.assertIn(hidden, props["InaccessiblePaths"].split())
         self.assertEqual(argv[-3:], ["--", "node", "tests/test-x.js"])
 
+    def test_git_reads_the_tree_the_check_runs_in(self):
+        """Ops #284: the tree is tw-files' and the check another uid's, so git
+        refused it as dubious ownership; git trusts this one tree only."""
+        tree = "/srv/tw/work/rift/Thornswood/12-load-order"
+        argv = check_argv(policy(), "rift", tree, ["node", "tests/test-x.js"])
+        env = dict(a.split("=", 1)[1].split("=", 1) for a in argv[:argv.index("--")] if a.startswith("--setenv="))
+        self.assertEqual((env["GIT_CONFIG_COUNT"], env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]),
+                         ("1", "safe.directory", tree))
+        self.assertNotIn("*", env["GIT_CONFIG_VALUE_0"])
+
     def test_only_the_gateway_user_calls_tw_files(self):
         self.assertTrue(all(users == {"hermes"} for _, users in World().files.ops().values()))
 
