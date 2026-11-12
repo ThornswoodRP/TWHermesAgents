@@ -1490,7 +1490,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   // 9 Nov: Android saved both of Patrick's fingerprint tries in Bitwarden, and the Decisions list went on
   // offering the fingerprint. A try a passkey app took is kept as a passkey, and the offer goes.
   await page.goto(base + '/m/decisions')
-  await step('a fingerprint try a passkey app took is said, and Decisions stops offering it', async () => {
+  await step('a fingerprint try a passkey app took is said, and neither Decisions nor Settings offers it again', async () => {
     await page.getByRole('button', { name: 'Use my fingerprint' }).waitFor({ timeout: 8000 })
     await page.route('**/api/v1/passkeys/register', async (r) => {
       const real = await r.fetch()
@@ -1504,6 +1504,10 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     await page.evaluate(() => { localStorage.removeItem('hermes.phoneKey.v1'); return route() })
     await page.locator('#view').getByText(/^(Nothing needs you right now\.|Waiting on you)/).first().waitFor({ timeout: 8000 })
     if (await page.getByText('Sign in with your fingerprint', { exact: true }).count()) throw new Error('still offered')
+    // 12 Nov, Patrick's answer C: Settings stops offering it on that phone too.
+    await page.evaluate(() => go('/m/settings'))
+    await page.getByRole('heading', { name: 'Passkeys' }).waitFor({ timeout: 8000 })
+    if (await page.getByRole('button', { name: 'Use my fingerprint' }).count()) throw new Error('Settings still offers it')
   })
   // Nothing may widen the page (Patrick's Pixel 9a, 1 Nov): a link, a commit id or a branch name with no
   // space in it pushed the page past the phone's width, and the last tab went off-screen at normal zoom.
