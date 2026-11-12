@@ -76,7 +76,7 @@ from typing import Callable
 
 from thornswood_guard.policy import Policy
 
-from . import reload, wire
+from . import reload, restart_plan, wire
 
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
@@ -336,8 +336,49 @@ class Follower:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def install(self, dest: Path, commit: str) -> None:
-        self.sh("install", ["bash", str(dest / "deploy" / "install.sh"), commit])
+    def keeps(self, before: str | None, dest: Path) -> dict[str, bool]:
+        """What the install may leave running (restart_plan): the brokers when
+        nothing they load changed, and the connector, with every Bot turn it
+        runs, when nothing it or the brokers load changed and the core's store
+        does not migrate (a migration stops every worker of the core, 1 Nov).
+        A release that cannot be read keeps nothing."""
+        try:
+            old = self.opt / "releases" / before if before else None
+            changed = restart_plan.changed((old, packages_in(old)) if old else None, (dest, packages_in(dest)))
+        except (Stop, OSError, SyntaxError, ValueError) as e:
+            self.say(f"NOTE what this release changes could not be read ({e}); every process starts again")
+            return {"brokers": False, "connector": False}
+        migrates = self.migrates(dest)
+        # A broker starting again refuses calls for a second or two, and a turn
+        # whose ticket check (tw-policy's touch) is refused is refused for the
+        # rest of the turn (thornswood_guard.brokers.TurnGate). So the
+        # connector's turns go on only while the brokers do too.
+        keep = {"brokers": not changed["brokers"],
+                "connector": not changed["brokers"] and not changed["connector"] and not migrates}
+        why = [w for w, yes in (("what it loads changed", changed["connector"]), ("the brokers start again", changed["brokers"]),
+                                ("the core's store migrates", migrates)) if yes]
+        self.say("the brokers " + ("keep running: nothing they load changed" if keep["brokers"] else "start again")
+                 + "; the connector " + (f"starts again: {', '.join(why)}" if why else
+                                         "keeps running: nothing it or the brokers load changed and the store does not migrate"))
+        return keep
+
+    def migrates(self, dest: Path) -> bool:
+        """Whether the core's store moves to another schema at this release; a
+        store that cannot be read counts as moving."""
+        try:
+            have = self.store_schema()
+            return have is not None and self.known_schema(dest) != have
+        except (Stop, OSError, sqlite3.Error) as e:
+            self.say(f"NOTE the core's store schema could not be compared ({e}); it counts as migrating")
+            return True
+
+    def install(self, dest: Path, commit: str, *, keep_brokers: bool = False, keep_connector: bool = False) -> None:
+        # A flag goes only to an install script that reads it; a put-back's
+        # older release gets none and starts everything again, as it did.
+        script = dest / "deploy" / "install.sh"
+        text = script.read_text(encoding="utf-8", errors="replace") if script.is_file() else ""
+        flags = ["--keep-brokers"] if keep_brokers and "--keep-brokers)" in text else []
+        self.sh("install", ["bash", str(script), commit, *flags])
         # deploy/install.sh has just pointed current at this release, which the
         # decision core's install checks before it does anything.
         if not self._at(self.r["decide_env"]).exists():
@@ -351,7 +392,14 @@ class Follower:
         # still on the release before would meet its old tools. 2 Nov 2026: Patrick's answers that waited
         # on tw_git's open_issue are put back in the queue by a migration, and the core's install runs
         # that migration before apply.py and tw-reload-bots give the Bots the op.
-        self.connector_later = "--connector-later" in core.read_text(encoding="utf-8", errors="replace")
+        text = core.read_text(encoding="utf-8", errors="replace")
+        if keep_connector and "--keep-connector)" in text:
+            # 12 Nov 2026: each install stopped the connector, and with it every
+            # Bot turn it was running, though nothing it runs had changed.
+            self.connector_later = False
+            self.sh("install", ["bash", str(core), commit, "--keep-connector"])
+            return
+        self.connector_later = "--connector-later" in text
         self.sh("install", ["bash", str(core), commit] + (["--connector-later"] if self.connector_later else []))
 
     def start_connector(self) -> None:
@@ -536,11 +584,19 @@ class Follower:
             self.report("not installed", commit=tip, step=e.step, reason=e.reason, before=before)
             return 1
         try:
-            # reload.drain says False when tw-policy did not hold new turns;
-            # then the reload holds and waits itself.
-            self.held = self.drain_() is not False
+            keep = self.keeps(before, dest)
+            if keep["connector"]:
+                # Nothing a turn runs in stops for the install. A reload, when
+                # apply says one is needed, holds and waits itself, only for
+                # the turns in the gateway and Desktop's sessions it stops.
+                self.held = False
+                self.say("new turns are not held: the install stops nothing a running turn needs")
+            else:
+                # reload.drain says False when tw-policy did not hold new turns;
+                # then the reload holds and waits itself.
+                self.held = self.drain_() is not False
             unit = self.gateway_unit()
-            self.install(dest, tip)
+            self.install(dest, tip, keep_brokers=keep["brokers"], keep_connector=keep["connector"])
             needed = self.apply(dest, tip)
             if needed or self.gateway_unit() != unit:
                 self.restart()
@@ -562,7 +618,8 @@ class Follower:
         finally:
             # The drain's hold on new turns ends here whatever happened; a
             # reload has ended it already, and ending it again changes nothing.
-            self.end_hold_()
+            if self.held:
+                self.end_hold_()
         self.say(f"PASS {tip[:12]} is installed, applied, {reloaded} and the canary passed")
         self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None,
                     log=str(self.log))

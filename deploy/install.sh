@@ -14,6 +14,11 @@
 #
 # --move-gateway moves the Hermes gateway from the hermes user's own unit to
 # tw-hermes-gateway.service in tw-hermes.slice, starting it the same way.
+# --keep-brokers leaves the four brokers running when they are already up:
+# tw-follow-main passes it when nothing the brokers load changed between the
+# installed release and this one (thornswood_brokers.restart_plan), so an
+# install that does not touch them does not refuse the Bots' calls while
+# they start again (12 Nov). A broker that is not running is still started.
 # --quotas turns group quotas on for the filesystem holding /srv/tw (ext4
 # only; it adds the journaled quota options to that line of /etc/fstab after
 # checking the new file, remounts, and builds the quota file), so each Bot's
@@ -22,15 +27,16 @@
 set -euo pipefail
 umask 022
 
-commit="${1:?usage: install.sh <commit> [--move-gateway] [--quotas]}"
+commit="${1:?usage: install.sh <commit> [--move-gateway] [--quotas] [--keep-brokers]}"
 shift
-move_gateway=""; quotas=""
+move_gateway=""; quotas=""; keep_brokers=""
 for arg in "$@"; do
   case "$arg" in
     --move-gateway) move_gateway="$arg" ;;
     --quotas) quotas="$arg" ;;
+    --keep-brokers) keep_brokers="$arg" ;;
     "") ;;
-    *) echo "STOP: the options are --move-gateway and --quotas, not $arg."; exit 1 ;;
+    *) echo "STOP: the options are --move-gateway, --quotas and --keep-brokers, not $arg."; exit 1 ;;
   esac
 done
 opt=/opt/thornswood-hermes
@@ -546,8 +552,17 @@ systemctl restart tw-offsite.path
 # (2 Nov, 10:06 PM) hit the limit, the brokers stayed down and the put-back's
 # own restart was refused too. reset-failed clears the count for this restart
 # only; a broker that then fails by itself still meets the limit.
-systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
-systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
+if [[ -n "$keep_brokers" ]]; then
+  # Nothing they load changed, so the running brokers already hold this
+  # release's code; enable --now above started any that was not running.
+  for unit in tw-policy.service tw-git.service tw-files.service tw-proxy.service; do
+    systemctl is-active --quiet "$unit" || stop "$unit is not running after its start; journalctl -u $unit says why."
+  done
+  ok "brokers kept running: nothing they load changed"
+else
+  systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
+  systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
+fi
 ok "units in place and started"
 
 # 8b. Bramble's wake: Tailscale Funnel publishes the one webhook path, and

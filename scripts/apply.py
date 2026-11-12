@@ -402,11 +402,16 @@ def install_reviews(hermes: list[str], bot: str) -> list[str]:
 
 
 # What a running Bot process loaded when it started and keeps until it
-# starts again: its config and the two plugins (the gateway's own profile has
-# config and the guard). Skills, the owed-wake script and cron jobs are read
-# from disk each time they are used, so a change to them needs no reload.
-# 9 Nov: every install reloaded every Bot, about every 15 minutes while
-# merges came in, and the phone showed them "not heard from" each time.
+# starts again: its config and what Hermes imports of the two plugins (the
+# gateway's own profile has config and the guard). Skills, the owed-wake
+# script and cron jobs are read from disk each time they are used, so a
+# change to them needs no reload. 9 Nov: every install reloaded every Bot,
+# about every 15 minutes while merges came in, and the phone showed them
+# "not heard from" each time. 12 Nov: a plugin counted whole, so a change to
+# github.py (tw-git's rules) or owed_wake.py (the wake check's script), which
+# no Bot process imports, reloaded every Bot and cut Rift's turn off at
+# 1:18 AM. Now only the files the plugin's import loads count
+# (thornswood_brokers.restart_plan.loaded).
 HELD_PLUGINS = ("thornswood_guard", "thornswood_live")
 RELOAD_LINE = "RELOAD: "
 
@@ -416,6 +421,8 @@ def held(home: Path, bots) -> dict[str, str]:
     every file a running Bot holds."""
     import hashlib
 
+    from thornswood_brokers.restart_plan import loaded
+
     out = {}
     roots = [home / "profiles" / b for b in bots] + [home]
     for root in roots:
@@ -423,7 +430,9 @@ def held(home: Path, bots) -> dict[str, str]:
         for name in HELD_PLUGINS:
             d = root / "plugins" / name
             if d.is_dir():
-                files += sorted(f for f in d.rglob("*") if f.is_file() and "__pycache__" not in f.parts)
+                got = loaded(root / "plugins", [name])
+                files += got if got is not None else sorted(
+                    f for f in d.rglob("*") if f.is_file() and "__pycache__" not in f.parts)
         for f in files:
             if f.is_file():
                 out[f.relative_to(home).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()

@@ -56,11 +56,32 @@ def pilot_data() -> dict:
     return data
 
 
-def service(host=None, clock=None, db=None, data=None) -> PolicyService:
+def service(host=None, clock=None, db=None, data=None, **kw) -> PolicyService:
     from thornswood_guard.policy import Policy
     p = Policy(data if data else pilot_data())
     db = db or Path(tempfile.mkdtemp()) / "policy.db"
-    return PolicyService(db, p, host_reader=host or roomy, clock=clock or Clock())
+    return PolicyService(db, p, host_reader=host or roomy, clock=clock or Clock(), **kw)
+
+
+class Holders:
+    """Who asks for each ticket, as the socket would say: set `now` before an
+    admit; `gone` names the processes that have ended."""
+
+    def __init__(self):
+        self.now = ("", "")
+        self.gone: set[str] = set()
+
+    def holder(self, pid):
+        return self.now
+
+    def alive(self, process):
+        return process not in self.gone
+
+
+def three_turns() -> dict:
+    data = pilot_data()
+    data["admission"]["model_turns"]["pilot"] = 3
+    return data
 
 
 class Release(unittest.TestCase):
@@ -73,10 +94,27 @@ class Release(unittest.TestCase):
                      "VALUES('sb', 'rift', 'sandbox', 'high', 't3', 'files', 'admitted', '2026-11-01T00:00:00+00:00')")
         handler, callers = s.ops()["release_turns"]
         self.assertEqual(callers, {"root"})
-        self.assertEqual(handler("root", {"why": "the Bots were reloaded"}), {"released": 2})
+        self.assertEqual(handler("root", {"why": "the Bots were reloaded"}), {"released": 2, "kept": 0})
         states = dict(s.db.execute("SELECT id, state FROM tickets").fetchall())
         self.assertEqual((states[a["ticket"]], states[b["ticket"]], states["sb"]), ("done", "done", "admitted"))
         self.assertEqual(s.admit("hermes", {"bot": "echo", "task": "t4"})["state"], "admitted")
+
+
+    def test_a_reload_keeps_the_ticket_of_a_turn_whose_process_still_runs(self):
+        # 12 Nov 2026: an install leaves the connector running when nothing it
+        # loads changed, and its Bot Chat turns go on through the reload.
+        who = Holders()
+        s = service(data=three_turns(), holder=who.holder, alive=who.alive)
+        who.now = ("101:5", "tw-decide-connector.service")
+        chat = s.admit("hermes", {"bot": "rift", "task": "t1", "source": "cli"})
+        who.now = ("202:7", "tw-hermes-gateway.service")
+        hook = s.admit("hermes", {"bot": "bramble", "task": "t2", "source": "webhook"})
+        who.now = ("", "")
+        old = s.admit("hermes", {"bot": "wisp", "task": "t3"})
+        who.gone.add("202:7")
+        self.assertEqual(s.release_turns("root", {}), {"released": 2, "kept": 1})
+        states = dict(s.db.execute("SELECT id, state FROM tickets").fetchall())
+        self.assertEqual([states[t["ticket"]] for t in (chat, hook, old)], ["admitted", "done", "done"])
 
 
 class Hold(unittest.TestCase):
@@ -115,6 +153,36 @@ class Hold(unittest.TestCase):
         s.hold_turns("root", {"seconds": 10 ** 6})
         clock.advance(minutes=41)
         self.assertEqual(s.admit("hermes", {"bot": "rift", "task": "t1"})["state"], "admitted")
+
+    def test_a_reload_hold_spares_the_connector_and_its_turns(self):
+        who = Holders()
+        s = service(data=three_turns(), holder=who.holder, alive=who.alive)
+        who.now = ("101:5", "tw-decide-connector.service")
+        s.admit("hermes", {"bot": "rift", "task": "t1", "source": "cli"})
+        who.now = ("202:7", "tw-hermes-gateway.service")
+        hook = s.admit("hermes", {"bot": "bramble", "task": "t2", "source": "webhook"})
+        self.assertEqual(s.hold_turns("root", {"seconds": 900, "spare_connector": True})["running"], 1,
+                         "only the gateway's turn is waited for")
+        who.now = ("103:9", "tw-decide-connector.service")
+        self.assertEqual(s.admit("hermes", {"bot": "echo", "task": "t3", "source": "cli"})["state"], "admitted")
+        who.now = ("204:1", "tw-hermes-gateway.service")
+        cron = s.admit("hermes", {"bot": "wisp", "task": "t4", "source": "cron"})
+        self.assertEqual((cron["state"], cron["held"]), ("waiting", True))
+        s.finish("hermes", {"bot": "bramble", "ticket": hook["ticket"]})
+        self.assertEqual(s.turns_running("root", {}), {"running": 0, "held": True})
+
+    def test_a_reload_hold_never_loosens_a_hold_on_every_turn(self):
+        who = Holders()
+        s = service(data=three_turns(), holder=who.holder, alive=who.alive)
+        who.now = ("101:5", "tw-decide-connector.service")
+        s.admit("hermes", {"bot": "rift", "task": "t1", "source": "cli"})
+        self.assertEqual(s.hold_turns("root", {"seconds": 900})["running"], 1)
+        got = s.hold_turns("root", {"seconds": 900, "spare_connector": True})
+        self.assertEqual((got["held_already"], got["running"]), (True, 1))
+        who.now = ("103:9", "tw-decide-connector.service")
+        self.assertEqual(s.admit("hermes", {"bot": "echo", "task": "t2", "source": "cli"})["state"], "waiting")
+        s.end_hold("root", {})
+        self.assertEqual(s.hold_turns("root", {"seconds": 900, "spare_connector": True})["running"], 0)
 
     def test_only_root_holds(self):
         s = service()
@@ -808,3 +876,36 @@ class Callers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Holder(unittest.TestCase):
+    """The process and unit a ticket records, read from /proc."""
+
+    def proc(self, pid, start, cgroup):
+        root = Path(tempfile.mkdtemp())
+        d = root / str(pid)
+        d.mkdir()
+        fields = ["S"] + ["0"] * 18 + [str(start)] + ["0"] * 10
+        (d / "stat").write_text(f"{pid} (hermes chat (x)) " + " ".join(fields) + "\n")
+        (d / "cgroup").write_text(cgroup)
+        return root
+
+    def test_a_connector_turn_is_named_by_its_unit_and_start_time(self):
+        from thornswood_brokers.policy_service import alive, holder
+        root = self.proc(1480567, 9912, "0::/system.slice/tw-decide-connector.service\n")
+        self.assertEqual(holder(1480567, root), ("1480567:9912", "tw-decide-connector.service"))
+        self.assertTrue(alive("1480567:9912", root))
+        self.assertFalse(alive("1480567:1", root), "the same pid started again is another process")
+        self.assertFalse(alive("42:1", root))
+
+    def test_the_gateway_and_a_cron_job_are_named_by_their_own_units(self):
+        from thornswood_brokers.policy_service import holder
+        root = self.proc(7, 3, "0::/tw.slice/tw-hermes.slice/tw-hermes-gateway.service\n")
+        self.assertEqual(holder(7, root)[1], "tw-hermes-gateway.service")
+        root = self.proc(8, 3, "0::/user.slice/user-1002.slice/user@1002.service/app.slice/hermes-worker-cron-8e04.scope\n")
+        self.assertEqual(holder(8, root)[1], "hermes-worker-cron-8e04.scope")
+
+    def test_a_process_that_cannot_be_read_records_nothing(self):
+        from thornswood_brokers.policy_service import holder
+        self.assertEqual(holder(None), ("", ""))
+        self.assertEqual(holder(5, Path(tempfile.mkdtemp())), ("", ""))

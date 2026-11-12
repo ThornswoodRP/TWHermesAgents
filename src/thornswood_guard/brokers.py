@@ -50,15 +50,24 @@ def call(path: str, op: str, args: dict | None = None, *, timeout: float = 120.0
             s.connect(path)
         except OSError as e:
             raise BrokerRefused(f"the broker at {path} is not answering ({e.strerror or e}); nothing was done") from e
-        s.sendall((json.dumps({"op": op, "args": args or {}}) + "\n").encode("utf-8"))
         buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-            if len(buf) > MAX_LINE:
-                raise BrokerRefused("the broker's answer is larger than 4 MB")
+        try:
+            s.sendall((json.dumps({"op": op, "args": args or {}}) + "\n").encode("utf-8"))
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                if len(buf) > MAX_LINE:
+                    raise BrokerRefused("the broker's answer is larger than 4 MB")
+        except OSError as e:
+            # 12 Nov 2026, 12:40 AM Mountain: tw-policy restarting for an
+            # install reset the connector's turn_room call mid-answer, and the
+            # ConnectionResetError, not a refusal, ended the connector. A call
+            # dropped after it was sent has not been answered, the same as a
+            # broker that closes without a word.
+            raise BrokerRefused(f"the broker at {path} closed without answering ({e.strerror or e}); the outcome "
+                                "is unknown until it is read back") from e
     if not buf:
         raise BrokerRefused("the broker closed without answering; the outcome is unknown until it is read back")
     answer = json.loads(buf)

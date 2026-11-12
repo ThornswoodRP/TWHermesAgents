@@ -96,13 +96,20 @@ def _release_turns(why: str) -> dict:
     return _policy("release_turns", {"why": why})
 
 
-def drain(ask: Callable[[str, dict], dict], sleep: Callable[[float], None], say, wait: int = DRAIN_WAIT) -> bool:
+def drain(ask: Callable[[str, dict], dict], sleep: Callable[[float], None], say, wait: int = DRAIN_WAIT,
+          spare_connector: bool = False) -> bool:
     """Holds new turns and waits for the running ones to end. True when the
     hold is on (end it with end_hold); False when tw-policy did not answer,
-    and the reload goes on as before."""
+    and the reload goes on as before.
+
+    spare_connector: the reload's own drain, which stops the gateway and ends
+    Desktop's sessions and leaves the connector running. Its Bot Chat turns
+    are processes of the connector's, so they are neither held nor waited for:
+    before 12 Nov 2026 every Bot Chat turn waited on a reload that does not
+    touch them, for up to DRAIN_WAIT."""
     try:
         held = ask("hold_turns", {"why": "the Bots are being reloaded after an install",
-                                  "seconds": wait + 600})
+                                  "seconds": wait + 600, "spare_connector": spare_connector})
         running = held["running"]
     except Exception as e:  # noqa: BLE001  the reload still has to happen
         say(f"FAIL: tw-policy did not hold new turns ({e}); a turn running now may be cut off")
@@ -202,7 +209,7 @@ def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep,
     if already_held:
         say("new turns are held already, and the running ones had their wait; reloading now")
         return _reload(run, sleep, say, release)
-    held = drain(ask, sleep, say)
+    held = drain(ask, sleep, say, spare_connector=True)
     try:
         return _reload(run, sleep, say, release)
     finally:
@@ -233,8 +240,10 @@ def _reload(run: Runner, sleep: Callable[[float], None], say, release: Callable[
         say(f"ended {len(ended)} hermes login session{'s' if len(ended) != 1 else ''} (Hermes Desktop's backends; Desktop reconnects)")
     released = None
     try:
-        released = release("the Bots were reloaded")["released"]
-        say(f"gave back {released} model turn ticket{'s' if released != 1 else ''} the ended turns held")
+        got = release("the Bots were reloaded")
+        released, kept = got["released"], got.get("kept", 0)
+        say(f"gave back {released} model turn ticket{'s' if released != 1 else ''} the ended turns held"
+            + (f"; {kept} turn{'s' if kept != 1 else ''} still running (the connector's) kept theirs" if kept else ""))
     except Exception as e:  # noqa: BLE001  the queue's ten-minute rule still frees them
         ok = False
         say(f"FAIL: tw-policy did not take back the ended turns' tickets ({e}); they go back after ten minutes "

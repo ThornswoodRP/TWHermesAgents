@@ -170,6 +170,17 @@ class Apply(unittest.TestCase):
         last = r.stdout.strip().splitlines()[-1]
         self.assertEqual(last, "RELOAD: needed; 1 file a running Bot holds changed: "
                                "profiles/wisp/plugins/thornswood_guard/policy.yaml")
+        # 12 Nov 2026: a file of the guard's folder no Bot process imports
+        # (tw-git's rules, the wake check's script) reloaded every Bot.
+        for name in ("github.py", "owed_wake.py"):
+            (home / "profiles" / "wisp" / "plugins" / "thornswood_guard" / name).write_text("# changed\n")
+            r = self.run_apply(home)
+            self.assertTrue(r.stdout.strip().splitlines()[-1].startswith("RELOAD: not needed"), (name, r.stdout))
+        # One it imports still does.
+        (home / "profiles" / "wisp" / "plugins" / "thornswood_guard" / "brokers.py").write_text("# changed\n")
+        r = self.run_apply(home)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "RELOAD: needed; 1 file a running Bot holds changed: "
+                                                            "profiles/wisp/plugins/thornswood_guard/brokers.py")
 
     def test_bramble_gets_its_owed_wake_check_once_and_no_other_bot_does(self):
         # 1 Nov, 10:02 PM on: every wake the fleet queue turned away was
