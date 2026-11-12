@@ -9,6 +9,7 @@ reviewer can read it; a test fails if the two ever differ.
 
 from __future__ import annotations
 
+from .hours import rule
 from .policy import Policy
 from .routes import config_for, gateway_chain
 
@@ -265,8 +266,14 @@ def wake_route(policy: Policy) -> dict:
         # dequeued pull_request has no check_suite, so it is never held back.
         "coalesce": {"key": WAKE_GROUP_FIELD, "window_seconds": 120, "max_wait_seconds": 900},
         "toolsets": ["thornswood"],
-        "prompt": WAKE_PROMPT,
+        "prompt": wake_prompt(policy),
     }
+
+
+def wake_prompt(policy: Policy) -> str:
+    """WAKE_PROMPT with the work hours as the installed policy has them, so a
+    GitHub wake says them too (hours.rule)."""
+    return WAKE_PROMPT + " " + rule(policy.data)
 
 
 def build_gateway(policy: Policy) -> dict:
