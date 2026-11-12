@@ -175,6 +175,33 @@ class Gate(unittest.TestCase):
         self.assertIsNone(gate(f, "wisp").before_llm(session_id="w1", task_id="9"),
                           "the next Bot is admitted at once, not after ten minutes")
 
+    def test_a_message_waiting_when_turns_are_held_for_a_reload_is_kept_at_once(self):
+        # 12 Nov 2026, 10:09 PM Mountain: Magpie's message to Sprocket about
+        # #5830 waited in Sprocket's Bot Chat; the 10:11 PM reload ended it
+        # unkept, and Magpie had been told not to send it again.
+        f = Fleet()
+        f.policy.hold_turns("root", {"seconds": 900})
+        ticks = iter(range(10000))
+        g = TurnGate(ready_policy(), "sprocket", f.ask, wait_seconds=540, sleep=lambda s: None,
+                     clock=lambda: next(ticks))
+        out = g.before_llm(session_id="20261030_153904_d46b76", platform="desktop",
+                           user_message="Message from magpie (@magpie): #5830 is in your code.")
+        self.assertIn("The message is kept", out["context"])
+        self.assertIn("reloaded", out["context"])
+        self.assertNotIn("waited", out["context"], "it did not wait out its 540 seconds")
+        asks = [a for b, op, a in f.seen if op == "admit"]
+        self.assertEqual(len(asks), 1, "kept at the first answer that says new turns are held")
+        g.after_turn(session_id="20261030_153904_d46b76")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='sprocket'").fetchall(), [("done",)])
+        # A sweep's wake is owed at once too.
+        b = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=540, sleep=lambda s: None, clock=lambda: next(ticks))
+        self.assertIn("is owed", b.before_llm(session_id="w", platform="webhook")["context"])
+        # A turn that cannot be kept waits as before.
+        f.seen.clear()
+        r = TurnGate(ready_policy(), "rift", f.ask, wait_seconds=3, sleep=lambda s: None, clock=lambda: next(ticks))
+        r.before_llm(session_id="room-1", platform="raft", user_message="hello room")
+        self.assertGreater(len([a for b_, op, a in f.seen if op == "admit"]), 1)
+
     def test_a_turn_turned_away_and_not_kept_keeps_its_place(self):
         f = Fleet()
         rift = gate(f, "rift")

@@ -238,7 +238,11 @@ class PolicyService:
             reason = self._why_not_now(kind, ticket)
             if reason:
                 self.db.execute("UPDATE tickets SET reason=? WHERE id=?", (reason, ticket))
-                return {"ticket": ticket, "state": "waiting", "reason": reason}
+                # held: new turns wait for a reload, which ends every turn still
+                # waiting in the Bots' processes; the gate keeps such a turn's
+                # message at once instead of waiting with it (brokers.TurnGate).
+                return {"ticket": ticket, "state": "waiting", "reason": reason,
+                        "held": kind == "turn" and bool(self._held())}
             t = iso(self.clock())
             self.db.execute("UPDATE tickets SET state='admitted', admitted_at=?, seen_at=?, reason=NULL WHERE id=?", (t, t, ticket))
             self._audit(caller, "admit", {"ticket": ticket, "bot": bot, "kind": kind})

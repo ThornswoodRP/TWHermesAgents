@@ -217,14 +217,21 @@ class TurnGate:
                     with self.lock:
                         self.turns[key] = {"ticket": ticket, "state": "admitted", "sweep": sweep}
                     return None
-                if self.clock() + pause > deadline:
+                # New turns are held for a reload, which ends this process and
+                # every turn still waiting in it. 12 Nov 2026, 10:09 PM Mountain:
+                # Magpie's message to Sprocket about #5830 waited in Sprocket's
+                # Bot Chat, the 10:11 PM reload ended it unkept, and Magpie had
+                # been told not to send it again. A message that can be kept,
+                # and a sweep whose wake can be owed, stop waiting now.
+                held = bool(got.get("held")) and (sweep or self._keepable(kwargs))
+                if held or self.clock() + pause > deadline:
                     # A sweep's session has no next turn either: its ticket
                     # goes back at the end, and the wake is owed instead.
                     with self.lock:
                         self.turns[key] = {"ticket": ticket, "state": "waiting", "reason": got.get("reason"),
                                            "scheduled": scheduled or sweep}
                     why = (got.get("reason") or "the fleet is busy") + \
-                        f" (this turn waited {int(self.wait_seconds)} seconds for it)"
+                        ("" if held else f" (this turn waited {int(self.wait_seconds)} seconds for it)")
                     if sweep:
                         self._owe(why)
                         return {"context": self._owed(why)}
@@ -261,11 +268,16 @@ class TurnGate:
             self._note_turned_away(kwargs, str(e), kept)
             return {"context": self._kept(str(e)) if kept else self._queued(str(e))}
 
+    @staticmethod
+    def _keepable(kwargs: dict) -> bool:
+        """Whether _keep would take this turn's message: a Bot Chat message with text."""
+        return str(kwargs.get("platform") or "") in LOCAL_CHAT and bool(str(kwargs.get("user_message") or "").strip())
+
     def _keep(self, kwargs: dict, reason: str) -> bool:
         """Keep a turned-away Bot Chat message in the decision core. Never raises: False when it is not one,
         or could not be kept, and the turn says it needs asking again, as before."""
         text = str(kwargs.get("user_message") or "").strip()
-        if str(kwargs.get("platform") or "") not in LOCAL_CHAT or not text:
+        if not self._keepable(kwargs):
             return False
         try:
             self.ask("decide", "keep_turned_away", {"bot": self.bot, "text": text, "reason": reason,

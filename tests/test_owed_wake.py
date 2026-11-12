@@ -433,9 +433,11 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(home, "bramble", owed, now=NOON + 240, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
         self.assertIn("turned away", out[0])
-        self.assertIn("no sweep has carried to its end", "\n".join(out), "the owed sweep carries the look's lines")
+        # The owed wake runs the look too (12 Nov 2026: a wake owed all
+        # evening kept every look from running), fresh, so its lines ride it.
+        self.assertIn("no sweep carried its lines", "\n".join(out), "the owed sweep carries the look's lines")
         self.assertIn("in the field of sprocket", out[-1])
-        self.assertEqual(b.reads(), [], "carrying them reads nothing")
+        self.assertEqual(sum("in the field of sprocket" in l for l in out), 1, "said once, not carried twice")
         # A GitHub sweep paid the owed wake: nothing is owed, and the look runs again.
         out = owed_wake.check(home, "bramble", b, now=NOON + 300, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
@@ -563,6 +565,30 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("pick for each free worker", out[-1])
         searches = [a for a in b.reads() if "/search/" in a["path"]]
         self.assertLessEqual(len(searches), 3, [urllib_q(a) for a in searches])
+
+    def test_an_owed_wake_runs_the_free_worker_look_too(self):
+        # 12 Nov 2026: a wake was owed nearly all evening (GitHub's wakes
+        # turned away while another sweep ran). The check returned before the
+        # look, no look ran from 7:32 PM Mountain on, and Rift, Sprocket and
+        # Echo sat with no issue from 9:15 PM.
+        claimed = dict(BUSY, **{"claimed: Sprocket": 0})
+        b = Idle(claimed=claimed, open_={'"area: Launcher","area: Packaging"': 3})
+        due = {"owed": True, "due": True, "since": "t", "refused": 7, "reason": "another sweep is running"}
+
+        def owed(broker, op, args):
+            return due if op == "wake_due" else b(broker, op, args)
+        out = owed_wake.check(self.day(), "bramble", owed, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("turned away", out[0])
+        self.assertIn("in the field of sprocket", out[-1])
+        # With every worker busy the owed wake still wakes, with its own line only.
+        b2 = Idle(claimed=BUSY)
+
+        def owed2(broker, op, args):
+            return due if op == "wake_due" else b2(broker, op, args)
+        out = owed_wake.check(self.day(), "bramble", owed2, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertEqual(len(out), 1, out)
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
