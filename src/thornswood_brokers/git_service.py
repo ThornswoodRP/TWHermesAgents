@@ -394,7 +394,7 @@ class GitService:
     def push(self, caller: str, args: dict) -> dict:
         bot, repo, task = self._bot(args), self._repo(args), self._task(args)
         branch = str(args.get("branch") or "")
-        bundle = self._bundle(bot, str(args.get("bundle") or ""))
+        bundle = self._carried_bundle(bot, branch, str(args.get("bundle") or ""))
         app = self._app(bot)
         mirror = self._mirror(repo, app)
         incoming = f"refs/tw/in/{bot}/{branch}"
@@ -439,6 +439,25 @@ class GitService:
         out = self._guarded_write(bot, task, "push", repo, f"refs/heads/{branch}", new, write=write, read_back=read_back)
         out.update({"sha": new, "changed_files": len(changed), "workflow_change": workflows})
         return out
+
+    def _carried_bundle(self, bot: str, branch: str, name: str) -> Path:
+        """The bundle a push sends: from the Bot's own spool, or, when Bramble
+        carries a workflow change for a Bot it may push for (policy branches
+        bramble_may_push_for), from that Bot's spool, where its tw-files made
+        it. Bramble cannot make it: its own tree is not the worker's, and the
+        push must carry the worker's commit as it is. Until 12 Nov 2026 only
+        Bramble's spool was read, so every such push was refused ("is not a
+        bundle in bramble's spool", Ops #277), and Magpie's workflow fixes
+        (#4135, #5765 and five more) could never reach GitHub. Whether the push
+        may go at all is still the push rule's (github.py push): Bramble pushes
+        to that branch only a change to a workflow file."""
+        owner = self.policy.branch_owner(branch)
+        if bot == "bramble" and owner in self.policy.data["branches"]["bramble_may_push_for"]:
+            try:
+                return self._bundle(owner, name)
+            except Refused:
+                pass
+        return self._bundle(bot, name)
 
     def _bundle(self, bot: str, name: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}\.bundle", name):

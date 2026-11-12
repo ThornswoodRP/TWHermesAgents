@@ -168,6 +168,37 @@ class Push(unittest.TestCase):
         self.assertEqual(writes[0]["installation"], "177392923")
         self.assertEqual(writes[0]["permissions"].get("workflows"), "write")
 
+    def test_bramble_pushes_the_bundle_magpie_made_from_magpies_spool(self):
+        # Ops #277, 11 Nov 2026: Magpie's #5765 fix (a workflow change) was
+        # refused for the workers' App, and Bramble's push of Magpie's bundle
+        # was refused as "not a bundle in bramble's spool".
+        w = World()
+        name, head = w.bundle("magpie", "magpie/5765-vpk-reason", {".github/workflows/build.yml": "on: push\n"},
+                              name="5765-vpk-reason-2baa018.bundle")
+        with self.assertRaises(Refused):
+            w.git.push("hermes", {"bot": "magpie", "repo": APP, "task": "t", "branch": "magpie/5765-vpk-reason",
+                                  "bundle": name})
+        out = w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "magpie/5765-vpk-reason",
+                                    "bundle": name})
+        self.assertEqual(out["sha"], head, "the push carries Magpie's commit as Magpie made it")
+        self.assertEqual(w.fake.ref(APP, "magpie/5765-vpk-reason"), head)
+        writes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
+        self.assertEqual(writes[-1]["permissions"].get("workflows"), "write")
+
+    def test_bramble_reads_no_other_bots_spool(self):
+        w = World()
+        name, _ = w.bundle("sprocket", "sprocket/9-ci", {".github/workflows/build.yml": "on: push\n"}, name="s.bundle")
+        with self.assertRaises(Refused) as e:
+            w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "sprocket/9-ci",
+                                  "bundle": name})
+        self.assertIn("not a bundle in bramble's spool", str(e.exception))
+        name, _ = w.bundle("magpie", "magpie/9-docs", {"docs/x.md": "x\n"}, name="m.bundle")
+        with self.assertRaises(Refused) as e:
+            w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "magpie/9-docs",
+                                  "bundle": name})
+        self.assertIn("only to carry a workflow change", str(e.exception))
+        self.assertIsNone(w.fake.ref(APP, "magpie/9-docs"))
+
     def test_only_wisp_works_in_the_fork(self):
         w = World()
         with self.assertRaises(Refused):
