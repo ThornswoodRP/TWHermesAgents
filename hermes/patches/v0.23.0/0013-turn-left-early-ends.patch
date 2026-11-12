@@ -1,0 +1,157 @@
+From f985876a5265b2403dcd74c83a5286f232a638fa Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Thu, 12 Nov 2026 00:47:07 +0000
+Subject: [PATCH] fix(agent): fire on_session_end for a turn that leaves the
+ loop early
+
+on_session_end is the per-turn end hook: finalize_turn fires it for a turn
+that finished, failed or was interrupted. The terminal failure paths (a
+non-retryable API error, retry exhaustion, a preflight timeout, a
+content-policy refusal) return their envelope from inside the loop and never
+reach finalize_turn, so for them the hook never fired. A plugin that holds
+something for the length of a turn (a live "what is running" view, a
+concurrency ticket) then kept the turn as running until the process ended.
+
+Seen on a gateway on 11 Nov 2026: twelve turns hit a 429, found no usable
+fallback and ended in 1 to 258 seconds with "Non-retryable client error";
+SessionDB closed each one, and a plugin that drops a turn on on_session_end
+showed all twelve as thinking for hours.
+
+run_conversation now fires on_session_end once, with completed, failed,
+interrupted and the exit reason from the envelope, when finalize_turn did
+not; finalize_turn marks the turns it ended. A turn with persistence off
+gets no hook, as in finalize_turn.
+---
+ agent/conversation_loop.py                   | 32 ++++++++++++
+ agent/turn_finalizer.py                      |  1 +
+ tests/agent/test_turn_end_hook_early_exit.py | 53 ++++++++++++++++++++
+ 3 files changed, 86 insertions(+)
+ create mode 100644 tests/agent/test_turn_end_hook_early_exit.py
+
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index dc47cd72..cbebeb60 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -1830,6 +1830,9 @@ def run_conversation(
+ 
+     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
+     agent._turn_user_intervened = False
++    # finalize_turn sets this when it fires on_session_end; an envelope that left the loop before it
++    # (retry exhaustion, a non-retryable error, a preflight timeout, ...) gets the hook below.
++    agent._turn_session_end_fired = False
+     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
+     # it does not embed the same pixels a second time into the same request (#76411).
+     with native_turn_images(user_message):
+@@ -1858,9 +1861,38 @@ def run_conversation(
+     if isinstance(result, dict):
+         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
+     _close_durable_failed_turn(agent, result)
++    _end_turn_left_early(agent, result, task_id)
+     return result
+ 
+ 
++def _end_turn_left_early(agent, result: Any, task_id: Optional[str]) -> None:
++    """Fire on_session_end for a turn that returned without reaching ``finalize_turn``.
++
++    on_session_end is the per-turn end hook (turn_finalizer: "finished, failed or interrupted"),
++    and plugins that hold something for the length of a turn release it there. The terminal
++    failure paths (a non-retryable API error, retry exhaustion, a preflight timeout, a
++    content-policy refusal, ...) return their envelope from inside the loop, so before this the
++    hook never fired for them and such a plugin held the turn as running until the process ended.
++    """
++    if getattr(agent, "_turn_session_end_fired", False) or getattr(agent, "_persist_disabled", False):
++        return
++    agent._turn_session_end_fired = True
++    r = result if isinstance(result, dict) else {}
++    from agent.turn_finalizer import _invoke_hook_safely
++    _invoke_hook_safely(
++        "on_session_end", logger,
++        session_id=agent.session_id,
++        task_id=task_id,
++        turn_id=r.get("turn_id") or str(getattr(agent, "_current_turn_id", "") or "") or None,
++        completed=bool(r.get("completed", False)),
++        failed=bool(r.get("failed", not r.get("completed", False))),
++        interrupted=bool(r.get("interrupted", False)),
++        turn_exit_reason=r.get("exit_reason") or r.get("failure_reason") or "left_before_finalize",
++        model=getattr(agent, "model", None),
++        platform=getattr(agent, "platform", None) or "",
++    )
++
++
+ _FAILED_TURN_ERROR_MAX_CHARS = 2000
+ 
+ 
+diff --git a/agent/turn_finalizer.py b/agent/turn_finalizer.py
+index 08abde42..7d0c5022 100644
+--- a/agent/turn_finalizer.py
++++ b/agent/turn_finalizer.py
+@@ -895,6 +895,7 @@ def finalize_turn(
+             model=agent.model,
+             platform=_platform,
+         )
++        agent._turn_session_end_fired = True
+ 
+     agent._turn_preflight_display_snapshot = None
+     agent._turn_received_provider_response = False
+diff --git a/tests/agent/test_turn_end_hook_early_exit.py b/tests/agent/test_turn_end_hook_early_exit.py
+new file mode 100644
+index 00000000..84c7772e
+--- /dev/null
++++ b/tests/agent/test_turn_end_hook_early_exit.py
+@@ -0,0 +1,53 @@
++"""on_session_end fires once for every turn, including one that leaves the loop early.
++
++A non-retryable API error (or retry exhaustion, a preflight timeout, a content-policy refusal)
++returns its envelope from inside the loop without reaching ``finalize_turn``. Plugins that hold
++something for the length of a turn release it in on_session_end, so before this they held such a
++turn as running until the process ended.
++"""
++
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import agent.conversation_loop as loop
++
++
++def _agent(**kw):
++    a = SimpleNamespace(session_id="s-1", model="m", platform="webhook", _current_turn_id="t-1",
++                        _persist_disabled=False)
++    a.__dict__.update(kw)
++    return a
++
++
++def _run(agent, envelope, finalized=False):
++    calls = []
++
++    def turn(a, *args, **kwargs):
++        if finalized:
++            a._turn_session_end_fired = True
++        return dict(envelope)
++
++    with patch.object(loop, "_run_conversation_turn", turn), \
++            patch("agent.turn_finalizer.settle_held_final", lambda a, r: None), \
++            patch("agent.turn_context.export_current_turn_boundary", lambda a, r, u: r), \
++            patch.object(loop, "_close_durable_failed_turn", lambda a, r: None), \
++            patch("agent.voice_turn_route.end_voice_turn_route", lambda a: None), \
++            patch("hermes_cli.lifecycle.invoke_hook", lambda name, **kw: calls.append((name, kw)) or []):
++        loop.run_conversation(agent, "hi", task_id="task-1")
++    return calls
++
++
++def test_a_turn_that_failed_before_finalize_ends_once():
++    calls = _run(_agent(), {"completed": False, "failed": True, "partial": True, "turn_id": "t-1"})
++    assert [c[0] for c in calls] == ["on_session_end"]
++    kw = calls[0][1]
++    assert kw["session_id"] == "s-1" and kw["task_id"] == "task-1" and kw["turn_id"] == "t-1"
++    assert kw["failed"] is True and kw["completed"] is False and kw["platform"] == "webhook"
++
++
++def test_a_finalized_turn_is_not_ended_twice():
++    assert _run(_agent(), {"completed": True}, finalized=True) == []
++
++
++def test_no_hook_when_persistence_is_off():
++    assert _run(_agent(_persist_disabled=True), {"completed": False, "failed": True}) == []
+-- 
+2.43.0
+
