@@ -472,6 +472,14 @@ decisions:
 # URL check refuses a private, loopback or cloud metadata address
 # (security.allow_private_urls stays false in every profile).
 toolsets:
+  # The web tools' backend, for search and for reading a page, set in every
+  # Bot's profile so no earlier `hermes tools` pick stays. Bramble's first
+  # real run on 15 Nov (Thornswood-Ops #340) found the profiles holding
+  # openai-native, which only runs on the openai-codex transport: every
+  # web_search failed over to the free tier, and web_extract failed outright
+  # ("a search-only backend and cannot extract URL content"). Exa with no key
+  # is Hermes's keyless Exa, which does both, for nothing.
+  web_backend: exa
   never:
     - browser
     - code_execution
