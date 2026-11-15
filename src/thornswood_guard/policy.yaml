@@ -612,6 +612,11 @@ brokers:
     # over a write's size and the plugin is not text, so no Bot could land
     # a gamemode or plugin change. A builder runs code from the Bot's own
     # tree, as every harness already does, so it gives a Bot nothing more.
+    # Every builder in scripts/dev is one form ({builder} is Build-<Name>),
+    # not a list of them: until 15 Nov 2026 only Build-Gamemode.js was
+    # named, Build-Gamemode --check runs Build-MerchantGamemode.js --check,
+    # and no Bot could rebuild merchant-trading-bundle.ts or the trading
+    # company's part (Thornswood-Ops #314; Thornswood #4915, #4543).
     # {tests} is tests or a product's own tests folder one below the top
     # (game/tests, launcher/tests): Thornswood keeps a product's harnesses
     # beside its code (Thornswood #5341), and a form that named only tests
@@ -621,7 +626,7 @@ brokers:
       - ["pwsh", "-NoProfile", "-File", "{tests}/test-{name}.ps1"]
       - ["python3", "{tests}/test-{name}.py"]
       - ["pwsh", "scripts/dev/Check-Words.ps1"]
-      - ["node", "scripts/dev/Build-Gamemode.js"]
+      - ["node", "scripts/dev/{builder}.js"]
       - ["python3", "scripts/mods/Add-ContentRecords.py"]
     check_limits:
       MemoryMax: 2G
