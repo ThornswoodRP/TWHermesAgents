@@ -365,5 +365,38 @@ class Setup(unittest.TestCase):
             up.server_close()
 
 
+class HermesBindsRoute2(unittest.TestCase):
+    """#142, #181: Hermes refused http://127.0.0.1:8611/credits as "not an
+    Anthropic-compatible host", so every turn that fell back from Claude
+    skipped route 2. Hermes v0.23.0 binds an anthropic fallback only to
+    Anthropic's own host or a path ending in /anthropic or /anthropic/v1
+    (agent/auxiliary_client.py _is_anthropic_compatible_host), and its SDK
+    client posts to the address, less a trailing /v1, plus /v1/messages
+    (agent/anthropic_adapter.py _base_client_kwargs)."""
+
+    def test_hermes_binds_the_credits_route_and_its_requests_reach_the_proxy(self):
+        import copy
+        import re
+        from urllib.parse import urlparse
+        from thornswood_brokers.proxy import ROUTES
+        from thornswood_guard.policy import Policy
+        from thornswood_guard.profile_config import build
+        data = copy.deepcopy(policy().data)
+        data["admission_proxy"]["ready"] = {"credits": True, "qwen": True}
+        p = Policy(data)
+        seen = 0
+        for bot in p.bots:
+            for fb in build(p, bot)["fallback_providers"]:
+                if fb["provider"] != "anthropic" or "base_url" not in fb:
+                    continue
+                seen += 1
+                with self.subTest(bot=bot):
+                    url = urlparse(fb["base_url"])
+                    self.assertTrue(url.path.rstrip("/").endswith(("/anthropic", "/anthropic/v1")), fb["base_url"])
+                    posted = re.sub(r"/v1/?$", "", url.path.rstrip("/")) + "/v1/messages"
+                    self.assertEqual([r for prefix, (r, up) in ROUTES.items() if posted == prefix + up], ["credits"])
+        self.assertEqual(seen, 1, "route 2 is Bramble's alone")
+
+
 if __name__ == "__main__":
     unittest.main()
