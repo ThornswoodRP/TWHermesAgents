@@ -432,9 +432,10 @@ class GitHubRules:
             return Verdict.yes(f"#{issue.number} repeats #{duplicate.number}")
         if reason == "completed":
             if done_pr is not None:
+                where = "" if done_pr.repo == issue.repo else done_pr.repo
                 if not done_pr.merged:
-                    return Verdict.no(f"PR {done_pr.number} has not merged, so it has not finished #{issue.number}")
-                return Verdict.yes(f"#{issue.number} was finished by PR {done_pr.number}")
+                    return Verdict.no(f"PR {where}#{done_pr.number} has not merged, so it has not finished #{issue.number}")
+                return Verdict.yes(f"#{issue.number} was finished by PR {where}#{done_pr.number}")
             if done_run is not None:
                 if done_run.get("status") != "completed" or done_run.get("conclusion") != "success":
                     return Verdict.no(f"run {done_run.get('id')} did not succeed "

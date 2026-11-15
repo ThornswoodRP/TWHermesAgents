@@ -418,7 +418,8 @@ TW_GIT_SCHEMA = {
         "at that head that Patrick answered authorize), "
         "close_pr (Bramble only: closes a pull request only on Patrick's answer on the outside pull request card "
         "that names it; replaced_by names the merged pull request that carried it), close_issue (Bramble only: closes an "
-        "issue with reason duplicate and duplicate_of, or reason completed and done_by_pr (merged) or done_by_run "
+        "issue with reason duplicate and duplicate_of, or reason completed and done_by_pr (merged, in pr_repo when "
+        "the fix is in another repo, e.g. ThornswoodRP/TWHermesAgents for an Ops issue) or done_by_run "
         "(succeeded, in run_repo), with body saying why; never as not planned), delete_branch (Bramble only: deletes a Bot's branch with no open pull request, at the head sha you read), start_run (Bramble only), read (a GET inside one repo, or /search/issues with repo:<that repo> in q), board (the board's open issues in do-order; eligible true keeps only what may be picked, and lists under waiting the ones whose newest comment says they wait on an open issue; areas keeps only issues with one of those area labels and not_areas leaves out any with one, e.g. areas Gamemode, Engine and In-game for Wisp's field, as a list; limit, at most 100), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
@@ -431,7 +432,8 @@ TW_GIT_SCHEMA = {
             "head": {"type": "string"}, "base": {"type": "string"},
             "number": {"type": "integer"}, "sha": {"type": "string"}, "replaced_by": {"type": "integer"},
             "reason": {"type": "string", "enum": ["duplicate", "completed"]}, "duplicate_of": {"type": "integer"},
-            "done_by_pr": {"type": "integer"}, "done_by_run": {"type": "integer"}, "run_repo": {"type": "string"},
+            "done_by_pr": {"type": "integer"}, "pr_repo": {"type": "string"},
+            "done_by_run": {"type": "integer"}, "run_repo": {"type": "string"},
             "title": {"type": "string"}, "body": {"type": "string"}, "draft": {"type": "boolean"},
             "label": {"type": "string"}, "action": {"type": "string", "enum": ["add", "remove"]},
             "not_repeat": {"type": "array", "items": {"type": "integer"}}, "how_it_differs": {"type": "string"},

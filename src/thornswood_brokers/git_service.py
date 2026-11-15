@@ -375,7 +375,10 @@ class GitService:
         refused a merged pull request over 250 commits, so its issue could
         not be closed (Ops #307, 12 Nov 2026: Thornswood #4536 and PR 5381,
         280 commits)."""
-        raw = self.gh.get("bramble", repo, f"/repos/{repo}/pulls/{int(number)}")
+        # TWHermesAgents has no Bot App installed; it is public, so a token
+        # for any repo Bramble's App is on reads its pull requests.
+        via = repo if self.policy.app_reaches("bramble", repo) else self.policy.data["repos"]["ops"]
+        raw = self.gh.get("bramble", via, f"/repos/{repo}/pulls/{int(number)}")
         return PullRequest(repo=repo, number=int(number), head_sha=raw["head"]["sha"], head_ref=raw["head"]["ref"],
                            base_ref=raw["base"]["ref"], author_bot=None, author_login=raw["user"]["login"],
                            merged=bool(raw.get("merged")))
@@ -1195,7 +1198,14 @@ class GitService:
         if args.get("duplicate_of") is not None:
             duplicate = self._issue(repo, int(args["duplicate_of"]))
         if args.get("done_by_pr") is not None:
-            done_pr = self._merged_pr(repo, int(args["done_by_pr"]))
+            # The fix may be in another of the repos tw-git reads: an Ops issue
+            # whose broker fix merged in TWHermesAgents (Ops #299: #275 and #264,
+            # fixed by TWHermesAgents#139, could not be closed on it).
+            pr_repo = str(args.get("pr_repo") or repo)
+            if pr_repo not in self.policy.data["repos"].values():
+                raise Refused(f"{pr_repo} is not a repo tw-git reads; pr_repo is one of "
+                              + ", ".join(sorted(self.policy.data["repos"].values())))
+            done_pr = self._merged_pr(pr_repo, int(args["done_by_pr"]))
         if args.get("done_by_run") is not None:
             run_repo = str(args.get("run_repo") or repo)
             if self.policy.data["merge"]["base"].get(run_repo) is None:
