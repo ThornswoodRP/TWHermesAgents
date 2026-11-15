@@ -143,6 +143,38 @@ class Work(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (w.spool / "in" / "sprocket").glob("Thornswood-*.bundle")),
                          [b["bundle"]], "one bundle in its base's line, pruned like any other")
 
+    def test_a_new_branch_opens_on_another_open_branch_and_is_pushed(self):
+        # Ops #320: Rift could not build #4809's fix on its open #5630; a new
+        # branch from the 4760 bundle opened at main, and a tree on 4760's own
+        # branch could not be pushed under the new name.
+        w = World()
+        w.checkout(task="4760-plugins")
+        self._send(w, "4760-plugins")
+        under = w.fake.ref(APP, "sprocket/4760-plugins")
+        b = w.git.base("hermes", {"bot": "sprocket", "repo": APP, "branch": "sprocket/4760-plugins"})
+        args = {"bot": "sprocket", "repo": APP, "task": "4809-plugins-txt-missing", "bundle": b["bundle"],
+                "branch": "sprocket/4809-plugins-txt-missing"}
+        for bad, says in (("rift/1-x", "own branches"), ("sprocket/4809-plugins-txt-missing", "own branches")):
+            with self.subTest(bad=bad), self.assertRaises(Refused) as e:
+                w.files.checkout("hermes", {**args, "from_branch": bad})
+            self.assertIn(says, str(e.exception))
+        out = w.files.checkout("hermes", {**args, "from_branch": "sprocket/4760-plugins"})
+        self.assertEqual((out["head"], out["from"], out["branch"]),
+                         (under, "branch sprocket/4760-plugins", "sprocket/4809-plugins-txt-missing"))
+        a = {"bot": "sprocket", "repo": APP, "task": "4809-plugins-txt-missing"}
+        w.files.write("hermes", {**a, "path": "plugins.txt", "content": "Thornswood.esp\n"})
+        w.files.commit("hermes", {**a, "message": "Write plugins.txt when it is missing"})
+        sent = w.files.bundle("hermes", a)
+        self.assertEqual(sent["branch"], "sprocket/4809-plugins-txt-missing")
+        w.git.push("hermes", {"bot": "sprocket", "repo": APP, "task": "4809", "branch": sent["branch"],
+                              "bundle": sent["bundle"]})
+        self.assertEqual(git(w.fake.remote(APP), "rev-parse", "sprocket/4809-plugins-txt-missing~1"), under)
+        self.assertEqual(w.fake.ref(APP, "sprocket/4760-plugins"), under, "the branch under it is untouched")
+        # A bundle without that branch says how to get one.
+        w.files.remove("hermes", a)
+        with self.assertRaises(Refused) as e:
+            w.files.checkout("hermes", {**args, "bundle": w.base_bundle("sprocket"), "from_branch": "sprocket/4760-plugins"})
+        self.assertIn("tw_git base with branch sprocket/4760-plugins", str(e.exception))
     def test_main_comes_into_a_conflicting_branch_as_a_merge_and_is_pushed_without_force(self):
         # Ops #328: #5892 sat on auto-merge, dirty, after main moved under it;
         # #5880, #5815 and #5941 were rebuilt on main and force-pushed.
