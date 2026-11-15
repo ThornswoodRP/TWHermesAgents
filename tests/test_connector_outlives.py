@@ -23,7 +23,6 @@ import time
 import unittest
 from pathlib import Path
 
-import helpers  # noqa: F401  (puts the repo on sys.path)
 from test_decisions_api import Served
 from test_decisions_chat import flags, seat
 
