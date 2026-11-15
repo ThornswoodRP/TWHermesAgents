@@ -33,6 +33,7 @@ from thornswood_guard.github import SHA, CheckRun, Credit, GitHubRules, Issue, P
 from thornswood_guard.policy import Policy, Verdict
 
 from .github_api import GitHub, GitHubError, quote
+from .repeats import likely_repeats
 from .wire import Refused
 
 # The board through the workers' App (policy.yaml board).
@@ -775,11 +776,39 @@ class GitService:
         (src/thornswood_decisions/chat.py _decided_text). Patrick's answer on
         dec_zf92laU0xp8mvmyfa8C7pA, 2 Nov 2026: five of his answers waited on it.
 
+        It carries one label, a work label the repo already has (bug, enhancement),
+        set as it is made: until 15 Nov 2026 open_issue took none, so every issue a
+        Bot filed in Ops arrived unlabeled and was labeled by hand after (Ops #267,
+        #259). Never a claim label: a finding is filed unclaimed.
+
+        It is refused when its title repeats an open issue, or one closed lately
+        (repeats.py says how they are matched), naming each: Patrick, 15 Nov 2026,
+        "If something is already done or already an issue it should not be an
+        issue or an extra one". Whatever it adds goes on that issue as a comment.
+        A Bot that read them and finds its own a different problem names each in
+        not_repeat, with how_it_differs, which goes into the body.
+
         The body ends with the write's marker, so a lost answer is found by it and
-        never filed twice. No label and no assignee: Todo, unclaimed."""
+        never filed twice. No assignee: Todo, unclaimed."""
         bot, repo, task = self._bot(args), self._repo(args), self._task(args)
         title, body = str(args.get("title") or ""), str(args.get("body") or "")
         self._check(self.rules.open_issue(bot, repo, title, body))
+        name = str(args.get("label") or "").strip()
+        if not name:
+            raise Refused("an issue carries one work label as it is filed, e.g. bug or enhancement")
+        if name in self.policy.claim_labels() or name.lower().startswith("claimed:"):
+            raise Refused("a new issue is filed unclaimed: give it a work label such as bug or enhancement, not a claim")
+        label = self._repo_label(repo, name)
+        if label is None:
+            raise Refused(f"{repo} has no label {name!r}; use one it has, such as bug or enhancement")
+        not_repeat = args.get("not_repeat") or []
+        if not isinstance(not_repeat, list) or not all(isinstance(n, int) and not isinstance(n, bool) for n in not_repeat):
+            raise Refused("not_repeat is a list of issue numbers")
+        differs = str(args.get("how_it_differs") or "").strip()
+        if not_repeat and not differs:
+            raise Refused("not_repeat needs how_it_differs: one line saying how this differs from each issue it names")
+        if not_repeat:
+            body = f"{body}\n\nNot a repeat of {', '.join(f'#{n}' for n in not_repeat)}: {differs}"
         app = "bramble" if bot == "bramble" else self._app(bot)
         digest = hashlib.sha256(json.dumps([repo, title, body]).encode()).hexdigest()[:16]
         marker = f"<!-- tw:{digest} -->"
@@ -792,14 +821,38 @@ class GitService:
                     return {"number": i["number"], "url": i.get("html_url")}
             return None
 
+        # The issue this same ask filed (its marker) is not a repeat of it: a
+        # lost answer is read back by its marker below.
+        reader = self.policy.reader_for(repo)
+        others = [i for i in self.gh.get_all(reader, repo, f"/repos/{repo}/issues?state=open&per_page=100")
+                  if not i.get("pull_request")]
+        others += [i for i in self.gh.get(reader, repo, f"/repos/{repo}/issues?state=closed&sort=updated"
+                                                       "&direction=desc&per_page=100") or []
+                   if not i.get("pull_request") and i.get("state_reason") != "not_planned"]
+        others = [i for i in others if marker not in (i.get("body") or "")]
+        repeats = [r for r in likely_repeats(title, others) if r["number"] not in not_repeat]
+        if repeats:
+            named = "; ".join(f"#{r['number']} {r['title']!r} ({'open' if r.get('state', 'open') == 'open' else 'closed'})"
+                              for r in repeats)
+            raise Refused(f"this may repeat {named}. Read it: if it is the same problem, or already done, comment there "
+                          "instead of filing. If yours is a different problem, open it again with not_repeat naming each "
+                          "of those numbers and how_it_differs saying how")
+
         def write():
             r = self.gh.call(app, repo, WRITE["issues"], "POST", f"/repos/{repo}/issues",
-                             {"title": title, "body": f"{body}\n\n{marker}"})
+                             {"title": title, "body": f"{body}\n\n{marker}", "labels": [label["name"]]})
             if r.status != 201:
                 raise GitHubError(r.status, str((r.body or {}).get("message") if isinstance(r.body, dict) else r.body))
             return {"number": r.body["number"]}
 
-        return self._guarded_write(bot, task, "open_issue", repo, f"issue-new/{digest}", "", write=write, read_back=find)
+        def read_back():
+            got = find()
+            if got is None:
+                return None
+            labels = [l.get("name") for l in self.gh.get(app, repo, f"/repos/{repo}/issues/{got['number']}").get("labels") or []]
+            return dict(got, label=label["name"]) if label["name"] in labels else None
+
+        return self._guarded_write(bot, task, "open_issue", repo, f"issue-new/{digest}", "", write=write, read_back=read_back)
 
     def label(self, caller: str, args: dict) -> dict:
         bot, repo, task = self._bot(args), self._repo(args), self._task(args)
