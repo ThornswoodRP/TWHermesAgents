@@ -1533,6 +1533,28 @@ class CloseIssue(unittest.TestCase):
         w.fake.prs[(APP, 42)]["merged"] = True
         self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
 
+    def test_a_fix_merged_in_twhermesagents_closes_an_ops_issue(self):
+        # Ops #299: #275 and #264 were fixed by TWHermesAgents#139, and
+        # close_issue took done_by_pr only in the issue's own repo.
+        hermes = "ThornswoodRP/TWHermesAgents"
+        w = World()
+        w.fake.add_issue(OPS, 275)
+        w.fake.add_pr(hermes, 139, head_ref="claude/x", head_sha="c" * 40, files=["a"], author="EvilPatrick06")
+        with self.assertRaises(Refused) as e:
+            self.close(w, repo=OPS, number=275, reason="completed", done_by_pr=139, pr_repo=hermes,
+                       body="The broker fix merged.")
+        self.assertIn(f"PR {hermes}#139 has not merged", str(e.exception))
+        w.fake.prs[(hermes, 139)]["merged"] = True
+        out = self.close(w, repo=OPS, number=275, reason="completed", done_by_pr=139, pr_repo=hermes,
+                         body="Fixed by ThornswoodRP/TWHermesAgents#139, installed on the VM.")
+        self.assertTrue(out["done"], out)
+        self.assertEqual(w.fake.issues[(OPS, 275)]["state_reason"], "completed")
+        # Only a repo tw-git reads.
+        w.fake.add_issue(OPS, 264)
+        with self.assertRaises(Refused) as e:
+            self.close(w, repo=OPS, number=264, reason="completed", done_by_pr=1, pr_repo="someone/else")
+        self.assertIn("not a repo tw-git reads", str(e.exception))
+
     def test_a_merged_pull_request_over_250_commits_finishes_it(self):
         # Ops #307: PR 5381 had 280 commits, GitHub lists 250, and the full
         # read refused it, so #4536 could not be closed as done by it.

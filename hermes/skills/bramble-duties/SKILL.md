@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.21.0
+version: 1.22.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -385,6 +385,11 @@ hour, after the Desk's list:
    section 1. Work one at a time, as section 6 says for the workers.
 3. When its pull request has merged, `tw_git close_issue` with reason
    `completed` and `done_by_pr`. A duplicate is closed as in section 5.
+   An Ops issue whose fix is in ThornswoodRP/TWHermesAgents (the brokers,
+   the guard, the decision core, these skills) closes the same way once the
+   VM's install of that merge shows on Ops #249: `done_by_pr` the merged
+   TWHermesAgents pull request and `pr_repo` `ThornswoodRP/TWHermesAgents`.
+   An Ops issue is never left open after its fix is installed (Ops #299).
 4. One that needs a public change (Thornswood or the fork) gets a public
    issue that says what and where, without the private detail, and names
    the Ops issue by number only. That public issue is picked from the board
