@@ -194,6 +194,22 @@ class PolicyService:
     def limits_ok(self) -> bool:
         return self._meta("limits_ok") == "1"
 
+    def _limits_failed(self) -> str:
+        """Why sandbox jobs wait on the limits check, naming each limit it
+        found off. Until 15 Nov 2026 it said only that the check did not pass,
+        so nobody on a worker's side could tell which limit to look at
+        (Thornswood-Ops #292: every run_check was refused on 11 Nov)."""
+        at = self._meta("limits_at")
+        if not at:
+            return "no limits check has been recorded since tw-policy started; no sandbox job runs until one passes"
+        try:
+            details = [str(d) for d in json.loads(self._meta("limits_details") or "[]")]
+        except ValueError:
+            details = []
+        what = "; ".join(details[:5]) + (f"; and {len(details) - 5} more" if len(details) > 5 else "")
+        return (f"the limits check at boot ({at}) did not pass: {what or 'it named no limit'}. "
+                "No sandbox job runs until one passes (tw-limits-check.service runs it)")
+
     # The queue
 
     def _stage_limit(self, name: str) -> int:
@@ -327,7 +343,7 @@ class PolicyService:
             if limit == 0:
                 return f"no sandbox job runs in the {self.rules['stage']} stage"
             if not self.limits_ok():
-                return "the last limits check at boot did not pass; no sandbox job runs until one does"
+                return self._limits_failed()
         else:
             limit = self._stage_limit("model_turns")
             held = self._held(unit)

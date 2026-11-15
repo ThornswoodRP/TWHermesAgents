@@ -162,6 +162,7 @@ const SAID = {
   passkey_unavailable: 'Passkeys are not set up on the core yet.',
   no_origin: 'The core does not know its address yet, so passkeys cannot work.',
   offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.',
+  cut_off: 'The core\'s answer was cut off on the way. Asking again is the same ask, never a second one.',
   voice_off: 'Dictation is not running on the VM.',
   voice_slow: 'Whisper on the VM took too long with that. Try a shorter recording.',
 }
@@ -187,7 +188,12 @@ async function call(method, path, body) {
     return { status: 0, body: { error: 'offline' } }
   }
   let out = {}
-  try { out = await resp.json() } catch (err) { out = {} }
+  try { out = await resp.json() } catch (err) {
+    // A 200 whose body never arrived (the page being left, or the connection cut part way) is no answer, the same
+    // as a request that never reached the core. Taken as a 200 with an empty body, a chat kept that empty body as
+    // its newest page, and every later open of that chat threw before it drew (#138, #123).
+    if (resp.ok) return { status: 0, body: { error: 'cut_off' } }
+  }
   return { status: resp.status, body: out }
 }
 
@@ -2592,7 +2598,11 @@ const threads = {}       // gw:sid -> { newest, older, olderMore, note }
 // fetched only while it stayed open, and Android closes it. The copy is this
 // browser's own storage for this app, the newest KEPT_MESSAGES of the KEPT_CHATS
 // chats opened last; signing out deletes it.
-const KEPT = 'hermes.kept.v1'
+const KEPT = 'hermes.kept.v2'
+// v1 copies could hold an empty page from an answer cut off on the way (#138), which broke that chat for good,
+// so they are dropped once and each chat is read from Hermes again.
+const KEPT_OLD = 'hermes.kept.v1'
+try { localStorage.removeItem(KEPT_OLD) } catch (e) {}
 const KEPT_CHATS = 30
 const KEPT_MESSAGES = 150
 

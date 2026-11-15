@@ -316,8 +316,12 @@ class Queue(unittest.TestCase):
         s = service(data=data)
         r = s.admit("hermes", {"bot": "rift", "task": "t", "kind": "sandbox"})
         self.assertIn("limits check", r["reason"])
-        s.limits_record("root", {"ok": False, "details": ["memory.max is max"]})
-        self.assertIn("limits check", s.admit("hermes", {"bot": "rift", "task": "t2", "kind": "sandbox"})["reason"])
+        s.limits_record("root", {"ok": False, "details": ["tw-sandbox.slice: memory.max is max; MemoryMax=2G is "
+                                                          "not applied", "swap is 0.0 GB"]})
+        why = s.admit("hermes", {"bot": "rift", "task": "t2", "kind": "sandbox"})["reason"]
+        # Ops #292: a failed check names the limits it found off.
+        self.assertIn("limits check", why)
+        self.assertIn("MemoryMax=2G is not applied; swap is 0.0 GB", why)
         s2 = service(data=data)
         s2.limits_record("root", {"ok": True})
         self.assertEqual(s2.admit("hermes", {"bot": "rift", "task": "t", "kind": "sandbox"})["state"], "admitted")

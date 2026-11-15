@@ -484,6 +484,41 @@ class MainCards(unittest.TestCase):
         self.assertTrue(core2.main_answer(self.w.ws, c["id"])["restored"])
         self.assertFalse(core2.states(c["id"])["release_authorized"])
 
+    def test_a_release_link_gets_one_main_card_at_a_time(self):
+        # Ops #331: Thornswood #6048 at a8abf30 got three Main cards, each
+        # opened by a Bramble turn that did not see the one before.
+        c = main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
+        self.assertEqual((e.exception.reason, e.exception.detail["decision_id"]), ("main_already_asked", c["id"]))
+        self.assertIn(c["id"], str(e.exception))
+        p = main_card(self.w, link=f"publish:{REPO}@{SHA}")
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, link=f"publish:{REPO}@{SHA}#5582")
+        self.assertEqual(e.exception.detail["decision_id"], p["id"], "the same commit with a pull request is the same link")
+        # Another commit, or a main run of the same one, is another link.
+        main_card(self.w, link=f"merge:{REPO}@{'1' * 40}#6048", scope_of_yes=f"PR 6048 merges at {'1' * 40}.")
+        main_card(self.w)
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "authorize"))
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
+        self.assertEqual(e.exception.reason, "main_already_authorized")
+        # Once Bramble has used his yes, the link is free again.
+        self.w.core.report_work_done(self.w.bramble, c["id"], "merged")
+        main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
+
+    def test_a_main_card_that_got_no_or_expired_leaves_the_link_free(self):
+        c = main_card(self.w)
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "not_now"))
+        d = main_card(self.w)
+        self.w.core.answer(self.w.patrick(), **World.answer_args(d, "authorize", key="key-00000002"))
+        self.w.clock.advance(days=3)
+        e = main_card(self.w)  # his yes on d is past what a record lives
+        self.w.clock.advance(days=4)
+        main_card(self.w)  # e went unanswered and expired
+        self.assertEqual(self.w.store.db.execute("SELECT count(*) FROM decisions WHERE kind = 'main'").fetchone()[0], 4)
+        self.assertNotEqual(e["id"], d["id"])
+
     def test_main_answer_is_for_main_cards_only(self):
         c = self.w.card()
         with self.assertRaises(CoreError) as e:

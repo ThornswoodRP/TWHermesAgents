@@ -64,7 +64,7 @@ Every push to a pull request, and every push to `main`, runs **Guard rail tests*
 - **Guard rail tests (VM's Python)**: Ubuntu 24.04 with Python 3.12, the VM's own;
 - **Guard rail tests (One's Python)**: Windows with Python 3.13, named for Patrick's Windows machine, so the suite keeps working on a Windows checkout.
 
-When both pass on a pull request's exact head, `.github/workflows/merge-green.yml` merges it with nobody touching it. It runs `main`'s own `scripts/merge_green.py`, never a pull request's code, and merges a pull request only when it is open, not a draft, from this repository, aimed at `main`, green on both checks with nothing else on that head failing, and clean to merge. A pull request that says `Closes #N` closes that issue when it merges, so a fix closes its own issue. A new push runs the checks again.
+When both pass on a pull request's exact head, `.github/workflows/merge-green.yml` merges it with nobody touching it. It runs `main`'s own `scripts/merge_green.py`, never a pull request's code, and merges a pull request only when it is open, not a draft, from this repository, aimed at `main`, green on both checks with nothing else on that head failing, and clean to merge. A pull request that says `Closes #N` closes that issue when it merges, so a fix closes its own issue: GitHub does it when a person's auto-merge merges it, and merge-green does it for the merges it makes, since GitHub closes nothing for a merge made with an Actions token. A new push runs the checks again.
 
 A failing check is fixed at its cause, never re-run to get a pass.
 
