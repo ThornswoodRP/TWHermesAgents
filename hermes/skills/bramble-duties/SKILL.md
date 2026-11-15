@@ -53,7 +53,15 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    robot's (Dependabot's, the pin robot's: the policy's `robot_authors`) are
    yours. A person's or a thread's is its owner's, who puts it on
    auto-merge; leave it alone, green or not. One from outside the team gets
-   the review in section 3, and never auto-merge.
+   the review in section 3, and never auto-merge. The exception is a Claude
+   session's (its branch is `claude/<what>`, opened with Patrick's sign-in)
+   that changes a file of step 5: Thornswood's auto-merge leaves it off,
+   and it is yours for its Main card alone (Patrick's A on his page, 15 Nov
+   2026, Ops #353: "Claude branches wait for the card"). Open the card for
+   its head as step 5 says, without a review or a comment of yours (the
+   thread owns its code), and once he answers `authorize`, `tw_git merge`
+   it with the card's id; tw_git refuses it without one. A conflict or a red
+   check on it is still its thread's.
 3. For each of those pull requests that is not a draft and has no auto-merge on
    (`auto_merge` is null), read it (`GET /repos/<repo>/pulls/<number>`). If
    its `mergeable` is false, it conflicts with its base: it goes back to its
