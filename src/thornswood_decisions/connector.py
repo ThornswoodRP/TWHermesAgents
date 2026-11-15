@@ -372,8 +372,8 @@ class Turn:
         if hasattr(os, "killpg"):
             try:
                 os.killpg(self.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            except ProcessLookupError:
+                return  # it ended between the check above and the kill: there is nothing left to end
         elif self.popen is not None:
             # Windows, where only the tests run a turn: the runner and the turn under it.
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.pid)], capture_output=True, check=False)
@@ -383,10 +383,8 @@ class Turn:
         """The connector that started it waits for its runner, which has ended or been killed, so none is
         left behind; a turn it picked up is its own parent's to reap."""
         if self.popen is not None:
-            try:
-                self.popen.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                pass
+            # It has written how the turn ended and is returning, or it was killed: either way it ends now.
+            self.popen.wait()
 
 
 class Hermes:

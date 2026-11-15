@@ -23,7 +23,7 @@ import time
 import unittest
 from pathlib import Path
 
-from decisions_helpers import World  # noqa: F401  (puts the repo on sys.path)
+import helpers  # noqa: F401  (puts the repo on sys.path)
 from test_decisions_api import Served
 from test_decisions_chat import flags, seat
 
