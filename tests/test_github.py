@@ -455,8 +455,21 @@ class OpsMerges(unittest.TestCase):
         self.assertTrue(self.merge(p=pr(repo=OPS, head_ref="claude/x", author_bot=None,
                                         author_login="EvilPatrick06")).allowed)
 
-    def test_a_workflow_change_needs_no_yes(self):
-        self.assertTrue(self.merge(p=pr(repo=OPS, files=[".github/workflows/box-run.yml"])).allowed)
+    def test_a_change_to_what_the_box_runs_needs_patricks_yes(self):
+        # Ops's workflows run on the box's runners, and status-page runs
+        # ops/write-status.js from main there (his A on Ops #353, 15 Nov 2026:
+        # Ops #358, a thread's new workflow, waited on a card opened by hand).
+        for f in (".github/workflows/box-run.yml", "ops/write-status.js"):
+            for p in (pr(repo=OPS, files=[f]),
+                      pr(repo=OPS, head_ref="claude/x", author_bot=None, author_login="EvilPatrick06", files=[f])):
+                v = self.merge(p=p)
+                self.assertFalse(v.allowed, f + " " + p.head_ref)
+                self.assertIn(f"merge:{OPS}@{HEAD}#42", v.reason)
+        own = pr(repo=OPS, head_ref="patrick-tunnel", author_bot=None, author_login="EvilPatrick06",
+                 files=[".github/workflows/tunnel.yml"])
+        v = self.merge(p=own)
+        self.assertTrue(v.allowed, v.reason)
+        self.assertTrue(self.merge(p=pr(repo=OPS, files=["ops/status.md", "issues/1.md", "tests/x.js"])).allowed)
 
     def test_skipped_is_not_success(self):
         v = self.merge(checks=green(name="check", conclusion="skipped"))

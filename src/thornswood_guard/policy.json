@@ -149,6 +149,15 @@
           ".github/workflows/"
         ],
         "verb_lists": []
+      },
+      "ThornswoodRP/Thornswood-Ops": {
+        "dirs": [
+          ".github/workflows/"
+        ],
+        "files": [
+          "ops/write-status.js"
+        ],
+        "verb_lists": []
       }
     }
   },

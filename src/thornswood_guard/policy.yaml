@@ -165,8 +165,10 @@ merge:
   # dec_IL6elJT7TwyCVC_wzMIveA: "Auto-merge skips a pull request that changes
   # workflows, the gate or its verb scripts unless it is Patrick's"). The same
   # files as Thornswood's scripts/ops/Auto-Merge.js holds: every file under
-  # dirs, each verb list, and each script and 'reads' entry a verb of the
-  # base branch's lists names (an entry ending in / is a folder). tw_git merge
+  # dirs, each of files, each verb list, and each script and 'reads' entry a
+  # verb of the base branch's lists names (an entry ending in / is a folder).
+  # Patrick's own pull request from a branch that is not a Claude session's
+  # (claude/) needs no card: it is his yes (his A on Ops #353, 15 Nov 2026). tw_git merge
   # turned auto-merge on for Thornswood #5665 (a verb script, 9 Nov 2026) and
   # skymp #150 (workflows, 12 Nov 2026) with no card answered: Ops #276.
   patrick_paths:
@@ -175,6 +177,15 @@ merge:
       verb_lists: ["scripts/vps/gate/verbs.json", "scripts/release/nexus-verbs.json"]
     ThornswoodRP/skymp:
       dirs: [".github/workflows/"]
+      verb_lists: []
+    # Ops's workflows run on the box's runners (box-run, tunnel,
+    # status-page, check), and status-page runs ops/write-status.js from main
+    # there. Until 15 Nov 2026 Ops had no entry, so Bramble merged any green
+    # Ops pull request with no card, and Ops #358 (a new workflow) waited on a
+    # card opened by hand (Patrick's A on Ops #353).
+    ThornswoodRP/Thornswood-Ops:
+      dirs: [".github/workflows/"]
+      files: ["ops/write-status.js"]
       verb_lists: []
 
 # What Bramble's release tooling may start. Nothing else, on main only.

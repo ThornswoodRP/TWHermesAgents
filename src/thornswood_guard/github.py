@@ -279,12 +279,22 @@ class GitHubRules:
         held = p.patrick_files(pr.repo, pr.files, verb_paths or [])
         if not held:
             return Verdict.yes()
+        if self.patricks_own_pr(pr):
+            return Verdict.yes(f"it changes {held[0]}, and it is Patrick's own pull request")
         named = ", ".join(held[:3]) + (", ..." if len(held) > 3 else "")
         yes = self.decisions.check(decision_id, kind="merge", repo=pr.repo, commit=sha, pr=pr.number)
         if yes.allowed:
             return Verdict.yes(f"it changes {named}, and {yes.reason} lets it merge at {sha[:12]}")
         return Verdict.no(f"PR {pr.number} changes {named}, which merges only on Patrick's authorize on a Main card "
                           f"with release link merge:{pr.repo}@{sha}#{pr.number}: {yes.reason}")
+
+    def patricks_own_pr(self, pr: PullRequest) -> bool:
+        """Patrick's own pull request: opened as him, from a branch that is
+        not a Claude session's. A Claude session's opens as him too, and waits
+        for his Main card like a Bot's (his A on Ops #353, 15 Nov 2026)."""
+        return (pr.author_bot is None and bool(pr.author_login)
+                and pr.author_login.lower() == str(self.policy.data["decisions"]["answered_by"]).lower()
+                and not CLAUDE_BRANCH.match(pr.head_ref or ""))
 
     def claude_session_pr(self, pr: PullRequest) -> bool:
         """A Claude session's pull request: a claude/ branch opened with the
