@@ -1263,12 +1263,14 @@ class PullRequestsAndIssues(unittest.TestCase):
         # with no issue needs one before its DECIDED.md line, and tw_git had no way to open it.
         w = World()
         args = {"bot": "bramble", "repo": APP, "task": "dec_x", "title": "Record the #5327 merge answer",
-                "body": "Patrick answered the #5327 merge card.\n\nDone when DECIDED.md carries it."}
+                "body": "Patrick answered the #5327 merge card.\n\nDone when DECIDED.md carries it.", "label": "enhancement"}
         out = w.git.open_issue("hermes", args)
         self.assertTrue(out["done"], out)
         issue = w.fake.issues[(APP, out["receipt"]["number"])]
         self.assertEqual(issue["title"], "Record the #5327 merge answer")
-        self.assertEqual((issue["labels"], issue["assignees"]), ([], []))
+        # One work label, set as it is made (Ops #267), and no assignee.
+        self.assertEqual((issue["labels"], issue["assignees"]), ([{"name": "enhancement"}], []))
+        self.assertEqual(out["receipt"]["label"], "enhancement")
         self.assertEqual(issue["user"]["login"], "thornswood-bramble[bot]")
         self.assertIn({"issues": "write", "metadata": "read"}, [t["permissions"] for t in w.fake.tokens])
         # The same ask again files nothing more.
@@ -1276,23 +1278,71 @@ class PullRequestsAndIssues(unittest.TestCase):
             w.git.open_issue("hermes", args)
         self.assertEqual(len(w.fake.writes("POST", f"/repos/{APP}/issues")), 1)
         # A worker files through the workers' App.
-        out = w.git.open_issue("hermes", dict(args, bot="sprocket", title="A finding"))
+        out = w.git.open_issue("hermes", dict(args, bot="sprocket", title="A finding", label="bug"))
         self.assertEqual(w.fake.issues[(APP, out["receipt"]["number"])]["user"]["login"], "thornswood-workers[bot]")
 
     def test_a_lost_issue_answer_is_found_by_its_marker(self):
         w = World()
         w.fake.lose_answer.add(f"POST /repos/{APP}/issues")
-        args = {"bot": "bramble", "repo": APP, "task": "t", "title": "A finding", "body": "What. Done when x."}
+        args = {"bot": "bramble", "repo": APP, "task": "t", "title": "A finding", "body": "What. Done when x.",
+                "label": "bug"}
         with self.assertRaises(Refused):
             w.git.open_issue("hermes", args)
         out = w.git.open_issue("hermes", args)
         self.assertTrue(out["reconciled"], out)
         self.assertEqual(len([k for k in w.fake.issues if k[0] == APP]), 1)
 
+    def test_an_issue_that_repeats_an_open_or_done_one_is_refused_naming_it(self):
+        # Patrick, 15 Nov 2026: "If something is already done or already an
+        # issue it should not be an issue or an extra one". Ops #288 repeated
+        # #295 (an ask_one that One's Hermes ends with no answer), both filed
+        # by Bramble on 11 Nov.
+        w = World()
+        # The other open issues the words are weighed against, as on Ops then.
+        for n, t in enumerate(("main has no branch protection", "tw_git push to Thornswood-Ops answers HTTP 404",
+                               "edit_pr can't take a pull request out of draft", "No Bot can rebuild a lockfile entry",
+                               "run_check refuses the merchant gamemode builder",
+                               "No Bot can read a public Nexus collection page",
+                               "close_issue can't name a fix merged in another repository",
+                               "Box runs of live-changing verbs don't wait for Patrick's approval",
+                               "The decision core opens a second Main card for the same merge",
+                               "No Bot can read a CI job log too big for a tw_git reply"), start=256):
+            w.fake.add_issue(OPS, n)
+            w.fake.issues[(OPS, n)]["title"] = t
+        w.fake.add_issue(OPS, 295)
+        w.fake.issues[(OPS, 295)]["title"] = "One's Hermes ends ask_one turns with no answer and no reason"
+        w.fake.add_issue(OPS, 286)
+        w.fake.issues[(OPS, 286)].update(title="No broker op deletes a Bot branch that has no pull request",
+                                         state="closed", state_reason="completed")
+        w.fake.add_issue(OPS, 290)
+        w.fake.issues[(OPS, 290)].update(title="The launcher log sends nothing", state="closed", state_reason="not_planned")
+        args = {"bot": "bramble", "repo": OPS, "task": "t", "label": "bug",
+                "title": "One's Hermes answers an ask_one with an empty turn", "body": "What. Done when x."}
+        with self.assertRaises(Refused) as e:
+            w.git.open_issue("hermes", args)
+        self.assertIn("#295", str(e.exception))
+        self.assertIn("(open)", str(e.exception))
+        # Done already: a closed issue is a repeat too.
+        with self.assertRaises(Refused) as e:
+            w.git.open_issue("hermes", dict(args, title="No broker op deletes a Bot's branch with no open pull request"))
+        self.assertIn("#286", str(e.exception))
+        self.assertIn("(closed)", str(e.exception))
+        self.assertEqual(w.fake.writes("POST", f"/repos/{OPS}/issues"), [])
+        # A Bot that read #295 and finds its own a different problem says how, and that goes in the body.
+        out = w.git.open_issue("hermes", dict(args, not_repeat=[295], how_it_differs="this one is One's empty answer to ask_one's read, not the turn"))
+        self.assertTrue(out["done"], out)
+        body = w.fake.issues[(OPS, out["receipt"]["number"])]["body"]
+        self.assertIn("Not a repeat of #295: this one is One's empty answer", body)
+        # A title alike in nothing is filed as it is.
+        out = w.git.open_issue("hermes", dict(args, title="The VM's disk fills with old release folders"))
+        self.assertTrue(out["done"], out)
+
     def test_an_issue_that_is_not_plain_or_not_in_a_bots_repo_is_refused(self):
         w = World()
-        base = {"bot": "bramble", "repo": APP, "task": "t", "title": "A finding", "body": "What. Done when x."}
-        for bad in ({"body": "What.\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_"},
+        base = {"bot": "bramble", "repo": APP, "task": "t", "title": "A finding", "body": "What. Done when x.",
+                "label": "bug"}
+        for bad in ({"label": ""}, {"label": "claimed: Bramble"}, {"label": "no such label"},
+                    {"not_repeat": [5]}, {"not_repeat": "5", "how_it_differs": "x"},{"body": "What.\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_"},
                     {"body": "What.\n---"}, {"body": " "}, {"title": ""}, {"title": "two\nlines"},
                     {"repo": "ThornswoodRP/Thornswood-Hermes"}, {"repo": "someone/else"}, {"bot": "patrick"}):
             with self.subTest(bad=bad), self.assertRaises(Refused):

@@ -31,6 +31,10 @@ class Lost(Exception):
     """The connection dropped after GitHub did the write."""
 
 
+DEFAULT_LABELS = ("bug", "documentation", "duplicate", "enhancement", "good first issue", "help wanted",
+                  "invalid", "question", "wontfix")
+
+
 class FakeGitHub:
     def __init__(self, root: Path | None = None):
         self.root = Path(root or tempfile.mkdtemp())
@@ -376,7 +380,8 @@ class FakeGitHub:
                          and (not query.get("creator") or i["user"]["login"] == query["creator"])]
                 return Response(200, json.loads(json.dumps(found[(page - 1) * 100: page * 100])), {})
             n = max([k[1] for k in self.issues if k[0] == repo] + [k[1] for k in self.prs if k[0] == repo] + [99]) + 1
-            self.issues[(repo, n)] = {"number": n, "user": {"login": self.app_login}, "assignees": [], "labels": [],
+            self.issues[(repo, n)] = {"number": n, "user": {"login": self.app_login}, "assignees": [],
+                                      "labels": [{"name": l} for l in body.get("labels") or []],
                                       "state": "open", "title": body["title"], "body": body.get("body"),
                                       "html_url": f"https://github.com/{repo}/issues/{n}"}
             return Response(201, json.loads(json.dumps(self.issues[(repo, n)])), {})
@@ -413,6 +418,9 @@ class FakeGitHub:
                 self.repo_labels[k] = {"name": body["name"], "color": body["color"], "description": body.get("description")}
                 return Response(201, self.repo_labels[k], {})
             k = (repo, urllib.parse.unquote(rest[1]).lower())
+            if k not in self.repo_labels and k[1] in DEFAULT_LABELS:
+                # Every GitHub repository starts with these.
+                self.repo_labels[k] = {"name": k[1], "color": "ededed", "description": ""}
             label = self.repo_labels.get(k)
             if label is None:
                 return Response(404, {"message": "Not Found"}, {})
