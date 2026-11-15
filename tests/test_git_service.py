@@ -807,6 +807,29 @@ class PatrickMerges(unittest.TestCase):
         sha = w2.green_pr(repo=APP, checks=False, files=["keys/box/patrick.pub"])
         self.assertTrue(w2.merge(sha=sha, repo=APP)["auto_merge"], "main names no verb that reads it")
 
+    def test_a_file_a_nexus_verb_runs_is_refused_once_its_reads_names_it(self):
+        """Ops #329: Thornswood #6007 (nexus-collection.js) and #5992
+        (collection-permissions.js) changed files New-NexusRevision runs, and
+        tw_git merge turned auto-merge on for both with no card, because the
+        Nexus verb list named only New-NexusRevision.ps1. Thornswood #6184
+        puts every file a verb runs in its reads; this holds that a file
+        named there is refused like the verb's own script."""
+        runs = ["scripts/release/collection-permissions.js", "scripts/release/nexus-collection.js"]
+        for path in runs:
+            before = self.world(verbs=False)
+            before.fake.contents[(APP, "main", "scripts/release/nexus-verbs.json")] = json.dumps(
+                {"verbs": {"New-NexusRevision": {"script": "scripts/release/New-NexusRevision.ps1"}}}).encode()
+            sha = before.green_pr(repo=APP, checks=False, files=[path])
+            self.assertTrue(before.merge(sha=sha, repo=APP)["auto_merge"], "the list as it was let it through")
+            w = self.world(verbs=False)
+            w.fake.contents[(APP, "main", "scripts/release/nexus-verbs.json")] = json.dumps(
+                {"verbs": {"New-NexusRevision": {"script": "scripts/release/New-NexusRevision.ps1", "reads": runs}}}).encode()
+            sha = w.green_pr(repo=APP, checks=False, files=[path])
+            self.refused(w, APP, sha, f"changes {path}")
+            self.assertEqual(w.fake.auto_merged, [])
+            did = self.card(w, APP, sha)
+            self.assertTrue(w.merge(sha=sha, repo=APP, decision_id=did)["auto_merge"], "Patrick's authorize at its head lets it on")
+
     def test_patricks_authorize_at_the_head_puts_it_on_once(self):
         w = self.world()
         sha = w.green_pr(repo=FORK, branch="wisp/2760-pr-write-guard", checks=False,
