@@ -236,6 +236,8 @@ class DecisionCore:
                                (p.workspace_id, task)).fetchone()
                 if not a or a["bot"] != p.bot:
                     raise CoreError(403, "not_your_task", f"task {task} is not assigned to {p.bot}")
+            if release:
+                self._no_second_main(db, p.workspace_id, release)
             if source_key:
                 req = db.execute("SELECT decision_id FROM decision_requests WHERE workspace_id = ? "
                                  "AND source_key = ?", (p.workspace_id, source_key)).fetchone()
@@ -573,6 +575,39 @@ class DecisionCore:
                                                  "merge:<owner>/<repo>@<its head commit>#<pull request>")
         return {"for": m.group(1), "repo": m.group(2), "commit": m.group(3),
                 "pr": int(m.group(4)) if m.group(4) else None}
+
+    def _no_second_main(self, db, workspace_id: str, release: dict) -> None:
+        """Refuses a Main card for a release link that already has one Patrick
+        is asked on, or has authorized and Bramble has not used. Main cards
+        take no source_key, so until 15 Nov 2026 nothing tied a card to its
+        link: Thornswood #6048 at a8abf30 got three Main cards, each opened by
+        a Bramble turn that did not see the one before, and Patrick answered
+        all three (Thornswood-Ops #331). An authorization is used once and
+        lives DEFAULT_EXPIRY (tw-policy's default_expiry_hours), so a card
+        whose yes Bramble reported done, that expired, or that was answered
+        before a restore leaves the link free for a new card."""
+        head = f"{release['for']}:{release['repo']}@{release['commit']}"
+        rows = db.execute("SELECT d.id, d.status, d.expires_at, d.revision FROM decisions d JOIN task_links l "
+                          "ON l.decision_id = d.id AND l.kind = 'release' WHERE d.workspace_id = ? "
+                          "AND d.kind = 'main' AND d.status IN ('pending', 'resolved') AND (l.ref = ? OR l.ref LIKE ?)",
+                          (workspace_id, head, head + "#%")).fetchall()
+        now = self.s.clock()
+        for r in rows:
+            if r["status"] == "pending" and now < parse(r["expires_at"]):
+                raise CoreError(409, "main_already_asked", f"Main card {r['id']} already asks Patrick about {head}: "
+                                "use it (revise_card if it changed) instead of opening another", decision_id=r["id"])
+            if r["status"] != "resolved":
+                continue
+            a = self.main_answer(workspace_id, r["id"])
+            if not a or a["option"] != AUTHORIZE or a["restored"]:
+                continue
+            if now >= parse(a["answered_at"]) + DEFAULT_EXPIRY:
+                continue
+            if db.execute("SELECT 1 FROM events WHERE kind = 'work.done' AND subject = ?", (r["id"],)).fetchone():
+                continue
+            raise CoreError(409, "main_already_authorized", f"Patrick already authorized {head} on Main card "
+                            f"{r['id']}: act on that answer, then report_work_done, instead of asking again",
+                            decision_id=r["id"])
 
     def _release_row(self, db, decision_id: str) -> dict:
         r = db.execute("SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'release'",
