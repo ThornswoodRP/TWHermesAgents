@@ -560,6 +560,17 @@ class GitHubRules:
             if not yes.allowed:
                 return Verdict.no(f"this run needs Patrick's word for {commit[:12]}: {yes.reason}")
             return Verdict.yes(f"{yes.reason}; GitHub's Main environment still waits for Patrick")
+        if decision_id:
+            # A run that needs no card can still be started on one, and then
+            # the card binds it: his yes for one commit is no yes for another.
+            # Until 15 Nov 2026 the card was not read at all and was used up
+            # anyway, so a Setup-Discord yes for e84f3bf, which said the run
+            # does not start if main moved, started one on bc18732 on 10 Nov
+            # (Thornswood-Ops #279).
+            yes = self.decisions.check(decision_id, kind=kind, repo=repo, commit=commit)
+            if not yes.allowed:
+                return Verdict.no(f"card {decision_id} does not cover this run at main {commit[:12]}: {yes.reason}. "
+                                  "Ask again for this commit, or start it with no card if no card is needed")
         if channel == "main":
             return Verdict.yes(f"{workflow} for main at {commit[:12]}: Patrick allows main releases without "
                                f"a yes for each (policy.yaml runs.main_without_patrick)")

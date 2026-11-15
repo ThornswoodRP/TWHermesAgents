@@ -705,6 +705,19 @@ class MainWithoutAYes(unittest.TestCase):
     def test_a_secret_verb_is_still_never_run(self):
         self.assertFalse(self.run_(workflow="nexus-run.yml", line="Set-NexusKey").allowed)
 
+    def test_a_card_a_run_is_started_on_binds_it_to_its_commit(self):
+        # Ops #279: a Setup-Discord yes for e84f3bf, which said the run does
+        # not start if main moved, started one on bc18732 on 10 Nov 2026.
+        # The run needs no card, but one it is started on must cover it.
+        line = "Get-Logs -Dev -Lines 2000"
+        decide(self.s, id="old", kind="main", commit=OTHER, pr_number=None)
+        v = self.run_(workflow="box-run.yml", line=line, channel="dev", decision_id="old")
+        self.assertFalse(v.allowed)
+        self.assertIn("does not cover this run", v.reason)
+        decide(self.s, id="now", kind="main", commit=HEAD, pr_number=None)
+        self.assertTrue(self.run_(workflow="box-run.yml", line=line, channel="dev", decision_id="now").allowed)
+        self.assertTrue(self.run_(workflow="box-run.yml", line=line, channel="dev").allowed, "no card is still fine")
+
 
 class Settings(unittest.TestCase):
     def setUp(self):
