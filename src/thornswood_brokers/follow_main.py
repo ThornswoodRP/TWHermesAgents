@@ -81,6 +81,9 @@ from . import reload, restart_plan, wire
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
 CONNECTOR = "tw-decide-connector.service"
+# The line in the connector's unit that leaves its Bot Chat turns running
+# when it stops (TWHermesAgents #163, deploy/decisions/tw-decide-connector.service).
+TURNS_OUTLIVE = "KillMode=process"
 # The line scripts/apply.py ends with (apply.RELOAD_LINE).
 RELOAD_LINE = "RELOAD: "
 
@@ -375,17 +378,22 @@ class Follower:
 
     def keeps(self, before: str | None, dest: Path) -> dict[str, bool]:
         """What the install may leave running (restart_plan): the brokers when
-        nothing they load changed, and the connector, with every Bot turn it
-        runs, when nothing it loads changed, the core's store does not migrate
-        (a migration stops every worker of the core, 1 Nov), and the brokers
-        either keep running or start again behind sockets systemd holds.
+        nothing they load changed, and the connector when nothing it loads
+        changed, the core's store does not migrate (a migration stops every
+        worker of the core, 1 Nov), and the brokers either keep running or
+        start again behind sockets systemd holds. And "turns": whether every
+        running turn goes on through the install, so new ones need not be
+        held: the brokers keep answering, the store does not migrate, and the
+        connector either keeps running or, under a unit that stops only the
+        connector itself (TURNS_OUTLIVE), leaves its Bot Chat turns running
+        for the connector that starts next to pick up (#163).
         A release that cannot be read keeps nothing."""
         try:
             old = self.opt / "releases" / before if before else None
             changed = restart_plan.changed((old, packages_in(old)) if old else None, (dest, packages_in(dest)))
         except (Stop, OSError, SyntaxError, ValueError) as e:
             self.say(f"NOTE what this release changes could not be read ({e}); every process starts again")
-            return {"brokers": False, "connector": False}
+            return {"brokers": False, "connector": False, "turns": False}
         migrates = self.migrates(dest)
         # A broker that made its own socket refused calls for a second or two
         # while it started again, and a turn whose ticket check (tw-policy's
@@ -394,16 +402,33 @@ class Follower:
         # brokers' sockets in both releases, unchanged, a call waits for the
         # broker instead (#162), so the connector's turns go on through it.
         held = self.sockets_held(old, dest)
+        brokers_answer = not changed["brokers"] or held
         keep = {"brokers": not changed["brokers"],
-                "connector": not changed["connector"] and not migrates and (not changed["brokers"] or held)}
+                "connector": not changed["connector"] and not migrates and brokers_answer}
+        keep["turns"] = brokers_answer and not migrates and (keep["connector"] or self.turns_outlive_connector())
         why = [w for w, yes in (("what it loads changed", changed["connector"]),
                                 ("the brokers start again without systemd holding their sockets",
                                  changed["brokers"] and not held),
                                 ("the core's store migrates", migrates)) if yes]
         self.say("the brokers " + ("keep running: nothing they load changed" if keep["brokers"] else "start again")
                  + "; the connector " + (f"starts again: {', '.join(why)}" if why else
-                                         "keeps running: nothing it or the brokers load changed and the store does not migrate"))
+                                         "keeps running: nothing it or the brokers load changed and the store does not migrate")
+                 + ("; its Bot Chat turns go on, and the connector that starts next picks them up"
+                    if why and keep["turns"] else ""))
         return keep
+
+    def turns_outlive_connector(self) -> bool:
+        """Whether the connector's unit systemd runs now stops only the
+        connector (TURNS_OUTLIVE), so its Bot Chat turns go on when it stops.
+        Read from the unit installed, which the running connector was started
+        under: the first install of #163 still stops a connector whose turns
+        write into its pipes, and so holds new turns and waits as before."""
+        unit = self._at("/etc/systemd/system") / CONNECTOR
+        try:
+            lines = unit.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return False
+        return TURNS_OUTLIVE in (line.strip() for line in lines)
 
     def sockets_held(self, old: Path | None, dest: Path) -> bool:
         """Whether systemd holds every broker's socket across this install:
@@ -652,10 +677,12 @@ class Follower:
             return 1
         try:
             keep = self.keeps(before, dest)
-            if keep["connector"]:
-                # Nothing a turn runs in stops for the install. A reload, when
-                # apply says one is needed, holds and waits itself, only for
-                # the turns in the gateway and Desktop's sessions it stops.
+            if keep["turns"]:
+                # Nothing a turn runs in stops for the install: a connector
+                # started again leaves its Bot Chat turns running for the next
+                # one (#163). A reload, when apply says one is needed, holds
+                # and waits itself, only for the turns in the gateway and
+                # Desktop's sessions it stops.
                 self.held = False
                 self.say("new turns are not held: the install stops nothing a running turn needs")
             else:

@@ -91,6 +91,15 @@ the claims, and the phone's pages go the moment it asks for one. Each turn runs
 on its own thread and says its result the moment it ends; the next claim does
 not wait for it, so a message to one Bot never waits for another Bot's turn
 (Patrick, 9 Nov: "it doesnt feel live"), up to PARALLEL turns at once.
+
+A turn outlives the connector (#163). Before 15 Nov each was a child writing into a pipe the connector read,
+so an install that started the connector again for a change to its own code (connector.py, own_connector.py,
+room_send.py or contracts.json, in about 15 to 22 merges from 5 to 12 Nov) ended every turn it ran. Now each
+runs under turn_run.py in a session of its own, writing Hermes's stream into a file in its own folder
+(TURNS_DIR), and the unit stops only the connector (KillMode=process), so the turn goes on in the same unit
+with the same sandbox. The connector that starts next picks up every turn still there (Connector.adopt):
+it follows each from the start of its stream to its end, as if it had started it, and says what came of it
+while the core still holds the message's lease (chat.LEASE, longer than TURN_SECONDS).
 """
 
 from __future__ import annotations
@@ -101,6 +110,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import sqlite3
 import stat
 import subprocess
@@ -137,6 +148,22 @@ DOING_KEEP = 20      # and at least this often, so the core knows the line is cu
 BOT_CHAT = "Bot Chat"
 PAGE_BYTES = 480 * 1024  # under the core's 512 KB
 HELPER = Path(__file__).with_name("room_send.py")
+# Each Bot Chat turn runs under this, apart from the connector, so that it outlives it (#163, turn_run.py).
+RUNNER = Path(__file__).with_name("turn_run.py")
+# Where each turn the connector hands to Hermes keeps its state, under the Bots' user's home: one folder a
+# message (0700), with the message as the core leased it (item.json, the connector's), how its turn was
+# started (turn.json) and its process (pid.json, Hermes's), the turn's stream as Hermes writes it (out), how
+# it ended (exit, turn_run.py), the message's text while the turn runs (message.txt), and what came of it
+# until the core takes that (result.json). A connector that starts while turns of the one before it still
+# run follows each of them to its end from here (Connector.adopt).
+TURNS_DIR = (".local", "state", "thornswood", "connector-turns")
+ITEM, TURN, PID, OUT, EXIT, RESULT, MESSAGE = ("item.json", "turn.json", "pid.json", "out", "exit", "result.json",
+                                               "message.txt")
+# What came of a message whose turn the connector before this one never started: nothing was sent.
+NOT_HANDED = "the connector stopped before it handed the message to Hermes"
+NOT_STARTED = "not-started"  # turn_run.NOT_STARTED: the turn's command could not start, so nothing was sent
+FOLLOW_SECONDS = 0.1  # how often a turn's stream file is read again while the turn runs
+ITEM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")  # store.new_id
 HELPER_FAILED = "the connector's Hermes helper"  # how a helper failure's reason begins (chat.py HELPER_FAILED)
 # How the reason begins when a Bot Chat message waits for the fleet queue (tw-policy) instead of the
 # gateway (chat.py FLEET). The Bots' turn gate turns away a turn the queue has no room for, and that turn
@@ -243,6 +270,121 @@ def helper_command(hermes_bin: str, python: str | None = None, root: str | None 
 def _tail(data: bytes, n: int = 160) -> str:
     text = " ".join(data.decode("utf-8", "replace").split())
     return text[-n:] if text else "nothing"
+
+
+def _write_json(path: Path, value: dict) -> None:
+    """Whole or not at all, 0600: a connector that starts after this one reads it as it was written."""
+    part = path.with_name(path.name + ".part")
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(value, f)
+    os.replace(part, path)
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def proc_start(pid: int) -> str | None:
+    """When a process started (field 22 of /proc/<pid>/stat), so a pid used again later is never taken for it
+    (thornswood_brokers.policy_service.holder reads it the same way); None when it is not running (or only a
+    zombie), or where there is no /proc."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return None
+    if not fields or fields[0] in ("Z", "X"):
+        return None
+    return fields[19] if len(fields) > 19 else None
+
+
+class Turn:
+    """One Bot Chat turn in its folder (TURNS_DIR): run by turn_run.py in a session of its own, writing Hermes's
+    stream into a file, so that it goes on when the connector that started it stops, and the connector after
+    it can follow it to its end. `popen` is there only for the connector that started it."""
+
+    def __init__(self, folder: Path, rec: dict, pid: int | None = None, start: str | None = None,
+                 popen: subprocess.Popen | None = None):
+        self.folder, self.rec, self.pid, self.start, self.popen = folder, rec, pid, start, popen
+
+    @property
+    def started(self) -> float:
+        return float(self.rec["started"])
+
+    @classmethod
+    def load(cls, folder: Path) -> "Turn | None":
+        """The turn a connector before this one started in that folder; None when none was started there (no
+        turn.json: Hermes was never asked)."""
+        rec = _read_json(folder / TURN)
+        if not (isinstance(rec, dict) and isinstance(rec.get("target"), str) and PROFILE_ID.match(rec["target"])
+                and isinstance(rec.get("started"), (int, float))
+                and (rec.get("session") is None or (isinstance(rec["session"], str) and SESSION_ID.match(rec["session"])))):
+            return None
+        pid = _read_json(folder / PID) or {}
+        return cls(folder, rec, pid.get("pid") if type(pid.get("pid")) is int else None,
+                   pid.get("start") if isinstance(pid.get("start"), str) else None)
+
+    def alive(self) -> bool:
+        """Whether its turn_run.py still runs: the very process, never another that got its pid later."""
+        if self.popen is not None:
+            return self.popen.poll() is None
+        return self.pid is not None and self.start is not None and proc_start(self.pid) == self.start
+
+    def code(self) -> str | None:
+        """How it ended, as turn_run.py wrote it: the exit code, or NOT_STARTED; None when nothing says."""
+        try:
+            return (self.folder / EXIT).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
+    def finished(self) -> bool:
+        return (self.folder / EXIT).exists() or not self.alive()
+
+    def lines(self, stop: threading.Event):
+        """Hermes's stream, line by line as it is written, from its start, until the turn has finished and
+        all of it is read (or `stop`)."""
+        with open(self.folder / OUT, "rb") as f:
+            part = b""
+            while True:
+                chunk = f.readline()
+                if chunk:
+                    part += chunk
+                    if part.endswith(b"\n"):
+                        yield part.decode("utf-8", "replace")
+                        part = b""
+                    continue
+                if stop.is_set():
+                    return
+                if self.finished():
+                    # It wrote all it will: whatever is left, then the end.
+                    for line in (part + f.read()).splitlines(keepends=True):
+                        yield line.decode("utf-8", "replace")
+                    return
+                time.sleep(FOLLOW_SECONDS)
+
+    def kill(self) -> None:
+        """Ends the turn and everything it started: its session's process group, which is turn_run.py's own."""
+        if not self.alive():
+            return
+        if hasattr(os, "killpg"):
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return  # it ended between the check above and the kill: there is nothing left to end
+        elif self.popen is not None:
+            # Windows, where only the tests run a turn: the runner and the turn under it.
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.pid)], capture_output=True, check=False)
+            self.popen.kill()
+
+    def reap(self) -> None:
+        """The connector that started it waits for its runner, which has ended or been killed, so none is
+        left behind; a turn it picked up is its own parent's to reap."""
+        if self.popen is not None:
+            # It has written how the turn ended and is returning, or it was killed: either way it ends now.
+            self.popen.wait()
 
 
 class Hermes:
@@ -426,8 +568,13 @@ class Hermes:
             return "uncertain", reason, None
         return ("not_ready" if got.get("ready") is False else "failed"), reason or "not done", None
 
+    @property
+    def turns(self) -> Path:
+        """Where each turn keeps its state (TURNS_DIR)."""
+        return self.home.joinpath(*TURNS_DIR)
+
     def to_bot(self, bot: str, text: str, doing=None, live=None, files: list[str] | None = None,
-               rewind=None) -> tuple[str, str, str]:
+               rewind=None, folder: Path | None = None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message to a Bot's Bot Chat. `doing(state, tool)` hears what the
         turn is doing as Hermes's stream says it (own_connector.follow_turn): thinking, writing, or a tool.
         `live` (own_connector.LiveTurn) keeps the turn as Desktop draws it.
@@ -437,42 +584,128 @@ class Hermes:
         Bot's thinking, its subagents and its status lines never reached the phone (Patrick, 9 Nov).
 
         `rewind` ("retry" or "edit", and his turn's id) takes the Bot Chat back to before that turn first
-        (room_send.py --tw-rewind, rewinds.py)."""
+        (room_send.py --tw-rewind, rewinds.py).
+
+        The turn keeps its state in `folder` (the connector's, for its message) and outlives this process
+        (start_turn); without one, it gets a folder of its own, gone once it ends."""
         state, why = self.check(bot)
         if state != "ready":
             # Nothing was sent: the message waits, with why (the gateway, or the helper's own failure).
             return "not_ready", "", why
-        with tempfile.TemporaryDirectory(prefix="tw-chat-") as folder:
-            os.chmod(folder, 0o700)
-            path = Path(folder) / "message.txt"
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-            argv = [*self.helper_cmd, "chat", *_rewind_args(rewind), "-p", bot, "--in", str(self.home), "-c", BOT_CHAT,
-                    "--create-if-missing", "-Q", "--format", "stream-json", "--query-file", str(path), *(files or [])]
-            # The Bot's own home, named before any of Hermes is imported, as in to_session.
-            env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
-            started = time.time()
+        return self._run(bot, None, text, folder, doing, live, lambda path: [
+            *self.helper_cmd, "chat", *_rewind_args(rewind), "-p", bot, "--in", str(self.home), "-c", BOT_CHAT,
+            "--create-if-missing", "-Q", "--format", "stream-json", "--query-file", str(path), *(files or [])])
+
+    def _run(self, bot: str, sid: str | None, text: str, folder: Path | None, doing, live, argv) -> tuple[str, str, str]:
+        """One turn of `bot` (in session `sid`, or its Bot Chat), started and followed to its end."""
+        own = folder is None
+        if own:
+            self.turns.mkdir(parents=True, exist_ok=True)
+            folder = Path(tempfile.mkdtemp(prefix="turn-", dir=self.turns))
+        try:
             try:
-                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, cwd=str(self.home), text=True,
-                                        encoding="utf-8", errors="replace", env=env)
-            except OSError:
+                turn = self.start_turn(folder, bot, sid, text, argv)
+            except OSError as exc:
+                return "failed", "", f"could not keep the turn's state on disk ({type(exc).__name__}); nothing was sent"
+            if turn is None:
                 return "failed", "", "could not start the hermes command"
-            seen: dict = {}
-            reader = threading.Thread(target=follow_turn, args=(proc.stdout, seen, doing or (lambda s, t: None), live),
-                                      daemon=True)
-            reader.start()
-            try:
-                code = proc.wait(timeout=TURN_SECONDS)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                return "uncertain", "", "no end to the Bot's turn in 15 minutes; it may have the message"
-            finally:
-                reader.join(30)
-                proc.stdout.close()
-        return self._ended(bot, None, code, started, seen)
+            return self.finish(turn, doing, live)
+        finally:
+            if own:
+                shutil.rmtree(folder, ignore_errors=True)
+
+    def start_turn(self, folder: Path, bot: str, sid: str | None, text: str, argv) -> Turn | None:
+        """Starts one turn under turn_run.py, in a session of its own, with Hermes's stream going into a file
+        in `folder`, never a pipe: a pipe broke when the connector stopped, and its turns stopped with it
+        (#163). The text goes in a 0600 file in that 0700 folder, never on a command line, and is gone when
+        the turn ends. `argv(path)` is the turn's command for the text's file. None when the runner could not
+        start (nothing was sent)."""
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        os.chmod(folder, 0o700)
+        # Before anything starts: a connector that finds no turn.json knows Hermes was never asked.
+        rec = {"target": bot, "session": sid, "started": time.time()}
+        _write_json(folder / TURN, rec)
+        path = folder / MESSAGE
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        out = os.open(folder / OUT, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # The Bot's own home, named before any of Hermes is imported (room_send.py loads Hermes's chat view
+        # before Hermes reads -p), so every part of the turn is that profile's.
+        env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
+        try:
+            proc = subprocess.Popen([sys.executable, "-I", str(RUNNER), str(folder), "--", *argv(path)],
+                                    stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.DEVNULL,
+                                    cwd=str(self.home), env=env, start_new_session=True)
+        except OSError:
+            path.unlink(missing_ok=True)
+            return None
+        finally:
+            os.close(out)
+        start = proc_start(proc.pid)
+        try:
+            _write_json(folder / PID, {"pid": proc.pid, "start": start})
+        except OSError:
+            pass  # the turn runs all the same; only a connector after this one could not follow it (resume)
+        return Turn(folder, rec, proc.pid, start, popen=proc)
+
+    def resume(self, folder: Path, doing=None, live=None) -> tuple[str, str, str]:
+        """(outcome, ref, reason) for the turn a connector before this one started in `folder` and did not see
+        to its end (Connector.adopt): followed from its stream's start to its end, as if this connector had
+        started it."""
+        turn = Turn.load(folder)
+        if turn is None:
+            # turn.json is written before anything starts, so Hermes was never asked: nothing was sent, and
+            # the message goes back in the queue as it was.
+            return "not_ready", "", NOT_HANDED
+        if turn.pid is None and not (folder / EXIT).exists():
+            return "uncertain", "", "the connector stopped as the turn started; it may have the message"
+        return self.finish(turn, doing, live)
+
+    def finish(self, turn: Turn, doing=None, live=None) -> tuple[str, str, str]:
+        """Follows a turn to its end and says what came of it. Into a session, the message is Hermes's the
+        moment it says it steered it into that session's running turn: what is left is only watching that
+        turn, so the view is let go of, as Desktop's /detach does, and ends without touching the turn."""
+        sid = turn.rec.get("session")
+        seen: dict = {}
+        taken = threading.Event()
+
+        def heard(st, tool):
+            if seen.get("taken"):
+                taken.set()
+            (doing or (lambda s, t: None))(st, tool)
+
+        stop = threading.Event()
+        reader = threading.Thread(target=follow_turn, args=(turn.lines(stop), seen, heard, live), daemon=True)
+        reader.start()
+        how = "ended"
+        while reader.is_alive():
+            if sid is not None and taken.is_set():
+                how = "taken"
+                break
+            if time.time() >= turn.started + TURN_SECONDS:
+                how = "timeout"
+                break
+            reader.join(0.5)
+        if how != "ended":
+            turn.kill()
+            stop.set()
+            reader.join(30)
+        turn.reap()
+        (turn.folder / MESSAGE).unlink(missing_ok=True)
+        code = turn.code()
+        if sid is not None and seen.get("taken"):
+            return "confirmed", f"{seen['taken']} into the running turn", ""
+        if how == "timeout":
+            return "uncertain", "", "no end to the Bot's turn in 15 minutes; it may have the message"
+        if code == NOT_STARTED:
+            return "failed", "", "could not start the hermes command"
+        try:
+            n = int(code)
+        except (TypeError, ValueError):
+            # Its runner ended without saying (killed, or the VM stopped): the turn may have the message.
+            return "uncertain", "", "the turn stopped without saying how it ended; it may have the message"
+        return self._ended(turn.rec["target"], sid, n, turn.started, seen)
 
     def _ended(self, bot: str, sid: str | None, code: int, started: float, seen: dict) -> tuple[str, str, str]:
         """What came of a turn that ran to its end, from its exit code, how a retry's or an edit's rewind went,
@@ -499,7 +732,7 @@ class Hermes:
         return "uncertain", "", f"hermes stopped with exit code {code}; it may have the message"
 
     def to_session(self, bot: str, sid: str, text: str, doing=None, live=None,
-                   files: list[str] | None = None, rewind=None) -> tuple[str, str, str]:
+                   files: list[str] | None = None, rewind=None, folder: Path | None = None) -> tuple[str, str, str]:
         """(outcome, ref, reason) for one message into one session of a Bot: the one a Board row opens,
         where the Bot may be working right now (Patrick, 9 Nov). It goes the way Desktop's message box
         sends into an open chat: room_send.py `chat --resume`, through the Bot's running gateway, which
@@ -509,7 +742,7 @@ class Hermes:
 
         A steered or redirected message has no turn of its own: Hermes has it once it says so, which is
         the end of this message (the Board's live line follows the Bot's turn). Anything else is followed
-        to its turn's end, as a Bot Chat turn is."""
+        to its turn's end, as a Bot Chat turn is, and outlives this process as one does (start_turn)."""
         if not SESSION_ID.match(sid):
             return "failed", "", "that is not a session id Hermes gives"
         state, why = self.check(bot)
@@ -521,60 +754,9 @@ class Hermes:
             return "not_ready", "", f"could not read {bot}'s store ({type(exc).__name__})"
         if not mine:
             return "failed", "", f"that session is not one of {bot}'s"
-        with tempfile.TemporaryDirectory(prefix="tw-chat-") as folder:
-            os.chmod(folder, 0o700)
-            path = Path(folder) / "message.txt"
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-            argv = [*self.helper_cmd, "chat", *_rewind_args(rewind), "-p", bot, "-Q", "--format", "stream-json", "--query-file", str(path),
-                    "--resume", sid, *(files or [])]
-            # The Bot's own home, named before any of Hermes is imported (room_send.py loads Hermes's chat
-            # view before Hermes reads -p), so every part of the turn is that profile's.
-            env = dict(os.environ, HERMES_HOME=str(self.home / ".hermes" / "profiles" / bot))
-            started = time.time()
-            try:
-                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, cwd=str(self.home), text=True,
-                                        encoding="utf-8", errors="replace", env=env)
-            except OSError:
-                return "failed", "", "could not start the hermes command"
-            seen: dict = {}
-            taken = threading.Event()
-
-            def heard(st, tool):
-                if seen.get("taken"):
-                    taken.set()
-                (doing or (lambda s, t: None))(st, tool)
-
-            reader = threading.Thread(target=follow_turn, args=(proc.stdout, seen, heard, live), daemon=True)
-            reader.start()
-            ends = time.monotonic() + TURN_SECONDS
-            code = None
-            while code is None and not taken.is_set() and time.monotonic() < ends:
-                try:
-                    code = proc.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    pass
-            if code is None and taken.is_set():
-                # Hermes has the message in the running turn. What is left is only watching that turn, so the
-                # view is let go of, as Desktop's /detach does, and ends without touching the turn.
-                proc.kill()
-                proc.wait()
-                reader.join(30)
-                proc.stdout.close()
-                return "confirmed", f"{seen['taken']} into the running turn", ""
-            if code is None:
-                proc.kill()
-                proc.wait()
-                reader.join(30)
-                proc.stdout.close()
-                return "uncertain", "", "no end to the Bot's turn in 15 minutes; it may have the message"
-            reader.join(30)
-            proc.stdout.close()
-        if seen.get("taken"):
-            return "confirmed", f"{seen['taken']} into the running turn", ""
-        return self._ended(bot, sid, code, started, seen)
+        return self._run(bot, sid, text, folder, doing, live, lambda path: [
+            *self.helper_cmd, "chat", *_rewind_args(rewind), "-p", bot, "-Q", "--format", "stream-json",
+            "--query-file", str(path), "--resume", sid, *(files or [])])
 
 
 class PolicyUnanswered(Exception):
@@ -674,9 +856,15 @@ def say(line: str) -> None:
 
 
 class Connector:
-    def __init__(self, core: Core, hermes: Hermes, say=say, hermes_home: Path | None = None):
+    def __init__(self, core: Core, hermes: Hermes, say=say, hermes_home: Path | None = None,
+                 turns: Path | None = None):
         self.core, self.hermes, self.say = core, hermes, say
         self.hermes_home = hermes_home or Path.home() / ".hermes"
+        # Where each Bot Chat turn keeps its state (TURNS_DIR), so that it outlives this process; None (a
+        # stand-in Hermes in the tests) keeps nothing on disk.
+        self.turns = turns if turns is not None else getattr(hermes, "turns", None)
+        self.folders: dict[str, Path] = {}  # each message's turn folder, until the core takes what came of it
+        self._adopted = False
         self.unsaid: list[dict] = []  # results the core has not taken yet
         self.waiting: dict[str, str] = {}  # gateways (by profile, "" for the room) found not ready: why
         self._lock = threading.Lock()
@@ -720,7 +908,13 @@ class Connector:
                 self.lives[item["id"]] = live
             rewind = ((item["rewind"], item["rewind_to"]) if item.get("rewind") in ("retry", "edit")
                       and type(item.get("rewind_to")) is int else None)
-            more = ({"files": extra} if extra else {}) | ({"rewind": rewind} if rewind else {})
+            try:
+                folder = self._folder(item)
+            except OSError as exc:
+                return {"id": item["id"], "outcome": "failed", "ref": "",
+                        "reason": f"could not keep the turn's state on disk ({type(exc).__name__}); nothing was sent"}
+            more = ({"files": extra} if extra else {}) | ({"rewind": rewind} if rewind else {}) | (
+                {"folder": folder} if folder else {})
             try:
                 if item.get("session"):
                     outcome, ref, reason = self.hermes.to_session(item["target"], item["session"], text,
@@ -731,6 +925,82 @@ class Connector:
                 with self._lock:
                     self.doing.pop(item["id"], None)
         return {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
+
+    def _folder(self, item: dict) -> Path | None:
+        """The folder this message's turn keeps its state in (TURNS_DIR), new, with the message as the core
+        leased it, so that a connector after this one can see its turn to the end and say what came of it."""
+        if self.turns is None or not ITEM_ID.fullmatch(item["id"]):
+            return None
+        folder = self.turns / f"m-{item['id']}"
+        # One left from an earlier lease of this message, whose result the core took: never this turn's.
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder, mode=0o700)
+        os.chmod(self.turns, 0o700)
+        _write_json(folder / ITEM, {"id": item["id"], "target": item["target"]})
+        with self._lock:
+            self.folders[item["id"]] = folder
+        return folder
+
+    def _forget(self, mid: str) -> None:
+        """The core has what came of the message: its turn's folder goes."""
+        with self._lock:
+            folder = self.folders.pop(mid, None)
+        if folder is not None:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def adopt(self) -> int:
+        """The turns the connector before this one started and did not see to their end, picked up once, when
+        this one starts (#163): an install that changed the connector's code stopped it, and its turns went
+        on (the unit's KillMode=process, turn_run.py). Each still running is followed to its end on a thread
+        of its own, as if this connector had started it; each that ended meanwhile is read to its end at once;
+        and a result the core had not taken is offered again. Returns how many turns it picked up."""
+        self._adopted = True
+        try:
+            folders = sorted(p for p in self.turns.iterdir() if p.is_dir()) if self.turns is not None else []
+        except OSError:
+            folders = []
+        picked = 0
+        for folder in folders:
+            item = _read_json(folder / ITEM)
+            if not (isinstance(item, dict) and isinstance(item.get("id"), str) and ITEM_ID.fullmatch(item["id"])
+                    and isinstance(item.get("target"), str) and PROFILE_ID.match(item["target"])):
+                # Made before its message was written into it: no turn ever ran there.
+                shutil.rmtree(folder, ignore_errors=True)
+                continue
+            with self._lock:
+                self.folders[item["id"]] = folder
+            result = _read_json(folder / RESULT)
+            if isinstance(result, dict) and result.get("id") == item["id"]:
+                with self._lock:
+                    self.unsaid.append(result)
+                continue
+            t = threading.Thread(target=self._resume, args=(item, folder), name=f"turn {item['id']}", daemon=True)
+            t.start()
+            with self._lock:
+                self.running.append(t)
+            picked += 1
+        if picked:
+            self.say(f"NOTE picked up {picked} turn{'s' if picked != 1 else ''} the connector before this one started")
+            self._say_doing_while_running()
+        return picked
+
+    def _resume(self, item: dict, folder: Path) -> None:
+        def doing(state, tool):
+            with self._lock:
+                self.doing[item["id"]] = {"id": item["id"], "state": state, "tool": tool}
+        live = LiveTurn()
+        with self._lock:
+            self.lives[item["id"]] = live
+        try:
+            outcome, ref, reason = self.hermes.resume(folder, doing, live)
+            r = {"id": item["id"], "outcome": outcome, "ref": ref, "reason": reason}
+        except Exception as exc:  # whatever it was, the message may have gone: say so, never resend
+            r = {"id": item["id"], "outcome": "uncertain", "ref": "",
+                 "reason": f"the connector hit {type(exc).__name__} while following the turn"}
+        finally:
+            with self._lock:
+                self.doing.pop(item["id"], None)
+        self._ended(item, r)
 
     def _fetched(self, files: list) -> list[tuple[dict, bytes]]:
         """Each file on a room message, fetched from the core and checked against its size and SHA-256:
@@ -827,6 +1097,7 @@ class Connector:
             status, body = self.core.post("/connector/result", r)
             if status == 200 or (status == 409 and body.get("error") == "not_leased"):
                 self.say(f"{'PASS' if r['outcome'] == 'confirmed' else 'NOTE'} {r['id']}: {r['outcome']}")
+                self._forget(r["id"])
             else:
                 keep.append(r)
         return keep
@@ -915,6 +1186,8 @@ class Connector:
         meanwhile, up to PARALLEL turns at once. Before, a round waited for all its turns, so a message to
         one Bot waited for another Bot's three-minute turn. Returns how many messages went to Hermes, or -1
         when the core said to wait."""
+        if not self._adopted:
+            self.adopt()
         self._report()
         if self.waiting and self._still_waiting():
             return 0
@@ -961,7 +1234,7 @@ class Connector:
         helper = r["reason"].startswith(HELPER_FAILED)
         if helper and r["outcome"] != "not_ready":
             self.say(f"FAIL {r['id']}: {r['reason']}")
-        if r["outcome"] == "not_ready":
+        if r["outcome"] == "not_ready" and r["reason"] != NOT_HANDED:
             with self._lock:
                 new = gateway not in self.waiting
                 self.waiting[gateway] = r["reason"]
@@ -974,6 +1247,13 @@ class Connector:
                          "its messages wait in the queue")
         with self._lock:
             self.unsaid.append(r)
+            folder = self.folders.get(r["id"])
+        if folder is not None:
+            # Kept with the turn until the core takes it, so a connector that starts before it does offers it.
+            try:
+                _write_json(folder / RESULT, r)
+            except OSError as exc:
+                self.say(f"FAIL {r['id']}: could not keep its result on disk ({type(exc).__name__})")
         self._report()
         self.wakeup.set()
 

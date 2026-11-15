@@ -442,6 +442,48 @@ class FollowMain(unittest.TestCase):
         self.assertTrue(vm.ran("deploy/install.sh")[0].endswith("--keep-brokers"), vm.calls)
         self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
 
+    # #163: a change to the connector's own code started it again, and its
+    # Bot Chat turns were children writing into its pipes, so the install
+    # held new turns, waited up to 20 minutes and cut off the rest.
+    def installed_connector_unit(self, f, text: str) -> None:
+        unit = f.root / "etc" / "systemd" / "system" / follow_main.CONNECTOR
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(text)
+
+    def test_a_connector_whose_unit_stops_only_itself_starts_again_and_holds_no_turn(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/connector.py": "\n# changed\n"})
+        self.installed_connector_unit(f, (REPO / "deploy" / "decisions" / "tw-decide-connector.service").read_text())
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (0, 0), self.said)
+        self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
+        self.assertTrue(any("the connector starts again: what it loads changed; its Bot Chat turns go on, and the "
+                            "connector that starts next picks them up" in l for l in self.said), self.said)
+        self.assertIn("new turns are not held: the install stops nothing a running turn needs", self.said)
+
+    def test_the_first_install_under_a_unit_that_still_ends_the_turns_holds_them_as_before(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/connector.py": "\n# changed\n"})
+        old_unit = (REPO / "deploy" / "decisions" / "tw-decide-connector.service").read_text()
+        self.installed_connector_unit(f, old_unit.replace(follow_main.TURNS_OUTLIVE + "\n", ""))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (1, 1), self.said)
+
+    def test_a_store_that_migrates_still_holds_new_turns(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/connector.py": "\n# changed\n"})
+        self.installed_connector_unit(f, (REPO / "deploy" / "decisions" / "tw-decide-connector.service").read_text())
+        f.migrates = lambda dest: True
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.drained, 1, self.said)
+
+    def test_the_connectors_unit_stops_only_the_connector(self):
+        unit = (REPO / "deploy" / "decisions" / "tw-decide-connector.service").read_text().splitlines()
+        self.assertIn(follow_main.TURNS_OUTLIVE, unit)
+
     def test_install_scripts_that_do_not_read_the_options_are_not_given_them(self):
         vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
         f = self.follower(vm)
@@ -495,7 +537,7 @@ class FollowMain(unittest.TestCase):
     def test_a_release_that_cannot_be_read_keeps_nothing(self):
         vm = FakeVM(NEW)
         f = self.follower(vm)
-        self.assertEqual(f.keeps(OLD, f.opt / "releases" / NEW), {"brokers": False, "connector": False})
+        self.assertEqual(f.keeps(OLD, f.opt / "releases" / NEW), {"brokers": False, "connector": False, "turns": False})
 
     def test_the_hold_ends_when_the_install_fails_too(self):
         vm = FakeVM(NEW, fail={"tw-canary": 1})

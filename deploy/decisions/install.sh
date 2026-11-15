@@ -229,10 +229,13 @@ run() { runuser -u tw-decide -- "$opt/bin/tw-decide" --db "$db" "$@"; }
 #
 # --keep-connector (the follower, when nothing the connector loads changed and
 # the store does not migrate, thornswood_brokers.restart_plan): the connector
-# is left running, and with it every Bot Chat turn it carries. Stopping it
-# killed those turns at each install (12 Nov). It already runs this release's
-# code, and with no migration nothing it leased is put back; while the core
-# is down its calls fail and it keeps the results until the core answers.
+# is left running. It already runs this release's code, and with no migration
+# nothing it leased is put back; while the core is down its calls fail and it
+# keeps the results until the core answers. Without it the connector stops
+# here, and only the connector: its unit's KillMode=process leaves each Bot
+# Chat turn it started running, and the connector that starts below (or the
+# follower's, after the reload) picks each up and says what came of it
+# (TWHermesAgents #163). Before, stopping it ended those turns (12 Nov).
 CORE_WORKERS="tw-decide-bots.service tw-decide-live.service tw-decide-voice.service tw-decide-connector.service tw-decide-push.service tw-decide-own.service tw-decide-feed.service tw-decide-peers.service"
 if [[ -n "$keep_connector" ]]; then
   CORE_WORKERS="${CORE_WORKERS/tw-decide-connector.service /}"

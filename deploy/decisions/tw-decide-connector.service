@@ -13,7 +13,15 @@
 # which a test holds it to). The connector asks tw-policy for the fleet
 # queue's room and a Bot's models there, and loads nothing of the guard or
 # the policy itself, so a change to either no longer restarts it at an
-# install, which ends every Bot Chat turn (15 Nov 2026).
+# install (15 Nov 2026).
+#
+# KillMode=process (TWHermesAgents #163): stopping or restarting the connector
+# ends only the connector. Each Bot Chat turn it started runs on under
+# turn_run.py, in this unit's cgroup with all of this unit's sandbox (the IP
+# rules, MemoryMax, the namespaces), writing its stream into a file, and the
+# connector that starts next follows it to its end and says what came of it
+# (connector.Connector.adopt). Before, an install that changed the
+# connector's code ended every turn it ran.
 [Unit]
 Description=Thornswood decision core connector (phone chat into Hermes)
 After=tw-decide.service tw-hermes-gateway.service
@@ -41,6 +49,7 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 CapabilityBoundingSet=
 MemoryMax=900M
+KillMode=process
 Restart=on-failure
 RestartSec=30s
 

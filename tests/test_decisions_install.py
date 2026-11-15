@@ -73,6 +73,9 @@ class Unit(unittest.TestCase):
         self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN} "
                                          "--policy-socket /run/tw-brokers/policy.sock")
         self.assertEqual((s["NoNewPrivileges"], s["CapabilityBoundingSet"]), ("yes", ""))
+        # Stopping it ends only the connector: its Bot Chat turns run on in this unit, under all of the above,
+        # for the connector that starts next to pick up (#163).
+        self.assertEqual(s["KillMode"], "process")
         self.assertNotIn("ListenStream", s)
         for key in s:
             self.assertNotRegex(key + s[key], r"(?i)api_server_key|token=|secret")
