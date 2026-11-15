@@ -460,7 +460,7 @@ TW_FILES_SCHEMA = {
     "name": "tw_files",
     "description": (
         "Your work trees, through the file broker: one tree per task under your own name, nothing outside it. "
-        "Ops: trees (your trees: each one's repo, task name and branch; needs no repo or task), checkout (a new tree on your branch from the base bundle tw_git gave you), read, write, edit (replace "
+        "Ops: trees (your trees: each one's repo, task name and branch; needs no repo or task), checkout (a new tree on your branch from the base bundle tw_git gave you; from_branch, another of your branches that bundle carries, opens the new branch at its head), read, write, edit (replace "
         "text found exactly once), delete, list, status, diff, search (git grep; stopped after 30 seconds, so '.*' over a big one-line JSON file is refused, not waited on), commit, bundle (your branch, for tw_git push), "
         "remove (after the PR merged or closed), run_check (one test harness, or a builder that writes a generated "
         "file into your tree: node scripts/dev/Build-Gamemode.js after a change to game/gamemode/*.ts, any other "
@@ -473,7 +473,7 @@ TW_FILES_SCHEMA = {
         "properties": {
             "op": {"type": "string", "enum": FILES_OPS},
             "repo": {"type": "string"}, "task": {"type": "string", "description": "<issue>-<what>, lower case"},
-            "branch": {"type": "string"}, "bundle": {"type": "string"},
+            "branch": {"type": "string"}, "bundle": {"type": "string"}, "from_branch": {"type": "string"},
             "path": {"type": "string"}, "content": {"type": "string"},
             "old": {"type": "string"}, "new": {"type": "string"},
             "offset": {"type": "integer"}, "limit": {"type": "integer"},

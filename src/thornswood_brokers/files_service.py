@@ -436,6 +436,9 @@ class FilesService:
         branch = str(args.get("branch") or "")
         if not self.policy.own_branch(bot, branch):
             raise Refused(f"{branch} is not {self.policy.bot_name(bot)}'s; a Bot branch is <bot>/<issue>-<what>")
+        from_branch = str(args.get("from_branch") or "")
+        if from_branch and (not self.policy.own_branch(bot, from_branch) or from_branch == branch):
+            raise Refused(f"from_branch is another of {self.policy.bot_name(bot)}'s own branches, not {from_branch!r}")
         base = self.policy.data["merge"]["base"][repo]
         bundle = self._spool(self.spool_in, bot, str(args.get("bundle") or ""))
         with self._lock(bot):
@@ -453,17 +456,30 @@ class FilesService:
                 raise Refused(f"git init failed: {r.stderr.strip()[-300:]}")
             self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{base}:refs/remotes/origin/{base}", allow_file=True)
             # A bundle tw-git made with this branch in it (tw_git base with
-            # branch) opens the tree at that branch's head (Ops #311).
+            # branch) opens the tree at that branch's head (Ops #311). With
+            # from_branch, a new branch opens at the head of another of the
+            # Bot's branches, so one pull request can be built on another
+            # still open: until 15 Nov 2026 a new branch always opened at the
+            # base, and Rift could not build #4809's fix on #5630 (Ops #320).
             heads = self._git(tree, "bundle", "list-heads", str(bundle), allow_file=True).stdout.split()
             start = f"refs/remotes/origin/{base}"
-            if f"refs/heads/{branch}" in heads:
-                self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            source = from_branch or branch
+            if f"refs/heads/{source}" in heads:
+                self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{source}:refs/remotes/origin/{source}",
                           allow_file=True)
-                start = f"refs/remotes/origin/{branch}"
+                start = f"refs/remotes/origin/{source}"
+            elif from_branch:
+                raise Refused(f"the bundle {bundle.name} does not carry {from_branch}: call tw_git base with branch "
+                              f"{from_branch}, then check out with that bundle")
             self._git(tree, "checkout", "-q", "-b", branch, start)
+            if from_branch:
+                # The new branch is not the one it came from: nothing is set to
+                # track it, and push sends the new name.
+                self._git(tree, "update-ref", "-d", f"refs/remotes/origin/{from_branch}")
             head = self._git(tree, "rev-parse", "HEAD").stdout.strip()
         out = {"tree": f"{repo} {tree.name}", "branch": branch, "base": base, "head": head,
-               "from": "branch" if start != f"refs/remotes/origin/{base}" else "base"}
+               "from": f"branch {from_branch}" if from_branch else
+               ("branch" if start != f"refs/remotes/origin/{base}" else "base")}
         if finished:
             out["removed"] = finished
         return out
