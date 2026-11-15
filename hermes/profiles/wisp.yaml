@@ -131,6 +131,10 @@ plugins:
   auto_update_check_hours: 0
   hook_callback_timeout: 600
 hooks_auto_accept: false
+web:
+  backend: exa
+  search_backend: exa
+  extract_backend: exa
 security:
   redact_secrets: true
   allow_private_urls: false

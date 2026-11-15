@@ -433,6 +433,7 @@
     "default_expiry_hours": 72
   },
   "toolsets": {
+    "web_backend": "exa",
     "never": [
       "browser",
       "code_execution",

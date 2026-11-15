@@ -173,6 +173,9 @@ def build(policy: Policy, bot: str) -> dict:
             "hook_callback_timeout": HOOK_TIMEOUT,
         },
         "hooks_auto_accept": False,
+        # One backend for web_search and web_extract (policy toolsets.web_backend), named for both
+        # capabilities so an earlier pick of either does not stay.
+        "web": {key: policy.data["toolsets"]["web_backend"] for key in ("backend", "search_backend", "extract_backend")},
         # allow_private_urls false: Hermes's web tools (which run in the
         # gateway, on the VM's own network) refuse a private, loopback,
         # tailnet or cloud metadata address. It is Hermes's default; it is

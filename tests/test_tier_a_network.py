@@ -109,6 +109,17 @@ class TheBotsConfig(unittest.TestCase):
             for toolset in ("browser", "code_execution", "computer_use", "x_search", "delegation"):
                 self.assertIn(toolset, off, bot)
 
+    def test_one_keyless_backend_searches_and_reads_pages(self):
+        # Ops #340: the profiles held openai-native, which can neither search here nor read a page.
+        p = policy()
+        self.assertEqual(p.data["toolsets"]["web_backend"], "exa")
+        for bot in BOTS:
+            web = build(p, bot)["web"]
+            self.assertEqual(web, {"backend": "exa", "search_backend": "exa", "extract_backend": "exa"}, bot)
+            # Keyless: no key is handed to any Bot.
+            self.assertFalse([k for k in build(p, bot)["terminal"]["docker_env"] if "EXA" in k], bot)
+        self.assertNotIn("web", build_gateway(p))
+
     def test_hermes_refuses_private_addresses_in_every_profile(self):
         p = policy()
         for cfg in [build(p, bot) for bot in BOTS] + [build_gateway(p)]:
