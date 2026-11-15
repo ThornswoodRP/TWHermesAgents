@@ -81,6 +81,9 @@ class Loaded(unittest.TestCase):
     def test_a_helper_the_connector_runs_by_path_starts_it(self):
         self.assertEqual(self.changed(change={"src/thornswood_decisions/room_send.py": "\n# x\n"}),
                          {"brokers": False, "connector": True})
+        # And the runner each Bot Chat turn runs under (#163): the turns running keep theirs.
+        self.assertEqual(self.changed(change={"src/thornswood_decisions/turn_run.py": "\n# x\n"}),
+                         {"brokers": False, "connector": True})
 
     def test_a_launcher_or_unit_starts_its_process(self):
         self.assertTrue(self.changed(change={"deploy/systemd/tw-git.service": "\n"})["brokers"])
