@@ -101,6 +101,15 @@ AUTO_MERGE_OFF = """mutation($pr: ID!) {
 DEQUEUE = """mutation($pr: ID!) {
   dequeuePullRequest(input: {id: $pr}) { mergeQueueEntry { id } }
 }"""
+# Ready for review, or back to a draft (Ops #268). GitHub's REST update of a
+# pull request takes no draft field: it answers 200 and leaves the draft as
+# it was, so only these two mutations change it.
+READY_FOR_REVIEW = """mutation($pr: ID!) {
+  markPullRequestReadyForReview(input: {pullRequestId: $pr}) { pullRequest { isDraft } }
+}"""
+TO_DRAFT = """mutation($pr: ID!) {
+  convertPullRequestToDraft(input: {pullRequestId: $pr}) { pullRequest { isDraft } }
+}"""
 WORKFLOW_DIR = ".github/workflows/"
 # A Co-authored-by line in a commit message: the credit for someone else's work.
 CO_AUTHOR = re.compile(r"^co-authored-by:[ \t]*(.*?)[ \t]*<([^>\n]+)>[ \t]*$", re.IGNORECASE | re.MULTILINE)
@@ -688,24 +697,39 @@ class GitService:
         return self._guarded_write(bot, task, "open_pr", repo, f"pr-open/{head}", sha, write=write, read_back=find)
 
     def edit_pr(self, caller: str, args: dict) -> dict:
+        """The title, the body, and whether it is a draft (draft false marks it
+        ready for review). Done only when GitHub reads back every field asked
+        for: until 15 Nov 2026 draft was not taken at all, so an edit with
+        draft false and a body changed the body, answered done, and left the
+        pull request a draft that merge then refused (Ops #268: Thornswood
+        #5632, #5642, #5630, #5815, #5822, #5836 and #5839)."""
         bot, repo, task = self._bot(args), self._repo(args), self._task(args)
         pr = self._pr(repo, args.get("number"))
         self._check(self.rules.edit_pr(bot, pr))
         fields = {k: args[k] for k in ("title", "body") if isinstance(args.get(k), str)}
-        if not fields:
-            raise Refused("an edit changes the title or the body")
+        draft = args.get("draft")
+        if draft is not None and not isinstance(draft, bool):
+            raise Refused("draft is true or false")
+        if not fields and draft is None:
+            raise Refused("an edit changes the title, the body or draft")
         app = "bramble" if bot == "bramble" else self._app(bot)
-        digest = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
+        want = dict(fields, **({} if draft is None else {"draft": draft}))
+        digest = hashlib.sha256(json.dumps(want, sort_keys=True).encode()).hexdigest()[:16]
 
         def write():
-            r = self.gh.call(app, repo, WRITE["pulls"], "PATCH", f"/repos/{repo}/pulls/{pr.number}", fields)
-            if r.status != 200:
-                raise GitHubError(r.status, str(r.body))
+            if fields:
+                r = self.gh.call(app, repo, WRITE["pulls"], "PATCH", f"/repos/{repo}/pulls/{pr.number}", fields)
+                if r.status != 200:
+                    raise GitHubError(r.status, str(r.body))
+            if draft is not None and bool(self.gh.get(app, repo, f"/repos/{repo}/pulls/{pr.number}").get("draft")) != draft:
+                node = self._queue_state(repo, pr.number, pr.base_ref)["id"]
+                self.gh.graphql(app, repo, WRITE["pulls"], TO_DRAFT if draft else READY_FOR_REVIEW, {"pr": node})
             return {"number": pr.number}
 
         def read_back():
             raw = self.gh.get(app, repo, f"/repos/{repo}/pulls/{pr.number}")
-            return {"number": pr.number} if all(raw.get(k) == v for k, v in fields.items()) else None
+            same = all(raw.get(k) == v for k, v in fields.items())
+            return {"number": pr.number} if same and (draft is None or bool(raw.get("draft")) == draft) else None
 
         return self._guarded_write(bot, task, "edit_pr", repo, f"pr/{pr.number}/{digest}", pr.head_sha, write=write, read_back=read_back)
 
