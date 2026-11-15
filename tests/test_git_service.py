@@ -1289,7 +1289,11 @@ class PullRequestsAndIssues(unittest.TestCase):
         self.assertTrue(w.git.label("hermes", args)["done"])
         self.assertIn("claimed: Wisp", [l["name"] for l in w.fake.issues[(APP, 4482)]["labels"]])
 
-    def test_a_wait_counts_only_while_it_is_the_newest_comment(self):
+    def test_a_wait_holds_until_a_later_comment_says_it_is_over(self):
+        # 12 Nov 2026, 3:20 PM Mountain: a known issue note went onto many
+        # issues, and #4511 and #4507 showed as pickable with their waits
+        # still open, since the wait was read from the newest comment alone
+        # (Ops #327). A comment that says nothing about the wait leaves it.
         w = World()
         w.fake.add_issue(APP, 4482)
         w.fake.add_issue(APP, 4400)
@@ -1298,11 +1302,22 @@ class PullRequestsAndIssues(unittest.TestCase):
         with self.assertRaises(Refused) as e:
             w.git.label("hermes", args)
         self.assertIn("ThornswoodRP/Thornswood#4400", str(e.exception))
-        w.fake.comments[(APP, 4482)].append({"id": 2, "body": "Waits on PR #4400 now."})
+        w.fake.comments[(APP, 4482)].append({"id": 2, "body": "Known issue: the forge window can open twice."})
         with self.assertRaises(Refused):
             w.git.label("hermes", args)
-        w.fake.comments[(APP, 4482)].append({"id": 3, "body": "Patrick: go ahead without it."})
+        w.fake.comments[(APP, 4482)].append({"id": 3, "body": "No longer waits on #4400: Patrick said go ahead "
+                                                              "without it."})
         self.assertTrue(w.git.label("hermes", args)["done"])
+
+    def test_the_newest_stated_wait_replaces_an_older_one(self):
+        w = World()
+        for n in (4482, 4400, 4401):
+            w.fake.add_issue(APP, n)
+        w.fake.issues[(APP, 4400)]["state"] = "closed"
+        w.fake.comments[(APP, 4482)] = [{"id": 1, "body": "Waits on #4401."}, {"id": 2, "body": "Waits on #4400 now."},
+                                        {"id": 3, "body": "A note."}]
+        args = {"bot": "bramble", "repo": APP, "task": "t", "number": 4482, "label": "claimed: Wisp", "action": "add"}
+        self.assertTrue(w.git.label("hermes", args)["done"], "#4400 closed, and the wait on #4401 was replaced")
 
     def test_a_wait_on_a_repo_tw_git_does_not_read_is_refused(self):
         w = World()
@@ -1470,8 +1485,8 @@ class PullRequestsAndIssues(unittest.TestCase):
                                 "repository": {"nameWithOwner": APP}, "author": {"login": "EvilPatrick06"},
                                 "labels": {"nodes": [{"name": "area: Gamemode"}]}, "assignees": {"nodes": []}}}
 
-        w.fake.board_items = [item(n) for n in (4507, 4518, 4536, 4600, 4601, 4602)]
-        for n in (4507, 4518, 4536, 4600, 4601, 4602, 5754):
+        w.fake.board_items = [item(n) for n in (4507, 4518, 4536, 4600, 4601, 4602, 4603)]
+        for n in (4507, 4518, 4536, 4600, 4601, 4602, 4603, 5754):
             w.fake.add_issue(APP, n)
         w.fake.add_issue(OPS, 306)
         w.fake.add_issue(OPS, 307)
@@ -1480,17 +1495,18 @@ class PullRequestsAndIssues(unittest.TestCase):
         w.fake.comments[(APP, 4518)] = [{"body": "Waits on Thornswood-Ops #306. The cause can't be named yet."}]
         w.fake.comments[(APP, 4536)] = [{"body": "Waits on Thornswood-Ops #307, a broker gap."}]
         w.fake.comments[(APP, 4600)] = [{"body": "Waits on #5754."}, {"body": "Measured: it no longer waits."}]
+        w.fake.comments[(APP, 4601)] = [{"body": "Waits on #5754."}, {"body": "Known issue: posted to the forum."}]
         out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "limit": 3})
-        self.assertEqual([r["number"] for r in out["issues"]], [4536, 4600, 4601], "#307 closed, so #4536 is free")
+        self.assertEqual([r["number"] for r in out["issues"]], [4536, 4600, 4602], "#307 closed, so #4536 is free")
         self.assertEqual([(r["number"], r["waits_on"]) for r in out["waiting"]],
-                         [(4507, f"{APP}#5754"), (4518, f"{OPS}#306")])
+                         [(4507, f"{APP}#5754"), (4518, f"{OPS}#306"), (4601, f"{APP}#5754")])
         for n in (4507, 4518):
             with self.subTest(n=n), self.assertRaises(Refused):
                 w.git.label("hermes", {"bot": "wisp", "repo": APP, "task": str(n), "number": n,
                                        "label": "claimed: Wisp", "action": "add"})
         # Only what a pick needs is read: once limit is reached, the rest is not.
         read = [p for m, p, _ in w.fake.calls if m == "GET" and "/comments" in p]
-        self.assertFalse([p for p in read if "/issues/4602/" in p], read)
+        self.assertFalse([p for p in read if "/issues/4603/" in p], read)
         everything = w.git.board("hermes", {"bot": "bramble", "limit": 10})
         self.assertNotIn("waiting", everything, "only an eligible read looks at waits")
 

@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.22.0
+version: 1.23.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -548,10 +548,14 @@ work hours.
    comment names what it waits on ("Waits on #N"), and the worker gets its
    next issue now: a blocked worker is free, never "waiting" with its claim
    kept (9 Nov 2026: Wisp kept #4155 and sat idle from 9:21 AM on Ops #266).
-   An issue whose newest comment says it waits on an open issue is not
-   eligible until that issue closes. Write it as "Waits on" and the issue
-   (`#N` in the same repo, `Thornswood-Ops #N`, or `owner/repo#N`):
-   `tw_git label` reads the newest comment and refuses a claim while an
+   An issue whose newest comment about its wait says it waits on an open
+   issue is not eligible until that issue closes. Write it as "Waits on"
+   and the issue (`#N` in the same repo, `Thornswood-Ops #N`, or
+   `owner/repo#N`). A later comment that says nothing about the wait leaves
+   it (Ops #327: a known issue note cleared #4511's and #4507's waits on
+   12 Nov 2026); a comment that says "No longer waits" or "Waits on nothing"
+   ends it before the issue closes. `tw_git label` reads that comment and
+   refuses a claim while an
    issue it says the issue waits on is open (11 Nov 2026: #4482 was claimed
    again at 2:37 PM Mountain while Ops #275, which it waits on, was open),
    and `tw_git board` with eligible leaves it out, listing it under
