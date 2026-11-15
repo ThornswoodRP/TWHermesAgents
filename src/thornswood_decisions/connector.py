@@ -249,13 +249,15 @@ class Hermes:
     """The two stock ways into the Bots' Hermes."""
 
     def __init__(self, hermes_cmd: list[str], helper_cmd: list[str] | str, home: Path, helper: Path = HELPER,
-                 fleet=None):
+                 fleet=None, policy_socket: str = ""):
         # A Python's path alone (the tests' stand-ins) runs the helper file straight with it.
         self.cmd, self.home = list(hermes_cmd), home
         self.helper_cmd = [helper_cmd, "-I", str(helper)] if isinstance(helper_cmd, str) else list(helper_cmd)
         # fleet(bot) -> (room, why not): whether the fleet queue would admit a turn of that Bot now
         # (fleet_room). None where the Bots have no queue (brokers.ready off): every turn runs.
         self.fleet = fleet
+        # tw-policy's socket, which answers the models a Bot's chat may be moved to (bot_models).
+        self.policy_socket = policy_socket
 
     def turned_away(self, bot: str, since: float, sid: str | None = None):
         """Why the queue turned away the turn that started at `since` (time.time()) in the Bot's Bot Chat,
@@ -375,7 +377,7 @@ class Hermes:
         (room_send.py op `control` with the profile). The models are the Bot's own route list's that cost
         nothing per message (bot_models), so a pick can never move it off its policy."""
         got = self._helper({"op": "control", "profile": bot, "name": bot.capitalize(), "session_id": session_id,
-                            "allowed": bot_models(bot), **({"set": want} if want else {})}, CHECK_SECONDS)
+                            "allowed": bot_models(bot, self.policy_socket), **({"set": want} if want else {})}, CHECK_SECONDS)
         if got is None:
             return None, False, "the Bot's gateway did not answer in a minute"
         if got.get("helper_failed"):
@@ -575,33 +577,55 @@ class Hermes:
         return self._ended(bot, sid, code, started, seen)
 
 
-def bot_models(bot: str, policy_file: Path | None = None) -> list[list[str]]:
-    """[provider, model] of each route in the Bot's own list (policy.yaml routes, in its order) that it reaches
-    with its own sign-in: not one behind the admission proxy, which spends credits or needs One. These are
-    the only models its chat may be moved to from the app."""
-    from thornswood_guard.policy import Policy
-    from thornswood_guard.routes import chain_for
-    policy = Policy.load(policy_file) if policy_file else Policy.load()
-    if bot not in policy.bots:
+class PolicyUnanswered(Exception):
+    """tw-policy refused an op of the connector's, or did not answer it."""
+
+
+def _ask_policy(sock: str, op: str, args: dict):
+    """One op of tw-policy's, over its socket as the Bots' own user. The
+    connector reads nothing of the policy or the guard itself (15 Nov 2026):
+    a process holds the code and data it loaded at its start, so while it
+    imported the guard, every change to policy.json or to the guard's code
+    restarted the connector at the install. A connector restart ends every
+    Bot Chat turn it runs, so tw-follow-main held all new turns for up to 20
+    minutes first, and the Board showed two Bots working, then one: 20 of the
+    23 installs from 11 to 15 Nov that held the Bots changed nothing the
+    connector runs (thornswood_brokers.restart_plan). tw-policy, which owns
+    the policy, answers for it, and starts again by itself behind its socket.
+    Raises PolicyUnanswered with tw-policy's reason when it refuses or does
+    not answer."""
+    from thornswood_brokers.wire import Refused, call
+    try:
+        return call(sock, op, args, timeout=CHECK_SECONDS)
+    except Refused as e:
+        raise PolicyUnanswered(str(e)) from e
+
+
+def bot_models(bot: str, sock: str) -> list[list[str]]:
+    """[provider, model] of each route in the Bot's own list that it reaches with its own sign-in, from
+    tw-policy (its op bot_models): the only models its chat may be moved to from the app. Empty where the
+    Bots have no queue, or tw-policy does not answer: the app may then move the chat nowhere."""
+    if not sock:
         return []
-    return [[r["provider"], r["model"]] for r in chain_for(policy, bot, proxy_ready=False)
-            if r.get("via") != "admission-proxy"]
+    try:
+        got = _ask_policy(sock, "bot_models", {"bot": bot}) or {}
+    except PolicyUnanswered:
+        return []
+    models = got.get("models") if isinstance(got, dict) else None
+    return [[str(m[0]), str(m[1])] for m in models or [] if isinstance(m, list) and len(m) == 2]
 
 
-def fleet_room(policy_file: Path | None = None):
-    """fleet(bot) for Hermes: tw-policy's turn_room, asked over its socket as the Bots' own user, or None
-    when the Bots have no queue (brokers.ready off). A queue that does not answer has no room."""
-    from thornswood_guard.brokers import BrokerRefused, call
-    from thornswood_guard.policy import Policy
-    policy = Policy.load(policy_file) if policy_file else Policy.load()
-    if not policy.data["brokers"].get("ready"):
+def fleet_room(sock: str | None):
+    """fleet(bot) for Hermes: tw-policy's turn_room, asked over its socket (--policy-socket, which the
+    unit gives) as the Bots' own user, or None when the connector was given no socket (the Bots have no
+    queue: brokers.ready off). A queue that does not answer has no room."""
+    if not sock:
         return None
-    sock = policy.data["brokers"]["sockets"]["policy"]["path"]
 
     def fleet(bot: str) -> tuple[bool, str]:
         try:
-            got = call(sock, "turn_room", {"bot": bot}, timeout=CHECK_SECONDS)
-        except BrokerRefused as e:
+            got = _ask_policy(sock, "turn_room", {"bot": bot})
+        except PolicyUnanswered as e:
             return False, f"tw-policy did not answer ({e})"
         return bool(got.get("room")), str(got.get("why_not") or "")
     return fleet
@@ -1087,10 +1111,13 @@ def main(argv: list[str]) -> int:
                          "when it says ready (tw-canary)")
     ap.add_argument("--token", default=str(home / ".config" / "thornswood" / "connector.token"))
     ap.add_argument("--core", default=CORE)
+    ap.add_argument("--policy-socket", default="",
+                    help="tw-policy's socket (policy.yaml brokers.sockets.policy.path), which the unit gives while "
+                         "the Bots have a queue (brokers.ready); with none, every turn runs")
     ap.add_argument("--once", action="store_true", help="one round, then stop")
     args = ap.parse_args(argv)
     hermes = Hermes([args.hermes], helper_command(args.hermes, args.hermes_python, args.hermes_root), home,
-                    fleet=fleet_room())
+                    fleet=fleet_room(args.policy_socket), policy_socket=args.policy_socket)
     if args.check_ready is not None:
         if not PROFILE_ID.match(args.check_ready):
             raise SystemExit("STOP: --check-ready takes a Bot's profile name")

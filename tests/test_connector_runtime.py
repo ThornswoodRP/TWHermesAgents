@@ -355,28 +355,30 @@ class TheFleetQueue(unittest.TestCase):
         self.assertTrue(c._still_waiting())
         self.assertIn("has no room", c.waiting["bramble"])
 
-    def brokers(self, ready: bool) -> dict:
-        import copy
-        from helpers import policy
-        data = copy.deepcopy(policy().data)
-        data["brokers"]["ready"] = ready
-        return data
+    def test_fleet_room_is_off_without_a_policy_socket(self):
+        # The unit gives --policy-socket while the Bots have a queue
+        # (brokers.ready); the connector reads nothing of the policy itself.
+        self.assertIsNone(connector.fleet_room(""))
+        self.assertIsNone(connector.fleet_room(None))
 
-    def test_fleet_room_is_off_while_the_brokers_are_off(self):
-        off = self.dir / "off.json"
-        off.write_text(json.dumps(self.brokers(False)), encoding="utf-8")
-        self.assertIsNone(connector.fleet_room(off))
-
-    # The brokers' sockets are Unix sockets, and the connector runs on the VM; Windows has none.
-    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "the brokers' sockets are Unix sockets, which only the VM has")
-    def test_fleet_room_asks_the_policy_socket_while_the_brokers_are_on(self):
-        data = self.brokers(True)
-        data["brokers"]["sockets"]["policy"]["path"] = str(self.dir / "no.sock")
-        on = self.dir / "on.json"
-        on.write_text(json.dumps(data), encoding="utf-8")
-        room, why = connector.fleet_room(on)("bramble")
+    # The brokers' sockets are Unix sockets, and the connector runs on the VM
+    # (the brokers' client reads Linux users with pwd).
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the brokers' sockets are Unix sockets, which only the VM has")
+    def test_fleet_room_asks_the_policy_socket(self):
+        room, why = connector.fleet_room(str(self.dir / "no.sock"))("bramble")
         self.assertFalse(room)
         self.assertTrue(why.startswith("tw-policy did not answer"), why)
+
+    def test_the_units_policy_socket_is_tw_policys(self):
+        import configparser
+        from helpers import REPO, policy
+        cp = configparser.ConfigParser(strict=False, interpolation=None)
+        cp.read_string((REPO / "deploy" / "decisions" / "tw-decide-connector.service").read_text(encoding="utf-8"))
+        argv = cp["Service"]["ExecStart"].split()
+        brokers = policy().data["brokers"]
+        self.assertTrue(brokers["ready"], "the unit gives the socket only while the Bots have a queue")
+        self.assertEqual(argv[argv.index("--policy-socket") + 1], brokers["sockets"]["policy"]["path"])
+        self.assertIn("hermes", brokers["sockets"]["policy"]["clients"])
 
 
 class CheckReadyCommand(unittest.TestCase):
