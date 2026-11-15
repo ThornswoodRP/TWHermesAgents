@@ -144,6 +144,13 @@ merge:
   # decision core itself (#132), or once he puts them on this list, quoted
   # here with the date.
   auto_merge_people: ["EvilPatrick06", "WiccanDjinn"]
+  # The address a coding tool puts in a Co-authored-by line on every commit it
+  # makes for the person it works for (Claude Code: the model's noreply). On a
+  # commit whose author is on auto_merge_people it is that person's own work,
+  # not outside work: tw-git merge refused Patrick's own Ops #316 for it on
+  # 12 and 15 Nov 2026 (Ops #318). On anybody else's commit it is still
+  # outside work, read as before.
+  tool_co_authors: ["noreply@anthropic.com"]
   # The commits our own workflows make (engine-pin.yml commits as GitHub
   # Actions for the pin robot's pull request).
   workflow_authors: ["github-actions[bot]"]

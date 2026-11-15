@@ -180,7 +180,13 @@ class GitHubRules:
     def outside_credits(self, pr: PullRequest) -> list[Credit]:
         """The credits on a pull request that are not on Patrick's list, a Bot,
         a robot or one of our own workflows."""
-        return [c for c in pr.credits if not self.policy.trusted_credit(c.login, c.email)]
+        p = self.policy
+        tools = {e.lower() for e in p.data["merge"].get("tool_co_authors") or []}
+        # Commits whose author is on Patrick's list: a coding tool's
+        # Co-authored-by line on one of those is that person's work (Ops #318).
+        own = {c.commit for c in pr.credits if not c.co_author and p.trusted_login(p.credit_login(c.login, c.email))}
+        return [c for c in pr.credits if not p.trusted_credit(c.login, c.email)
+                and not (c.co_author and c.commit in own and (c.email or "").strip().lower() in tools)]
 
     def outside_work(self, pr: PullRequest, allowed: set[str] | None = None) -> Verdict:
         """Patrick, 8 Nov 2026: outside work never merges "unless I specficallyt
@@ -432,9 +438,10 @@ class GitHubRules:
             return Verdict.yes(f"#{issue.number} repeats #{duplicate.number}")
         if reason == "completed":
             if done_pr is not None:
+                where = "" if done_pr.repo == issue.repo else done_pr.repo
                 if not done_pr.merged:
-                    return Verdict.no(f"PR {done_pr.number} has not merged, so it has not finished #{issue.number}")
-                return Verdict.yes(f"#{issue.number} was finished by PR {done_pr.number}")
+                    return Verdict.no(f"PR {where}#{done_pr.number} has not merged, so it has not finished #{issue.number}")
+                return Verdict.yes(f"#{issue.number} was finished by PR {where}#{done_pr.number}")
             if done_run is not None:
                 if done_run.get("status") != "completed" or done_run.get("conclusion") != "success":
                     return Verdict.no(f"run {done_run.get('id')} did not succeed "

@@ -58,12 +58,31 @@ class Loaded(unittest.TestCase):
         self.assertEqual(self.changed(change={"src/thornswood_brokers/policy_service.py": "\n# x\n"}),
                          {"brokers": True, "connector": False})
 
-    def test_the_policy_both_load_starts_both(self):
-        self.assertEqual(self.changed(change={"src/thornswood_guard/policy.json": " "}),
-                         {"brokers": True, "connector": True})
+    def test_the_policy_and_the_guard_start_the_brokers_and_leave_the_connector_running(self):
+        # 15 Nov 2026: the connector imported the guard for the policy, so 20
+        # of the 23 installs from 11 to 15 Nov that stopped it (and, before
+        # that, held every new turn for up to 20 minutes) changed only the
+        # policy or the guard's code, which no connector turn needs: a Bot
+        # Chat turn is a Hermes process of its own that loads the guard when
+        # it starts. tw-policy answers the connector for the policy now.
+        for rel in ("src/thornswood_guard/policy.json", "src/thornswood_guard/policy.yaml",
+                    "src/thornswood_guard/brokers.py", "src/thornswood_guard/routes.py",
+                    "src/thornswood_guard/policy.py", "src/thornswood_guard/profile_config.py"):
+            self.assertEqual(self.changed(change={rel: "\n# x\n" if rel.endswith(".py") else " "}),
+                             {"brokers": True, "connector": False}, rel)
+
+    def test_the_connector_loads_nothing_of_the_guard(self):
+        files = restart_plan.loaded(REPO / "src", restart_plan.PROCESSES["connector"]["modules"])
+        guard = [f.relative_to(REPO / "src").as_posix() for f in files if f.relative_to(REPO / "src").parts[0] ==
+                 "thornswood_guard"]
+        self.assertEqual(guard, [])
+        self.assertIn(REPO / "src" / "thornswood_brokers" / "wire.py", files)
 
     def test_a_helper_the_connector_runs_by_path_starts_it(self):
         self.assertEqual(self.changed(change={"src/thornswood_decisions/room_send.py": "\n# x\n"}),
+                         {"brokers": False, "connector": True})
+        # And the runner each Bot Chat turn runs under (#163): the turns running keep theirs.
+        self.assertEqual(self.changed(change={"src/thornswood_decisions/turn_run.py": "\n# x\n"}),
                          {"brokers": False, "connector": True})
 
     def test_a_launcher_or_unit_starts_its_process(self):

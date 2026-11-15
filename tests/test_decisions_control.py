@@ -720,6 +720,7 @@ class Connector(unittest.TestCase):
         hermes = connector.Hermes.__new__(connector.Hermes)
         hermes._helper = lambda req, seconds: json.loads(subprocess.run(
             [sys.executable, "-I", str(script)], input=json.dumps(req).encode(), capture_output=True).stdout)
+        hermes.policy_socket = "/run/tw-brokers/policy.sock"
         said, core = [], FakeCore()
         conn = connector.Connector.__new__(connector.Connector)
         conn.hermes, conn.core, conn.say = hermes, core, said.append
@@ -729,24 +730,29 @@ class Connector(unittest.TestCase):
                                   {"id": "ctl_bbbbbbbbbb", "bot": "../x", "session_id": SID},
                                   {"id": "ctl_cccccccccc", "session_id": SID}, "junk"])
         self.assertEqual(sent, 1)
-        bm.assert_called_once_with("rift")
+        bm.assert_called_once_with("rift", "/run/tw-brokers/policy.sock")
         self.assertEqual(json.loads((self.dir / "req.json").read_text()),
                          {"op": "control", "profile": "rift", "name": "Rift", "session_id": SID, "allowed": models,
                           "set": {"reasoning": "high"}})
         self.assertEqual(core.posts, [("/connector/control", {"id": "ctl_aaaaaaaaaa", "state": BOT_STATE,
                                                               "applied": True, "reason": ""})])
 
-    def test_a_bots_models_are_its_own_routes_it_reaches_with_its_own_sign_in(self):
-        from thornswood_guard.policy import Policy
-        from thornswood_guard.routes import chain_for
-        policy = Policy.load()
-        for bot in BOTS:
-            with self.subTest(bot=bot):
-                got = connector.bot_models(bot)
-                self.assertTrue(got, "every Bot has a route of its own")
-                chain = [[r["provider"], r["model"]] for r in chain_for(policy, bot, proxy_ready=False)]
-                self.assertTrue(all(m in chain for m in got))
-        self.assertEqual(connector.bot_models("nobody"), [])
+    def test_a_bots_models_come_from_tw_policy(self):
+        # The connector reads nothing of the policy itself (15 Nov 2026): it
+        # asks tw-policy, and with no socket, or none answering, a chat may
+        # be moved nowhere.
+        asked = []
+
+        def ask(sock, op, args):
+            asked.append((sock, op, args))
+            return {"models": [["anthropic", "claude-opus-5-5"], "junk", ["x"]]}
+        with unittest.mock.patch.object(connector, "_ask_policy", ask):
+            self.assertEqual(connector.bot_models("rift", "/p.sock"), [["anthropic", "claude-opus-5-5"]])
+            self.assertEqual(connector.bot_models("rift", ""), [])
+        self.assertEqual(asked, [("/p.sock", "bot_models", {"bot": "rift"})])
+        if sys.platform.startswith("linux"):
+            # The brokers' sockets are Unix sockets, which only the VM has.
+            self.assertEqual(connector.bot_models("rift", str(Path(tempfile.mkdtemp()) / "none.sock")), [])
 
 
 if __name__ == "__main__":

@@ -70,8 +70,12 @@ class Unit(unittest.TestCase):
         cp.read_string((DEPLOY / "tw-decide-connector.service").read_text(encoding="utf-8"))
         s = cp["Service"]
         self.assertEqual((s["User"], s["IPAddressDeny"], s["IPAddressAllow"]), ("hermes", "any", "localhost"))
-        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN}")
+        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN} "
+                                         "--policy-socket /run/tw-brokers/policy.sock")
         self.assertEqual((s["NoNewPrivileges"], s["CapabilityBoundingSet"]), ("yes", ""))
+        # Stopping it ends only the connector: its Bot Chat turns run on in this unit, under all of the above,
+        # for the connector that starts next to pick up (#163).
+        self.assertEqual(s["KillMode"], "process")
         self.assertNotIn("ListenStream", s)
         for key in s:
             self.assertNotRegex(key + s[key], r"(?i)api_server_key|token=|secret")
