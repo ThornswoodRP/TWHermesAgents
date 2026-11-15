@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import re
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -206,6 +207,18 @@ class TheSkill(unittest.TestCase):
                      "never re-run", "gh pr create --repo ThornswoodRP/TWHermesAgents --base main"):
             self.assertIn(step, part)
         self.assertNotIn("gh pr merge", self.text)
+
+    def test_the_guides_test_task_is_the_shape_done_on_merge_reads(self):
+        # Thornswood's done-on-merge.yml reads only "Test task for #N: <title>"
+        # with the Server line under it. The Bots wrote "## Test task (Dev)" and
+        # "Main test task, for ...", and six issues never went to Done (15 Nov 2026).
+        guide = (REPO / "hermes" / "skills" / "thornswood" / "thornswood-guide" / "SKILL.md").read_text(encoding="utf-8")
+        lines = guide.splitlines()
+        heads = [i for i, l in enumerate(lines) if re.match(r"^\s*Test task for #(\d+)\s*:\s*(.+?)\s*$", l)]
+        self.assertTrue(heads, "the guide shows the test task block")
+        for i in heads:
+            self.assertRegex(lines[i + 1], r"^\s*Server\s*:\s*(Main|Dev)\s*$")
+            self.assertLessEqual(len(re.match(r"^\s*Test task for #\d+\s*:\s*(.+?)\s*$", lines[i]).group(1)), 45)
 
     def test_the_guide_and_bramble_say_who_writes_it(self):
         guide = (REPO / "hermes" / "skills" / "thornswood" / "thornswood-guide" / "SKILL.md").read_text(encoding="utf-8")

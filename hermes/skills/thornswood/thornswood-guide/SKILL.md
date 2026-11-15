@@ -79,7 +79,15 @@ This comes before every other line here. It is word for word the rule every Clau
 5. Open the PR (Developer-Guide.md "Open the pull request", and the PR template): what was wrong, the cause, what changed, the tests, "Which parts it touches" ticked, the run note if one is needed, and:
    - `Refs #N` for a fix people would notice. The issue stays open, goes to Done on merge, and closes with its Main test task when a main Ship carries it.
    - `Closes #N` only for a change nobody would notice in the game.
-   - The test task text for the issue (section 9), in the PR, ready to post.
+   - With `Refs #N`, the test task for #N in the PR body, in exactly this shape, one block per issue and kind. `done-on-merge.yml` reads only this shape: a heading such as `## Test task (Dev)`, or a line such as `Main test task, for ...`, is not read, so the issue never goes to Done and the main Ship never closes it (Thornswood #5853, #5856, #5956, #6067, #6070 and #6115 sat that way until 15 Nov 2026). The first line starts with `Test task for #N:` and the title on the same line; the `Server:` line comes right under it; the block ends at a heading, a `---` line or the end, so put it after the rest of the body's text and before the release note line:
+     ```text
+     Test task for #4409: The forge shows the price first
+     Server: Main
+     1. Open the forge at any smithy.
+     2. Pick an iron dagger.
+     What should happen: the window lists the iron it takes before you make it.
+     ```
+     A Dev one says `Server: Dev` and a `Build:` line under it (section 9 says when a test task is Dev).
    - The release note line, which main's required "Release note" check holds to Ship's note rules (Thornswood docs/guide/release-to-dev.md, "Say so, then write the note"). Either `Release note: none` with nothing after it on the line, when nobody would notice the change in the game, the launcher, the site or Discord, or the title on the same line as `Release note:`, three words or more, and one `- ` line under it for each thing people will notice:
      ```text
      Release note: The forge shows the price before you pay
