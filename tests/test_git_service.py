@@ -799,7 +799,28 @@ class PatrickMerges(unittest.TestCase):
         self.assertTrue([t for t in w.fake.tokens if t["permissions"].get("workflows") == "write"
                          and t["permissions"].get("pull_requests") == "write"])
         self.assertEqual(w.fake.auto_merged, [(FORK, 42, sha, "MERGE")])
-        self.assertIsNotNone(w.policy._decision(did).used_at, "the yes is used")
+        self.assertIsNone(w.policy._decision(did).used_at, "auto-merge on is not the merge; the yes stands")
+
+    def test_a_drop_from_the_queue_goes_on_again_on_the_same_yes(self):
+        """Thornswood #5996, 13 Nov 2026: on Patrick's authorize for 9cde8b1
+        it joined the queue, the queue dropped it on #5752's pwsh crash, and
+        the yes had been spent, so it waited for a second card for the same
+        head. The yes is for the merge at that head, and holds until then."""
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        did = self.card(w, APP, sha)
+        self.assertTrue(w.merge(sha=sha, repo=APP, decision_id=did)["auto_merge"])
+        w.fake.prs[(APP, 42)]["auto_merge"] = None  # GitHub's drop turns it off
+        self.assertTrue(w.merge(sha=sha, repo=APP, decision_id=did)["auto_merge"])
+        self.assertEqual([h for _, _, h, _ in w.fake.auto_merged], [sha, sha])
+        # A new head still needs a new yes.
+        new = "f" * 40
+        w.fake.prs[(APP, 42)]["head"]["sha"] = new
+        w.fake.prs[(APP, 42)]["auto_merge"] = None
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=new, repo=APP, decision_id=did)
+        self.assertIn("a new head needs a new yes", str(e.exception))
+        self.assertEqual(len(w.fake.auto_merged), 2)
 
     def test_a_card_for_another_head_pr_or_kind_or_no_answer_is_refused(self):
         w = self.world()

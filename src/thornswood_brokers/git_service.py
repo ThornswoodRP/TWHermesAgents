@@ -1006,7 +1006,19 @@ class GitService:
 
         out = self._guarded_write(bot, task, "merge", repo, f"pr/{number}", sha, write=write, read_back=read_back,
                                   undone=undone)
-        if uses and not out.get("reconciled"):
+        # Patrick's yes is for this pull request merging at this exact head,
+        # so it is spent when that merge is done here. Auto-merge on, or a
+        # place in the queue, is not the merge: GitHub turns auto-merge off
+        # when the queue drops the pull request unmerged, and the same head
+        # then goes on again on the same yes until it expires. A merged pull
+        # request (pr.merged) and a new head (the record's commit) are refused
+        # by themselves. Until 15 Nov 2026 the yes was spent at auto-merge
+        # on: Thornswood #5996 went into the queue on his authorize for
+        # 9cde8b1 on 13 Nov, the queue dropped it on #5752's pwsh crash in a
+        # harness it does not reach, and it waited for a second card for the
+        # same head.
+        merged_here = bool(out.get("merged") or (out.get("receipt") or {}).get("merged"))
+        if uses and merged_here and not out.get("reconciled"):
             self.ask("decision_use", {"id": decision_id})
         receipt = out.get("receipt") or {}
         if receipt.get("queued"):
