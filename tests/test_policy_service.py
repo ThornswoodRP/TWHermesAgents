@@ -770,6 +770,28 @@ class Routes(unittest.TestCase):
         self.assertFalse(s.route_admit("tw-proxy", {"bot": "bramble", "route": "credits"})["admitted"])
 
 
+class BotModels(unittest.TestCase):
+    """The models the app may move a Bot's chat to, which the connector asks
+    tw-policy for (15 Nov 2026: it imported the guard to read them, and every
+    policy or guard change restarted it and held the Bots at the install)."""
+
+    def test_a_bots_models_are_its_own_routes_it_reaches_with_its_own_sign_in(self):
+        from thornswood_guard.routes import chain_for
+        s = service()
+        for bot in s.policy.bots:
+            with self.subTest(bot=bot):
+                got = s.bot_models("hermes", {"bot": bot})["models"]
+                self.assertTrue(got, "every Bot has a route of its own")
+                own = [[r["provider"], r["model"]] for r in chain_for(s.policy, bot, proxy_ready=False)
+                       if r.get("via") != "admission-proxy"]
+                self.assertEqual(got, own)
+        self.assertEqual(s.bot_models("hermes", {"bot": "nobody"}), {"models": []})
+
+    def test_only_the_bots_user_asks(self):
+        s = service()
+        self.assertEqual(s.ops()["bot_models"][1], {s.policy.data["brokers"]["users"]["gateway"]})
+
+
 class Leases(unittest.TestCase):
     def test_one_holder_and_a_new_generation_each_time(self):
         clock = Clock()
