@@ -121,6 +121,20 @@ class Route(unittest.TestCase):
         self.assertEqual(rev["revision"], 2)
         self.assertEqual([c["revision"] for c in self.call("my_cards", "bramble")], [2])
 
+    def test_my_cards_gives_a_card_that_no_longer_waits_short(self):
+        # Ops #266: on 12 Nov 2026 Bramble's my_cards was 105,473 characters,
+        # which Hermes kept where no Bot may read.
+        waiting = self.call("open_card", "bramble", **card_args())
+        done = self.call("open_card", "bramble", **card_args(title="Pick the other one"))
+        self.w.core.answer(self.w.patrick(), **World.answer_args(done, "a"))
+        cards = {c["id"]: c for c in self.call("my_cards", "bramble")}
+        self.assertIn("options", cards[waiting["id"]])
+        short = cards[done["id"]]
+        self.assertEqual(set(short), {"id", "kind", "status", "title", "task", "links", "superseded_by", "states",
+                                      "answer"})
+        self.assertEqual((short["status"], short["answer"]["option"]), ("resolved", "a"))
+        self.assertIn("options", self.call("get_card", "bramble", decision_id=done["id"]))
+
     def test_writes_off_says_so(self):
         w = World(writes=False)
         self.addCleanup(w.close)

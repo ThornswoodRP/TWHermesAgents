@@ -175,6 +175,50 @@ class Work(unittest.TestCase):
         with self.assertRaises(Refused) as e:
             w.files.checkout("hermes", {**args, "bundle": w.base_bundle("sprocket"), "from_branch": "sprocket/4760-plugins"})
         self.assertIn("tw_git base with branch sprocket/4760-plugins", str(e.exception))
+    def test_main_comes_into_a_conflicting_branch_as_a_merge_and_is_pushed_without_force(self):
+        # Ops #328: #5892 sat on auto-merge, dirty, after main moved under it;
+        # #5880, #5815 and #5941 were rebuilt on main and force-pushed.
+        w = World()
+        w.checkout(task="4740-readme")
+        w.files.edit("hermes", w.a(task="4740-readme", path="README.md", old="Thornswood", new="Thornswood, by Rift"))
+        w.files.commit("hermes", w.a(task="4740-readme", message="Name it"))
+        b = w.files.bundle("hermes", w.a(task="4740-readme"))
+        w.git.push("hermes", {"bot": "sprocket", "repo": APP, "task": "4740", "branch": b["branch"], "bundle": b["bundle"]})
+        mine = w.fake.ref(APP, "sprocket/4740-readme")
+        # Main moves under it, on the same line.
+        work = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "clone", "-q", str(w.fake.remote(APP)), str(work)], check=True, capture_output=True)
+        readme = (work / "README.md").read_text().replace("Thornswood", "Thornswood, on main", 1)
+        (work / "README.md").write_text(readme)
+        (work / "NEW.md").write_text("new on main\n")
+        git(work, "add", "-A")
+        git(work, "commit", "-q", "-m", "main moves")
+        git(work, "push", "-q", "origin", "HEAD:main")
+        main = w.fake.ref(APP, "main")
+        a = w.a(task="4740-readme")
+        w.files.write("hermes", {**a, "path": "dirty.txt", "content": "x\n"})
+        fresh = w.git.base("hermes", {"bot": "sprocket", "repo": APP})["bundle"]
+        with self.assertRaises(Refused) as e:
+            w.files.merge_base("hermes", {**a, "bundle": fresh})
+        self.assertIn("not committed", str(e.exception))
+        w.files.delete("hermes", {**a, "path": "dirty.txt"})
+        out = w.files.merge_base("hermes", {**a, "bundle": fresh})
+        self.assertEqual((out["merged"], out["conflicts"], out["base_sha"]), (True, ["README.md"], main))
+        with self.assertRaises(Refused) as e:
+            w.files.commit("hermes", {**a, "message": "Take main in"})
+        self.assertIn("not resolved", str(e.exception))
+        resolved = (work / "README.md").read_text().replace("Thornswood, on main", "Thornswood, by Rift, on main", 1)
+        w.files.write("hermes", {**a, "path": "README.md", "content": resolved})
+        c = w.files.commit("hermes", {**a, "message": "Take main in"})
+        self.assertEqual(c["files"], 1, "only what the branch changes against main counts")
+        sent = w.files.bundle("hermes", a)
+        w.git.push("hermes", {"bot": "sprocket", "repo": APP, "task": "4740", "branch": sent["branch"],
+                              "bundle": sent["bundle"]})
+        remote = w.fake.remote(APP)
+        self.assertEqual(git(remote, "rev-parse", "sprocket/4740-readme^1", "sprocket/4740-readme^2").split(),
+                         [mine, main], "two parents: its own head first, then main")
+        self.assertIn("NEW.md", git(remote, "ls-tree", "--name-only", "sprocket/4740-readme"))
+        self.assertEqual(w.files.merge_base("hermes", {**a, "bundle": fresh})["merged"], False, "already has main")
 
     def test_base_opens_only_the_bots_own_branch_that_github_has(self):
         w = World()
