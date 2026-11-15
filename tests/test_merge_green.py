@@ -30,6 +30,7 @@ class Fake:
         self.mergeable = mergeable or {}
         self.calls = []
         self.closed = []
+        self.issues = {}
 
     def __call__(self, method, path, body=None):
         self.calls.append((method, path, body))
@@ -53,6 +54,12 @@ class Fake:
             n = int(m.group(1))
             del self.prs[n]
             return 200, {"merged": True}
+        m = re.match(rf"^/repos/{R}/issues/(\d+)$", path)
+        if m and int(m.group(1)) in self.issues:
+            issue = self.issues[int(m.group(1))]
+            if method == "PATCH":
+                issue.update(body)
+            return 200, dict(issue)
         m = re.match(rf"^/repos/{R}/git/refs/heads/(.+)$", path)
         if method == "DELETE" and m:
             for n, p in list(self.prs.items()):
@@ -121,6 +128,31 @@ class MergeGreen(unittest.TestCase):
         self.assertEqual(f.merged(), [92])
         self.assertFalse([c for c in f.calls if c[0] == "DELETE"])
         self.assertIn(95, f.prs)
+
+    def test_a_merge_closes_the_issues_its_body_names(self):
+        # #126: GitHub closes nothing for a merge made with an Actions token,
+        # so #141 ("Closes #136.") merged on 15 Nov and #136 stayed open.
+        p = dict(pr(141, "a" * 40), body="Take it back out. Closes #136.\nFixes: #120, resolves ThornswoodRP/TWHermesAgents#121, "
+                                         "closes other/repo#5, Refs #122, closes #123")
+        f = Fake([p], {"a" * 40: OK})
+        f.issues = {136: {"number": 136, "state": "open"}, 120: {"number": 120, "state": "open"},
+                    121: {"number": 121, "state": "open"}, 122: {"number": 122, "state": "open"},
+                    123: {"number": 123, "state": "closed"}}
+        code, said = self.run_it(f)
+        self.assertEqual(code, 0)
+        self.assertEqual(f.merged(), [141])
+        closed = [int(c[1].rsplit("/", 1)[1]) for c in f.calls if c[0] == "PATCH" and "/issues/" in c[1]]
+        self.assertEqual(closed, [136, 120, 121])
+        self.assertEqual(f.issues[136]["state_reason"], "completed")
+        self.assertEqual(f.issues[122]["state"], "open", "Refs closes nothing")
+        self.assertIn("  #136 closed: #141 merged", said)
+
+    def test_a_pull_request_that_is_not_merged_closes_nothing(self):
+        p = dict(pr(142, "b" * 40), body="Closes #136.")
+        f = Fake([p], {"b" * 40: []})
+        f.issues = {136: {"number": 136, "state": "open"}}
+        self.run_it(f)
+        self.assertEqual(f.issues[136]["state"], "open")
 
     def test_the_workflow_runs_mains_script_after_the_guard_rail_tests(self):
         text = (REPO / ".github" / "workflows" / "merge-green.yml").read_text(encoding="utf-8")
