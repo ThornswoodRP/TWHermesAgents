@@ -490,6 +490,26 @@ class OutsideWork(unittest.TestCase):
         out = w.merge(sha=sha, repo=APP)
         self.assertTrue(out["auto_merge"])
 
+    def test_a_coding_tools_co_author_on_patricks_own_commit_is_his_work(self):
+        # Ops #318: Ops #316, Patrick's own commit from one of his project
+        # threads, was refused for the model's Co-authored-by line.
+        w = World()
+        sha = w.green_pr(repo=OPS)
+        w.fake.pr_commits[(OPS, 42)] = [{"sha": sha, "author": {"login": "EvilPatrick06"}, "commit": {
+            "author": {"name": "EvilPatrick06", "email": "187923600+EvilPatrick06@users.noreply.github.com"},
+            "message": "Fix the backup note\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>\n"}}]
+        out = w.merge(sha=sha)
+        self.assertTrue(out["done"], out)
+        self.assertEqual(len(w.fake.writes("PUT")), 1)
+
+    def test_the_same_line_on_a_bots_or_an_outsiders_commit_is_still_outside_work(self):
+        w = World()
+        sha = self.carried(w, "x\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>\n", repo=OPS, labels=())
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha)
+        self.assertIn("noreply@anthropic.com", str(e.exception))
+        self.assertEqual(w.fake.writes("PUT"), [])
+
     def test_commits_github_did_not_list_merge_nothing(self):
         w = World()
         sha = w.green_pr(repo=APP, checks=False)

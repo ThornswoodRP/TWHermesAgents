@@ -180,7 +180,13 @@ class GitHubRules:
     def outside_credits(self, pr: PullRequest) -> list[Credit]:
         """The credits on a pull request that are not on Patrick's list, a Bot,
         a robot or one of our own workflows."""
-        return [c for c in pr.credits if not self.policy.trusted_credit(c.login, c.email)]
+        p = self.policy
+        tools = {e.lower() for e in p.data["merge"].get("tool_co_authors") or []}
+        # Commits whose author is on Patrick's list: a coding tool's
+        # Co-authored-by line on one of those is that person's work (Ops #318).
+        own = {c.commit for c in pr.credits if not c.co_author and p.trusted_login(p.credit_login(c.login, c.email))}
+        return [c for c in pr.credits if not p.trusted_credit(c.login, c.email)
+                and not (c.co_author and c.commit in own and (c.email or "").strip().lower() in tools)]
 
     def outside_work(self, pr: PullRequest, allowed: set[str] | None = None) -> Verdict:
         """Patrick, 8 Nov 2026: outside work never merges "unless I specficallyt
