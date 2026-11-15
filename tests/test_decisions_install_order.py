@@ -60,7 +60,9 @@ def stops() -> dict[str, int]:
     src = lines()
     var = {}
     for line in src:
-        m = re.match(r'\s*CORE_WORKERS="([^"]*)"', line)
+        # The list itself; --keep-connector's line, which takes the connector
+        # out of it, is read by test_only_keep_connector_leaves_the_connector_running.
+        m = re.match(r'\s*CORE_WORKERS="(tw-[^"$]*)"', line)
         if m:
             var["CORE_WORKERS"] = m.group(1).split()
     out: dict[str, int] = {}
@@ -97,6 +99,16 @@ class InstallOrder(unittest.TestCase):
             self.assertLess(stopped[unit], touch,
                             f"install.sh stops {unit} on line {stopped[unit] + 1}, after it opens the store "
                             f"on line {touch + 1}")
+
+    def test_only_keep_connector_leaves_the_connector_running(self):
+        # 12 Nov 2026: the follower passes it only when nothing the connector
+        # or the brokers load changed and the store does not migrate
+        # (follow_main.Follower.keeps), so no connector of an older release
+        # meets a migrated store.
+        src = "\n".join(lines())
+        self.assertIn('if [[ -n "$keep_connector" ]]; then\n  CORE_WORKERS="${CORE_WORKERS/tw-decide-connector.service /}"\nfi',
+                      src)
+        self.assertEqual(src.count("CORE_WORKERS="), 2)
 
     def test_the_timers_stop_before_their_services(self):
         stopped = stops()

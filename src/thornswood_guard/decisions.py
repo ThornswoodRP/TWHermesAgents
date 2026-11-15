@@ -25,7 +25,7 @@ def now_utc() -> datetime:
 @dataclass
 class Decision:
     id: str
-    kind: str            # "main", "publish", "cutover"
+    kind: str            # "main", "publish", "cutover", "merge"
     repo: str
     commit: str          # the exact head or build commit the yes is for
     revision: int        # the card revision Patrick answered
@@ -107,7 +107,7 @@ class DecisionStore:
         """Called once after a restore from backup: every Main record dies."""
         killed = 0
         for d in self._records.values():
-            if d.kind in ("main", "publish", "cutover") and not d.dead:
+            if d.kind in ("main", "publish", "cutover", "merge") and not d.dead:
                 d.dead = True
                 d.notes.append("dead: store restored from a backup")
                 killed += 1

@@ -2,8 +2,9 @@
 # route and credit state, leases and the Dev ledger (08 section 7).
 [Unit]
 Description=Thornswood tw-policy
-After=tw-limits-check.service
+After=tw-limits-check.service tw-policy.socket
 Wants=tw-limits-check.service
+Requires=tw-policy.socket
 StartLimitIntervalSec=15min
 StartLimitBurst=3
 
@@ -14,9 +15,6 @@ Group=tw-policy
 SupplementaryGroups=tw-policy-clients
 Slice=tw-brokers.slice
 ExecStart=/opt/thornswood-hermes/bin/tw-serve policy
-RuntimeDirectory=tw/policy
-RuntimeDirectoryMode=0755
-RuntimeDirectoryPreserve=no
 ReadWritePaths=/srv/tw/policy
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX

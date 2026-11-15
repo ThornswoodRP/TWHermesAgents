@@ -80,6 +80,7 @@ def _turns(folder: Path, alive) -> list[dict]:
             platform = t.get("platform")
             out.append({"session_id": sid, "state": "tool" if tool else "thinking",
                         "tool": tool, "since": str(t.get("since") or "")[:40],
+                        "step_since": str(t.get("step_since") or "")[:40],
                         "platform": platform if isinstance(platform, str) and PLATFORM.match(platform) else ""})
     return out
 

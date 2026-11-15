@@ -414,11 +414,17 @@ class MainCards(unittest.TestCase):
     def test_it_needs_one_good_release_link(self):
         for links, why in (([], "none"), ([("release", f"main:{REPO}@{SHA}"), ("release", f"publish:{REPO}@{SHA}")], "two"),
                            ([("release", f"main:{REPO}@{SHA[:12]}")], "short commit"),
-                           ([("release", f"deploy:{REPO}@{SHA}")], "unknown kind")):
+                           ([("release", f"deploy:{REPO}@{SHA}")], "unknown kind"),
+                           ([("release", f"merge:{REPO}@{SHA}")], "a merge with no pull request")):
             with self.subTest(why), self.assertRaises(CoreError) as e:
                 self.w.card(kind="main", options=MAIN_OPTIONS, recommendation="authorize",
                             scope_of_yes=f"One main run at {SHA}.", links=links)
             self.assertEqual(e.exception.reason, "release_link")
+
+    def test_a_merge_card_names_the_pull_request_at_its_head(self):
+        # Ops #276: a workflow, gate or verb script pull request merges only on this.
+        c = main_card(self.w, link=f"merge:{REPO}@{SHA}#150", scope_of_yes=f"PR 150 merges at {SHA}.")
+        self.assertIn({"kind": "release", "ref": f"merge:{REPO}@{SHA}#150"}, c["links"])
 
     def test_it_offers_authorize_and_its_scope_names_the_commit(self):
         with self.assertRaises(CoreError) as e:

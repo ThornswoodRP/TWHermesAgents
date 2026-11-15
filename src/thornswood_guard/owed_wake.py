@@ -37,6 +37,45 @@ and Sprocket and Magpie stayed stopped with nothing left to say so.
 Both ask tw-policy for room first and are taken only when it has some; what
 each saw last is kept in IDLE_FILE in the profile.
 
+The free worker look also runs at the first check after a worker's turn
+ends, not only on the hour: every check reads tw-policy's bot_turns, which
+spends no GitHub read, and a worker with no turn running or in line whose
+last turn ended after the last look is a hand-back, a stop or a finish that
+Bramble acts on now. And such a worker, holding a claimed issue with no
+pull request, is named at once, not after an hour of quiet: a worker runs
+an issue only inside a turn, so one with no turn running, none in line and
+no message queued for it in the decision core (tw-decide queued_for) is
+not working anything. 11 Nov 2026: Rift handed back #4980 blocked at 4:00
+PM and Magpie #5765 at 3:59 PM; the 4:52 PM look counted both busy on
+their claims, quiet just under the hour it then needed, and the next look
+was an hour away, so four of the five workers sat with no turn from 4 PM
+while Wisp alone worked. The look waits while Bramble has a turn running,
+in line or queued, because a hand-back is answered in that turn and the
+look must read what it did; the hourly look runs whatever Bramble is doing.
+
+A look that wakes Bramble keeps its lines in IDLE_FILE until a scheduled
+sweep admitted after it runs to its end (tw-policy's sweep_done): those are
+the only sweeps that carry them. Until then every wake this check gives
+carries them too, and while Bramble has no turn running the look runs again,
+fresh. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
+Sprocket, Echo and Wisp free; its sweep was turned away because another was
+running, a GitHub sweep paid the wake it owed without its lines, the 6:44 PM
+sweep carried only an Ops issue, and no worker got work for the next hour.
+
+Bramble's two weekly reviews (scripts/apply.py REVIEW_JOBS) are Hermes cron
+jobs of its own profile, and nothing told anybody when one failed: Bramble
+has no cronjob tool in its turns, and the guard keeps its file tools out of
+Hermes's home. 15 Nov 2026: the board review fired at 8:37 AM Mountain while
+the Claude limit was spent, its turn ended "Your request was not processed",
+and what Hermes recorded about it could be read only on the VM
+(TWHermesAgents #181, Thornswood-Ops #336). So the alert look also reads
+those two jobs' records in <profile>/cron/jobs.json, the file Hermes keeps
+them in (contracts.json, profiles.jobs), and a run that ended with an error
+wakes Bramble once with the job, when it ran and Hermes's own error line,
+for Bramble to put on the board. The record rides every wake until a sweep
+admitted after it was said runs to its end, as the free worker look's lines
+do, so a wake that was itself turned away or failed does not lose it.
+
 Bramble itself works around the clock (Patrick, 9 Nov 2026, 1:27 AM:
 "Bramble should still be working and always be working and alert"); only
 the workers' new issues wait for 6 AM. So the alert wake looks every
@@ -55,10 +94,11 @@ import re
 import tempfile
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .brokers import OWED_FILE, OWED_WAKE_JOB, OWED_WAKE_MARK, BrokerRefused, Caller
+from .hours import rule, says, work_hours
 
 SLEEP = json.dumps({"wakeAgent": False})
 ASK_SECONDS = 10.0
@@ -69,25 +109,36 @@ SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
     "fleet queue turned away, the morning after the Grok lanes stop, new work of your own, a free worker with "
-    "work on the board, or a worker that stopped mid-issue). "
+    "work on the board, or a worker that handed back or stopped mid-issue). "
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
     "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes, the Desk's list and the Ops "
     "issues, the lanes' and the duplicate check's comments, your open cards, then a free worker's next issue "
-    "from the board, or a stopped worker told to carry on (6 AM to 11 PM Mountain only). "
+    "from the board, or a stopped worker told to carry on, in the work hours the first line before this "
+    "says. "
     "Report each merge and its Release as the skill says. Nothing in this message approves anything."
 )
 # The Grok lanes work 11 PM to 6 AM Mountain; their comments wait for the
 # first sweep after this hour.
 MORNING_HOUR = 6
-# New work starts only in these hours, Mountain (Patrick, 9 Nov 2026); the
-# decision core holds briefs to the same hours (core.WORK_HOURS).
-WORK_HOURS = (6, 23)
+# New work starts only in policy.yaml's work hours, Mountain (hours.py); the
+# decision core holds briefs to the same hours.
 MOUNTAIN = "America/Denver"
 # How often the free worker wake reads the claims and the board.
 IDLE_EVERY = 3600.0
 IDLE_FILE = ("local", "thornswood-hermes", "idle-wake.json")
 # How often the alert wake looks at Bramble's own work, at any hour.
 ALERT_EVERY = 900.0
+# Bramble's two weekly reviews, by the names scripts/apply.py gives them
+# (REVIEW_JOBS), and the file Hermes keeps a profile's cron jobs in.
+REVIEWS = ("tw-weekly-board-review", "tw-weekly-project-review")
+JOBS_FILE = ("cron", "jobs.json")
+# How much of Hermes's error line a wake carries.
+ERROR_CHARS = 400
+# The free worker look's pull request pages (_worked): REST reads, not
+# searches, so GitHub's search limits do not count them. Ten pages are the
+# thousand most recently updated pull requests; a claim whose pull request
+# is older than that is read as having none.
+PR_PAGES = 10
 # bramble-duties section 6: the area labels with one owner. An issue with
 # none of these is picked by the part it names, so any free worker may take
 # it; one whose only area is Release is Bramble's own.
@@ -105,6 +156,33 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
     """The lines to print. The last one is SLEEP unless the sweep should run now.
     policy is the installed policy's data; without it only owed wakes are
     looked at."""
+    now = time.time() if now is None else now
+    lines = _check(home, bot, ask, now, policy)
+    if policy is None or lines[-1] == SLEEP:
+        return lines
+    # Every wake says the work hours as the policy has them, whatever woke it.
+    return [f"It is {_clock(now)} Mountain. {rule(policy)}", *lines, *_carried(home, now, policy),
+            *_reviews_carried(home, bot, ask, now)]
+
+
+def _carried(home: Path, now: float, policy: dict | None = None) -> list[str]:
+    """The free worker look's lines that no sweep has yet carried to its end,
+    added to any wake from 6 AM to 11 PM: an owed wake, the alert wake, the
+    morning wake. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped
+    and Sprocket, Echo and Wisp free; its sweep was turned away (another was
+    running), a GitHub sweep paid the wake it owed without its lines, the
+    6:44 PM sweep carried only an Ops issue, and no worker got work. The lines
+    go once a scheduled sweep admitted after the look ran to its end
+    (_idle)."""
+    state = _load(home.joinpath(*IDLE_FILE))
+    at, said = state.get("said_at"), state.get("said")
+    if not at or not said or float(at) == now or not _working(now, policy):
+        return []
+    return [f"What the free worker look at {_clock(float(at))} Mountain said, which no sweep has carried to its "
+            "end yet (bramble-duties, section 6):", *said]
+
+
+def _check(home: Path, bot: str, ask: Caller, now: float, policy: dict | None) -> list[str]:
     outbox = home.joinpath(*OWED_FILE)
     try:
         if outbox.exists():
@@ -117,11 +195,40 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
     if due.get("owed") and not due.get("due"):
         return [f"a wake is owed since {due.get('since')}, but the queue has no room yet: {due.get('why_not')}", SLEEP]
     if due.get("owed"):
-        return [f"{due.get('refused')} wake(s) since {due.get('since')} were turned away by the fleet queue "
+        owed = [f"{due.get('refused')} wake(s) since {due.get('since')} were turned away by the fleet queue "
                 f"(the last because {due.get('reason')}). The queue has room now."]
+        if policy is None:
+            return owed
+        # The free worker look and the alert look ride an owed wake too.
+        # 12 Nov 2026: a wake was owed nearly all evening (GitHub's wakes
+        # turned away while another sweep ran), this returned before the
+        # look, and no look ran from 7:32 PM Mountain on, so Rift, Sprocket
+        # and Echo sat with no issue from 9:15 PM.
+        looked = _idle(home, bot, ask, now, policy)
+        return owed if looked[-1] == SLEEP else [*owed, *looked]
     if policy is None:
         return ["no wake is owed", SLEEP]
-    return ["no wake is owed", *_idle(home, bot, ask, time.time() if now is None else now, policy)]
+    return ["no wake is owed", *_idle(home, bot, ask, now, policy)]
+
+
+def _local(now: float):
+    """now as Mountain time, or None when the time zone data cannot be read."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(now, ZoneInfo(MOUNTAIN))
+    except Exception:
+        return None
+
+
+def _working(now: float, policy: dict | None = None) -> bool:
+    local = _local(now)
+    start, end = work_hours(policy)
+    return local is not None and start <= local.hour < end
+
+
+def _clock(t: float) -> str:
+    local = _local(t)
+    return local.strftime("%I:%M %p").lstrip("0") if local else datetime.fromtimestamp(t, timezone.utc).strftime("%H:%M UTC")
 
 
 def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[str]:
@@ -137,17 +244,28 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         why_no_morning = f"the {MOUNTAIN} time zone could not be read ({type(e).__name__})"
     today = local.date().isoformat() if local else None
     morning = local is not None and local.hour >= MORNING_HOUR and state.get("morning") != today
-    working = local is not None and WORK_HOURS[0] <= local.hour < WORK_HOURS[1]
+    start, end = work_hours(policy)
+    working = local is not None and start <= local.hour < end
     idle_due = working and now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
     alert_due = now - float(state.get("alert_checked") or 0) >= ALERT_EVERY
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
-                                        "new work from 11 PM to 6 AM, while the Grok lanes audit")
+                                        f"new work outside {says((start, end))}, while the Grok lanes audit overnight")
+    ended_said = None
+    if state.get("said_at"):
+        unheard, ended_said = _unheard(bot, ask, state)
+        if not unheard:
+            _save(path, state)
+        idle_due = idle_due or (working and unheard)
+    if working and not idle_due:
+        ended, ended_said = _turns_ended(bot, ask, policy, float(state.get("idle_checked") or 0))
+        idle_due = bool(ended)
     if not morning and not idle_due and not alert_due:
         if local is None:
             return [why_no_morning, SLEEP]
         if not working:
             return [night, SLEEP]
-        return ["the morning sweep has run, and neither the alert check nor the free worker check is due", SLEEP]
+        return [*([ended_said] if ended_said else []),
+                "the morning sweep has run, and neither the alert check nor the free worker check is due", SLEEP]
     try:
         room = ask("policy", "turn_room", {"bot": bot, "sweep": True})
     except BrokerRefused as e:
@@ -162,6 +280,7 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     said = []
     if alert_due:
         state["alert_checked"] = now
+        failed = _new_failed_reviews(home, state, now)
         try:
             seen = _own_work(bot, ask, policy)
         except BrokerRefused as e:
@@ -171,13 +290,15 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
             new = sorted(set(seen) - set(state.get("seen") or []))
             state["seen"] = sorted(seen)
             _save(path, state)
-            if new:
-                return [f"New or changed since the last look, and yours at any hour: {', '.join(new[:8])}"
-                        + (f" and {len(new) - 8} more" if len(new) > 8 else "")
-                        + " (bramble-duties, sections 4, 5 and 7)."]
+            if new or failed:
+                return [*failed, *([f"New or changed since the last look, and yours at any hour: {', '.join(new[:8])}"
+                                    + (f" and {len(new) - 8} more" if len(new) > 8 else "")
+                                    + " (bramble-duties, sections 4, 5 and 7)."] if new else [])]
             said.append("nothing of your own is new since the last look")
         else:
             _save(path, state)
+            if failed:
+                return [*failed, *said]
     if not idle_due:
         return [*said, night if not working and night else "the free worker check is not due", SLEEP]
     if alert_due:
@@ -189,7 +310,152 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         # runs at the next check, five minutes on.
         return [*said, "the free worker check is due and runs at the next check, apart from this one's searches",
                 SLEEP]
-    return [*said, *_free_workers(bot, ask, now, policy, path, state)]
+    return [*said, *([ended_said] if ended_said else []), *_free_workers(bot, ask, now, policy, path, state)]
+
+
+def _failed_reviews(home: Path) -> dict[str, str]:
+    """{"<job>@<last run>": the line that says it} for each of Bramble's weekly
+    reviews whose last run ended with an error, read from Hermes's own record
+    (cron.jobs mark_job_run sets last_error only on a run that failed). An
+    unreadable file is no record: the next look reads it again."""
+    try:
+        data = json.loads(home.joinpath(*JOBS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    jobs = data.get("jobs") if isinstance(data, dict) else data
+    out = {}
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict) or job.get("name") not in REVIEWS:
+            continue
+        at, error = job.get("last_run_at"), " ".join(str(job.get("last_error") or "").split())
+        if not at or not error:
+            continue
+        if len(error) > ERROR_CHARS:
+            error = error[: ERROR_CHARS - 3] + "..."
+        out[f"{job['name']}@{at}"] = (
+            f"Your weekly job {job['name']} ran {_day_and_clock(str(at))} and did not do its work. "
+            f"Hermes recorded: \"{error}\". Put this on Thornswood-Ops as it is, on the open issue about that "
+            "run or a new one titled with the job and the day (bramble-duties, section 4), so its cause is "
+            "fixed where it is. Change no job.")
+    return out
+
+
+def _day_and_clock(iso: str) -> str:
+    """When a run was, as Patrick reads it ("on 15 Nov at 8:37 AM Mountain"),
+    or Hermes's own time when it cannot be read."""
+    t = _when(iso)
+    local = _local(t) if t else None
+    if local is None:
+        return f"at {iso}"
+    return f"on {local.day} {local.strftime('%b')} at {_clock(t)} Mountain"
+
+
+def _new_failed_reviews(home: Path, state: dict, now: float) -> list[str]:
+    """The failed review runs no wake has said yet, each now kept in state
+    as said at now. Records Hermes no longer holds (the job ran again) leave
+    state."""
+    failed = _failed_reviews(home)
+    kept = {k: v for k, v in (state.get("reviews") or {}).items() if k in failed}
+    new = [k for k in failed if k not in kept]
+    for k in new:
+        kept[k] = {"at": now}
+    state["reviews"] = kept
+    return [failed[k] for k in new]
+
+
+def _reviews_carried(home: Path, bot: str, ask: Caller, now: float) -> list[str]:
+    """Failed review runs already said, that no sweep admitted after the
+    saying has carried to its end (tw-policy's sweep_done): added to every
+    wake until one has. tw-policy not answering keeps them."""
+    path = home.joinpath(*IDLE_FILE)
+    state = _load(path)
+    pending = {k: v for k, v in (state.get("reviews") or {}).items() if not v.get("carried")}
+    if not pending:
+        return []
+    try:
+        mine = ((ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}).get(bot) or {}
+        done = _when(str(mine.get("sweep_done") or ""))
+    except BrokerRefused:
+        done = 0.0
+    failed = _failed_reviews(home)
+    lines = []
+    for k, v in pending.items():
+        if done and done >= float(v["at"]):
+            v["carried"] = True
+        elif float(v["at"]) != now and k in failed:
+            lines.append(failed[k])
+    _save(path, state)
+    return lines
+
+
+def _unheard(bot: str, ask: Caller, state: dict) -> tuple[bool, str | None]:
+    """Whether the last free worker look that woke Bramble was never carried
+    to the end of a sweep: no scheduled sweep admitted since it ran to its
+    end (tw-policy's sweep_done), and Bramble has no turn running or in line
+    that may be that sweep. Then the look runs again, fresh, at this check.
+    Once one has, the look's lines leave state. tw-policy not answering
+    keeps them and runs nothing: the next check asks again."""
+    try:
+        mine = ((ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}).get(bot) or {}
+    except BrokerRefused:
+        return False, None
+    at = float(state["said_at"])
+    done = mine.get("sweep_done")
+    try:
+        carried = bool(done) and datetime.fromisoformat(done).timestamp() >= at
+    except (TypeError, ValueError):
+        carried = False
+    if carried:
+        state.pop("said_at", None)
+        state.pop("said", None)
+        return False, None
+    if mine.get("running") or mine.get("waiting"):
+        return False, None
+    return True, (f"the free worker look at {_clock(at)} Mountain woke you, but no sweep carried its lines to the "
+                  "end (it was turned away, or a sweep that never saw them paid its wake): it looks again now")
+
+
+def _workers(policy: dict) -> list[str]:
+    return [name for name, b in policy["bots"].items() if b.get("role") == "worker"]
+
+
+def _turns_ended(bot: str, ask: Caller, policy: dict, since: float) -> tuple[list[str], str | None]:
+    """The workers whose last turn ended after since (the last free worker
+    look) and that have no turn running, none in line and no message queued
+    for them: each handed back, stopped or finished, and the look runs now.
+    Empty, with why, while Bramble has a turn running, in line or queued (it
+    is answering a hand-back, and the look reads what that turn did), and
+    empty when tw-policy or tw-decide does not answer (the hourly look still
+    runs). Spends no GitHub read."""
+    try:
+        turns = (ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}
+    except BrokerRefused:
+        return [], None
+    ended = []
+    for w in _workers(policy):
+        t = turns.get(w)
+        if not isinstance(t, dict) or t.get("running") or t.get("waiting") or not t.get("last"):
+            continue
+        try:
+            if datetime.fromisoformat(t["last"]).timestamp() > since:
+                ended.append(w)
+        except (TypeError, ValueError):
+            continue
+    if not ended:
+        return [], None
+    try:
+        queued = (ask("decide", "queued_for", {"bot": bot}) or {}).get("bots") or {}
+    except BrokerRefused as e:
+        return [], f"{', '.join(ended)} ended a turn, but tw-decide did not answer ({e}); the free worker look waits"
+    ended = [w for w in ended if not queued.get(w)]
+    mine = turns.get(bot) if isinstance(turns.get(bot), dict) else {}
+    if ended and (mine.get("running") or mine.get("waiting") or queued.get(bot)):
+        return [], (f"{', '.join(ended)} ended a turn since the last look; the free worker look runs once your own "
+                    "turn that is running, in line or queued has ended, so it reads what that turn did")
+    if not ended:
+        return [], None
+    return ended, (f"{', '.join(ended)} ended a turn since the last look and has no turn running, in line or queued: "
+                   "the free worker look runs now, not on the hour")
 
 
 def _own_work(bot: str, ask: Caller, policy: dict) -> list[str]:
@@ -216,13 +482,21 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     state["idle_checked"] = now
     state.pop("stopped", None)
     _save(path, state)
-    workers = {name: b["claim_label"] for name, b in policy["bots"].items() if b.get("role") == "worker"}
+    workers = {name: policy["bots"][name]["claim_label"] for name in _workers(policy)}
     repo = policy["repos"]["app"]
     asked = _asked(bot, ask)
     try:
-        return _look(bot, ask, now, policy, workers, repo, asked)
+        lines = _look(bot, ask, now, policy, workers, repo, asked)
     except BrokerRefused as e:
         return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
+    if lines[-1] == SLEEP:
+        state.pop("said_at", None)
+        state.pop("said", None)
+    else:
+        # check() puts the work hours line first on every wake.
+        state["said_at"], state["said"] = now, lines
+    _save(path, state)
+    return lines
 
 
 def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, str], repo: str,
@@ -237,9 +511,13 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     # Wisp's engine fixes are (10 Nov 2026: #4513's fix merged as fork
     # #148 at 5:49 AM, and Wisp, seen as still working it, got nothing
     # from 9:44 AM on, with 179 issues open in its field).
-    prs = {**_worked(bot, ask, policy["repos"]["fork"]), **_worked(bot, ask, repo)}
     claims = _claims(bot, ask, repo, list(workers.values()))
     fork_claims = _claims(bot, ask, policy["repos"]["fork"], [workers["wisp"]]) if "wisp" in workers else {}
+    # The pull requests are read back to the oldest claimed issue's creation,
+    # since a pull request for an issue is opened after it.
+    since = min((str(i["created_at"]) for items in (*claims.values(), *fork_claims.values())
+                 for i in items if i.get("created_at")), default="")
+    prs = {**_worked(bot, ask, policy["repos"]["fork"], since), **_worked(bot, ask, repo, since)}
     parked: dict[str, list[int]] = {}
     free = []
     for w in workers:
@@ -258,11 +536,13 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                     "comment what it waits on and take the claim off, or send it back to the worker as its "
                     "next issue (bramble-duties, section 6, items 1 and 5). The worker counts as free.")
     if stopped:
-        said.append(f"{', '.join(sorted(stopped))} hold an active issue but have run no turn since "
-                    f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each stopped "
-                    "mid-issue and nothing wakes it by itself; tell each to carry on, or take its claim off "
-                    "if it is blocked (bramble-duties, section 6, items 5 and 6). This is said at every "
-                    "hourly look until it runs a turn or its claim comes off.")
+        said.append(f"{', '.join(sorted(stopped))} hold an active issue but have no turn running, none in line and "
+                    "nothing queued for them, the last ended "
+                    f"{', '.join(w + ' ' + (stopped[w] or 'never') for w in sorted(stopped))}: each handed back "
+                    "with no pull request or stopped mid-issue, and nothing wakes it by itself. If its hand-back "
+                    "says it is blocked, comment what it waits on, take the claim off and give it its next issue; "
+                    "otherwise tell it to carry on (bramble-duties, section 6, items 5 and 6). This is said at "
+                    "every look until it runs a turn or its claim comes off.")
     if not free:
         return said or ["every worker is on an active issue", SLEEP]
     # Open, unclaimed, and nobody's whose work is hands off: the board's
@@ -328,18 +608,27 @@ def _claims(bot: str, ask: Caller, repo: str, labels: list[str]) -> dict[str, li
     return out
 
 
-def _worked(bot: str, ask: Caller, repo: str) -> dict[tuple[str, int], str]:
-    """(worker, issue) for each of the repo's 100 most recently updated pull
-    requests that is open or merged, from its <bot>/<issue>-<what> branch,
-    with when the pull request was opened (newest when there are several)."""
-    pulls = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/repos/{repo}/pulls?state=all&sort=updated"
-                                 "&direction=desc&per_page=100"}) or {}).get("body") or []
+def _worked(bot: str, ask: Caller, repo: str, since: str = "") -> dict[tuple[str, int], str]:
+    """(worker, issue) for each of the repo's pull requests that is open or
+    merged, from its <bot>/<issue>-<what> branch, with when the pull request
+    was opened (newest when there are several). Read newest updated first, a
+    page of 100 at a time, back to since (the oldest claimed issue's
+    creation), at most PR_PAGES pages. 12 Nov 2026: it read one page, and
+    Echo's #4330, #4333 and #4327, whose fixes merged on 9 Nov and wait for
+    the main Ship, fell off it and were called parked."""
     out: dict[tuple[str, int], str] = {}
-    for p in pulls if isinstance(pulls, list) else []:
-        m = re.match(r"^([a-z]+)/(\d+)-", ((p.get("head") or {}).get("ref") or ""))
-        if m and (p.get("state") == "open" or p.get("merged_at")):
-            key = (m.group(1), int(m.group(2)))
-            out[key] = max(out.get(key, ""), str(p.get("created_at") or ""))
+    for page in range(1, PR_PAGES + 1):
+        pulls = (ask("git", "read", {"bot": bot, "repo": repo, "path": f"/repos/{repo}/pulls?state=all&sort=updated"
+                                     f"&direction=desc&per_page=100&page={page}"}) or {}).get("body") or []
+        pulls = pulls if isinstance(pulls, list) else []
+        for p in pulls:
+            m = re.match(r"^([a-z]+)/(\d+)-", ((p.get("head") or {}).get("ref") or ""))
+            if m and (p.get("state") == "open" or p.get("merged_at")):
+                key = (m.group(1), int(m.group(2)))
+                out[key] = max(out.get(key, ""), str(p.get("created_at") or ""))
+        oldest = min((str(p.get("updated_at") or "") for p in pulls), default="")
+        if len(pulls) < 100 or not since or not oldest or _when(oldest) < _when(since):
+            break
     return out
 
 
@@ -397,27 +686,27 @@ def _when(iso: str) -> float:
 
 
 def _stopped(bot: str, ask: Caller, busy: list[str], now: float) -> dict[str, str | None]:
-    """Each busy worker with no model turn running and none heard from in
-    IDLE_EVERY seconds, with when its last turn was heard from (None when it
-    never ran one). tw-policy not answering finds none: that costs one look."""
+    """Each busy worker with no model turn running, none in line and no
+    message queued for it in the decision core, with when its last turn was
+    heard from (None when it never ran one). A worker works an issue only
+    inside a turn, so such a worker is not working it, however recently its
+    turn ended (until 11 Nov 2026 it also had to be quiet for IDLE_EVERY,
+    and a worker that handed back blocked waited up to two hours for its
+    next issue). tw-policy or tw-decide not answering finds none: that costs
+    one look."""
     if not busy:
         return {}
     try:
         turns = (ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}
+        queued = (ask("decide", "queued_for", {"bot": bot}) or {}).get("bots") or {}
     except BrokerRefused:
         return {}
     out = {}
     for w in busy:
         t = turns.get(w)
-        if not isinstance(t, dict) or t.get("running"):
+        if not isinstance(t, dict) or t.get("running") or t.get("waiting") or queued.get(w):
             continue
-        last = t.get("last")
-        try:
-            quiet = last is None or now - datetime.fromisoformat(last).timestamp() >= IDLE_EVERY
-        except (TypeError, ValueError):
-            continue
-        if quiet:
-            out[w] = last
+        out[w] = t.get("last")
     return out
 
 

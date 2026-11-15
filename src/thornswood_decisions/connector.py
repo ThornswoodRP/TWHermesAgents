@@ -122,9 +122,16 @@ TURN_SECONDS = 15 * 60
 CHECK_SECONDS = 60
 LIVE_SECONDS = 30  # how often each Bot's gateway state goes to the core, for the phone's dots
 TASKS_SECONDS = 30  # how often each Bot's subagents, background commands and scheduled jobs go to the core
-# At most this many `hermes` turns at once: each is a whole Hermes process, and
-# the unit's MemoryMax holds them all.
-PARALLEL = 3
+# At most this many `hermes` turns at once: one for each Bot and the room,
+# since the core leases one message per target at a time (chat.MAX_CLAIM).
+# Each is a whole Hermes process, and the unit's MemoryMax (900M) holds them
+# all. 12 Nov 2026: it was 3, so at 12:07 AM Mountain, with Bramble's five
+# briefs queued, Echo, Sprocket and Rift ran and Magpie and Wisp waited for
+# a slot, not for memory or the fleet queue. Measured then on the VM: each
+# `hermes` child 74 to 76 MiB RSS, the connector 32 MiB, the unit's peak
+# 237 MiB with three running, so seven fit in about 600 MiB. The fleet
+# queue still decides how many model turns run (policy admission).
+PARALLEL = 7
 DOING_SECONDS = 0.25  # while turns run, what each is doing and shows goes to the core this often when it changed
 DOING_KEEP = 20      # and at least this often, so the core knows the line is current (chat.py DOING_STALE)
 BOT_CHAT = "Bot Chat"

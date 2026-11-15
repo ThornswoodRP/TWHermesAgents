@@ -268,6 +268,10 @@ class ConnectorSide(unittest.TestCase):
         self.assertIn("assigned you task 5547", items[0]["text"])
         self.assertIn("Name the failing check from the log.", items[0]["text"])
         self.assertIn("approves nothing by itself", items[0]["text"])
+        # 12 Nov 2026: a worker's long chat kept an older guide and stopped at the hand-back. The turn's own
+        # words load the guide afresh and name the step after the hand-back.
+        self.assertIn("Load the thornswood-guide skill again now", items[0]["text"])
+        self.assertIn("take your own next issue as section 4 step 9 says", items[0]["text"])
         self.chat.result(self.w.ws, self.tok, items[0]["id"], "confirmed", "turn finished")
         self.assertEqual(self.w.store.db.execute("SELECT status FROM connector_outbox WHERE id = ?",
                                                  (items[0]["id"],)).fetchone()[0], "sent")
@@ -279,6 +283,7 @@ class ConnectorSide(unittest.TestCase):
     def test_no_new_work_is_handed_out_from_11_pm_to_6_am_mountain(self):
         # Patrick, 9 Nov 2026: the Bots auto work 6 AM to 11 PM; at night the Grok lanes audit.
         flags(self.w, "connector_effects")
+        self.w.core.work_hours = lambda: (6, 23)
         cases = [(datetime(2026, 11, 9, 12, 59, tzinfo=timezone.utc), False),  # 5:59 AM MST
                  (datetime(2026, 11, 9, 13, 0, tzinfo=timezone.utc), True),    # 6:00 AM
                  (datetime(2026, 11, 10, 5, 59, tzinfo=timezone.utc), True),   # 10:59 PM
@@ -294,6 +299,11 @@ class ConnectorSide(unittest.TestCase):
                     self.assertEqual(e.exception.reason, "after_hours")
         # An assignment with no brief tells nobody and is not held.
         self.assertFalse(self.w.core.assign_task(self.w.bramble, "70", "echo")["queued"])
+        # While the lanes' audits are paused, a brief goes at any hour (Patrick, 11 Nov 2026, 11:22 PM).
+        from thornswood_guard.hours import work_hours
+        self.w.core.work_hours = lambda: work_hours({"work": {"hours": [6, 23], "lanes_audit_overnight": False}})
+        self.w.clock.t = datetime(2026, 11, 10, 6, 30, tzinfo=timezone.utc)  # 11:30 PM
+        self.assertTrue(self.w.core.assign_task(self.w.bramble, "71", "echo", "Do it.")["queued"])
 
     def test_the_bot_that_asked_is_told_and_that_is_bot_told(self):
         flags(self.w, "connector_effects")

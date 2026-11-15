@@ -149,6 +149,26 @@ class VmInstall(unittest.TestCase):
                 self.ask(box=bad)
         self.assertEqual(self.ledger(), [])
 
+    def test_the_grok_lanes_computer_goes_on_the_ledger_line(self):
+        # Thornswood #5933: whether the lanes' computer on the VM is ready, and its screen.
+        self.ask(grok={"ready": False, "screen": "open", "version": "1.0.1", "problem": None})
+        self.assertIn("Grok lanes' computer: Grok Bot 1.0.1, local computer not registered yet, screen open.", self.ledger()[0])
+
+    def test_a_grok_problem_goes_out_as_one_line_with_no_address(self):
+        self.ask(grok={"ready": True, "screen": "closed", "version": "1.0.1",
+                       "problem": "tw-grok-screen did not start on 100.118.1.2"})
+        line = self.ledger()[0]
+        self.assertIn("local computer registered, screen closed; tw-grok-screen did not start on <address>.", line)
+        self.assertNotIn("100.118", line)
+
+    def test_a_grok_field_out_of_its_form_is_refused_and_nothing_is_written(self):
+        good = {"ready": True, "screen": "closed", "version": "1.0.1", "problem": None}
+        for bad in ({**good, "ready": "yes"}, {**good, "screen": "http://hermes:6080/"},
+                    {**good, "version": "https://downloads.cursor.com/x"}, {**good, "problem": ["a"]}, "ready"):
+            with self.assertRaises(Refused, msg=bad):
+                self.ask(grok=bad)
+        self.assertEqual(self.ledger(), [])
+
     def test_the_reason_goes_out_as_one_line_with_no_address(self):
         self.assertEqual(one_line("ssh to 100.64.1.2 failed\n  and fe80::1:2:3:4 too"), "ssh to <address> failed and <address> too")
         self.assertTrue(len(one_line("x" * 900)) <= 300)

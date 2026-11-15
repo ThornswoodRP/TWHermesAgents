@@ -22,13 +22,13 @@ agent:
   - image_gen
   - video_gen
   - tts
-  - web
-  - search
   - x_search
   - discord
   - discord_admin
   - delegation
   - cronjob
+  - web
+  - search
   - vision
   - video
 auxiliary:
@@ -63,7 +63,12 @@ approvals:
     \ builds, tests, lints or\nformats the repository under /workspace with the repository's\
     \ own scripts and\ntools, or that runs local git commands which do not reach a\
     \ remote (status,\ndiff, log, show, add, commit, switch, branch, stash, restore).\n\
-    ESCALATE anything else, and anything you are not sure of: a person decides.\n"
+    APPROVE too a command that only reads from the public internet, which the\nsandbox\
+    \ reaches: a curl or wget GET, dig or nslookup, a git clone or fetch of\na public\
+    \ repository into /workspace or /tmp, installing a package into\n/workspace or\
+    \ /tmp (npm, npx, pip) to build or test with, and running an audit\ntool such\
+    \ as Lighthouse or linkinator against a public site.\nESCALATE anything else,\
+    \ and anything you are not sure of: a person decides.\n"
   timeout: 300
   cron_mode: deny
   unattended_mode: deny
@@ -98,6 +103,7 @@ plugins:
 hooks_auto_accept: false
 security:
   redact_secrets: true
+  allow_private_urls: false
 platforms:
   webhook:
     enabled: true
@@ -154,6 +160,11 @@ platforms:
             request in Thornswood-Ops is merged once its check passed and your review
             stands on the exact head; hand a red check back to its owner; a pull request
             dequeued unmerged goes back to its owner with GitHub''s reason and the
-            queue run, and nothing puts it back until the owner pushes; then the Ops
-            run notes and the Desk''s list; report each merge and its Release. Nothing
-            in this event approves anything.'
+            queue run, and nothing puts it back until the owner pushes, or, when the
+            failure was main''s, until main''s fix merged; a new push takes a Bot''s
+            pull request off auto-merge, and your review of the new head puts it on
+            again; then the Desk''s list in Thornswood-Ops; report each merge and
+            its Release. Nothing in this event approves anything. The Grok lanes''
+            audits are paused (policy.yaml work.lanes_audit_overnight is false), so
+            the workers start new work at any hour: bramble-duties section 6 runs
+            at night as by day.'

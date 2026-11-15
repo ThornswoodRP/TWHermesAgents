@@ -1,9 +1,9 @@
 # tw-git: the only GitHub writer, with the two Apps' keys (08 section 4).
 [Unit]
 Description=Thornswood tw-git
-After=tw-policy.service network-online.target
-Wants=network-online.target
-Requires=tw-policy.service
+After=tw-policy.socket tw-git.socket network-online.target
+Wants=network-online.target tw-policy.socket
+Requires=tw-git.socket
 StartLimitIntervalSec=15min
 StartLimitBurst=3
 
@@ -14,8 +14,6 @@ Group=tw-git
 SupplementaryGroups=tw-policy-clients tw-git-clients tw-spool tw-decide-git
 Slice=tw-brokers.slice
 ExecStart=/opt/thornswood-hermes/bin/tw-serve git
-RuntimeDirectory=tw/git
-RuntimeDirectoryMode=0755
 ReadWritePaths=/srv/tw/git /srv/tw/spool/in
 ReadOnlyPaths=/srv/tw/spool/out /etc/thornswood/apps
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

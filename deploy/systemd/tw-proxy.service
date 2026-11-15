@@ -3,9 +3,9 @@
 # never in its environment.
 [Unit]
 Description=Thornswood tw-proxy
-After=tw-policy.service network-online.target
-Wants=network-online.target
-Requires=tw-policy.service
+After=tw-policy.socket tw-proxy.socket network-online.target
+Wants=network-online.target tw-policy.socket
+Requires=tw-proxy.socket
 StartLimitIntervalSec=15min
 StartLimitBurst=3
 

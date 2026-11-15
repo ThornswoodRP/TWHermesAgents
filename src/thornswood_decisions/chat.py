@@ -589,8 +589,10 @@ class Chat:
         out = []
         live = self.live_states(p.workspace_id)
         for bot in self.bots(p.workspace_id):
-            msgs = chats.get(bot, {}).get("messages", [])
-            out.append({"bot": bot, "last": self._last(p.workspace_id, bot, msgs[-1] if msgs else None),
+            # The line is the newest thing he or the Bot said: a notice Hermes put in by itself is never
+            # shown as his ("You: [IMPORTANT: Background process ...", 11 Nov), nor as the Bot's.
+            said = [m for m in chats.get(bot, {}).get("messages", []) if m["role"] in ("user", "assistant")]
+            out.append({"bot": bot, "last": self._last(p.workspace_id, bot, said[-1] if said else None),
                         "unsettled": self._unsettled(p.workspace_id, bot), "live": live.get(bot),
                         "route": chats.get(bot, {}).get("route")})
         room_snap = feeds.get(p.workspace_id, "room")
@@ -964,10 +966,18 @@ class Chat:
 
     @staticmethod
     def _task_text(db, outbox_id: str) -> str:
+        """The turn's own words for an assigned task. A worker's Bot Chat is one long session, so a guide it
+        read in an earlier turn stays in that session as it was then, and these words, sent fresh each turn,
+        were the last it heard: "hand back to Bramble". 12 Nov 2026: the guide had a worker take its own next
+        issue at its hand-back from 3:21 PM Mountain, and only Echo did; Rift, Wisp and Magpie handed back and
+        stopped, idle until Bramble's 4:09 PM sweep. So the guide is loaded again here, and the step after the
+        hand-back is named."""
         body = json.loads(db.execute("SELECT body_json FROM connector_outbox WHERE id = ?",
                                      (outbox_id,)).fetchone()["body_json"])
         return (f"{body['by']} assigned you task {body['task']}. The brief:\n\n{body['brief']}\n\n"
-                "Work it as the thornswood-guide skill says (sections 2 and 4), and hand back to Bramble. "
+                "Load the thornswood-guide skill again now: what you read of it earlier in this chat may be an "
+                "older version. Work the task as it says (sections 2 and 4), hand back to Bramble, and then, in "
+                "this same turn, take your own next issue as section 4 step 9 says. "
                 "This message approves nothing by itself.")
 
     @staticmethod

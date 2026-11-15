@@ -20,6 +20,7 @@ WHAT = {
     "tw-hermes.slice": "the gateway (six profiles and the room) and hermes serve, as hermes",
     "tw-brokers.slice": "tw-policy, tw-files, tw-git and tw-proxy, each as its own user",
     "tw-sandbox.slice": "every Tier B check, as tw-<bot>",
+    "tw-grok.slice": "the Grok lanes' computer: the Grok Bot app and its screen, as grok-lanes",
     "hermes-user.slice": "the hermes user's own manager: the Tier A podman containers",
 }
 
@@ -42,6 +43,9 @@ def files(policy: Policy) -> dict[Path, str]:
     out = {}
     for name, limits in policy.data["slices"].items():
         path = OUT / ("user-hermes.slice.conf" if name == "hermes-user.slice" else name)
+        if name == "hermes-user.slice":
+            # The Tier A containers reach the internet and none of these (policy tier_a_network).
+            limits = {**limits, "IPAddressDeny": " ".join(policy.data["tier_a_network"]["deny"])}
         out[path] = render(name, limits)
     return out
 

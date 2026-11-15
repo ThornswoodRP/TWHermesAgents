@@ -152,6 +152,23 @@ merge:
   # (Thornswood #5544). tw-git refuses to merge one that credits nobody with a
   # Co-authored-by line, because then the work's author cannot be read.
   outside_label: "outside work"
+  # What merges only on Patrick's yes on a Main card for that pull request at
+  # its exact head, release link merge:<owner>/<repo>@<head>#<pull request>:
+  # a change to what runs on the live box or in CI (Patrick, 2 Nov 2026,
+  # dec_IL6elJT7TwyCVC_wzMIveA: "Auto-merge skips a pull request that changes
+  # workflows, the gate or its verb scripts unless it is Patrick's"). The same
+  # files as Thornswood's scripts/ops/Auto-Merge.js holds: every file under
+  # dirs, each verb list, and each script and 'reads' entry a verb of the
+  # base branch's lists names (an entry ending in / is a folder). tw_git merge
+  # turned auto-merge on for Thornswood #5665 (a verb script, 9 Nov 2026) and
+  # skymp #150 (workflows, 12 Nov 2026) with no card answered: Ops #276.
+  patrick_paths:
+    ThornswoodRP/Thornswood:
+      dirs: [".github/workflows/", "scripts/vps/gate/"]
+      verb_lists: ["scripts/vps/gate/verbs.json", "scripts/release/nexus-verbs.json"]
+    ThornswoodRP/skymp:
+      dirs: [".github/workflows/"]
+      verb_lists: []
 
 # What Bramble's release tooling may start. Nothing else, on main only.
 runs:
@@ -201,11 +218,26 @@ runs:
   patrick_switches:
     New-NexusRevision: [Publish]
 
+# When the workers start new work, Mountain. From 6 AM to 11 PM while the
+# Grok lanes audit overnight (Patrick, 9 Nov 2026: "have them auto work
+# between 6 am and 11 pm"). While he has the lanes' audits paused, around the
+# clock (Patrick, 11 Nov 2026, 11:22 PM: "I want my Hermes Agents to work
+# through tonight since I pauased the audits"). Set lanes_audit_overnight back
+# to true when the audits start again. owed_wake.py's free worker look and the
+# decision core's assign_task both read it (thornswood_guard/hours.py).
+work:
+  hours: [6, 23]
+  lanes_audit_overnight: false
+
 # Branches: a worker pushes only its own, named <bot>/<issue>-<what>.
 branches:
   pattern: "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$"
-  # Bramble's App pushes the workflow change Magpie wrote to Magpie's branch.
-  bramble_may_push_for: [magpie]
+  # Bramble's App pushes a workflow change a worker wrote to that worker's
+  # branch: the workers' App has no Workflows permission. Magpie only until
+  # 12 Nov 2026; then every worker (Patrick's answer A on
+  # q-277-bramble-workflow-push, Ops #277), because Wisp's and Sprocket's
+  # workflow fixes had no route.
+  bramble_may_push_for: [rift, sprocket, echo, magpie, wisp]
 
 claims:
   prefix: "claimed: "
@@ -433,7 +465,21 @@ decisions:
   default_expiry_hours: 72
 
 # Toolsets each Bot never has. The guard also refuses their tools by name.
+# web and search (web_search, web_extract) are not here since Patrick's word
+# on 15 Nov 2026: "We need to give them network access so they can do those
+# tests and so they can do web searches for research and stuff as needed".
+# Hermes runs them in the gateway with no key (its keyless tier), and its own
+# URL check refuses a private, loopback or cloud metadata address
+# (security.allow_private_urls stays false in every profile).
 toolsets:
+  # The web tools' backend, for search and for reading a page, set in every
+  # Bot's profile so no earlier `hermes tools` pick stays. Bramble's first
+  # real run on 15 Nov (Thornswood-Ops #340) found the profiles holding
+  # openai-native, which only runs on the openai-codex transport: every
+  # web_search failed over to the free tier, and web_extract failed outright
+  # ("a search-only backend and cannot extract URL content"). Exa with no key
+  # is Hermes's keyless Exa, which does both, for nothing.
+  web_backend: exa
   never:
     - browser
     - code_execution
@@ -443,8 +489,6 @@ toolsets:
     - image_gen
     - video_gen
     - tts
-    - web
-    - search
     - x_search
     - discord
     - discord_admin
@@ -487,17 +531,20 @@ brokers:
   # credentials on every connection.
   # The group is only who may connect; each op still checks the caller's
   # user from SO_PEERCRED.
+  # tw-policy, tw-git and tw-files listen on sockets systemd holds
+  # (deploy/systemd/tw-*.socket), so a broker starting again for an install
+  # refuses no call: calls wait in the socket until it answers (#162).
   sockets:
     policy:
-      path: /run/tw/policy/policy.sock
+      path: /run/tw-brokers/policy.sock
       group: tw-policy-clients
       clients: [hermes, tw-git, tw-files, tw-proxy, root]
     git:
-      path: /run/tw/git/git.sock
+      path: /run/tw-brokers/git.sock
       group: tw-git-clients
       clients: [hermes, root]
     files:
-      path: /run/tw/files/files.sock
+      path: /run/tw-brokers/files.sock
       group: tw-files-clients
       clients: [hermes, root]
     # The Bots' route to the decision core (#49), served by tw-decide-bots as
@@ -558,10 +605,14 @@ brokers:
     # over a write's size and the plugin is not text, so no Bot could land
     # a gamemode or plugin change. A builder runs code from the Bot's own
     # tree, as every harness already does, so it gives a Bot nothing more.
+    # {tests} is tests or a product's own tests folder one below the top
+    # (game/tests, launcher/tests): Thornswood keeps a product's harnesses
+    # beside its code (Thornswood #5341), and a form that named only tests
+    # left the Bots unable to run any of them.
     check_commands:
-      - ["node", "tests/test-{name}.js"]
-      - ["pwsh", "-NoProfile", "-File", "tests/test-{name}.ps1"]
-      - ["python3", "tests/test-{name}.py"]
+      - ["node", "{tests}/test-{name}.js"]
+      - ["pwsh", "-NoProfile", "-File", "{tests}/test-{name}.ps1"]
+      - ["python3", "{tests}/test-{name}.py"]
       - ["pwsh", "scripts/dev/Check-Words.ps1"]
       - ["node", "scripts/dev/Build-Gamemode.js"]
       - ["python3", "scripts/mods/Add-ContentRecords.py"]
@@ -689,13 +740,61 @@ slices:
     CPUWeight: 50
     CPUQuota: 100%
     TasksMax: 1024
+  # The Grok lanes' computer (grok_lanes below): the Grok Bot app and its
+  # virtual screen, as grok-lanes.
+  tw-grok.slice:
+    MemoryHigh: 1536M
+    MemoryMax: 2G
+    CPUWeight: 20
+    CPUQuota: 100%
+    TasksMax: 512
   # Tier A: the hermes user's own manager runs the rootless podman containers,
   # so its user slice (user-<uid of hermes>.slice) carries the sandbox caps too.
+  # scripts/render_units.py also gives it tier_a_network's deny list (below)
+  # as IPAddressDeny: the kernel refuses every packet to those addresses from
+  # anything in the slice, the containers' network helper (slirp4netns or
+  # pasta) included, whatever runs inside a container.
   hermes-user.slice:
     MemoryHigh: 3584M
     MemoryMax: 4G
     CPUQuota: 100%
     TasksMax: 1024
+
+# The Grok lanes' computer (Patrick's answer A on q-5933-lanes-fallback,
+# 12 Nov 2026; ThornswoodRP/Thornswood#5933). The Grok Bot lanes audit on
+# Grok Bot's own cloud computer; when its included usage runs out they do
+# read-only work on a computer of Patrick's through the Grok Bot app. That
+# was One; it is this VM, so nothing of theirs runs on One. xAI's Grok Bot for
+# Linux runs as grok-lanes on a virtual screen (tw-grok-lanes.service), from
+# xAI's signed apt repository, whose key is pinned here by fingerprint. The
+# account has no sudo, no ssh key, no group of the brokers or the Bots, and
+# its unit cannot see /home (Patrick's own Hermes's box key is there), the
+# brokers' state or /etc/thornswood. Patrick signs in once through the
+# screen (tw-grok-screen.service): a noVNC page on the VM's Tailscale address
+# only, open while the app has no local computer registered and for
+# screen_minutes after an install that finds screen_open true.
+grok_lanes:
+  user: grok-lanes
+  home: /srv/tw/grok-lanes
+  apt_key: deploy/grok-lanes/grok-bot.asc
+  apt_key_fingerprint: 380FF4BCDC34A4BD92A3565342A1772E62E492D6
+  apt_uri: https://downloads.cursor.com/aptrepo
+  apt_suite: grok-bot
+  package: grok-bot
+  app: /opt/Grok Bot/grok-bot
+  # What says the app's local computer is registered (it is there once
+  # Patrick has signed in and turned on Execution on this computer).
+  ready_file: .grokbot/local-exec-daemon-credential.json
+  display: 71
+  screen_port: 6080
+  screen_minutes: 120
+  # true opens the screen for screen_minutes at the next install, for a
+  # change in the app's settings after the sign-in. Back to false after.
+  screen_open: false
+  disk_quota_gb: 8
+  # Public: whether the local computer is registered and whether the screen
+  # is open, put on the ledger with an installed result. Never an address.
+  status_file: /var/lib/thornswood/grok-lanes.json
 
 # Backups (02 section 7, OPEN item 7). Encrypted on the VM to Patrick's age
 # public key. Never in an archive: sign-ins, .env files, keys. Until 31 Oct
@@ -766,6 +865,34 @@ backups:
 tier_a_disk:
   images: /var/lib/thornswood/tier-a
   work_root: /home/hermes/tw-work
+
+# The network inside a Tier A container (Patrick, 15 Nov 2026: "We need to
+# give them network access so they can do those tests and so they can do web
+# searches for research and stuff as needed"). Until then every container ran
+# with --network=none, so the weekly project review could not run Lighthouse,
+# linkinator or read the live site's headers ("github.com would not resolve").
+# A container now reaches the public internet and nothing else of ours:
+# - deny: the addresses no packet from the hermes user's slice may reach,
+#   rendered into that slice's IPAddressDeny (scripts/render_units.py), so
+#   the kernel holds it for the containers' network helper whatever a
+#   container asks for: this VM's own and its network's private addresses,
+#   the tailnet (Patrick's machines and the VM's Tailscale listeners), the
+#   cloud metadata service at 169.254.169.254, and multicast. Loopback stays
+#   open because a container's own lo (a test's local server, Lighthouse
+#   driving Chrome) is in the slice too; the VM's own loopback is not
+#   reachable from a container, since podman maps no host loopback into it
+#   (slirp4netns's --disable-host-loopback, pasta's --no-map-gw), and the
+#   canary holds that live.
+# - dns: the resolvers a container asks, public ones on the internet, because
+#   the VM's own (systemd-resolved, which asks Tailscale's 100.100.100.100
+#   and the cloud's 169.254.169.254) are in the deny list.
+# What a container holds does not change: only /workspace, no Hermes home, no
+# key, no token (docker_forward_env and docker_env stay empty), so the box
+# key, the brokers' keys and the Bots' proxy tokens stay where they are.
+tier_a_network:
+  deny: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4,
+         fc00::/7, fe80::/10, ff00::/8]
+  dns: [1.1.1.1, 9.9.9.9]
 
 # The VM follows main by itself (src/thornswood_brokers/follow_main.py,
 # tw-follow-main.timer). Patrick's answer A on q-retire-hermes-one, 31 Oct

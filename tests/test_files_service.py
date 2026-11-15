@@ -19,6 +19,7 @@ import copy
 import errno
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -118,6 +119,42 @@ class Work(unittest.TestCase):
         self.assertEqual(out["head"], b["sha"])
         with self.assertRaises(Refused):
             w.git.base("hermes", {"bot": "rift", "repo": FORK})
+
+    def test_a_tree_opens_at_the_head_of_the_bots_own_open_branch(self):
+        # Ops #311, 12 Nov 2026: Magpie's one-line fix to its open #5865 had to
+        # be rebuilt on main and force-pushed, because base gave only main.
+        w = World()
+        w.checkout(task="77-fix")
+        self._send(w, "77-fix")
+        head = w.fake.ref(APP, "sprocket/77-fix")
+        shutil.rmtree(w.tree(task="77-fix"))
+        b = w.git.base("hermes", {"bot": "sprocket", "repo": APP, "branch": "sprocket/77-fix"})
+        self.assertEqual((b["branch"], b["branch_sha"]), ("sprocket/77-fix", head))
+        out = w.files.checkout("hermes", {"bot": "sprocket", "repo": APP, "task": "77-fix", "bundle": b["bundle"],
+                                          "branch": "sprocket/77-fix"})
+        self.assertEqual((out["head"], out["from"]), (head, "branch"))
+        self.assertIn("77-fix.txt", [e["name"] for e in w.files.list("hermes", w.a(task="77-fix"))["entries"]])
+        w.files.write("hermes", w.a(task="77-fix", path="more.txt", content="more\n"))
+        w.files.commit("hermes", w.a(task="77-fix", message="One more line"))
+        sent = w.files.bundle("hermes", w.a(task="77-fix"))
+        w.git.push("hermes", {"bot": "sprocket", "repo": APP, "task": "77", "branch": sent["branch"],
+                              "bundle": sent["bundle"]})
+        self.assertEqual(git(w.fake.remote(APP), "rev-parse", "sprocket/77-fix~1"), head, "on top of its head")
+        self.assertEqual(sorted(p.name for p in (w.spool / "in" / "sprocket").glob("Thornswood-*.bundle")),
+                         [b["bundle"]], "one bundle in its base's line, pruned like any other")
+
+    def test_base_opens_only_the_bots_own_branch_that_github_has(self):
+        w = World()
+        w.checkout(bot="rift", task="12-load-order")
+        for bot, branch, says in (("sprocket", "rift/12-load-order", "not Sprocket's"),
+                                  ("sprocket", "sprocket/99-never-pushed", "GitHub has no branch"),
+                                  ("sprocket", "main", "not Sprocket's")):
+            with self.subTest(branch=branch), self.assertRaises(Refused) as e:
+                w.git.base("hermes", {"bot": bot, "repo": APP, "branch": branch})
+            self.assertIn(says, str(e.exception))
+        mirror = w.root / "mirrors" / "ThornswoodRP__Thornswood.git"
+        self.assertEqual(git(mirror, "for-each-ref", "refs/heads/"), git(mirror, "for-each-ref", "refs/heads/main"),
+                         "no branch ref is left in the mirror")
 
     def test_a_newer_base_replaces_the_bots_older_one(self):
         # 11 Nov 2026: no base bundle was ever deleted; 16 GB of them took the
@@ -235,6 +272,47 @@ class Work(unittest.TestCase):
         names = [e["name"] for e in w.files.list("hermes", w.a())["entries"]]
         self.assertEqual(names, ["README.md", "tests"])
         self.assertIn("README.md:1:Thornswood", w.files.search("hermes", w.a(pattern="Thorns"))["matches"])
+
+    def test_a_search_that_runs_long_is_stopped_and_frees_the_bots_lane(self):
+        # Ops #310, 12 Nov 2026: Rift's '.*' search over recipes.json, 6 MB on
+        # one line, held Rift's lock for hours and every tw_files op of
+        # Rift's timed out behind it.
+        import threading
+        import time
+        from unittest import mock
+        from thornswood_brokers import files_service
+        w = World()
+        w.checkout()
+        one_line = "[" + ",".join('{"keyword":"CraftingSmithingForge","name":"Iron Arrow %d"}' % i
+                                  for i in range(40000)) + "]"
+        (w.tree() / "recipes.json").write_text(one_line)
+        got = {}
+
+        def search():
+            try:
+                w.files.search("hermes", w.a(pattern="Forge.*Bow"))
+            except Refused as e:
+                got["refused"] = str(e)
+        with mock.patch.object(files_service, "SEARCH_SECONDS", 1):
+            t0 = time.monotonic()
+            th = threading.Thread(target=search)
+            th.start()
+            th.join(20)
+            took = time.monotonic() - t0
+        self.assertFalse(th.is_alive(), "the search was not stopped")
+        self.assertLess(took, 10)
+        self.assertIn("ran past 1 seconds and was stopped", got.get("refused", ""))
+        t0 = time.monotonic()
+        self.assertIn("README.md:1:Thornswood", w.files.search("hermes", w.a(pattern="Thorns"))["matches"])
+        self.assertLess(time.monotonic() - t0, 5, "the Bot's next op answers at once")
+
+    def test_a_search_matching_everything_is_cut_not_held_in_memory(self):
+        w = World()
+        w.checkout()
+        (w.tree() / "big.txt").write_text("line\n" * 300_000)
+        out = w.files.search("hermes", w.a(pattern="."))
+        self.assertTrue(out["cut"])
+        self.assertLessEqual(len(out["matches"]), 200_000)
 
     def test_sizes(self):
         w = World()
@@ -510,12 +588,19 @@ class Checks(unittest.TestCase):
     def test_only_the_harness_forms_run(self):
         f = World().files
         for cmd in (["node", "tests/test-fence.js"], ["pwsh", "-NoProfile", "-File", "tests/test-3561-path.ps1"],
-                    ["python3", "tests/test-x.py"], ["pwsh", "scripts/dev/Check-Words.ps1"]):
+                    ["python3", "tests/test-x.py"], ["pwsh", "scripts/dev/Check-Words.ps1"],
+                    # A product's own tests folder (Thornswood #5341).
+                    ["node", "game/tests/test-farming.js"], ["python3", "bot/tests/test-3111-trust.py"],
+                    ["pwsh", "-NoProfile", "-File", "launcher/tests/test-498-msbuild.ps1"]):
             with self.subTest(cmd=cmd):
                 self.assertEqual(f.check_command(cmd), cmd)
         for cmd in (["pwsh", "scripts/dev/Run-Gate.ps1"], ["node", "tests/test-../../x.js"], ["node", "-e", "x"],
                     ["bash", "-c", "id"], ["node", "tests/test-a.js", "--extra"], ["python3", "tests/test-A.py"],
-                    "node tests/test-x.js"):
+                    "node tests/test-x.js",
+                    # Only one folder above tests, by a plain name: no climb, no second level, no other folder.
+                    ["node", "../tests/test-x.js"], ["node", "a/b/tests/test-x.js"], ["node", "game/test-x.js"],
+                    ["node", "/tests/test-x.js"], ["node", "Game/tests/test-x.js"], ["node", "game/tests/../x.js"],
+                    ["node", "game/tests/test-x.js/"], ["node", "game/testsx/test-x.js"]):
             with self.subTest(cmd=cmd), self.assertRaises(Refused):
                 f.check_command(cmd)
 
@@ -651,6 +736,16 @@ class Checks(unittest.TestCase):
         for hidden in ("/srv/tw/policy", "/srv/tw/git", "/srv/tw/spool", "/etc/thornswood", "/run/tw"):
             self.assertIn(hidden, props["InaccessiblePaths"].split())
         self.assertEqual(argv[-3:], ["--", "node", "tests/test-x.js"])
+
+    def test_git_reads_the_tree_the_check_runs_in(self):
+        """Ops #284: the tree is tw-files' and the check another uid's, so git
+        refused it as dubious ownership; git trusts this one tree only."""
+        tree = "/srv/tw/work/rift/Thornswood/12-load-order"
+        argv = check_argv(policy(), "rift", tree, ["node", "tests/test-x.js"])
+        env = dict(a.split("=", 1)[1].split("=", 1) for a in argv[:argv.index("--")] if a.startswith("--setenv="))
+        self.assertEqual((env["GIT_CONFIG_COUNT"], env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]),
+                         ("1", "safe.directory", tree))
+        self.assertNotIn("*", env["GIT_CONFIG_VALUE_0"])
 
     def test_only_the_gateway_user_calls_tw_files(self):
         self.assertTrue(all(users == {"hermes"} for _, users in World().files.ops().values()))

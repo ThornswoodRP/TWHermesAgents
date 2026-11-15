@@ -108,6 +108,7 @@ class Idle:
         self.pulls = pulls or []
         self.cards = []
         self.turns = {}
+        self.queued = {}
         self.asked = []
 
     def __call__(self, broker, op, args):
@@ -118,6 +119,8 @@ class Idle:
             return self.cards
         if op == "bot_turns":
             return {"bots": self.turns}
+        if op == "queued_for":
+            return {"bots": self.queued}
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour"}
         if op == "read":
@@ -259,15 +262,29 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("tw-git did not answer", out[-2])
 
     def test_no_free_worker_check_from_11_pm_to_6_am(self):
-        # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain.
+        # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain,
+        # while the Grok lanes audit overnight.
+        lanes = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": True})
         for t in (BEFORE_SIX, AFTER_SIX + 16 * 3600):  # 3:30 AM, 11:30 PM
             with self.subTest(t=t):
                 b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 4})
-                out = owed_wake.check(self.day(), "bramble", b, now=t, policy=POLICY)
+                out = owed_wake.check(self.day(), "bramble", b, now=t, policy=lanes)
                 self.assertFalse(wakes("\n".join(out)))
                 self.assertIn("no worker starts new work", out[-2])
                 paths = [a["path"] for a in b.reads()]
                 self.assertFalse([p for p in paths if "/pulls?" in p or "area%3A" in p], paths)
+
+    def test_while_the_lanes_audits_are_paused_the_look_runs_at_night_and_says_so(self):
+        # Patrick, 11 Nov 2026, 11:22 PM: "I want my Hermes Agents to work
+        # through tonight since I pauased the audits".
+        paused = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": False})
+        b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 4})
+        home = self.day()
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": AFTER_SIX + 16 * 3600})
+        out = owed_wake.check(home, "bramble", b, now=AFTER_SIX + 16 * 3600, policy=paused)  # 11:30 PM
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("audits are paused", "\n".join(out))
+        self.assertIn("in the field of echo", out[-1])
 
     def test_bramble_is_alert_at_any_hour_for_its_own_work(self):
         # Patrick, 9 Nov 2026, 1:27 AM: "Bramble should still be working and always be working and alert".
@@ -337,25 +354,143 @@ class MorningAndFreeWorkers(unittest.TestCase):
         b.turns = {"sprocket": {"running": False, "last": an_hour_ago},
                    "rift": {"running": True, "last": an_hour_ago},
                    "echo": {"running": False, "last": just_now},
+                   "wisp": {"running": False, "waiting": True, "last": an_hour_ago},
                    "magpie": {"running": False, "last": None}}
         out = owed_wake.check(home, "bramble", b, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
-        self.assertIn("magpie, sprocket hold an active issue", out[-1])
+        self.assertIn("echo, magpie, sprocket hold an active issue", out[-1],
+                      "a turn that ended two minutes ago is as stopped as one that ended an hour ago")
         self.assertIn("items 5 and 6", out[-1])
-        for w in ("rift", "echo", "wisp"):
-            self.assertNotIn(w, out[-1], "running, recently heard from, or unknown is not stopped")
+        self.assertIn("take the claim off and give it its next issue", out[-1])
+        for w in ("rift", "wisp"):
+            self.assertNotIn(w, out[-1], "running, or in line, is not stopped")
         later = NOON + owed_wake.IDLE_EVERY + 1
         out = self.look(home, b, later)
         later += 300
         self.assertTrue(wakes("\n".join(out)), "a stop that is still there is said again an hour later")
-        self.assertIn("magpie, sprocket", out[-1])
+        self.assertIn("echo, magpie, sprocket", out[-1])
         self.assertNotIn("stopped", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)),
                          "nothing is kept as told")
         b.turns["sprocket"] = {"running": False, "last": datetime.fromtimestamp(later + owed_wake.IDLE_EVERY, timezone.utc).isoformat()}
+        b.queued = {"sprocket": 1}
         b.turns["magpie"] = {"running": True, "last": None}
         b.turns["echo"] = {"running": True, "last": None}
         out = self.look(home, b, later + owed_wake.IDLE_EVERY)
-        self.assertFalse(wakes("\n".join(out)), "once each ran a turn, nothing is said")
+        self.assertFalse(wakes("\n".join(out)), "once each ran a turn or has one queued, nothing is said")
+
+    def test_a_hand_back_runs_the_look_at_the_next_check_not_on_the_hour(self):
+        # 11 Nov 2026: Rift handed back #4980 blocked at 4:00 PM and Magpie
+        # #5765 at 3:59 PM. The 4:52 PM look counted both busy, quiet just
+        # under an hour, and the next look was an hour away: four of the five
+        # workers sat with no turn from 4 PM while Wisp alone worked.
+        home = self.day()
+        # The alert look last ran at 12:15 PM, so none falls in these checks.
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE),
+                        {"morning": "2026-11-09", "alert_checked": NOON + 900, "idle_checked": NOON})
+        b = Idle(claimed=BUSY)
+        busy = {w: {"running": True, "last": None} for w in ("rift", "sprocket", "echo", "magpie", "wisp")}
+        b.turns = dict(busy)
+        out = owed_wake.check(home, "bramble", b, now=NOON + 300, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertEqual(b.reads(), [], "every worker has a turn: no GitHub read")
+        handed = datetime.fromtimestamp(NOON + 400, timezone.utc).isoformat()
+        b.turns["rift"] = {"running": False, "last": handed}
+        b.turns["bramble"] = {"running": True, "last": handed}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 600, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "Bramble is answering the hand-back; the look waits for that turn")
+        self.assertIn("rift ended a turn", "\n".join(out))
+        self.assertEqual(b.reads(), [])
+        b.turns["bramble"] = {"running": False, "last": handed}
+        b.queued = {"bramble": 1}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 660, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "a hand-back queued for Bramble is still to be answered")
+        b.queued = {}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 900, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("rift hold an active issue but have no turn running", out[-1])
+        self.assertTrue(b.reads(), "the look ran, a quarter hour after the last one")
+        n = len(b.reads())
+        b.turns["bramble"] = {"running": False, "last": handed,
+                              "sweep_done": datetime.fromtimestamp(NOON + 905, timezone.utc).isoformat()}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 1200, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "the hand-back was looked at; the next look is the hourly one")
+        self.assertEqual(len(b.reads()), n)
+        b.turns["rift"] = {"running": False, "last": handed}
+        b.queued = {"rift": 1}
+        b.turns["echo"] = {"running": False, "last": datetime.fromtimestamp(NOON + 1300, timezone.utc).isoformat()}
+        b.queued["echo"] = 1
+        out = owed_wake.check(home, "bramble", b, now=NOON + 1500, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), "a worker whose next brief is queued has its turn on the way")
+        self.assertEqual(len(b.reads()), n)
+
+    def test_a_look_whose_sweep_never_ran_looks_again_and_its_lines_ride_the_next_wake(self):
+        # 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
+        # Sprocket, Echo and Wisp free. Its sweep was turned away (another was
+        # running), a GitHub sweep paid the wake it owed without its lines, the
+        # 6:44 PM sweep carried only an Ops issue, and no worker got work.
+        home = self.day()
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE),
+                        {"morning": "2026-11-09", "alert_checked": NOON + 60})
+        claimed = dict(BUSY, **{"claimed: Sprocket": 0})
+        b = Idle(claimed=claimed, open_={'"area: Launcher","area: Packaging"': 3})
+        out = owed_wake.check(home, "bramble", b, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("in the field of sprocket", out[-1])
+        # The sweep it woke was turned away: no ticket. GitHub sweeps ran.
+        later = datetime.fromtimestamp(NOON + 200, timezone.utc).isoformat()
+        b.turns = {"bramble": {"running": False, "last": later, "sweep_done": None}}
+        b.asked.clear()
+        due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "another sweep is running"}
+
+        def owed(broker, op, args):
+            return due if op == "wake_due" else b(broker, op, args)
+        out = owed_wake.check(home, "bramble", owed, now=NOON + 240, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("turned away", out[1])
+        # The owed wake runs the look too (12 Nov 2026: a wake owed all
+        # evening kept every look from running), fresh, so its lines ride it.
+        self.assertIn("no sweep carried its lines", "\n".join(out), "the owed sweep carries the look's lines")
+        self.assertIn("in the field of sprocket", out[-1])
+        self.assertEqual(sum("in the field of sprocket" in l for l in out), 1, "said once, not carried twice")
+        # A GitHub sweep paid the owed wake: nothing is owed, and the look runs again.
+        out = owed_wake.check(home, "bramble", b, now=NOON + 300, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("no sweep carried its lines", "\n".join(out))
+        self.assertIn("in the field of sprocket", out[-1])
+        self.assertTrue(b.reads(), "a fresh look")
+        # While Bramble runs a turn, which may be that sweep, nothing runs.
+        b.asked.clear()
+        b.turns["bramble"] = {"running": True, "last": later, "sweep_done": None}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 600, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertEqual(b.reads(), [])
+        # The sweep ran to its end: its lines are gone, and the next look is the hourly one.
+        b.turns["bramble"] = {"running": False, "last": later,
+                              "sweep_done": datetime.fromtimestamp(NOON + 305, timezone.utc).isoformat()}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 900, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertNotIn("said_at", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)))
+        out = owed_wake.check(home, "bramble", b, now=NOON + 1200, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertEqual([a for a in b.reads() if "/pulls?" in a["path"]], [])
+
+    def test_a_look_that_finds_nothing_leaves_nothing_to_carry(self):
+        home = self.day()
+        out = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=NOON, policy=POLICY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        self.assertNotIn("said_at", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)))
+
+    def test_a_free_worker_after_a_hand_back_gets_its_next_issue_at_the_next_check(self):
+        home = self.day()
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE),
+                        {"morning": "2026-11-09", "alert_checked": NOON, "idle_checked": NOON})
+        claimed = dict(BUSY, **{"claimed: Sprocket": 0})
+        b = Idle(claimed=claimed, open_={'"area: Launcher","area: Packaging"': 3})
+        b.turns = {"sprocket": {"running": False, "last": datetime.fromtimestamp(NOON + 60, timezone.utc).isoformat()}}
+        out = owed_wake.check(home, "bramble", b, now=NOON + 300, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("in the field of sprocket", out[-1])
+        self.assertIn("not on the hour", "\n".join(out))
 
     def test_a_stop_and_a_free_worker_are_both_said(self):
         claimed = dict(BUSY, **{"claimed: Wisp": 0})
@@ -427,6 +562,42 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertFalse(wakes("\n".join(out)), out)
         self.assertIn("every worker is on an active issue", out[-2])
 
+    def test_a_merged_fix_past_the_first_page_of_pull_requests_still_counts(self):
+        # 12 Nov 2026: Echo's #4330, #4333 and #4327 had fixes merged on 9 Nov,
+        # waiting for the main Ship, but the look read only the 100 most
+        # recently updated pull requests and called them parked.
+        claimed = dict(BUSY, **{"claimed: Echo": 1})
+        echo = 100 * (1 + list(claimed).index("claimed: Echo"))
+        newer = [{"head": {"ref": f"magpie/{5000 + i}-x"}, "state": "closed", "merged_at": "2026-11-11T10:00:00Z",
+                  "created_at": "2026-11-11T09:00:00Z", "updated_at": "2026-11-11T10:00:00Z"} for i in range(99)]
+        newer.append({"head": {"ref": "echo/5800-later"}, "state": "open", "created_at": "2026-11-11T08:00:00Z",
+                      "updated_at": "2026-11-11T08:00:00Z"})
+        older = [{"head": {"ref": f"echo/{echo}-age-check"}, "state": "closed", "merged_at": "2026-11-09T13:35:00Z",
+                  "created_at": "2026-11-09T12:00:00Z", "updated_at": "2026-11-09T13:35:00Z"}]
+        b = Idle(claimed=claimed, open_={'"area: Website","area: Discord","area: Voice"': 4})
+        pages = []
+
+        def ask(broker, op, args):
+            if op == "read" and "/pulls?" in args["path"]:
+                b.asked.append((broker, op, args))
+                if args["repo"] == POLICY["repos"]["fork"]:
+                    return {"body": []}
+                page = int(args["path"].rsplit("page=", 1)[1])
+                pages.append(page)
+                return {"body": {1: newer, 2: older}.get(page, [])}
+            r = b(broker, op, args)
+            if op == "read" and "/search/issues" in args["path"]:
+                for i in r["body"].get("items") or []:
+                    if {"name": "claimed: Echo"} in i.get("labels", []):
+                        i["updated_at"], i["created_at"] = "2026-11-09T13:35:36Z", "2026-10-30T04:47:01Z"
+            return r
+        out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
+        self.assertEqual(pages, [1, 2])
+        # Its claim waits on the Ship: not parked, so no "take the claim off".
+        self.assertNotIn(f"echo #{echo}", "\n".join(out))
+        self.assertNotIn("take the claim off", "\n".join(out))
+        self.assertIn("in the field of echo", out[-1])
+
     def test_a_free_worker_look_sends_few_searches(self):
         # 10 Nov 2026: one search per worker's claims and one per free worker's
         # field, after the alert look's three, passed GitHub's secondary rate
@@ -445,11 +616,165 @@ class MorningAndFreeWorkers(unittest.TestCase):
         searches = [a for a in b.reads() if "/search/" in a["path"]]
         self.assertLessEqual(len(searches), 3, [urllib_q(a) for a in searches])
 
+    def test_an_owed_wake_runs_the_free_worker_look_too(self):
+        # 12 Nov 2026: a wake was owed nearly all evening (GitHub's wakes
+        # turned away while another sweep ran). The check returned before the
+        # look, no look ran from 7:32 PM Mountain on, and Rift, Sprocket and
+        # Echo sat with no issue from 9:15 PM.
+        claimed = dict(BUSY, **{"claimed: Sprocket": 0})
+        b = Idle(claimed=claimed, open_={'"area: Launcher","area: Packaging"': 3})
+        due = {"owed": True, "due": True, "since": "t", "refused": 7, "reason": "another sweep is running"}
+
+        def owed(broker, op, args):
+            return due if op == "wake_due" else b(broker, op, args)
+        out = owed_wake.check(self.day(), "bramble", owed, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("turned away", out[1])
+        self.assertIn("in the field of sprocket", out[-1])
+        # With every worker busy the owed wake still wakes, with its own line only.
+        b2 = Idle(claimed=BUSY)
+
+        def owed2(broker, op, args):
+            return due if op == "wake_due" else b2(broker, op, args)
+        out = owed_wake.check(self.day(), "bramble", owed2, now=NOON, policy=POLICY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertEqual(len(out), 2, out)
+
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
         out = owed_wake.check(self.home(), "bramble", Broker(due), now=AFTER_SIX, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)))
-        self.assertIn("turned away", out[0])
+        self.assertIn("turned away", out[1], "first after the work hours line")
+
+    def test_every_wake_says_the_work_hours_first(self):
+        # 12 Nov 2026: twice at night a sweep whose wake had no free worker
+        # lines told Patrick the lanes' audits were not paused, while they were.
+        due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
+        night = AFTER_SIX + 16 * 3600  # 11:30 PM
+        paused = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": False})
+        out = owed_wake.check(self.home(), "bramble", Broker(due), now=night, policy=paused)
+        self.assertIn("It is 11:30 PM Mountain. The Grok lanes' audits are paused", out[0])
+        lanes = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": True})
+        out = owed_wake.check(self.home(), "bramble", Broker(due), now=night, policy=lanes)
+        self.assertIn("only from 6 AM to 11 PM Mountain", out[0])
+        self.assertNotIn("paused", out[0])
+        asleep = owed_wake.check(self.home(), "bramble", Broker({"owed": False}), now=night, policy=lanes)
+        self.assertFalse(wakes("\n".join(asleep)))
+        self.assertNotIn("Mountain. The workers", asleep[0], "a check that sleeps adds nothing")
+
+
+class FailedReviews(unittest.TestCase):
+    """TWHermesAgents #181: on 15 Nov 2026 the board review fired at 8:37 AM
+    Mountain while the Claude limit was spent and ended "Your request was not
+    processed". Bramble has no cronjob tool and the guard keeps its file tools
+    out of Hermes's home, so what Hermes recorded could be read only on the VM
+    (Thornswood-Ops #336). The alert look reads it and tells Bramble."""
+
+    ERROR = ("RuntimeError: Anthropic rate-limited every one of 3 attempts, and every fallback was "
+             "unavailable. Limit resets at 9:00 AM.")
+
+    def home(self, board=None, project=None):
+        home = Path(tempfile.mkdtemp())
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": NOON})
+        self.write(home, board, project)
+        return home
+
+    def write(self, home, board=None, project=None):
+        """Hermes's jobs.json for the profile (cron/jobs.py: {"jobs": [...]}), with
+        tw-owed-wake beside the two reviews."""
+        def job(name, at, error):
+            return {"id": name[-6:], "name": name, "last_run_at": at, "last_status": "error" if error else "ok",
+                    "last_error": error}
+        jobs = [{"id": "owed01", "name": "tw-owed-wake", "last_run_at": "2026-11-09T12:25:00-07:00",
+                 "last_status": "error", "last_error": "not a review"},
+                job(owed_wake.REVIEWS[0], *(board or ("2026-11-08T08:37:02-07:00", None))),
+                job(owed_wake.REVIEWS[1], *(project or ("2026-11-08T09:53:01-07:00", None)))]
+        path = home.joinpath(*owed_wake.JOBS_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"jobs": jobs, "updated_at": "x"}), encoding="utf-8")
+
+    def check(self, home, ask, now):
+        return owed_wake.check(home, "bramble", ask, now=now, policy=POLICY)
+
+    def test_the_names_are_the_jobs_apply_makes(self):
+        sys.path.insert(0, str(REPO / "scripts"))
+        import apply
+        self.assertEqual(tuple(j["name"] for j in apply.REVIEW_JOBS), owed_wake.REVIEWS)
+
+    def test_a_failed_run_wakes_bramble_once_with_hermes_own_line(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", self.ERROR))
+        b = Idle(claimed=BUSY)
+        out = self.check(home, b, NOON + owed_wake.ALERT_EVERY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        said = "\n".join(out)
+        self.assertIn("tw-weekly-board-review ran on 9 Nov at 8:37 AM Mountain and did not do its work", said)
+        self.assertIn(self.ERROR, said)
+        self.assertIn("Thornswood-Ops", said)
+        self.assertNotIn("tw-weekly-project-review", said, "its last run was fine")
+        self.assertNotIn("not a review", said, "only the two reviews are read")
+        self.assertEqual(sum(self.ERROR in l for l in out), 1, "said once in this wake")
+        # The next alert look finds nothing new: no turn for it alone.
+        out = self.check(home, b, NOON + 2 * owed_wake.ALERT_EVERY)
+        self.assertFalse(wakes("\n".join(out)), out)
+
+    def test_it_rides_every_wake_until_a_sweep_after_it_ran_to_its_end(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", self.ERROR))
+        b = Idle(claimed=BUSY)
+        said_at = NOON + owed_wake.ALERT_EVERY
+        self.assertTrue(wakes("\n".join(self.check(home, b, said_at))))
+        # That sweep was turned away, or its turn failed: a later wake carries it.
+        due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "the fleet is busy"}
+
+        def owed(broker, op, args):
+            return due if op == "wake_due" else b(broker, op, args)
+        out = self.check(home, owed, said_at + 300)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn(self.ERROR, "\n".join(out))
+        # A sweep that started before it was said does not count.
+        b.turns = {"bramble": {"sweep_done": datetime.fromtimestamp(said_at - 60, timezone.utc).isoformat()}}
+        self.assertIn(self.ERROR, "\n".join(self.check(home, owed, said_at + 600)))
+        # One admitted after it ran to its end: it is not said again.
+        b.turns = {"bramble": {"sweep_done": datetime.fromtimestamp(said_at + 700, timezone.utc).isoformat()}}
+        out = self.check(home, owed, said_at + 800)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertNotIn(self.ERROR, "\n".join(out))
+        self.assertTrue(owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE))["reviews"]
+                        [f"{owed_wake.REVIEWS[0]}@2026-11-09T08:37:02-07:00"]["carried"])
+        self.assertNotIn(self.ERROR, "\n".join(self.check(home, b, said_at + 4 * owed_wake.ALERT_EVERY)))
+
+    def test_a_new_failed_run_of_the_same_job_is_said_again(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", self.ERROR))
+        b = Idle(claimed=BUSY)
+        self.assertTrue(wakes("\n".join(self.check(home, b, NOON + owed_wake.ALERT_EVERY))))
+        self.write(home, board=("2026-11-16T08:37:02-07:00", "RuntimeError: another cause"))
+        out = self.check(home, b, NOON + 2 * owed_wake.ALERT_EVERY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("another cause", "\n".join(out))
+        self.assertNotIn(self.ERROR, "\n".join(out), "Hermes no longer holds the first one")
+
+    def test_no_room_keeps_it_for_the_look_that_has_room(self):
+        home = self.home(project=("2026-11-09T09:53:01-07:00", self.ERROR))
+        out = self.check(home, Idle(room=False, claimed=BUSY), NOON + owed_wake.ALERT_EVERY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        out = self.check(home, Idle(claimed=BUSY), NOON + owed_wake.ALERT_EVERY + 300)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("tw-weekly-project-review ran on 9 Nov at 9:53 AM Mountain", "\n".join(out))
+
+    def test_a_long_error_is_cut_and_a_missing_or_broken_file_says_nothing(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", "x" * 5000))
+        out = self.check(home, Idle(claimed=BUSY), NOON + owed_wake.ALERT_EVERY)
+        line = next(l for l in out if "tw-weekly-board-review" in l)
+        self.assertIn("x" * (owed_wake.ERROR_CHARS - 3) + "...", line)
+        self.assertNotIn("x" * owed_wake.ERROR_CHARS, line)
+        for broken in (None, "{not json"):
+            home = self.home()
+            path = home.joinpath(*owed_wake.JOBS_FILE)
+            if broken is None:
+                path.unlink()
+            else:
+                path.write_text(broken, encoding="utf-8")
+            out = self.check(home, Idle(claimed=BUSY), NOON + owed_wake.ALERT_EVERY)
+            self.assertFalse(wakes("\n".join(out)), out)
 
 
 def urllib_q(args):

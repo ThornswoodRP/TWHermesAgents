@@ -129,7 +129,25 @@
     "workflow_authors": [
       "github-actions[bot]"
     ],
-    "outside_label": "outside work"
+    "outside_label": "outside work",
+    "patrick_paths": {
+      "ThornswoodRP/Thornswood": {
+        "dirs": [
+          ".github/workflows/",
+          "scripts/vps/gate/"
+        ],
+        "verb_lists": [
+          "scripts/vps/gate/verbs.json",
+          "scripts/release/nexus-verbs.json"
+        ]
+      },
+      "ThornswoodRP/skymp": {
+        "dirs": [
+          ".github/workflows/"
+        ],
+        "verb_lists": []
+      }
+    }
   },
   "runs": {
     "main_without_patrick": true,
@@ -170,10 +188,21 @@
       ]
     }
   },
+  "work": {
+    "hours": [
+      6,
+      23
+    ],
+    "lanes_audit_overnight": false
+  },
   "branches": {
     "pattern": "^{bot}/[0-9]+-[a-z0-9][a-z0-9-]{0,60}$",
     "bramble_may_push_for": [
-      "magpie"
+      "rift",
+      "sprocket",
+      "echo",
+      "magpie",
+      "wisp"
     ]
   },
   "claims": {
@@ -404,6 +433,7 @@
     "default_expiry_hours": 72
   },
   "toolsets": {
+    "web_backend": "exa",
     "never": [
       "browser",
       "code_execution",
@@ -413,8 +443,6 @@
       "image_gen",
       "video_gen",
       "tts",
-      "web",
-      "search",
       "x_search",
       "discord",
       "discord_admin",
@@ -445,7 +473,7 @@
     },
     "sockets": {
       "policy": {
-        "path": "/run/tw/policy/policy.sock",
+        "path": "/run/tw-brokers/policy.sock",
         "group": "tw-policy-clients",
         "clients": [
           "hermes",
@@ -456,7 +484,7 @@
         ]
       },
       "git": {
-        "path": "/run/tw/git/git.sock",
+        "path": "/run/tw-brokers/git.sock",
         "group": "tw-git-clients",
         "clients": [
           "hermes",
@@ -464,7 +492,7 @@
         ]
       },
       "files": {
-        "path": "/run/tw/files/files.sock",
+        "path": "/run/tw-brokers/files.sock",
         "group": "tw-files-clients",
         "clients": [
           "hermes",
@@ -522,17 +550,17 @@
       "check_commands": [
         [
           "node",
-          "tests/test-{name}.js"
+          "{tests}/test-{name}.js"
         ],
         [
           "pwsh",
           "-NoProfile",
           "-File",
-          "tests/test-{name}.ps1"
+          "{tests}/test-{name}.ps1"
         ],
         [
           "python3",
-          "tests/test-{name}.py"
+          "{tests}/test-{name}.py"
         ],
         [
           "pwsh",
@@ -649,12 +677,36 @@
       "CPUQuota": "100%",
       "TasksMax": 1024
     },
+    "tw-grok.slice": {
+      "MemoryHigh": "1536M",
+      "MemoryMax": "2G",
+      "CPUWeight": 20,
+      "CPUQuota": "100%",
+      "TasksMax": 512
+    },
     "hermes-user.slice": {
       "MemoryHigh": "3584M",
       "MemoryMax": "4G",
       "CPUQuota": "100%",
       "TasksMax": 1024
     }
+  },
+  "grok_lanes": {
+    "user": "grok-lanes",
+    "home": "/srv/tw/grok-lanes",
+    "apt_key": "deploy/grok-lanes/grok-bot.asc",
+    "apt_key_fingerprint": "380FF4BCDC34A4BD92A3565342A1772E62E492D6",
+    "apt_uri": "https://downloads.cursor.com/aptrepo",
+    "apt_suite": "grok-bot",
+    "package": "grok-bot",
+    "app": "/opt/Grok Bot/grok-bot",
+    "ready_file": ".grokbot/local-exec-daemon-credential.json",
+    "display": 71,
+    "screen_port": 6080,
+    "screen_minutes": 120,
+    "screen_open": false,
+    "disk_quota_gb": 8,
+    "status_file": "/var/lib/thornswood/grok-lanes.json"
   },
   "backups": {
     "age_recipient_file": "/etc/thornswood/backup-recipient.txt",
@@ -710,6 +762,24 @@
   "tier_a_disk": {
     "images": "/var/lib/thornswood/tier-a",
     "work_root": "/home/hermes/tw-work"
+  },
+  "tier_a_network": {
+    "deny": [
+      "0.0.0.0/8",
+      "10.0.0.0/8",
+      "100.64.0.0/10",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "169.254.0.0/16",
+      "224.0.0.0/4",
+      "fc00::/7",
+      "fe80::/10",
+      "ff00::/8"
+    ],
+    "dns": [
+      "1.1.1.1",
+      "9.9.9.9"
+    ]
   },
   "follow_main": {
     "url": "git@github.com:ThornswoodRP/TWHermesAgents.git",

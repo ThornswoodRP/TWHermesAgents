@@ -13,9 +13,11 @@ response), the Bot told (a confirmed connector receipt), the work done
 card).
 
 A Main card (step 6) is Patrick's tap for what the brokers need his yes for:
-a main run while runs.main_without_patrick is false, a collection publish, or
-the claim label cutover. Only Bramble opens one. It names exactly what it is
-for in one release link, release:<main|publish|cutover>:<owner>/<repo>@<the
+a main run while runs.main_without_patrick is false, a collection publish,
+the claim label cutover, or the merge of a pull request that changes a
+workflow, the deploy gate or a verb script (merge.patrick_paths, Ops #276),
+which names that pull request and its head. Only Bramble opens one. It names exactly what it is
+for in one release link, release:<main|publish|cutover|merge>:<owner>/<repo>@<the
 40-character commit>[#<pull request>], fixed for the card's life; its scope of
 a yes names that commit, so the commit is on the card he reads; it offers
 "authorize"; and it is high risk, so his answer needs a fresh sign-in. tw-git
@@ -47,9 +49,15 @@ KEPT_HEAD = "[Thornswood queue] This message reached your Bot Chat at "
 # VPS, One and GitHub"; "If it is in the middle of something by the time it
 # may Finnish but not start on a new issue"). A brief told outside it is
 # refused, so no worker starts a new issue at night; one already working
-# finishes.
-WORK_HOURS = (6, 23)
+# finishes. The hours are policy.yaml's work section (thornswood_guard/hours.py):
+# around the clock while Patrick has the lanes' audits paused (11 Nov 2026).
 WORK_ZONE = "America/Denver"
+
+
+def _policy_hours() -> tuple[int, int]:
+    from thornswood_guard.hours import work_hours
+    from thornswood_guard.policy import Policy
+    return work_hours(Policy.load().data)
 
 DEFAULT_EXPIRY = timedelta(days=3)
 MAX_BODY_BYTES = 256 * 1024
@@ -57,7 +65,7 @@ MAX_OPTIONS = 6
 LIVE = ("draft", "pending")
 ROOM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # A Main card's one release link: what Patrick's "authorize" is for.
-RELEASE_LINK = re.compile(r"(main|publish|cutover):([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})(?:#([1-9][0-9]*))?")
+RELEASE_LINK = re.compile(r"(main|publish|cutover|merge):([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})(?:#([1-9][0-9]*))?")
 AUTHORIZE = "authorize"
 
 
@@ -72,8 +80,11 @@ def pushes(kind: str, urgent: bool) -> bool:
 
 
 class DecisionCore:
-    def __init__(self, store: Store, *, fault: Callable[[str], None] | None = None):
+    def __init__(self, store: Store, *, fault: Callable[[str], None] | None = None,
+                 work_hours: Callable[[], tuple[int, int]] = _policy_hours):
         self.s = store
+        # Read at each brief, so an install that changes the hours needs no restart of its own.
+        self.work_hours = work_hours
         self.auth = Auth(store)
         self._fault = fault or (lambda point: None)
 
@@ -139,9 +150,11 @@ class DecisionCore:
                 raise CoreError(413, "too_big", f"a brief is at most {MAX_BRIEF} characters")
         if brief is not None:
             local = parse(self.s.now()).astimezone(ZoneInfo(WORK_ZONE))
-            if not WORK_HOURS[0] <= local.hour < WORK_HOURS[1]:
+            start, end = self.work_hours()
+            if not start <= local.hour < end:
+                from thornswood_guard.hours import says
                 raise CoreError(409, "after_hours",
-                                f"new work starts from {WORK_HOURS[0]} AM to {WORK_HOURS[1] - 12} PM Mountain; it is "
+                                f"new work starts {says((start, end))} Mountain; it is "
                                 f"{local.strftime('%I:%M %p').lstrip('0')} there, so this waits for the morning")
         told = False
         with self.s.tx() as db:
@@ -549,12 +562,15 @@ class DecisionCore:
             return None
         if len(refs) != 1:
             raise CoreError(400, "release_link", "a Main card names what it is for in exactly one release link, "
-                                                 "release:<main|publish|cutover>:<owner>/<repo>@<40-character commit>"
+                                                 "release:<main|publish|cutover|merge>:<owner>/<repo>@<40-character commit>"
                                                  "[#<pull request>]")
         m = RELEASE_LINK.fullmatch(refs[0])
         if not m:
-            raise CoreError(400, "release_link", f"{refs[0]!r} is not <main|publish|cutover>:<owner>/<repo>@"
+            raise CoreError(400, "release_link", f"{refs[0]!r} is not <main|publish|cutover|merge>:<owner>/<repo>@"
                                                  "<40-character commit>[#<pull request>]")
+        if m.group(1) == "merge" and not m.group(4):
+            raise CoreError(400, "release_link", "a merge card names its pull request: "
+                                                 "merge:<owner>/<repo>@<its head commit>#<pull request>")
         return {"for": m.group(1), "repo": m.group(2), "commit": m.group(3),
                 "pr": int(m.group(4)) if m.group(4) else None}
 

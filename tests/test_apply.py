@@ -84,7 +84,7 @@ class Apply(unittest.TestCase):
         cfg = yaml.safe_load((home / "profiles" / "rift" / "config.yaml").read_text(encoding="utf-8"))
         self.assertEqual(cfg["terminal"]["backend"], "docker")
         self.assertEqual(cfg["terminal"]["docker_image"], "docker.io/nousresearch/hermes-sandbox:desktop")
-        self.assertFalse(cfg["terminal"]["docker_network"])
+        self.assertTrue(cfg["terminal"]["docker_network"])
 
     def test_a_failed_pull_changes_nothing(self):
         home = self.home()
@@ -170,6 +170,17 @@ class Apply(unittest.TestCase):
         last = r.stdout.strip().splitlines()[-1]
         self.assertEqual(last, "RELOAD: needed; 1 file a running Bot holds changed: "
                                "profiles/wisp/plugins/thornswood_guard/policy.yaml")
+        # 12 Nov 2026: a file of the guard's folder no Bot process imports
+        # (tw-git's rules, the wake check's script) reloaded every Bot.
+        for name in ("github.py", "owed_wake.py"):
+            (home / "profiles" / "wisp" / "plugins" / "thornswood_guard" / name).write_text("# changed\n")
+            r = self.run_apply(home)
+            self.assertTrue(r.stdout.strip().splitlines()[-1].startswith("RELOAD: not needed"), (name, r.stdout))
+        # One it imports still does.
+        (home / "profiles" / "wisp" / "plugins" / "thornswood_guard" / "brokers.py").write_text("# changed\n")
+        r = self.run_apply(home)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "RELOAD: needed; 1 file a running Bot holds changed: "
+                                                            "profiles/wisp/plugins/thornswood_guard/brokers.py")
 
     def test_bramble_gets_its_owed_wake_check_once_and_no_other_bot_does(self):
         # 1 Nov, 10:02 PM on: every wake the fleet queue turned away was
@@ -296,7 +307,7 @@ class Apply(unittest.TestCase):
         text = (REPO / "hermes" / "skills" / "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\nname: bramble-duties\n"))
         for must in ("ThornswoodRP/Thornswood-Ops", "ThornswoodRP/skymp", "dequeued", "gh-readonly-queue/main/pr-",
-                     "There is no timer and no retry", "ops/claude-queue/", "ops/bramble-list.md", "ops/status.md",
+                     "There is no timer and no retry", "deploy/after/", "ops/bramble-list.md", "ops/status.md",
                      "Never merge ThornswoodRP/TWHermesAgents", "tw_decide", "start_run"):
             self.assertIn(must, text)
         self.assertIn("whoever did it", text)

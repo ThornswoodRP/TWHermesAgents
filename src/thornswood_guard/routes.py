@@ -31,9 +31,11 @@ def _ready_set(policy: Policy, proxy_ready: bool | set[str] | None) -> set[str]:
 def proxy_url(policy: Policy, route: dict) -> str:
     """Where a route behind the admission proxy points: the loopback proxy,
     under the route's own path. Anthropic's SDK adds /v1/messages; an
-    OpenAI-style provider adds /chat/completions."""
+    OpenAI-style provider adds /chat/completions. An anthropic route ends in
+    /anthropic, the only shape of address other than Anthropic's own host
+    that Hermes binds an anthropic fallback to (#142, #181)."""
     listen = policy.data["admission_proxy"]["listen"]
-    suffix = "" if route["provider"] == "anthropic" else "/v1"
+    suffix = "/anthropic" if route["provider"] == "anthropic" else "/v1"
     return f"http://{listen}/{route['id']}{suffix}"
 
 

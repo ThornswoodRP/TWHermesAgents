@@ -42,10 +42,12 @@ EVENT_FIELDS = {"event_id": 128, "kind": 32, "actor": 80, "text": 2000, "at": 40
 MAX_THREADS = 20
 THREAD_FIELDS = {"thread": 128, "by": 80, "title": 200, "at": 40}
 BOT_MESSAGE_FIELDS = {"role": 16, "text": 2000, "at": 40}
-ROLES = ("user", "assistant")
+# A notice is a row Hermes put in the chat by itself, never his words (own_connector.NOTICE_KINDS).
+ROLES = ("user", "assistant", "notice")
 # The live Board (live_reader.py): one row for each turn running now.
 MAX_DOING = 60
-DOING_FIELDS = {"bot": 64, "title": 200, "since": 40, "platform": 32}
+# since: when the turn started; step_since: when it started what it is doing now (thornswood_live).
+DOING_FIELDS = {"bot": 64, "title": 200, "since": 40, "step_since": 40, "platform": 32}
 SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 # A room thread's id, as Hermes takes one (gateway/hosted_rooms_common.py IDENTIFIER_RE, 128 characters at most).
 THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # own.SESSION_ID: the row opens that session
@@ -103,7 +105,7 @@ def clean(name: str, body: dict) -> dict:
             for m in msgs:
                 row = {k: _text(m.get(k) if isinstance(m, dict) else None, n) for k, n in BOT_MESSAGE_FIELDS.items()}
                 if row["role"] not in ROLES:
-                    raise CoreError(400, "bad_feed", "a Bot Chat message is from the user or the assistant")
+                    raise CoreError(400, "bad_feed", "a Bot Chat message is from the user or the assistant, or a notice")
                 kept.append(row)
             out["bots"].append({"bot": _text(b.get("bot"), 64), "session_id": _text(b.get("session_id"), 128),
                                 "messages": kept, "route": _route(b.get("route"))})

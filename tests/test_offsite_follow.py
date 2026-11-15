@@ -22,6 +22,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import REPO, policy
 
@@ -203,7 +204,10 @@ class TheDropJail(unittest.TestCase):
     def test_drive_and_the_units(self):
         self.assertEqual(unit("tw-offsite.service")["User"], ["tw-offsite"])
         self.assertEqual(unit("tw-offsite.service")["ExecStartPre"], ["+/opt/thornswood-hermes/bin/tw-offsite intake"])
-        self.assertEqual(unit("tw-offsite.path")["PathChanged"], ["/srv/tw/boxdrop/in"])
+        # Markers, not the folder: a PathChanged during a run is dropped
+        # (12 Nov: 4 of 7 drops waited), a glob is looked at again after it.
+        self.assertEqual(unit("tw-offsite.path")["PathExistsGlob"], ["/srv/tw/boxdrop/in/*.done"])
+        self.assertNotIn("PathChanged", unit("tw-offsite.path"))
         self.assertEqual(unit("tw-offsite.timer")["OnCalendar"], ["*-*-* 04:30:00 America/Denver"])
         self.assertEqual(unit("tw-follow-main.timer")["OnUnitInactiveSec"], ["10min"])
 
@@ -327,6 +331,24 @@ class FollowMain(unittest.TestCase):
         self.assertTrue([l for l in self.said if l.startswith("PASS") and "every Bot process reloaded" in l], self.said)
         self.assertEqual(self.holds_ended, 1)
 
+    def test_the_reload_does_not_hold_and_wait_a_second_time(self):
+        # 12 Nov 2026: the install held new turns at 7:40 PM Mountain and
+        # waited 20 minutes for Sprocket's turn, then the reload held them
+        # again at 8:01 PM and waited 20 more for the same turn.
+        vm = FakeVM(NEW, apply_says="RELOAD: needed; 1 file a running Bot holds changed: profiles/rift/config.yaml\n")
+        f = self.follower(vm)
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.drained, 1)
+        self.assertTrue(vm.ran("tw-reload-bots")[0].endswith("tw-reload-bots --held"), vm.ran("tw-reload-bots"))
+        self.assertEqual(self.holds_ended, 1, "follow-main, which held them, ends the hold")
+
+    def test_when_tw_policy_held_nothing_the_reload_holds_and_waits_itself(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: needed; 1 file a running Bot holds changed: profiles/rift/config.yaml\n")
+        f = self.follower(vm)
+        f.drain_ = lambda: False  # reload.drain: tw-policy did not answer
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertTrue(vm.ran("tw-reload-bots")[0].endswith("tw-reload-bots"), vm.ran("tw-reload-bots"))
+
     def test_a_changed_gateway_unit_reloads_them_even_when_apply_changed_nothing(self):
         vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
         f = self.follower(vm)
@@ -345,6 +367,135 @@ class FollowMain(unittest.TestCase):
         vm = FakeVM(NEW, apply_says="Applied, from a release before the RELOAD line.\n")
         self.assertEqual(self.follower(vm).follow(), 0, self.said)
         self.assertEqual(len(vm.ran("tw-reload-bots")), 1)
+
+    # 12 Nov 2026: every install held new turns for up to 20 minutes, stopped
+    # the connector (and every Bot Chat turn it ran) and restarted all four
+    # brokers, whatever the release changed.
+    def releases(self, f, change: dict[str, str] | None = None, drop: str = ""):
+        """OLD and NEW as real releases of this repository's code, NEW with
+        `change` (path: text appended) and without the line `drop` in its
+        install scripts; the decision core installed, its store not moving."""
+        for commit in (OLD, NEW):
+            d = f.opt / "releases" / commit
+            if d.exists():
+                shutil.rmtree(d)
+            shutil.copytree(REPO / "src", d / "src", ignore=shutil.ignore_patterns("__pycache__", "app"))
+            shutil.copytree(REPO / "deploy", d / "deploy")
+        for rel, text in (change or {}).items():
+            f_ = f.opt / "releases" / NEW / rel
+            f_.write_text(f_.read_text() + text)
+        if drop:
+            for rel in ("deploy/install.sh", "deploy/decisions/install.sh"):
+                f_ = f.opt / "releases" / NEW / rel
+                f_.write_text(f_.read_text().replace(drop, ""))
+        env = f.root / "etc" / "thornswood" / "tw-decide.env"
+        env.parent.mkdir(parents=True, exist_ok=True)
+        env.write_text("")
+
+    def test_a_release_that_changes_nothing_the_brokers_or_connector_load_stops_neither_and_holds_nothing(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/api.py": "\n# changed\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (0, 0), self.said)
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith(f"deploy/install.sh {NEW} --keep-brokers"), vm.calls)
+        self.assertTrue(vm.ran("decisions/install.sh")[0].endswith(f"{NEW} --keep-connector"), vm.calls)
+        self.assertEqual(vm.ran(f"start {follow_main.CONNECTOR}"), [], "the connector was never stopped")
+        self.assertIn("new turns are not held: the install stops nothing a running turn needs", self.said)
+
+    def test_brokers_starting_again_behind_systemds_sockets_leave_the_connector_running(self):
+        # #162: a call made while a broker starts again waits in its socket.
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_brokers/git_service.py": "\n# changed\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (0, 0), self.said)
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith(f"deploy/install.sh {NEW}"), vm.calls)
+        self.assertTrue(vm.ran("decisions/install.sh")[0].endswith("--keep-connector"), vm.calls)
+
+    def test_brokers_that_make_their_own_sockets_start_the_connector_again(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_brokers/git_service.py": "\n# changed\n"})
+        for name in follow_main.Follower.BROKER_SOCKETS:
+            (f.opt / "releases" / OLD / "deploy" / "systemd" / name).unlink()
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual((self.drained, self.holds_ended), (1, 1))
+        self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
+        self.assertTrue(any("the connector starts again: the brokers start again without systemd holding their sockets"
+                            in l for l in self.said), self.said)
+
+    def test_a_changed_socket_unit_starts_the_connector_again(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"deploy/systemd/tw-policy.socket": "\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.drained, 1)
+
+    def test_a_release_that_changes_a_helper_the_connector_runs_starts_it_again(self):
+        # room_send.py is run by path, never imported.
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/room_send.py": "\n# changed\n"})
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.drained, 1)
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith("--keep-brokers"), vm.calls)
+        self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
+
+    def test_install_scripts_that_do_not_read_the_options_are_not_given_them(self):
+        vm = FakeVM(NEW, apply_says="RELOAD: not needed; nothing a running Bot holds changed\n")
+        f = self.follower(vm)
+        self.releases(f, {"src/thornswood_decisions/api.py": "\n# changed\n"}, drop="--keep-brokers)")
+        f2 = f.opt / "releases" / NEW / "deploy" / "decisions" / "install.sh"
+        f2.write_text(f2.read_text().replace("--keep-connector)", ""))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertTrue(vm.ran("deploy/install.sh")[0].endswith(f"deploy/install.sh {NEW}"), vm.calls)
+        self.assertNotIn("--keep-connector", vm.ran("decisions/install.sh")[0])
+        self.assertEqual(self.drained, 0, "the connector is kept as it is; only the script did not say so")
+
+    def test_a_put_back_to_a_release_without_socket_units_stops_them_first(self):
+        # The release after this one has systemd hold the brokers' sockets
+        # (#162); this follower is what puts it back if it fails, and the
+        # older tw-proxy binds the port tw-proxy.socket holds.
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.releases(f)
+        for name in follow_main.Follower.BROKER_SOCKETS:
+            unit = f.root / "etc" / "systemd" / "system" / name
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text("[Socket]\n")
+            (f.opt / "releases" / OLD / "deploy" / "systemd" / name).unlink(missing_ok=True)
+        self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / OLD), list(follow_main.Follower.BROKER_SOCKETS))
+        self.assertEqual(vm.ran("disable --quiet --now tw-policy.socket"),
+                         ["systemctl disable --quiet --now " + " ".join(follow_main.Follower.BROKER_SOCKETS)])
+        self.assertEqual(f.drop_sockets_not_in(f.opt / "releases" / NEW), [])
+
+    def test_the_brokers_are_asked_where_the_installed_release_says_they_are(self):
+        # 12 Nov 2026: #164 moved the sockets, and the run that installed it,
+        # started on the release before, ended its hold on the old path.
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.releases(f)
+        moved = f.opt / "releases" / NEW / "src" / "thornswood_guard" / "policy.json"
+        data = json.loads(moved.read_text())
+        data["brokers"]["sockets"]["policy"]["path"] = "/run/tw-moved/policy.sock"
+        moved.write_text(json.dumps(data))
+        self.assertEqual(f.socket("policy"), policy().data["brokers"]["sockets"]["policy"]["path"])
+        (f.opt / "current").unlink()
+        (f.opt / "current").symlink_to(f.opt / "releases" / NEW)
+        self.assertEqual(f.socket("policy"), "/run/tw-moved/policy.sock")
+        asked = []
+        plain = follow_main.Follower(policy(), run=vm, root=f.root, say=self.said.append)
+        with mock.patch.object(follow_main.wire, "call", lambda path, op, args, **kw: asked.append((path, op))):
+            plain.end_hold_()
+            plain.report_({"result": "installed"})
+        self.assertEqual(asked, [("/run/tw-moved/policy.sock", "end_hold"),
+                                 (policy().data["brokers"]["sockets"]["git"]["path"], "vm_install")])
+
+    def test_a_release_that_cannot_be_read_keeps_nothing(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm)
+        self.assertEqual(f.keeps(OLD, f.opt / "releases" / NEW), {"brokers": False, "connector": False})
 
     def test_the_hold_ends_when_the_install_fails_too(self):
         vm = FakeVM(NEW, fail={"tw-canary": 1})
@@ -836,6 +987,25 @@ class Reports(unittest.TestCase):
         at.write_text(json.dumps(box))
         self.assertEqual(f.follow(), 0, self.said)
         self.assertEqual(self.reports[0]["box"], box)
+
+    def test_an_install_puts_the_grok_lanes_computer_in_its_report_and_nothing_more(self):
+        # deploy/install.sh 8a writes grok_lanes.status_file; only its four public fields go out
+        # (Thornswood #5933), never what the install keeps to know when to restart the app.
+        f = self.follower(FakeVM(NEW))
+        at = f._at(f.p.data["grok_lanes"]["status_file"])
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text(json.dumps({"ready": False, "screen": "open", "version": "1.0.1", "runs": "ab" * 32, "problem": None}))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertEqual(self.reports[0]["grok"], {"ready": False, "screen": "open", "version": "1.0.1", "problem": None})
+
+    def test_a_report_with_no_grok_status_or_a_broken_one_carries_none(self):
+        f = self.follower(FakeVM(NEW))
+        self.assertEqual(f.follow(), 0, self.said)
+        self.assertNotIn("grok", self.reports[0])
+        at = f._at(f.p.data["grok_lanes"]["status_file"])
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text("[1, 2]")
+        self.assertIsNone(f.grok_lanes())
 
     def test_a_report_with_no_box_file_or_a_broken_one_carries_no_box(self):
         f = self.follower(FakeVM(NEW))

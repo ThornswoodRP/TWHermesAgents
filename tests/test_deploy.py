@@ -99,8 +99,33 @@ class Units(unittest.TestCase):
         for role in ("policy", "git", "files"):
             u = unit(f"tw-{role}.service")
             self.assertIn(socks[role]["group"], u["SupplementaryGroups"][0].split(), role)
-            self.assertEqual(u["RuntimeDirectory"], [f"tw/{role}"], role)
-            self.assertEqual(socks[role]["path"], f"/run/tw/{role}/{role}.sock")
+            self.assertNotIn("RuntimeDirectory", u, f"{role}: systemd's socket unit makes the folder, and a "
+                             "runtime folder would be removed with the socket in it when the broker stops")
+            self.assertEqual(u["Requires"], [f"tw-{role}.socket"], role)
+            self.assertIn(f"tw-{role}.socket", u["After"][0].split(), role)
+            # #162: systemd holds the socket, so a broker starting again refuses no call.
+            s = unit(f"tw-{role}.socket")
+            self.assertEqual(s["ListenStream"], [socks[role]["path"]], role)
+            self.assertEqual(s["SocketGroup"], [socks[role]["group"]], role)
+            self.assertEqual(s["SocketUser"], [policy().data["brokers"]["users"][role]], role)
+            self.assertEqual(s["SocketMode"], ["0660"], role)
+            self.assertNotIn("Accept", s, f"{role}: one broker process takes every connection")
+            self.assertEqual(socks[role]["path"], f"/run/tw-brokers/{role}.sock")
+
+    def test_no_broker_restart_stops_another(self):
+        # Requires= on tw-policy.service stopped tw-git, tw-files and tw-proxy
+        # whenever tw-policy stopped; they need only its socket.
+        for role in ("git", "files", "proxy"):
+            self.assertNotIn("tw-policy.service", " ".join(unit(f"tw-{role}.service").get("Requires", [])), role)
+
+    def test_the_install_starts_the_broker_sockets_and_checks_them(self):
+        text = (REPO / "deploy" / "install.sh").read_text()
+        self.assertIn("systemctl enable --quiet --now tw-checks.socket tw-policy.socket tw-git.socket tw-files.socket", text)
+        self.assertIn('for sock in $changed_sockets; do', text)
+        # A broker from before its socket unit stops first: tw-proxy holds the port.
+        self.assertLess(text.index('systemctl is-active --quiet "$sock" || systemctl stop "${sock%.socket}.service"'),
+                        text.index("systemctl enable --quiet --now tw-checks.socket tw-policy.socket"))
+        self.assertIn('systemctl is-active --quiet "$unit" || stop "$unit is not listening', text)
 
     def test_every_op_is_open_only_to_users_its_socket_lets_in(self):
         from thornswood_brokers.files_service import FilesService
@@ -354,9 +379,10 @@ class Units(unittest.TestCase):
             self.skipTest("systemd-analyze is not here")
         with tempfile.TemporaryDirectory() as t:
             for f in UNITS.iterdir():
-                if f.suffix in (".service", ".timer", ".slice", ".path"):
+                if f.suffix in (".service", ".timer", ".slice", ".path", ".socket"):
                     shutil.copy(f, t)
-            names = [str(Path(t) / f.name) for f in UNITS.iterdir() if f.suffix in (".service", ".timer", ".slice", ".path")]
+            names = [str(Path(t) / f.name) for f in UNITS.iterdir()
+                     if f.suffix in (".service", ".timer", ".slice", ".path", ".socket")]
             r = subprocess.run(["systemd-analyze", "verify", "--man=no", *names], capture_output=True, text=True)
             # verify also loads the host's own units and warns about them (on
             # the VM, Oracle's unified-monitoring-agent files are marked
@@ -402,7 +428,7 @@ class FakeRun:
         if argv[0] == "findmnt":
             return subprocess.CompletedProcess(argv, 0, "/\n", "")
         if argv[0] == "quota":
-            gb = 25 if argv[-1] == "tw-work-wisp" else 10
+            gb = {"tw-work-wisp": 25, "grok-lanes": policy().data["grok_lanes"]["disk_quota_gb"]}.get(argv[-1], 10)
             caps = getattr(self, "caps", {})
             limit = caps.get(argv[-1], gb * 1024 * 1024)
             return subprocess.CompletedProcess(argv, 0, f"Disk quotas for group {argv[-1]} (gid 990):\n"
@@ -501,6 +527,12 @@ class LimitsCheck(unittest.TestCase):
         got = self.check(run)
         self.assertEqual(got, ["tw-work-wisp has no 25 GB hard limit on /"])
         self.assertIn(["quotaon", "-p", "-g", "/"], run.calls)
+
+    def test_16_the_grok_lanes_without_their_disk_cap_are_found(self):
+        # Thornswood #5933: the lanes clone the repositories in their home.
+        run = FakeRun()
+        run.caps = {"grok-lanes": 0}
+        self.assertEqual(self.check(run), ["grok-lanes has no 8 GB hard limit on /"])
 
     def test_16_a_failed_check_holds_every_sandbox_job(self):
         from test_policy_service import service
@@ -945,8 +977,7 @@ class CanaryReading(unittest.TestCase):
         from thornswood_brokers.canary import parse_container
         self.assertEqual(parse_container("IFACE lo\nDONE\n"), [])
         got = parse_container("MOUNTED tmpfs\nHOSTHOME seen\nIFACE lo\nIFACE eth0\nDONE\n")
-        self.assertEqual(got, ["the container mounted tmpfs", "the container sees /home/hermes/.hermes",
-                               "the container has a network interface eth0"])
+        self.assertEqual(got, ["the container mounted tmpfs", "the container sees /home/hermes/.hermes"])
         self.assertIn("did not run", parse_container("Error: image not known")[0])
 
     def test_18_listeners(self):

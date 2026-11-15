@@ -3,8 +3,9 @@
 # connection by systemd, never through sudo, so NoNewPrivileges stays on.
 [Unit]
 Description=Thornswood tw-files
-After=tw-policy.service
-Requires=tw-policy.service
+After=tw-policy.socket tw-files.socket
+Requires=tw-files.socket
+Wants=tw-policy.socket
 StartLimitIntervalSec=15min
 StartLimitBurst=3
 
@@ -15,8 +16,6 @@ Group=tw-files
 SupplementaryGroups=tw-policy-clients tw-files-clients tw-checks tw-spool tw-work-bramble tw-work-rift tw-work-sprocket tw-work-echo tw-work-magpie tw-work-wisp
 Slice=tw-brokers.slice
 ExecStart=/opt/thornswood-hermes/bin/tw-serve files
-RuntimeDirectory=tw/files
-RuntimeDirectoryMode=0755
 ReadWritePaths=/srv/tw/work /srv/tw/spool/out
 ReadOnlyPaths=/srv/tw/spool/in
 PrivateNetwork=yes

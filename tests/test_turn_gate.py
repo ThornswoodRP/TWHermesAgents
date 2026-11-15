@@ -141,6 +141,80 @@ class Gate(unittest.TestCase):
         self.assertEqual([op for b, op, a in f.seen if b == "decide"], [])
         self.assertFalse(json.loads((notes / "room-1.json").read_text(encoding="utf-8"))["kept"])
 
+    def test_a_bots_message_into_a_bot_chat_made_in_desktop_is_kept(self):
+        # 11 Nov 2026: Magpie's and Rift's hand-backs reached Bramble's Bot Chat,
+        # a desktop session, while the Bots reloaded; neither was kept, and both
+        # were told to send it again after their own turns had ended.
+        f = Fleet()
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        bramble = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None)
+        text = "Message from magpie (@magpie): #5765: blocked on the push, and no PR exists."
+        out = bramble.before_llm(session_id="20261101_154903_0aec22", platform="desktop", user_message=text)
+        self.assertIn("The message is kept", out["context"])
+        kept = [a for b, op, a in f.seen if (b, op) == ("decide", "keep_turned_away")]
+        self.assertEqual([(k["bot"], k["text"]) for k in kept], [("bramble", text)])
+        self.assertFalse(self.owed_any(f), "a message is kept, not owed as a sweep")
+
+    def test_a_kept_turn_gives_its_ticket_back_and_holds_nobody_in_line(self):
+        # 12 Nov 2026, 9:15 PM Mountain on: kept turns of Bramble's Bot Chat
+        # left their tickets waiting, nothing asked with them again, and the
+        # line held every Bot's turn behind them until each went silent for
+        # ten minutes, so every Bot sat idle.
+        f = Fleet()
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        bramble = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None)
+        out = bramble.before_llm(session_id="20261101_154903_0aec22", platform="desktop",
+                                 user_message="Message from sprocket (@sprocket): #4431 is done.")
+        self.assertIn("The message is kept", out["context"])
+        self.assertIn("Refused by the Thornswood queue", bramble.before_tool("terminal", session_id="20261101_154903_0aec22"))
+        bramble.after_turn(session_id="20261101_154903_0aec22")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='bramble'").fetchall(), [("done",)])
+        rift.after_turn(session_id="r1")
+        self.assertIsNone(gate(f, "wisp").before_llm(session_id="w1", task_id="9"),
+                          "the next Bot is admitted at once, not after ten minutes")
+
+    def test_a_message_waiting_when_turns_are_held_for_a_reload_is_kept_at_once(self):
+        # 12 Nov 2026, 10:09 PM Mountain: Magpie's message to Sprocket about
+        # #5830 waited in Sprocket's Bot Chat; the 10:11 PM reload ended it
+        # unkept, and Magpie had been told not to send it again.
+        f = Fleet()
+        f.policy.hold_turns("root", {"seconds": 900})
+        ticks = iter(range(10000))
+        g = TurnGate(ready_policy(), "sprocket", f.ask, wait_seconds=540, sleep=lambda s: None,
+                     clock=lambda: next(ticks))
+        out = g.before_llm(session_id="20261030_153904_d46b76", platform="desktop",
+                           user_message="Message from magpie (@magpie): #5830 is in your code.")
+        self.assertIn("The message is kept", out["context"])
+        self.assertIn("reloaded", out["context"])
+        self.assertNotIn("waited", out["context"], "it did not wait out its 540 seconds")
+        asks = [a for b, op, a in f.seen if op == "admit"]
+        self.assertEqual(len(asks), 1, "kept at the first answer that says new turns are held")
+        g.after_turn(session_id="20261030_153904_d46b76")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='sprocket'").fetchall(), [("done",)])
+        # A sweep's wake is owed at once too.
+        b = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=540, sleep=lambda s: None, clock=lambda: next(ticks))
+        self.assertIn("is owed", b.before_llm(session_id="w", platform="webhook")["context"])
+        # A turn that cannot be kept waits as before.
+        f.seen.clear()
+        r = TurnGate(ready_policy(), "rift", f.ask, wait_seconds=3, sleep=lambda s: None, clock=lambda: next(ticks))
+        r.before_llm(session_id="room-1", platform="raft", user_message="hello room")
+        self.assertGreater(len([a for b_, op, a in f.seen if op == "admit"]), 1)
+
+    def test_a_turn_turned_away_and_not_kept_keeps_its_place(self):
+        f = Fleet()
+        rift = gate(f, "rift")
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        wisp = gate(f, "wisp")
+        self.assertIn("nothing starts it again", wisp.before_llm(session_id="room-1", platform="raft",
+                                                                  user_message="hello room")["context"])
+        wisp.after_turn(session_id="room-1")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='wisp'").fetchall(), [("waiting",)])
+
+    def owed_any(self, f):
+        return [a for b, op, a in f.seen if op == "owe_wake"]
+
     def test_a_message_the_core_would_not_keep_says_it_needs_asking_again(self):
         f = Fleet()
         rift = gate(f, "rift")
@@ -193,6 +267,47 @@ class Gate(unittest.TestCase):
         rift.before_llm(session_id="r1", task_id="12")
         rift.stopped(session_key="r1")
         self.assertIsNone(wisp.before_llm(session_id="w1", task_id="9"))
+
+    def test_a_waiting_turn_tw_policy_then_refuses_gives_its_ticket_back(self):
+        # 12 Nov 2026, 9:14 PM Mountain: the install restarted tw-policy while
+        # two of Bramble's turns waited out the hold. Each was refused and
+        # forgot its ticket, and the two tickets held every Bot's turn in line
+        # for ten minutes after the hold ended.
+        f = Fleet()
+        rift = gate(f, "rift")
+        rift.before_llm(session_id="r1", task_id="12")
+        bounce = {"on": False}
+
+        def ask(broker, op, args):
+            if bounce["on"] and op == "admit":
+                raise BrokerRefused("the broker at /run/tw/policy/policy.sock is not answering")
+            return f.ask(broker, op, args)
+        wisp = TurnGate(ready_policy(), "wisp", ask, wait_seconds=0, sleep=lambda s: None)
+        self.assertIn("not admitted", wisp.before_llm(session_id="w1", task_id="9")["context"])
+        bounce["on"] = True
+        self.assertIn("not answering", wisp.before_llm(session_id="w1", task_id="9")["context"])
+        bounce["on"] = False
+        wisp.after_turn(session_id="w1")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='wisp'").fetchall(), [("done",)])
+        rift.after_turn(session_id="r1")
+        self.assertIsNone(gate(f, "echo").before_llm(session_id="e1", task_id="3"),
+                          "no ticket of a refused turn holds the line")
+
+    def test_an_admitted_turn_whose_touch_is_refused_gives_its_ticket_back(self):
+        f = Fleet()
+        bounce = {"on": False}
+
+        def ask(broker, op, args):
+            if bounce["on"] and op == "touch":
+                raise BrokerRefused("the broker at /run/tw/policy/policy.sock is not answering")
+            return f.ask(broker, op, args)
+        rift = TurnGate(ready_policy(), "rift", ask, wait_seconds=0, sleep=lambda s: None)
+        self.assertIsNone(rift.before_llm(session_id="r1", task_id="12"))
+        bounce["on"] = True
+        self.assertIn("not answering", rift.before_tool("read_file", session_id="r1"))
+        bounce["on"] = False
+        rift.after_turn(session_id="r1")
+        self.assertIsNone(gate(f, "wisp").before_llm(session_id="w1", task_id="9"))
 
     def test_waiting_asks_again_with_the_same_ticket(self):
         f = Fleet()
@@ -279,6 +394,75 @@ class Waiting(unittest.TestCase):
         p = policy()
         self.assertEqual(build(p, "bramble")["plugins"]["hook_callback_timeout"], HOOK_TIMEOUT)
         self.assertEqual(build_gateway(p)["plugins"]["hook_callback_timeout"], HOOK_TIMEOUT)
+
+
+class ReviewRisk(unittest.TestCase):
+    """15 Nov 2026, #181: Bramble's 8:37 AM weekly board review met a spent
+    Claude limit. Its turn was high risk, as every turn was, because nothing
+    gave the queue a risk class, so Claude's included credits (route 2, for
+    Bramble's low-risk work) could not take it and the review was lost for the
+    week. The two weekly reviews report only, so their turns are low risk."""
+
+    def credits(self, f, bot="bramble"):
+        handler, callers = f.policy.ops()["route_admit"]
+        from thornswood_brokers.wire import Refused
+        try:
+            return handler(next(iter(callers)), {"bot": bot, "route": "credits"})
+        except Refused as e:
+            return {"refused": str(e)}
+
+    def review(self, mark=0):
+        # Hermes puts its cron hint before the job's prompt.
+        return "[cron hint]\n\n" + brokers.REVIEW_MARKS[mark] + " It is Sunday: run the weekly review."
+
+    def test_each_weekly_review_turn_is_low_risk_so_claudes_credits_may_take_it(self):
+        for mark in (0, 1):
+            with self.subTest(mark=mark):
+                f = Fleet()
+                g = gate(f, "bramble")
+                self.assertIsNone(g.before_llm(session_id="cron_r", task_id="cron:abc:1", platform="cron",
+                                               user_message=self.review(mark)))
+                got = self.credits(f)
+                self.assertTrue(got.get("admitted"), got)
+                self.assertEqual(got["risk"], "low")
+                self.assertIsNone(g.before_tool("read_file", session_id="cron_r"))
+
+    def test_any_other_turn_stays_high_risk_and_credits_refuse_it(self):
+        cases = (("bramble", {"platform": "cron", "user_message": "Board review, weekly"}),
+                 ("bramble", {"platform": "desktop", "user_message": brokers.REVIEW_MARKS[0] + " from a chat"}),
+                 ("bramble", {"platform": "webhook", "user_message": brokers.REVIEW_MARKS[0]}),
+                 ("rift", {"platform": "cron", "user_message": brokers.REVIEW_MARKS[0]}))
+        for bot, kw in cases:
+            with self.subTest(bot=bot, **kw):
+                f = Fleet()
+                self.assertIsNone(gate(f, bot).before_llm(session_id="s1", task_id="t1", **kw))
+                self.assertNotIn("set_task_risk", [op for _, op, _ in f.seen])
+                self.assertIn("low-risk work only" if bot == "bramble" else "not Rift's",
+                              self.credits(f, bot).get("refused", ""))
+
+    def test_a_refused_class_leaves_the_turn_running_as_before(self):
+        f = Fleet()
+        real = f.ask
+
+        def ask(broker, op, args):
+            if op == "set_task_risk":
+                raise BrokerRefused("tw-policy is starting")
+            return real(broker, op, args)
+        g = TurnGate(ready_policy(), "bramble", ask, wait_seconds=0, sleep=lambda s: None)
+        with self.assertLogs("thornswood_guard.brokers", "ERROR") as log:
+            self.assertIsNone(g.before_llm(session_id="cron_r", task_id="cron:abc:1", platform="cron",
+                                           user_message=self.review()))
+        self.assertIn("runs as high risk", log.output[0])
+        self.assertIn("low-risk work only", self.credits(f).get("refused", ""))
+
+    def test_the_review_jobs_carry_the_marks(self):
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "scripts" / "apply.py"
+        spec = importlib.util.spec_from_file_location("apply_for_marks", path)
+        apply = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(apply)
+        self.assertEqual([j["prompt"].split("]")[0] + "]" for j in apply.REVIEW_JOBS], list(brokers.REVIEW_MARKS))
 
 
 class Tools(unittest.TestCase):

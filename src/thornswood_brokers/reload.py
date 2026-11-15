@@ -58,6 +58,9 @@ AFTER_KILL = 10
 # the reload looks. Within follow-main's 45 minutes with the tests and install.
 DRAIN_WAIT = 20 * 60
 DRAIN_POLL = 10
+# Given by a caller that has held new turns and waited for the running ones
+# already (follow_main.Follower), which also ends the hold.
+HELD_FLAG = "--held"
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
@@ -93,16 +96,32 @@ def _release_turns(why: str) -> dict:
     return _policy("release_turns", {"why": why})
 
 
-def drain(ask: Callable[[str, dict], dict], sleep: Callable[[float], None], say, wait: int = DRAIN_WAIT) -> bool:
+def drain(ask: Callable[[str, dict], dict], sleep: Callable[[float], None], say, wait: int = DRAIN_WAIT,
+          spare_connector: bool = False) -> bool:
     """Holds new turns and waits for the running ones to end. True when the
     hold is on (end it with end_hold); False when tw-policy did not answer,
-    and the reload goes on as before."""
+    and the reload goes on as before.
+
+    spare_connector: the reload's own drain, which stops the gateway and ends
+    Desktop's sessions and leaves the connector running. Its Bot Chat turns
+    are processes of the connector's, so they are neither held nor waited for:
+    before 12 Nov 2026 every Bot Chat turn waited on a reload that does not
+    touch them, for up to DRAIN_WAIT."""
     try:
-        running = ask("hold_turns", {"why": "the Bots are being reloaded after an install",
-                                     "seconds": wait + 600})["running"]
+        held = ask("hold_turns", {"why": "the Bots are being reloaded after an install",
+                                  "seconds": wait + 600, "spare_connector": spare_connector})
+        running = held["running"]
     except Exception as e:  # noqa: BLE001  the reload still has to happen
         say(f"FAIL: tw-policy did not hold new turns ({e}); a turn running now may be cut off")
         return False
+    if held.get("held_already"):
+        # An earlier drain of this install holds new turns and gave the running
+        # ones their wait. 12 Nov 2026: the reload a follow-main from before
+        # HELD_FLAG ran waited 20 minutes a second time, the run went past its
+        # 45 minutes, and systemd killed it with the connector stopped.
+        say(f"new turns were held already, and the running ones had their wait; going on with "
+            f"{running} turn{'s' if running != 1 else ''} running")
+        return True
     waited = 0
     while running and waited < wait:
         if waited == 0:
@@ -177,8 +196,20 @@ def _end_sessions(run: Runner, sleep: Callable[[float], None], say) -> tuple[lis
 
 
 def reload_bots(run: Runner = _run, sleep: Callable[[float], None] = time.sleep, say=print,
-                release: Callable[[str], dict] = _release_turns, ask: Callable[[str, dict], dict] = _policy) -> int:
-    held = drain(ask, sleep, say)
+                release: Callable[[str], dict] = _release_turns, ask: Callable[[str, dict], dict] = _policy,
+                already_held: bool = False) -> int:
+    """already_held: whoever runs the reload has held new turns and waited
+    for the running ones already (follow-main's install, HELD_FLAG), and ends
+    the hold itself, so the reload neither waits again nor ends it. 12 Nov
+    2026: the a98bd644 install held new turns at 7:40 PM Mountain and waited
+    its 20 minutes for a running turn of Sprocket's; then this reload held
+    them again at 8:01 PM and waited 20 minutes more for the same turn, so
+    no Bot started a turn for 40 minutes: Echo's brief, Rift's and Wisp's
+    next turns and every Bramble sweep waited in line."""
+    if already_held:
+        say("new turns are held already, and the running ones had their wait; reloading now")
+        return _reload(run, sleep, say, release)
+    held = drain(ask, sleep, say, spare_connector=True)
     try:
         return _reload(run, sleep, say, release)
     finally:
@@ -209,8 +240,10 @@ def _reload(run: Runner, sleep: Callable[[float], None], say, release: Callable[
         say(f"ended {len(ended)} hermes login session{'s' if len(ended) != 1 else ''} (Hermes Desktop's backends; Desktop reconnects)")
     released = None
     try:
-        released = release("the Bots were reloaded")["released"]
-        say(f"gave back {released} model turn ticket{'s' if released != 1 else ''} the ended turns held")
+        got = release("the Bots were reloaded")
+        released, kept = got["released"], got.get("kept", 0)
+        say(f"gave back {released} model turn ticket{'s' if released != 1 else ''} the ended turns held"
+            + (f"; {kept} turn{'s' if kept != 1 else ''} still running (the connector's) kept theirs" if kept else ""))
     except Exception as e:  # noqa: BLE001  the queue's ten-minute rule still frees them
         ok = False
         say(f"FAIL: tw-policy did not take back the ended turns' tickets ({e}); they go back after ten minutes "
@@ -234,10 +267,14 @@ def _reload(run: Runner, sleep: Callable[[float], None], say, release: Callable[
 
 def main(argv: list[str] | None = None) -> int:
     import os
+    argv = sys.argv[1:] if argv is None else argv
+    if argv not in ([], [HELD_FLAG]):
+        print(f"STOP: tw-reload-bots takes nothing, or {HELD_FLAG} when its caller holds new turns already")
+        return 1
     if os.geteuid() != 0:
         print("STOP: run it as root: sudo /opt/thornswood-hermes/bin/tw-reload-bots")
         return 1
-    return reload_bots()
+    return reload_bots(already_held=argv == [HELD_FLAG])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .own_connector import MESSAGES_SQL, role_of, said_text, with_marks
+
 CORE = "http://127.0.0.1:9135/api/v1"
 ROOM_KINDS = ("message.user", "message.member")
 # A room's threads (TWHermesAgents #108): Hermes keeps each message's thread in its payload's thread_id
@@ -154,13 +156,14 @@ def bot_chat(state_db: Path) -> dict | None:
                         (BOT_CHAT_TITLE,)).fetchone()
         if not s:
             return None
-        rows = con.execute("SELECT role, content, timestamp FROM messages WHERE session_id = ? AND active = 1 "
-                           "AND role IN ('user', 'assistant') AND content IS NOT NULL AND content != '' "
-                           "ORDER BY id DESC LIMIT ?", (s["id"], BOT_MESSAGES)).fetchall()
+        # A row Hermes put in by itself (a background command's notice) is a notice, never his (own_connector
+        # NOTICE_KINDS); one it never shows is not read.
+        rows = con.execute(with_marks(con, MESSAGES_SQL), (s["id"], BOT_MESSAGES)).fetchall()
     finally:
         con.close()
     return {"session_id": s["id"], "messages": [
-        {"role": r["role"], "text": _text(r["content"]), "at": _iso(r["timestamp"])} for r in reversed(rows)]}
+        {"role": role_of(r), "text": _text(r["content"]) if role_of(r) != "notice" else said_text(r),
+         "at": _iso(r["timestamp"])} for r in reversed(rows)]}
 
 
 # The model a Bot's newest turn ran on. After each turn the gateway writes the model it really used on that

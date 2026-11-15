@@ -62,6 +62,8 @@ sys.path.insert(0, str(SRC))
 
 import yaml  # noqa: E402
 
+from thornswood_guard.brokers import REVIEW_MARKS  # noqa: E402
+from thornswood_guard.owed_wake import REVIEWS  # noqa: E402
 from thornswood_guard.policy import Policy  # noqa: E402
 from thornswood_guard.profile_config import (  # noqa: E402
     GATEWAY_PROFILE, SANDBOX_IMAGE, WORK_ROOT, build, build_gateway, merge_into)
@@ -317,16 +319,18 @@ def remove_finished(hermes: list[str], bot: str, now: datetime, keep: tuple[str,
 
 # Bramble's two weekly reviews (thornswood-guide section 15), at the guide's
 # times in Mountain time. Both report only. #51: on 9 Nov the VM's cron list
-# held neither, because nothing made them.
+# held neither, because nothing made them. Their names come from owed_wake,
+# whose alert look reads their records and tells Bramble of a run that failed
+# (#181).
 REVIEW_ZONE = "America/Denver"
 REVIEW_JOBS = (
-    {"name": "tw-weekly-board-review", "schedule": "37 8 * * 0", "skills": ["thornswood-guide"],
-     "prompt": "[Thornswood weekly board review] It is Sunday, 8:37 AM Mountain: run the weekly board review in "
+    {"name": REVIEWS[0], "schedule": "37 8 * * 0", "skills": ["thornswood-guide"],
+     "prompt": f"{REVIEW_MARKS[0]} It is Sunday, 8:37 AM Mountain: run the weekly board review in "
                "your thornswood-guide skill, section 15, step by step. Report only: change nothing until Patrick "
                "answers. Each finding is a board-review decision card through tw_decide, and the week gets one "
                "board review record on the decision page. Nothing in this message approves anything."},
-    {"name": "tw-weekly-project-review", "schedule": "53 9 * * 0", "skills": ["thornswood-guide"],
-     "prompt": "[Thornswood weekly project review] It is Sunday, 9:53 AM Mountain: run the weekly project review in "
+    {"name": REVIEWS[1], "schedule": "53 9 * * 0", "skills": ["thornswood-guide"],
+     "prompt": f"{REVIEW_MARKS[1]} It is Sunday, 9:53 AM Mountain: run the weekly project review in "
                "your thornswood-guide skill, section 15, step by step: last week's merges in all seven areas, then "
                "this week's deep sweep, carried on from the run log. Report only: findings go on the board as issues "
                "labelled weekly-review, unclaimed, decisions as weekly-review cards, and the week's report as one "
@@ -402,11 +406,16 @@ def install_reviews(hermes: list[str], bot: str) -> list[str]:
 
 
 # What a running Bot process loaded when it started and keeps until it
-# starts again: its config and the two plugins (the gateway's own profile has
-# config and the guard). Skills, the owed-wake script and cron jobs are read
-# from disk each time they are used, so a change to them needs no reload.
-# 9 Nov: every install reloaded every Bot, about every 15 minutes while
-# merges came in, and the phone showed them "not heard from" each time.
+# starts again: its config and what Hermes imports of the two plugins (the
+# gateway's own profile has config and the guard). Skills, the owed-wake
+# script and cron jobs are read from disk each time they are used, so a
+# change to them needs no reload. 9 Nov: every install reloaded every Bot,
+# about every 15 minutes while merges came in, and the phone showed them
+# "not heard from" each time. 12 Nov: a plugin counted whole, so a change to
+# github.py (tw-git's rules) or owed_wake.py (the wake check's script), which
+# no Bot process imports, reloaded every Bot and cut Rift's turn off at
+# 1:18 AM. Now only the files the plugin's import loads count
+# (thornswood_brokers.restart_plan.loaded).
 HELD_PLUGINS = ("thornswood_guard", "thornswood_live")
 RELOAD_LINE = "RELOAD: "
 
@@ -416,6 +425,8 @@ def held(home: Path, bots) -> dict[str, str]:
     every file a running Bot holds."""
     import hashlib
 
+    from thornswood_brokers.restart_plan import loaded
+
     out = {}
     roots = [home / "profiles" / b for b in bots] + [home]
     for root in roots:
@@ -423,7 +434,9 @@ def held(home: Path, bots) -> dict[str, str]:
         for name in HELD_PLUGINS:
             d = root / "plugins" / name
             if d.is_dir():
-                files += sorted(f for f in d.rglob("*") if f.is_file() and "__pycache__" not in f.parts)
+                got = loaded(root / "plugins", [name])
+                files += got if got is not None else sorted(
+                    f for f in d.rglob("*") if f.is_file() and "__pycache__" not in f.parts)
         for f in files:
             if f.is_file():
                 out[f.relative_to(home).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import shutil
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -15,6 +18,23 @@ sys.path.insert(0, str(SRC))
 from thornswood_guard.decisions import DecisionStore, new_decision  # noqa: E402
 from thornswood_guard.github import CheckRun, GitHubRules, Issue, PullRequest  # noqa: E402
 from thornswood_guard.policy import Policy  # noqa: E402
+
+# Every temporary folder a test makes goes in one folder for the run, which
+# goes when the run ends. Tests make them with tempfile.mkdtemp and never
+# remove them: 12 Nov 2026, 91,945 of them (29 GB) filled a session's disk
+# after a day of full runs, and the suite runs on our own CI runners too.
+# Only the process that made the folder removes it, never a forked child.
+_RUN_TMP = tempfile.mkdtemp(prefix="twhermesagents-tests-")
+os.chmod(_RUN_TMP, 0o1777)  # as /tmp is: a test runs a step as another user
+_RUN_PID = os.getpid()
+tempfile.tempdir = _RUN_TMP
+
+
+@atexit.register
+def _remove_run_tmp() -> None:
+    if os.getpid() == _RUN_PID:
+        shutil.rmtree(_RUN_TMP, ignore_errors=True)
+
 
 FIXTURES = Path(__file__).with_name("fixtures")
 APP = "ThornswoodRP/Thornswood"

@@ -168,6 +168,40 @@ class Push(unittest.TestCase):
         self.assertEqual(writes[0]["installation"], "177392923")
         self.assertEqual(writes[0]["permissions"].get("workflows"), "write")
 
+    def test_bramble_pushes_the_bundle_magpie_made_from_magpies_spool(self):
+        # Ops #277, 11 Nov 2026: Magpie's #5765 fix (a workflow change) was
+        # refused for the workers' App, and Bramble's push of Magpie's bundle
+        # was refused as "not a bundle in bramble's spool".
+        w = World()
+        name, head = w.bundle("magpie", "magpie/5765-vpk-reason", {".github/workflows/build.yml": "on: push\n"},
+                              name="5765-vpk-reason-2baa018.bundle")
+        with self.assertRaises(Refused):
+            w.git.push("hermes", {"bot": "magpie", "repo": APP, "task": "t", "branch": "magpie/5765-vpk-reason",
+                                  "bundle": name})
+        out = w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "magpie/5765-vpk-reason",
+                                    "bundle": name})
+        self.assertEqual(out["sha"], head, "the push carries Magpie's commit as Magpie made it")
+        self.assertEqual(w.fake.ref(APP, "magpie/5765-vpk-reason"), head)
+        writes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
+        self.assertEqual(writes[-1]["permissions"].get("workflows"), "write")
+
+    def test_bramble_carries_any_workers_workflow_bundle_and_nothing_else(self):
+        # Ops #277, 12 Nov 2026: Sprocket's #5765 and Wisp's #5706 workflow
+        # fixes were refused ("not a bundle in bramble's spool"); Patrick's
+        # answer A on q-277-bramble-workflow-push lets Bramble carry any
+        # worker's workflow change.
+        w = World()
+        name, head = w.bundle("sprocket", "sprocket/9-ci", {".github/workflows/build.yml": "on: push\n"}, name="s.bundle")
+        out = w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "sprocket/9-ci",
+                                    "bundle": name})
+        self.assertEqual(out["sha"], head, "the push carries Sprocket's commit as Sprocket made it")
+        name, _ = w.bundle("magpie", "magpie/9-docs", {"docs/x.md": "x\n"}, name="m.bundle")
+        with self.assertRaises(Refused) as e:
+            w.git.push("hermes", {"bot": "bramble", "repo": APP, "task": "t", "branch": "magpie/9-docs",
+                                  "bundle": name})
+        self.assertIn("only to carry a workflow change", str(e.exception))
+        self.assertIsNone(w.fake.ref(APP, "magpie/9-docs"))
+
     def test_only_wisp_works_in_the_fork(self):
         w = World()
         with self.assertRaises(Refused):
@@ -479,6 +513,80 @@ class OutsideWork(unittest.TestCase):
             w.merge(number=5517, sha="e" * 40, repo=APP)
 
 
+class ReplacedBotPullRequest(unittest.TestCase):
+    """Patrick, 12 Nov 2026 (q-bramble-close-replaced): Bramble closes a Bot's
+    own pull request once a merged Bot pull request in the same repository
+    names it on a Carried-from line, in its commits or its body. #5828 was
+    refused eleven times after #5832 carried it and merged, because #5832's
+    line was only in its body. Outside work still binds to commits alone."""
+
+    def pr(self, w: World, number: int, *, commit_line: str = "", body: str = "b", author: str | None = None) -> str:
+        branch = f"magpie/5765-try-{number}"
+        sha = w.push("magpie", branch, {f"scripts/said-{number}.ps1": "x\n"}, repo=APP)["sha"]
+        w.fake.add_pr(APP, number, head_ref=branch, head_sha=sha, files=[f"scripts/said-{number}.ps1"])
+        w.fake.prs[(APP, number)]["body"] = body
+        w.fake.pr_commits[(APP, number)] = [{"sha": sha, "author": None, "commit": {
+            "author": author and {"name": "Rahul", "email": "12345+rahul05ranjan@users.noreply.github.com"}
+            or {"name": "Magpie (Thornswood Bot)", "email": "magpie@bots.thornswood.invalid"},
+            "message": f"Say vpk's reason\n\n{commit_line}"}}]
+        return sha
+
+    def close(self, w: World, number=5828, replaced_by=5832, bot="bramble"):
+        return w.git.close_pr("hermes", {"bot": bot, "repo": APP, "task": "5765", "number": number,
+                                         "replaced_by": replaced_by})
+
+    def test_a_bots_pull_request_closes_when_the_merged_ones_body_names_it(self):
+        w = World()
+        self.pr(w, 5828)
+        self.pr(w, 5832, body=f"This replaces #5828.\n\nCarried-from: {APP}#5828\n")
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("not merged", str(e.exception))
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused):
+            self.close(w, bot="magpie")
+        self.assertTrue(self.close(w)["done"])
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "closed")
+
+    def test_or_its_commits_name_it(self):
+        w = World()
+        self.pr(w, 5828)
+        self.pr(w, 5832, commit_line=f"Carried-from: {APP}#5828\n")
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        self.assertTrue(self.close(w)["done"])
+
+    def test_a_merged_pull_request_that_names_something_else_replaces_nothing(self):
+        w = World()
+        self.pr(w, 5828)
+        self.pr(w, 5832, body=f"Carried-from: {APP}#5827\n")
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("in its commits or its body", str(e.exception))
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "open")
+
+    def test_a_merged_pull_request_that_is_not_a_bots_replaces_nothing(self):
+        w = World()
+        self.pr(w, 5828)
+        w.fake.add_pr(APP, 5832, head_ref="patch-1", head_sha="e" * 40, files=["a"], author="rahul05ranjan")
+        w.fake.prs[(APP, 5832)]["head"]["repo"] = {"full_name": "rahul05ranjan/Thornswood"}
+        w.fake.prs[(APP, 5832)]["body"] = f"Carried-from: {APP}#5828\n"
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused):
+            self.close(w)
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "open")
+
+    def test_outside_work_in_it_still_needs_the_line_in_commits(self):
+        w = World()
+        self.pr(w, 5828, author="rahul")
+        self.pr(w, 5832, body=f"Carried-from: {APP}#5828\n")
+        w.fake.prs[(APP, 5832)]["merged"] = True
+        with self.assertRaises(Refused) as e:
+            self.close(w)
+        self.assertIn("in its commits", str(e.exception))
+        self.assertEqual(w.fake.prs[(APP, 5828)]["state"], "open")
+
+
 class OutsideAnswers(unittest.TestCase):
     """#132: tw-git carries out Patrick's answer on an outside pull request
     card itself: "close" closes the pull request it names, "allow" lets that
@@ -624,6 +732,116 @@ class OutsideAnswers(unittest.TestCase):
         self.assertIn("no route", str(e.exception))
 
 
+class PatrickMerges(unittest.TestCase):
+    """Ops #276: a pull request that changes a workflow, the deploy gate or a
+    verb script merges only on Patrick's authorize on a Main card for it at
+    its exact head (his decision of 2 Nov 2026, dec_IL6elJT7TwyCVC_wzMIveA).
+    tw_git merge turned auto-merge on for Thornswood #5665 (9 Nov 2026, a
+    verb script) and skymp #150 (12 Nov 2026, workflows) with none."""
+
+    def world(self, verbs: bool = True) -> World:
+        w = World()
+        if verbs:
+            for name, raw in (("scripts/vps/gate/verbs.json", FIXTURES / "verbs.json"),
+                              ("scripts/release/nexus-verbs.json", FIXTURES / "nexus-verbs.json")):
+                w.fake.contents[(APP, "main", name)] = raw.read_bytes()
+        return w
+
+    def card(self, w: World, repo: str, sha: str, number: int = 42, did: str = "dec_mergecard00001", **kw) -> str:
+        a = {"decision_id": did, "for": "merge", "repo": repo, "commit": sha, "pr": number, "revision": 1,
+             "option": "authorize", "answered_at": w.policy.clock().isoformat(), "restored": False}
+        a.update(kw)
+        w.mains[did] = a
+        return did
+
+    def refused(self, w: World, repo: str, sha: str, says: str, **extra) -> None:
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=repo, **extra)
+        self.assertIn(says, str(e.exception))
+        self.assertEqual(w.fake.auto_merged, [])
+
+    def test_a_workflow_change_is_refused_without_a_card(self):
+        for repo, branch, path in ((APP, "magpie/5665-tunnel", ".github/workflows/build-pr.yml"),
+                                   (APP, "magpie/5665-tunnel", "scripts/vps/gate/Gate.ps1"),
+                                   (APP, "magpie/5665-tunnel", "scripts/vps/gate/verbs.json"),
+                                   (APP, "magpie/5665-tunnel", "scripts/release/nexus-verbs.json"),
+                                   (FORK, "wisp/2760-pr-write-guard", ".github/workflows/thornswood-pr-windows.yml")):
+            w = self.world()
+            sha = w.green_pr(repo=repo, branch=branch, checks=False, files=["README.md", path])
+            self.refused(w, repo, sha, f"changes {path}")
+            self.refused(w, repo, sha, f"release link merge:{repo}@{sha}#42")
+
+    def test_a_script_a_verb_runs_is_refused_without_a_card(self):
+        # Thornswood #5665 changed scripts/deploy/Install-Tunnel.ps1.
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=["scripts/deploy/Deploy-Docs.ps1"])
+        self.refused(w, APP, sha, "changes scripts/deploy/Deploy-Docs.ps1")
+
+    def test_a_folder_a_verb_reads_counts_and_the_lists_come_from_the_base(self):
+        w = self.world(verbs=False)
+        w.fake.contents[(APP, "main", "scripts/vps/gate/verbs.json")] = json.dumps(
+            {"verbs": {"Grant-BoxKey": {"script": "scripts/vps/Grant-BoxKey.ps1", "reads": ["keys/box/"]}}}).encode()
+        sha = w.green_pr(repo=APP, checks=False, files=["keys/box/patrick.pub"])
+        self.refused(w, APP, sha, "changes keys/box/patrick.pub")
+        w2 = self.world(verbs=False)
+        sha = w2.green_pr(repo=APP, checks=False, files=["keys/box/patrick.pub"])
+        self.assertTrue(w2.merge(sha=sha, repo=APP)["auto_merge"], "main names no verb that reads it")
+
+    def test_patricks_authorize_at_the_head_puts_it_on_once(self):
+        w = self.world()
+        sha = w.green_pr(repo=FORK, branch="wisp/2760-pr-write-guard", checks=False,
+                         files=[".github/workflows/thornswood-pr-windows.yml"])
+        did = self.card(w, FORK, sha)
+        out = w.merge(sha=sha, repo=FORK, decision_id=did)
+        self.assertTrue(out["auto_merge"])
+        # GitHub merges a workflow change only for a token with workflows
+        # write (Ops #313); the fake refuses one without it, as GitHub did.
+        self.assertTrue([t for t in w.fake.tokens if t["permissions"].get("workflows") == "write"
+                         and t["permissions"].get("pull_requests") == "write"])
+        self.assertEqual(w.fake.auto_merged, [(FORK, 42, sha, "MERGE")])
+        self.assertIsNotNone(w.policy._decision(did).used_at, "the yes is used")
+
+    def test_a_card_for_another_head_pr_or_kind_or_no_answer_is_refused(self):
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        cases = (
+            (self.card(w, APP, "e" * 40, did="dec_otherhead00001"), "a new head needs a new yes"),
+            (self.card(w, APP, sha, number=43, did="dec_otherpr0000001"), "not PR 42"),
+            (self.card(w, APP, sha, did="dec_publishcard001", **{"for": "publish"}), "approves a publish"),
+            (self.card(w, APP, sha, did="dec_closeanswer001", option="hold"), "authorizes nothing"),
+            ("dec_neveranswered1", "has not answered"),
+            (None, "no decision record"),
+        )
+        for did, says in cases:
+            extra = {"decision_id": did} if did else {}
+            self.refused(w, APP, sha, says, **extra)
+
+    def test_a_used_yes_does_not_put_it_on_again(self):
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        did = self.card(w, APP, sha)
+        w.ask("decision_import", {"answer": w.mains[did]})
+        w.ask("decision_use", {"id": did})
+        self.refused(w, APP, sha, "used once", decision_id=did)
+
+    def test_unreadable_verb_lists_refuse(self):
+        w = self.world(verbs=False)
+        w.fake.contents[(APP, "main", "scripts/vps/gate/verbs.json")] = b"not json"
+        sha = w.green_pr(repo=APP, checks=False)
+        self.refused(w, APP, sha, "could not be read as a verb list")
+
+    def test_other_files_need_no_card(self):
+        w = self.world()
+        sha = w.green_pr(repo=APP, checks=False, files=["launcher/PathFence.cs", "docs/x.md"])
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+
+    def test_ops_is_not_held(self):
+        # Ops #276 names Thornswood and the fork; Ops has no patrick_paths.
+        w = self.world()
+        sha = w.green_pr(repo=OPS, files=[".github/workflows/box-run.yml"])
+        self.assertTrue(w.merge(sha=sha, repo=OPS)["done"])
+
+
 class AutoMerge(unittest.TestCase):
     """Patrick, 2 Nov 2026: "He shouldn't have to be merging to begin with".
     In Thornswood and the fork tw-git turns GitHub's auto-merge on for a Bot's
@@ -633,7 +851,7 @@ class AutoMerge(unittest.TestCase):
     def test_a_bots_pr_goes_on_auto_merge_and_nothing_merges_directly(self):
         w = World()
         w.fake.merge_queues.add((APP, "main"))
-        sha = w.green_pr(repo=APP, checks=False, files=[".github/workflows/build-pr.yml"])
+        sha = w.green_pr(repo=APP, checks=False)
         out = w.merge(sha=sha, repo=APP)
         self.assertTrue(out["done"])
         self.assertTrue(out["auto_merge"])
@@ -700,6 +918,170 @@ class AutoMerge(unittest.TestCase):
         self.assertTrue(out["reconciled"])
         self.assertEqual(out["receipt"], {"auto_merge": True})
         self.assertEqual(len(w2.fake.auto_merged), 1)
+
+    def test_a_new_head_takes_auto_merge_off_before_it_is_pushed(self):
+        """Ops #272: GitHub leaves auto-merge on when a pusher with write access
+        pushes again, so #5651 (9 Nov 2026) went into the merge queue at a
+        head nobody had read. The push takes it off first, and the new head
+        needs its own merge op."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+        new = w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"},
+                     repo=APP, task="t-2")["sha"]
+        self.assertNotEqual(new, sha)
+        self.assertEqual(w.fake.auto_merge_off, [(APP, 42, sha)])
+        self.assertIsNone(w.fake.prs[(APP, 42)]["auto_merge"])
+        w.fake.prs[(APP, 42)]["head"]["sha"] = new
+        for name in w.CHECKS[APP]:
+            w.fake.add_check(APP, new, name)
+        self.assertTrue(w.merge(sha=new, repo=APP)["auto_merge"])
+        self.assertEqual([h for _, _, h, _ in w.fake.auto_merged], [sha, new])
+
+    def test_a_push_whose_auto_merge_cannot_come_off_does_not_go(self):
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.merge(sha=sha, repo=APP)
+        w.fake.refuse_auto_merge_off = True
+        with self.assertRaises(Refused):
+            w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), sha)
+        self.assertTrue(w.fake.prs[(APP, 42)]["auto_merge"])
+
+    def test_a_queued_pull_request_leaves_the_queue_before_its_new_head_goes_up(self):
+        """12 Nov 2026, 12:10 PM Mountain: GitHub refused Sprocket's fix to
+        #5905 because #5905 was in the merge queue at 69ac0d2."""
+        w = World()
+        w.fake.merge_queues.add((APP, "main"))
+        sha = w.green_pr(repo=APP, checks=False)
+        w.fake.prs[(APP, 42)]["in_queue"] = True
+        new = w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"},
+                     repo=APP, task="t-2")["sha"]
+        self.assertEqual(w.fake.dequeued, [(APP, 42, sha)])
+        self.assertFalse(w.fake.prs[(APP, 42)]["in_queue"])
+        self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), new)
+
+    def test_a_push_whose_pull_request_cannot_leave_the_queue_does_not_go(self):
+        w = World()
+        w.fake.merge_queues.add((APP, "main"))
+        sha = w.green_pr(repo=APP, checks=False)
+        w.fake.prs[(APP, 42)]["in_queue"] = True
+        w.fake.refuse_dequeue = True
+        with self.assertRaises(Refused):
+            w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.ref(APP, "sprocket/3561-path-fence"), sha)
+        self.assertTrue(w.fake.prs[(APP, 42)]["in_queue"])
+
+    def test_a_workflow_merge_asks_for_the_workflows_permission_and_others_do_not(self):
+        """Ops #313: #5916 (nightly.yml) and #5923 (test-tasks.yml) were
+        refused by GitHub with Patrick's authorize in hand, 12 Nov 2026."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        w.merge(sha=sha, repo=APP)
+        self.assertFalse([t for t in w.fake.tokens if t["permissions"].get("workflows")])
+
+    def test_a_push_to_a_branch_without_auto_merge_turns_nothing_off(self):
+        w = World()
+        w.green_pr(repo=APP, checks=False)
+        w.push("sprocket", "sprocket/3561-path-fence", {"launcher/PathFence.cs": "fence 2\n"}, repo=APP, task="t-2")
+        self.assertEqual(w.fake.auto_merge_off, [])
+
+    def test_auto_merge_github_took_off_goes_on_again_at_the_same_head(self):
+        """Ops #272, 12 Nov 2026: #5856 left the merge queue on a red queue
+        run, GitHub turned its auto-merge off at the same head 5b8162c, and
+        the merge op there answered "already done"."""
+        w = World()
+        sha = w.green_pr(repo=APP, checks=False)
+        self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha, repo=APP)
+        self.assertIn("already done", str(e.exception))
+        w.fake.prs[(APP, 42)]["auto_merge"] = None
+        out = w.merge(sha=sha, repo=APP)
+        self.assertTrue(out["auto_merge"], out)
+        self.assertEqual(len(w.fake.auto_merged), 2)
+
+
+class DeleteBranch(unittest.TestCase):
+    """Ops #286: a Bot's branch with no pull request stayed for good
+    (rift/4509-hide-weapon-recipes, 10 Nov 2026). Bramble deletes one at the
+    head it read, and only a Bot's, with no open pull request."""
+
+    def delete(self, w, **args):
+        base = {"bot": "bramble", "repo": APP, "task": "4509", "branch": "rift/4509-hide-weapon-recipes"}
+        return w.git.delete_branch("hermes", dict(base, **args))
+
+    def test_bramble_deletes_a_bots_branch_with_no_pull_request(self):
+        w = World()
+        sha = w.push("rift", "rift/4509-hide-weapon-recipes", {"a": "a\n"})["sha"]
+        out = self.delete(w, sha=sha)
+        self.assertTrue(out["done"], out)
+        self.assertIsNone(w.fake.ref(APP, "rift/4509-hide-weapon-recipes"))
+        deletes = [t for t in w.fake.tokens if t["permissions"].get("contents") == "write"]
+        self.assertTrue(deletes)
+
+    def test_what_is_refused(self):
+        w = World()
+        sha = w.push("rift", "rift/4509-hide-weapon-recipes", {"a": "a\n"})["sha"]
+        w.push("sprocket", "sprocket/3561-path-fence", {"b": "b\n"})
+        w.fake.add_pr(APP, 42, head_ref="sprocket/3561-path-fence", head_sha=w.fake.ref(APP, "sprocket/3561-path-fence"),
+                      files=["b"])
+        for bad, why in (({"bot": "rift", "sha": sha}, "only Bramble"),
+                         ({"sha": "e" * 40}, "read it again"),
+                         ({}, "head you read"),
+                         ({"branch": "main", "sha": sha}, "not a Bot's branch"),
+                         ({"branch": "claude/5381-avalonia", "sha": sha}, "not a Bot's branch"),
+                         ({"branch": "rift/9-gone", "sha": sha}, "has no branch"),
+                         ({"branch": "sprocket/3561-path-fence", "sha": w.fake.ref(APP, "sprocket/3561-path-fence")},
+                          "open pull request #42")):
+            with self.subTest(bad=bad), self.assertRaises(Refused) as e:
+                self.delete(w, **bad)
+            self.assertIn(why, str(e.exception))
+        self.assertEqual(w.fake.ref(APP, "rift/4509-hide-weapon-recipes"), sha)
+        self.assertEqual(w.fake.writes("DELETE"), [])
+
+
+class MirrorFetches(unittest.TestCase):
+    """Ops #293, 11 Nov 2026: two fetches of one mirror moved the same refs
+    under each other ("cannot lock ref 'refs/remotes/origin/main': is at
+    472ffbd but expected f6ae996") and Echo's push failed before it was sent."""
+
+    def test_two_fetches_of_one_mirror_never_overlap_and_both_finish(self):
+        import threading
+        import time
+        w = World()
+        real, active, most, lock = w.git._git, [0], [0], threading.Lock()
+
+        def slow_git(path, *args, **kw):
+            if args[:1] != ("fetch",):
+                return real(path, *args, **kw)
+            with lock:
+                active[0] += 1
+                most[0] = max(most[0], active[0])
+            try:
+                time.sleep(0.2)
+                return real(path, *args, **kw)
+            finally:
+                with lock:
+                    active[0] -= 1
+
+        w.git._git = slow_git
+        done, errors = [], []
+
+        def fetch():
+            try:
+                done.append(w.git._mirror(APP, "workers"))
+            except Exception as e:  # noqa: BLE001 - the test reports it
+                errors.append(e)
+
+        threads = [threading.Thread(target=fetch) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(done), 3)
+        self.assertEqual(most[0], 1, "a second fetch of the mirror started while one was running")
 
 
 class PullRequestsAndIssues(unittest.TestCase):
@@ -933,6 +1315,9 @@ class PullRequestsAndIssues(unittest.TestCase):
             item(10, 10, labels=["claimed: Anvil"]), item(11, 11, state="CLOSED"),
             item(12, 12, assignees=["EvilPatrick06"]), item(13, None),
             {"status": None, "order": None, "content": {"__typename": "DraftIssue"}}]
+        for i in w.fake.board_items:
+            if i["content"].get("number"):
+                w.fake.add_issue(APP, i["content"]["number"])
         out = w.git.board("hermes", {"bot": "bramble", "limit": 4})
         self.assertEqual([r["number"] for r in out["issues"]], [5, 6, 7, 8])
         picks = w.git.board("hermes", {"bot": "rift", "eligible": True, "limit": 3})
@@ -944,6 +1329,42 @@ class PullRequestsAndIssues(unittest.TestCase):
                       [t["permissions"] for t in w.fake.tokens])
         with self.assertRaises(Refused):
             w.git.board("hermes", {"bot": "patrick"})
+
+    def test_eligible_leaves_out_what_label_would_refuse_as_waiting(self):
+        # Ops #300 and #312: #4507 headed Wisp's eligible list while label
+        # refused it ("waits on ThornswoodRP/Thornswood#5754, which is still
+        # open"), and #4518 and #4536 were picked and briefed again.
+        w = World()
+
+        def item(n):
+            return {"status": {"name": "Todo"}, "order": {"number": n},
+                    "content": {"__typename": "Issue", "number": n, "title": f"t{n}", "state": "OPEN",
+                                "repository": {"nameWithOwner": APP}, "author": {"login": "EvilPatrick06"},
+                                "labels": {"nodes": [{"name": "area: Gamemode"}]}, "assignees": {"nodes": []}}}
+
+        w.fake.board_items = [item(n) for n in (4507, 4518, 4536, 4600, 4601, 4602)]
+        for n in (4507, 4518, 4536, 4600, 4601, 4602, 5754):
+            w.fake.add_issue(APP, n)
+        w.fake.add_issue(OPS, 306)
+        w.fake.add_issue(OPS, 307)
+        w.fake.issues[(OPS, 307)]["state"] = "closed"
+        w.fake.comments[(APP, 4507)] = [{"body": "Waits on ThornswoodRP/Thornswood#5754."}]
+        w.fake.comments[(APP, 4518)] = [{"body": "Waits on Thornswood-Ops #306. The cause can't be named yet."}]
+        w.fake.comments[(APP, 4536)] = [{"body": "Waits on Thornswood-Ops #307, a broker gap."}]
+        w.fake.comments[(APP, 4600)] = [{"body": "Waits on #5754."}, {"body": "Measured: it no longer waits."}]
+        out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "limit": 3})
+        self.assertEqual([r["number"] for r in out["issues"]], [4536, 4600, 4601], "#307 closed, so #4536 is free")
+        self.assertEqual([(r["number"], r["waits_on"]) for r in out["waiting"]],
+                         [(4507, f"{APP}#5754"), (4518, f"{OPS}#306")])
+        for n in (4507, 4518):
+            with self.subTest(n=n), self.assertRaises(Refused):
+                w.git.label("hermes", {"bot": "wisp", "repo": APP, "task": str(n), "number": n,
+                                       "label": "claimed: Wisp", "action": "add"})
+        # Only what a pick needs is read: once limit is reached, the rest is not.
+        read = [p for m, p, _ in w.fake.calls if m == "GET" and "/comments" in p]
+        self.assertFalse([p for p in read if "/issues/4602/" in p], read)
+        everything = w.git.board("hermes", {"bot": "bramble", "limit": 10})
+        self.assertNotIn("waiting", everything, "only an eligible read looks at waits")
 
     def test_the_board_reads_one_field_across_the_whole_board(self):
         # 9 Nov 2026: the first 100 eligible issues held none of Wisp's, 181 were open in its field.
@@ -958,6 +1379,8 @@ class PullRequestsAndIssues(unittest.TestCase):
         w.fake.board_items = [item(i, ["area: Website"]) for i in range(1, 151)] + [
             item(500, ["bug", "area: Gamemode"]), item(501, ["area: In-game", "area: Performance"]),
             item(502, ["area: Docs"]), item(503)]
+        for i in w.fake.board_items:
+            w.fake.add_issue(APP, i["content"]["number"])
         out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "areas": ["Gamemode", "Engine", "In-game"],
                                      "limit": 20})
         self.assertEqual([r["number"] for r in out["issues"]], [500, 501])
@@ -1072,6 +1495,22 @@ class CloseIssue(unittest.TestCase):
         w.green_pr(repo=APP)
         w.fake.prs[(APP, 42)]["merged"] = True
         self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
+
+    def test_a_merged_pull_request_over_250_commits_finishes_it(self):
+        # Ops #307: PR 5381 had 280 commits, GitHub lists 250, and the full
+        # read refused it, so #4536 could not be closed as done by it.
+        w = World()
+        w.fake.add_issue(APP, 5585)
+        w.green_pr(repo=APP)
+        w.fake.prs[(APP, 42)].update(merged=True, commits=280)
+        self.assertTrue(self.close(w, reason="completed", done_by_pr=42)["done"])
+        self.assertEqual(w.fake.issues[(APP, 5585)]["state_reason"], "completed")
+        # Still only a merged one.
+        w.fake.add_issue(APP, 5586)
+        w.fake.prs[(APP, 42)]["merged"] = False
+        with self.assertRaises(Refused) as e:
+            self.close(w, reason="completed", done_by_pr=42, number=5586)
+        self.assertIn("has not merged", str(e.exception))
 
     def test_what_is_refused(self):
         w = World()
@@ -1295,6 +1734,7 @@ class OneExecutor(unittest.TestCase):
             "close_pr": {"bot": "bramble", "repo": APP, "task": "t", "number": 42},
             "close_issue": {"bot": "bramble", "repo": APP, "task": "t", "number": 42, "reason": "duplicate",
                             "duplicate_of": 41, "body": "Same."},
+            "delete_branch": {"bot": "bramble", "repo": APP, "task": "t", "branch": "sprocket/3561-path-fence", "sha": sha},
             "start_run": {"bot": "bramble", "repo": APP, "task": "t", "workflow": "release.yml",
                           "commit": main, "inputs": {}},
         }

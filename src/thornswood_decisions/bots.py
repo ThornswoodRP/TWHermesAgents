@@ -65,11 +65,14 @@ OUTSIDE_ACTIONS = {"allow": "Auto-Merge", "merge": "Merge", "close": "Close"}
 
 
 class BotRoute:
-    def __init__(self, db_path: Path | str, workspace: str):
+    def __init__(self, db_path: Path | str, workspace: str, *, clock=None):
         self.db_path = Path(db_path)
         self.workspace = workspace
         self.bots = tuple(contracts.load()["profiles"]["ids"])
-        self.store = Store(self.db_path)
+        # The clock is the store's: the wall clock on the VM, a test's own
+        # clock in the tests, so a brief's work hours do not hang on when
+        # the suite runs (a1e61654's run failed at 11:21 PM, 11 Nov).
+        self.store = Store(self.db_path, clock=clock) if clock else Store(self.db_path)
         self.core = DecisionCore(self.store)
         row = self.store.db.execute("SELECT id FROM workspaces WHERE name = ?", (workspace,)).fetchone()
         if not row:
@@ -255,8 +258,20 @@ class BotRoute:
         return self.core.keep_turned_away(p, _text(args, "text"), str(args.get("reason") or ""),
                                           str(args.get("session") or ""))
 
+    def queued_for(self, p: Principal, args: dict) -> dict:
+        """How many messages wait in the connector's queue for each Bot, not yet handed to its Hermes: a
+        brief, a kept message, an answer. Bramble's owed-wake check asks it, so a worker whose next turn is
+        already on its way is not named as stopped, and the free worker look does not run while Bramble
+        itself has a message coming (a worker's hand-back, answered in that turn). Not one of the model's
+        tw_decide ops (brokers.DECIDE_OPS)."""
+        if p.kind != "bramble":
+            raise CoreError(403, "not_bramble", "only Bramble's wake check reads the connector's queue")
+        rows = self.store.db.execute("SELECT target, COUNT(*) AS n FROM connector_outbox WHERE workspace_id = ? "
+                                     "AND status IN ('queued', 'leased') GROUP BY target", (self.ws,)).fetchall()
+        return {"bots": {r["target"]: r["n"] for r in rows if r["target"] in self.bots}}
+
     OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
-           "keep_turned_away", "ask_one", "one_answer")
+           "keep_turned_away", "queued_for", "ask_one", "one_answer")
 
     def ops(self) -> dict:
         """The ops for thornswood_brokers.wire.Server: name -> (handler(caller, args), callers)."""

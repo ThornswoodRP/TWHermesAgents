@@ -1,6 +1,6 @@
 ---
 name: thornswood-ops
-description: Thornswood's private operations. The four repos and the two GitHub Apps, Dev and Main, the box, One, signing and Ships, the deploy gate and its verbs, run notes and status, where secrets live (by name only), recurring jobs, traps, standing orders (Hermes on Discord included), and what always needs Patrick. Load it before any run, deploy, release, box or Nexus step.
+description: Thornswood's private operations. The four repos and the two GitHub Apps, Dev and Main, the box, One, signing and Ships, the deploy gate and its verbs, steps after a deploy and status, where secrets live (by name only), recurring jobs, traps, standing orders (Hermes on Discord included), and what always needs Patrick. Load it before any run, deploy, release, box or Nexus step.
 version: 2.0.0
 metadata:
   hermes:
@@ -37,7 +37,7 @@ This comes before every other line here. It is word for word the rule every Clau
 TWHermesAgents is public, so the private operations are not here. They are
 in the private repository, Thornswood-Ops, at `docs/hermes/thornswood-ops.md`:
 the four repositories and who writes where, Dev and Main, the box, One,
-releases and signing, the deploy gate and its verbs, run notes and status,
+releases and signing, the deploy gate and its verbs, steps after a deploy and status,
 where each secret lives (by name only), the collection, recurring jobs, traps,
 standing orders, and what needs Patrick.
 

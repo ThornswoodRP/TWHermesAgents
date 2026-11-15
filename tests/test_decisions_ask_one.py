@@ -49,7 +49,7 @@ class TheBotsMessage(unittest.TestCase):
         flags(self.w, "mobile_read", "mobile_chat_write", "connector_effects")
         self.g = Gateways(self.w)
         self.g.hello("one")
-        self.route = BotRoute(self.w.path, "test")
+        self.route = BotRoute(self.w.path, "test", clock=self.w.clock)
         self.addCleanup(self.route.close)
         self.ops = self.route.ops()
 

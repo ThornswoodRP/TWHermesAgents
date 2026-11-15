@@ -47,6 +47,9 @@ class PullRequest:
     merged: bool = False
     credits: list[Credit] = field(default_factory=list)   # every commit's author and co-authors
     carried_from: list[tuple[str, int]] = field(default_factory=list)  # Carried-from lines: the outside PRs it carries
+    # Carried-from lines in its body. Only a Bot's own replaced pull request
+    # is closed on these (close_pr); outside work binds to its commits alone.
+    body_carried_from: list[tuple[str, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -113,12 +116,12 @@ class GitHubRules:
             return Verdict.no(f"only Wisp works in the engine fork, not {p.bot_name(owner)}")
         if owner == bot:
             if workflow_files_changed and p.app_of(bot) == "workers":
-                return Verdict.no("the workers' App has no Workflows permission; Magpie hands the workflow change to Bramble, whose App pushes it to Magpie's branch")
+                return Verdict.no(f"the workers' App has no Workflows permission; {p.bot_name(bot)} hands the workflow change to Bramble, whose App pushes it to {branch}")
             return Verdict.yes(f"{p.bot_name(bot)} pushes its own branch {branch}")
         if bot == "bramble" and owner in p.data["branches"]["bramble_may_push_for"]:
             if not workflow_files_changed:
-                return Verdict.no("Bramble pushes to Magpie's branch only to carry a workflow change Magpie wrote")
-            return Verdict.yes(f"Bramble's App pushes Magpie's workflow change to {branch}")
+                return Verdict.no(f"Bramble pushes to {p.bot_name(owner)}'s branch only to carry a workflow change {p.bot_name(owner)} wrote")
+            return Verdict.yes(f"Bramble's App pushes {p.bot_name(owner)}'s workflow change to {branch}")
         return Verdict.no(f"{branch} belongs to {p.bot_name(owner)}; a Bot pushes only its own branch")
 
     # Pull requests
@@ -204,12 +207,20 @@ class GitHubRules:
 
     def merge(self, bot: str, pr: PullRequest, sha: str, method: str,
               checks: list[CheckRun], *, branch_checks: set[str] | None = None,
-              allowed_people: set[str] | None = None) -> Verdict:
+              allowed_people: set[str] | None = None, verb_paths: list[str] | None = None,
+              decision_id: str | None = None) -> Verdict:
         """Bramble's merge. Where the policy has GitHub's auto-merge do it
         (merge.auto_merge), a yes here turns auto-merge on at this head and
         GitHub merges once the checks its branch rules require pass:
         branch_checks is that list, read from GitHub just before. Elsewhere
-        (Ops) a yes is the merge itself, once every required check passed."""
+        (Ops) a yes is the merge itself, once every required check passed.
+
+        A pull request that changes a workflow, the deploy gate or a verb
+        script (merge.patrick_paths; verb_paths: the scripts and reads the
+        base branch's verb lists name, read by tw-git) merges only on
+        Patrick's "authorize" on a Main card for it at this exact head,
+        release link merge:<repo>@<head>#<number>, passed as decision_id
+        (Ops #276)."""
         p = self.policy
         if not p.is_router(bot):
             return Verdict.no(f"only Bramble merges; {p.bot_name(bot) if p.is_bot(bot) else bot} never does, its own work included")
@@ -236,12 +247,33 @@ class GitHubRules:
         verdict = self.outside_work(pr, allowed_people)
         if not verdict.allowed:
             return verdict
+        verdict = self.patrick_merge(pr, sha, verb_paths, decision_id)
+        if not verdict.allowed:
+            return verdict
         if p.auto_merge(pr.repo):
             return self._auto_merge(pr, sha, checks, branch_checks)
         verdict = self.check_green(pr, checks)
         if not verdict.allowed:
             return verdict
         return Verdict.yes(f"green on {sha[:12]}: {', '.join(p.required_checks(pr.repo))}")
+
+    def patrick_merge(self, pr: PullRequest, sha: str, verb_paths: list[str] | None,
+                      decision_id: str | None) -> Verdict:
+        """Yes when the pull request changes nothing of merge.patrick_paths,
+        or Patrick authorized its merge at this head on a Main card."""
+        p = self.policy
+        if p.patrick_verb_lists(pr.repo) and verb_paths is None:
+            return Verdict.no(f"the verb lists of {pr.base_ref} in {pr.repo} were not read, so whether PR "
+                              f"{pr.number} changes a verb script is not known; nothing merges unseen")
+        held = p.patrick_files(pr.repo, pr.files, verb_paths or [])
+        if not held:
+            return Verdict.yes()
+        named = ", ".join(held[:3]) + (", ..." if len(held) > 3 else "")
+        yes = self.decisions.check(decision_id, kind="merge", repo=pr.repo, commit=sha, pr=pr.number)
+        if yes.allowed:
+            return Verdict.yes(f"it changes {named}, and {yes.reason} lets it merge at {sha[:12]}")
+        return Verdict.no(f"PR {pr.number} changes {named}, which merges only on Patrick's authorize on a Main card "
+                          f"with release link merge:{pr.repo}@{sha}#{pr.number}: {yes.reason}")
 
     def _auto_merge(self, pr: PullRequest, sha: str, checks: list[CheckRun],
                     branch_checks: set[str] | None) -> Verdict:
@@ -262,14 +294,20 @@ class GitHubRules:
         return Verdict.yes(f"auto-merge on at {sha[:12]}: GitHub merges once {', '.join(rule)} pass there")
 
     def close_pr(self, bot: str, pr: PullRequest, answers: list[dict], merged: dict[tuple[str, int], bool],
-                 open_now: bool, replaced: bool = False) -> Verdict:
+                 open_now: bool, replaced: bool = False, replaced_by: PullRequest | None = None) -> Verdict:
         """Bramble closes a pull request only on Patrick's answer (#132): his
         "close" on the outside pull request card that names it, as the outside
         pull request or as a Bot's pull request carrying its work; or his
         "allow" or "merge" on that card once the work carried from it merged,
         which replaced it. answers: the decision core's outside answers, read
         by tw-git; merged: whether each carried pull request merged; replaced:
-        tw-git read a merged pull request whose Carried-from line names it."""
+        tw-git read a merged pull request whose Carried-from line names it.
+
+        A Bot's own pull request with no outside work in it also closes when
+        replaced_by, a merged Bot pull request in the same repository, names
+        it on a Carried-from line in its commits or its body (Patrick, 12 Nov
+        2026, q-bramble-close-replaced: #5828 was refused eleven times after
+        #5832 carried it and merged, with his answer on #5832's card)."""
         p = self.policy
         if not p.is_router(bot):
             return Verdict.no(f"only Bramble closes a pull request, and only on Patrick's answer; "
@@ -281,6 +319,13 @@ class GitHubRules:
         if pr.merged or not open_now:
             return Verdict.no(f"PR {pr.number} is not open")
         here = (pr.repo, pr.number)
+        if replaced_by is not None and pr.author_bot is not None and not self.outside_credits(pr):
+            if not replaced_by.merged or replaced_by.repo != pr.repo or replaced_by.author_bot is None:
+                return Verdict.no(f"#{replaced_by.number} is not a merged Bot pull request in {pr.repo}, so it has "
+                                  f"not replaced PR {pr.number}")
+            if here in replaced_by.carried_from or here in replaced_by.body_carried_from:
+                return Verdict.yes(f"replaced by #{replaced_by.number}, a merged Bot pull request whose "
+                                   f"Carried-from line names it")
         for a in reversed(answers):
             carried = [(c["repo"], c["number"]) for c in a.get("carried") or []]
             names_it = here == (a["repo"], a["number"])

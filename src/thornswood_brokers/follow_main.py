@@ -76,7 +76,7 @@ from typing import Callable
 
 from thornswood_guard.policy import Policy
 
-from . import reload, wire
+from . import reload, restart_plan, wire
 
 Run = Callable[..., subprocess.CompletedProcess]
 LOGS_KEPT = 20
@@ -151,11 +151,10 @@ class Follower:
         # Before the install restarts the brokers and the reload the gateway,
         # new turns are held and running ones end (#52; tw-reload-bots ends
         # the hold). A test's stand-in, or tw-policy as root.
-        self.drain_ = drain or (lambda: reload.drain(reload._policy, time.sleep, self.say))
+        self.drain_ = drain or (lambda: reload.drain(self._ask_policy, time.sleep, self.say))
         self.end_hold_ = end_hold or self._end_hold
         # tw-git's vm_install, or a test's stand-in.
-        self.report_ = report or (lambda args: wire.call(policy.data["brokers"]["sockets"]["git"]["path"],
-                                                         "vm_install", args))
+        self.report_ = report or (lambda args: wire.call(self.socket("git"), "vm_install", args))
         self.r = policy.data["follow_main"]
         self.run_ = run
         self.root = root
@@ -166,10 +165,31 @@ class Follower:
         self.hermes_releases = self._at(self.r["hermes_releases"])
         self.logs = self.state_file.parent / "follow-main"
         self.log: Path | None = None
+        # Whether this run holds new turns (its drain), so the reload need not.
+        self.held = False
+
+    def socket(self, name: str) -> str:
+        """A broker's socket as the installed release names it, read when it is
+        used: an install can move it. 12 Nov 2026: #164 moved the brokers'
+        sockets to /run/tw-brokers, and this run, started on the release
+        before, asked the old path to end its hold on new turns, so no Bot
+        started a turn until the hold ran out 24 minutes later. The policy
+        this run started with names it only when the installed one cannot
+        be read."""
+        try:
+            data = json.loads((packages_in((self.opt / "current").resolve()) / "thornswood_guard" / "policy.json")
+                              .read_text(encoding="utf-8"))
+            return str(data["brokers"]["sockets"][name]["path"])
+        except (Stop, OSError, ValueError, KeyError, TypeError):
+            return self.p.data["brokers"]["sockets"][name]["path"]
+
+    def _ask_policy(self, op: str, args: dict) -> dict:
+        """Ask tw-policy, as root, where the installed release says it is."""
+        return wire.call(self.socket("policy"), op, args, timeout=30)
 
     def _end_hold(self) -> None:
         try:
-            reload._policy("end_hold", {})
+            self._ask_policy("end_hold", {})
         except Exception as e:  # noqa: BLE001  the hold ends by itself at HOLD_MAX
             self.say(f"FAIL: tw-policy did not end the hold on new turns ({e}); it ends by itself within 40 minutes")
 
@@ -238,6 +258,9 @@ class Follower:
         box = self.box_access() if result == "installed" else None
         if box:
             pending["box"] = box
+        grok = self.grok_lanes() if result == "installed" else None
+        if grok:
+            pending["grok"] = grok
         self.record(report_pending=pending)
         self.send_report()
 
@@ -250,6 +273,22 @@ class Follower:
         except (OSError, ValueError):
             return None
         return data if isinstance(data, dict) else None
+
+    def grok_lanes(self) -> dict | None:
+        """What this install wrote of the Grok lanes' computer (deploy/install.sh 6c, 8a; Thornswood
+        #5933): whether its local computer is registered, whether its screen is open, the app's
+        version and any problem. None when the file is not there or not JSON; tw-git holds each
+        field to its form, and only those fields go out."""
+        where = (self.p.data.get("grok_lanes") or {}).get("status_file")
+        if not where:
+            return None
+        try:
+            data = json.loads(self._at(where).read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {k: data.get(k) for k in ("ready", "screen", "version", "problem")}
 
     def send_report(self) -> None:
         pending = self.state().get("report_pending")
@@ -334,8 +373,66 @@ class Follower:
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def install(self, dest: Path, commit: str) -> None:
-        self.sh("install", ["bash", str(dest / "deploy" / "install.sh"), commit])
+    def keeps(self, before: str | None, dest: Path) -> dict[str, bool]:
+        """What the install may leave running (restart_plan): the brokers when
+        nothing they load changed, and the connector, with every Bot turn it
+        runs, when nothing it loads changed, the core's store does not migrate
+        (a migration stops every worker of the core, 1 Nov), and the brokers
+        either keep running or start again behind sockets systemd holds.
+        A release that cannot be read keeps nothing."""
+        try:
+            old = self.opt / "releases" / before if before else None
+            changed = restart_plan.changed((old, packages_in(old)) if old else None, (dest, packages_in(dest)))
+        except (Stop, OSError, SyntaxError, ValueError) as e:
+            self.say(f"NOTE what this release changes could not be read ({e}); every process starts again")
+            return {"brokers": False, "connector": False}
+        migrates = self.migrates(dest)
+        # A broker that made its own socket refused calls for a second or two
+        # while it started again, and a turn whose ticket check (tw-policy's
+        # touch) is refused is refused for the rest of the turn
+        # (thornswood_guard.brokers.TurnGate). With systemd holding the
+        # brokers' sockets in both releases, unchanged, a call waits for the
+        # broker instead (#162), so the connector's turns go on through it.
+        held = self.sockets_held(old, dest)
+        keep = {"brokers": not changed["brokers"],
+                "connector": not changed["connector"] and not migrates and (not changed["brokers"] or held)}
+        why = [w for w, yes in (("what it loads changed", changed["connector"]),
+                                ("the brokers start again without systemd holding their sockets",
+                                 changed["brokers"] and not held),
+                                ("the core's store migrates", migrates)) if yes]
+        self.say("the brokers " + ("keep running: nothing they load changed" if keep["brokers"] else "start again")
+                 + "; the connector " + (f"starts again: {', '.join(why)}" if why else
+                                         "keeps running: nothing it or the brokers load changed and the store does not migrate"))
+        return keep
+
+    def sockets_held(self, old: Path | None, dest: Path) -> bool:
+        """Whether systemd holds every broker's socket across this install:
+        both releases ship the same socket units, so none is started again."""
+        if old is None:
+            return False
+        for name in self.BROKER_SOCKETS:
+            a, b = old / "deploy" / "systemd" / name, dest / "deploy" / "systemd" / name
+            if not (a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes()):
+                return False
+        return True
+
+    def migrates(self, dest: Path) -> bool:
+        """Whether the core's store moves to another schema at this release; a
+        store that cannot be read counts as moving."""
+        try:
+            have = self.store_schema()
+            return have is not None and self.known_schema(dest) != have
+        except (Stop, OSError, sqlite3.Error) as e:
+            self.say(f"NOTE the core's store schema could not be compared ({e}); it counts as migrating")
+            return True
+
+    def install(self, dest: Path, commit: str, *, keep_brokers: bool = False, keep_connector: bool = False) -> None:
+        # A flag goes only to an install script that reads it; a put-back's
+        # older release gets none and starts everything again, as it did.
+        script = dest / "deploy" / "install.sh"
+        text = script.read_text(encoding="utf-8", errors="replace") if script.is_file() else ""
+        flags = ["--keep-brokers"] if keep_brokers and "--keep-brokers)" in text else []
+        self.sh("install", ["bash", str(script), commit, *flags])
         # deploy/install.sh has just pointed current at this release, which the
         # decision core's install checks before it does anything.
         if not self._at(self.r["decide_env"]).exists():
@@ -349,7 +446,14 @@ class Follower:
         # still on the release before would meet its old tools. 2 Nov 2026: Patrick's answers that waited
         # on tw_git's open_issue are put back in the queue by a migration, and the core's install runs
         # that migration before apply.py and tw-reload-bots give the Bots the op.
-        self.connector_later = "--connector-later" in core.read_text(encoding="utf-8", errors="replace")
+        text = core.read_text(encoding="utf-8", errors="replace")
+        if keep_connector and "--keep-connector)" in text:
+            # 12 Nov 2026: each install stopped the connector, and with it every
+            # Bot turn it was running, though nothing it runs had changed.
+            self.connector_later = False
+            self.sh("install", ["bash", str(core), commit, "--keep-connector"])
+            return
+        self.connector_later = "--connector-later" in text
         self.sh("install", ["bash", str(core), commit] + (["--connector-later"] if self.connector_later else []))
 
     def start_connector(self) -> None:
@@ -416,7 +520,10 @@ class Follower:
         # The installed release's own tw-reload-bots (src/thornswood_brokers/reload.py),
         # the step every apply ends with: it ends the hermes user's login
         # sessions, restarts the gateway and says STOP unless it is active.
-        self.sh("reload", [str(self.opt / "bin" / "tw-reload-bots")])
+        # When this run's drain holds new turns, the reload is told so and does
+        # not hold and wait a second time (12 Nov 2026: two 20-minute waits for
+        # one running turn kept every Bot from starting a turn for 40 minutes).
+        self.sh("reload", [str(self.opt / "bin" / "tw-reload-bots"), *([reload.HELD_FLAG] if self.held else [])])
 
     def store_schema(self) -> int | None:
         """The schema number the core's store is at, read only; None with no core."""
@@ -486,6 +593,19 @@ class Follower:
             self.sh("put back", ["systemctl", "disable", "--quiet", "--now", *extra])
         return extra
 
+    BROKER_SOCKETS = ("tw-policy.socket", "tw-git.socket", "tw-files.socket", "tw-proxy.socket")
+
+    def drop_sockets_not_in(self, dest: Path) -> list[str]:
+        """Stops and disables the brokers' socket units (#162) that the release
+        going back in does not ship: its brokers bind their own sockets, and
+        tw-proxy's own bind on the port systemd holds would fail."""
+        ships = {p.name for p in (dest / "deploy" / "systemd").glob("tw-*.socket")}
+        units = self._at("/etc/systemd/system")
+        extra = [u for u in self.BROKER_SOCKETS if u not in ships and (units / u).exists()]
+        if extra:
+            self.sh("put back", ["systemctl", "disable", "--quiet", "--now", *extra])
+        return extra
+
     def canary(self) -> None:
         self.sh("canary", [str(self.opt / "bin" / "tw-canary")])
 
@@ -531,9 +651,19 @@ class Follower:
             self.report("not installed", commit=tip, step=e.step, reason=e.reason, before=before)
             return 1
         try:
-            self.drain_()
+            keep = self.keeps(before, dest)
+            if keep["connector"]:
+                # Nothing a turn runs in stops for the install. A reload, when
+                # apply says one is needed, holds and waits itself, only for
+                # the turns in the gateway and Desktop's sessions it stops.
+                self.held = False
+                self.say("new turns are not held: the install stops nothing a running turn needs")
+            else:
+                # reload.drain says False when tw-policy did not hold new turns;
+                # then the reload holds and waits itself.
+                self.held = self.drain_() is not False
             unit = self.gateway_unit()
-            self.install(dest, tip)
+            self.install(dest, tip, keep_brokers=keep["brokers"], keep_connector=keep["connector"])
             needed = self.apply(dest, tip)
             if needed or self.gateway_unit() != unit:
                 self.restart()
@@ -555,7 +685,8 @@ class Follower:
         finally:
             # The drain's hold on new turns ends here whatever happened; a
             # reload has ended it already, and ending it again changes nothing.
-            self.end_hold_()
+            if self.held:
+                self.end_hold_()
         self.say(f"PASS {tip[:12]} is installed, applied, {reloaded} and the canary passed")
         self.record(result="installed", installed=tip, failed=None, step=None, why=None, put_back=None,
                     log=str(self.log))
@@ -585,6 +716,10 @@ class Follower:
                 dropped = self.drop_units_not_in(dest)
                 if dropped:
                     self.say(f"stopped and disabled {', '.join(dropped)}, which {before[:12]} does not ship")
+            dropped = self.drop_sockets_not_in(dest)
+            if dropped:
+                self.say(f"stopped and disabled {', '.join(dropped)}, which {before[:12]} does not ship; "
+                         "its brokers make their own sockets")
             self.install(dest, before)
             self.apply(dest, before)
             self.restart()

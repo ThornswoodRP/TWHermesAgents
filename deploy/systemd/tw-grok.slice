@@ -1,0 +1,16 @@
+# the Grok lanes' computer: the Grok Bot app and its screen, as grok-lanes.
+# Generated from src/thornswood_guard/policy.yaml by scripts/render_units.py; do not edit by hand.
+# A limit changes only by a PR to the policy, never on the box.
+[Unit]
+Description=Thornswood: the Grok lanes' computer: the Grok Bot app and its screen, as grok-lanes
+Before=slices.target
+
+[Slice]
+MemoryAccounting=yes
+CPUAccounting=yes
+TasksAccounting=yes
+MemoryHigh=1536M
+MemoryMax=2G
+CPUWeight=20
+CPUQuota=100%
+TasksMax=512

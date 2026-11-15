@@ -164,7 +164,7 @@ class Routes(unittest.TestCase):
         cfg = build(p, "bramble")
         fb = cfg["fallback_providers"]
         self.assertEqual(fb[0], {"provider": "anthropic", "model": "claude-opus-5-5",
-                                 "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+                                 "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
         self.assertEqual(fb[2]["base_url"], "http://127.0.0.1:8611/qwen/v1")
         self.assertEqual(check_config(p, "bramble", cfg, set()), [])
         self.assertEqual(check_config(p, "rift", build(p, "rift"), set()), [])
@@ -182,7 +182,7 @@ class Routes(unittest.TestCase):
                         cfg["fallback_providers"][0][k] = v
                 self.assertTrue(check_config(p, "bramble", cfg, set()))
         cfg = build(p, "rift")
-        cfg["fallback_providers"][0]["base_url"] = "http://127.0.0.1:8611/credits"
+        cfg["fallback_providers"][0]["base_url"] = "http://127.0.0.1:8611/credits/anthropic"
         self.assertTrue(check_config(p, "rift", cfg, set()))
 
     def test_before_the_proxy_is_ready_no_route_names_it(self):
@@ -190,7 +190,7 @@ class Routes(unittest.TestCase):
         cfg = build(p, "bramble")
         self.assertNotIn("base_url", str(cfg))
         cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
-                                             "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+                                             "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
         self.assertTrue(check_config(p, "bramble", cfg, set()))
 
     def test_a_route_not_ready_stays_out_while_the_other_is_in(self):
@@ -199,7 +199,7 @@ class Routes(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8611/qwen/v1", str(cfg))
         self.assertNotIn("/credits", str(cfg))
         cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
-                                             "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+                                             "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
         self.assertTrue(check_config(p, "bramble", cfg, set()))
 
     def test_anthropic_api_key_would_spend_the_credits_first(self):

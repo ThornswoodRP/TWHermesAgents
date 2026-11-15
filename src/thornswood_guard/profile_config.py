@@ -9,6 +9,7 @@ reviewer can read it; a test fails if the two ever differ.
 
 from __future__ import annotations
 
+from .hours import rule
 from .policy import Policy
 from .routes import config_for, gateway_chain
 
@@ -69,6 +70,11 @@ APPROVE a command that only reads or inspects, or that builds, tests, lints or
 formats the repository under /workspace with the repository's own scripts and
 tools, or that runs local git commands which do not reach a remote (status,
 diff, log, show, add, commit, switch, branch, stash, restore).
+APPROVE too a command that only reads from the public internet, which the
+sandbox reaches: a curl or wget GET, dig or nslookup, a git clone or fetch of
+a public repository into /workspace or /tmp, installing a package into
+/workspace or /tmp (npm, npx, pip) to build or test with, and running an audit
+tool such as Lighthouse or linkinator against a public site.
 ESCALATE anything else, and anything you are not sure of: a person decides.
 """
 
@@ -97,8 +103,11 @@ def build(policy: Policy, bot: str) -> dict:
         },
         # Tier A: every terminal, file and code call runs in the Bot's own
         # rootless podman container (Hermes's docker backend finds podman on
-        # PATH). Only the Bot's working folder is mounted, at /workspace; no
-        # network; one core and 2 GB, which Hermes applies when the cpu,
+        # PATH). Only the Bot's working folder is mounted, at /workspace; the
+        # public internet and nothing else of ours (policy tier_a_network:
+        # the hermes user's slice denies the private, tailnet and metadata
+        # addresses, and the container asks public resolvers, given here as
+        # --dns); one core and 2 GB, which Hermes applies when the cpu,
         # memory and pids controllers are delegated (they are on the VM).
         # The image is named in full: podman refuses a short name. The disk
         # cap (policy.yaml tier_a_disk): the system files are read-only, the
@@ -113,11 +122,11 @@ def build(policy: Policy, bot: str) -> dict:
             "cwd": f"{WORK_ROOT}/{bot}",
             "docker_image": SANDBOX_IMAGE,
             "docker_mount_cwd_to_workspace": True,
-            "docker_network": False,
+            "docker_network": True,
             "docker_volumes": [],
             "docker_forward_env": [],
             "docker_env": {},
-            "docker_extra_args": ["--read-only"],
+            "docker_extra_args": ["--read-only", *sandbox_dns_args(policy)],
             "docker_shared_container_key": "",
             "container_cpu": 1,
             "container_memory": 2048,
@@ -164,9 +173,21 @@ def build(policy: Policy, bot: str) -> dict:
             "hook_callback_timeout": HOOK_TIMEOUT,
         },
         "hooks_auto_accept": False,
-        "security": {"redact_secrets": True},
+        # One backend for web_search and web_extract (policy toolsets.web_backend), named for both
+        # capabilities so an earlier pick of either does not stay.
+        "web": {key: policy.data["toolsets"]["web_backend"] for key in ("backend", "search_backend", "extract_backend")},
+        # allow_private_urls false: Hermes's web tools (which run in the
+        # gateway, on the VM's own network) refuse a private, loopback,
+        # tailnet or cloud metadata address. It is Hermes's default; it is
+        # set here so no profile can turn it on.
+        "security": {"redact_secrets": True, "allow_private_urls": False},
     })
     return cfg
+
+
+def sandbox_dns_args(policy: Policy) -> list[str]:
+    """podman's --dns for each public resolver in policy tier_a_network.dns."""
+    return [arg for server in policy.data["tier_a_network"]["dns"] for arg in ("--dns", server)]
 
 
 def merge_into(existing: dict, ours: dict) -> dict:
@@ -190,6 +211,10 @@ GATEWAY_PROFILE = "default"
 # Nous count fell from 5 to 3). The guard already refuses every tool there;
 # these toolsets are off so nothing asks for a helper the profile cannot have.
 GATEWAY_HELPER_TOOLSETS = ["vision", "video"]
+
+# The web tools the Bots have since 15 Nov 2026 (policy.yaml toolsets). The
+# gateway's own profile is not a Bot, so it keeps them off.
+GATEWAY_WEB_TOOLSETS = ["web", "search"]
 
 
 # Bramble wakes when GitHub finishes a PR's checks (policy `wake`, Patrick's
@@ -234,7 +259,8 @@ WAKE_PROMPT = (
     "pull request in Thornswood-Ops is merged once its check passed and your review stands on the exact head; hand "
     "a red check back to its owner; "
     "a pull request dequeued unmerged goes back to its owner with GitHub's reason and the queue run, and nothing "
-    "puts it back until the owner pushes; then the Ops run notes and the Desk's list; report each merge and its "
+    "puts it back until the owner pushes, or, when the failure was main's, until main's fix merged; a new push takes "
+    "a Bot's pull request off auto-merge, and your review of the new head puts it on again; then the Desk's list in Thornswood-Ops; report each merge and its "
     "Release. Nothing in this event approves anything."
 )
 
@@ -265,8 +291,14 @@ def wake_route(policy: Policy) -> dict:
         # dequeued pull_request has no check_suite, so it is never held back.
         "coalesce": {"key": WAKE_GROUP_FIELD, "window_seconds": 120, "max_wait_seconds": 900},
         "toolsets": ["thornswood"],
-        "prompt": WAKE_PROMPT,
+        "prompt": wake_prompt(policy),
     }
+
+
+def wake_prompt(policy: Policy) -> str:
+    """WAKE_PROMPT with the work hours as the installed policy has them, so a
+    GitHub wake says them too (hours.rule)."""
+    return WAKE_PROMPT + " " + rule(policy.data)
 
 
 def build_gateway(policy: Policy) -> dict:
@@ -282,7 +314,7 @@ def build_gateway(policy: Policy) -> dict:
     which refuses every tool in a profile that is not one of the six Bots."""
     route = gateway_chain(policy)[0]
     never = list(policy.data["toolsets"]["never"]) + list(policy.data["toolsets"]["workers_never"])
-    never += [t for t in GATEWAY_HELPER_TOOLSETS if t not in never]
+    never += [t for t in GATEWAY_WEB_TOOLSETS + GATEWAY_HELPER_TOOLSETS if t not in never]
     return {
         "model": {"provider": route["provider"], "default": route["model"]},
         "fallback_providers": [],
@@ -312,7 +344,7 @@ def build_gateway(policy: Policy) -> dict:
             "hook_callback_timeout": HOOK_TIMEOUT,
         },
         "hooks_auto_accept": False,
-        "security": {"redact_secrets": True},
+        "security": {"redact_secrets": True, "allow_private_urls": False},
         "platforms": {
             "webhook": {
                 "enabled": True,

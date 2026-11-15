@@ -14,6 +14,11 @@
 #
 # --move-gateway moves the Hermes gateway from the hermes user's own unit to
 # tw-hermes-gateway.service in tw-hermes.slice, starting it the same way.
+# --keep-brokers leaves the four brokers running when they are already up:
+# tw-follow-main passes it when nothing the brokers load changed between the
+# installed release and this one (thornswood_brokers.restart_plan), so an
+# install that does not touch them does not refuse the Bots' calls while
+# they start again (12 Nov). A broker that is not running is still started.
 # --quotas turns group quotas on for the filesystem holding /srv/tw (ext4
 # only; it adds the journaled quota options to that line of /etc/fstab after
 # checking the new file, remounts, and builds the quota file), so each Bot's
@@ -22,15 +27,16 @@
 set -euo pipefail
 umask 022
 
-commit="${1:?usage: install.sh <commit> [--move-gateway] [--quotas]}"
+commit="${1:?usage: install.sh <commit> [--move-gateway] [--quotas] [--keep-brokers]}"
 shift
-move_gateway=""; quotas=""
+move_gateway=""; quotas=""; keep_brokers=""
 for arg in "$@"; do
   case "$arg" in
     --move-gateway) move_gateway="$arg" ;;
     --quotas) quotas="$arg" ;;
+    --keep-brokers) keep_brokers="$arg" ;;
     "") ;;
-    *) echo "STOP: the options are --move-gateway and --quotas, not $arg."; exit 1 ;;
+    *) echo "STOP: the options are --move-gateway, --quotas and --keep-brokers, not $arg."; exit 1 ;;
   esac
 done
 opt=/opt/thornswood-hermes
@@ -352,6 +358,53 @@ else
   echo "SKIP the box for Patrick's Hermes: there is no $box_user user"
 fi
 
+# 6c. The Grok lanes' computer (policy.yaml grok_lanes; Patrick's answer A on
+# q-5933-lanes-fallback, 12 Nov 2026): when Grok Bot's cloud usage runs out,
+# the lanes do their read-only work here instead of on One. xAI's Grok Bot
+# for Linux comes from its signed apt repository, the key pinned by its
+# fingerprint in policy; the package's own postinst writes the same source and
+# key again and loads its AppArmor profile. grok-lanes is a system account with
+# no shell, no sudo and no group of the brokers or the Bots; its home is under
+# /srv/tw, so its units can hide /home. The units start in step 8.
+grok_user="$(pol grok_lanes.user)"
+grok_home="$(pol grok_lanes.home)"
+grok_status="$(pol grok_lanes.status_file)"
+grok_key="$here/$(pol grok_lanes.apt_key)"
+grok_fpr="$(pol grok_lanes.apt_key_fingerprint)"
+grok_pkg="$(pol grok_lanes.package)"
+# What the lanes' computer lacks goes in grok_problem and on the ledger
+# (step 8); it never stops the Bots' install. A key that is not the pinned
+# one does: then this repository itself is wrong.
+grok_problem=""
+command -v gpg >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q gnupg >/dev/null
+got_fpr="$(gpg --show-keys --with-colons "$grok_key" 2>/dev/null | awk -F: '$1 == "fpr" {print $10; exit}')"
+[[ "$got_fpr" == "$grok_fpr" ]] || stop "$grok_key is the key $got_fpr, not the pinned $grok_fpr; Grok Bot is not installed from it."
+gpg --dearmor < "$grok_key" > /usr/share/keyrings/grok-bot.gpg.new
+chmod 0644 /usr/share/keyrings/grok-bot.gpg.new; mv -f /usr/share/keyrings/grok-bot.gpg.new /usr/share/keyrings/grok-bot.gpg
+printf 'Types: deb\nURIs: %s\nSuites: %s\nComponents: main\nSigned-By: /usr/share/keyrings/grok-bot.gpg\n' \
+  "$(pol grok_lanes.apt_uri)" "$(pol grok_lanes.apt_suite)" > /etc/apt/sources.list.d/grok-bot.sources
+# The newest Grok Bot each install: a build xAI stops supporting shows only
+# "Update required" until it is upgraded.
+if ! DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null 2>&1; then
+  grok_problem="apt could not read its package lists, Grok Bot's repository among them"
+elif ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$grok_pkg" xvfb xauth x11vnc novnc websockify >/dev/null 2>&1; then
+  grok_problem="apt could not install $grok_pkg and its screen (xvfb, x11vnc, novnc)"
+fi
+if [[ ! -x "$(pol grok_lanes.app)" ]]; then
+  grok_problem="${grok_problem:-the $grok_pkg package did not put the app in place}"
+fi
+if ! id "$grok_user" >/dev/null 2>&1; then
+  useradd --system --home-dir "$grok_home" --no-create-home --shell /usr/sbin/nologin --user-group "$grok_user"
+fi
+[[ "$(id -nG "$grok_user")" == "$grok_user" ]] || stop "$grok_user is in the groups '$(id -nG "$grok_user")'; it must be in its own alone."
+install -d -m 0700 -o "$grok_user" -g "$grok_user" "$grok_home"
+[[ "$(stat -c '%U:%G %a' "$grok_home")" == "$grok_user:$grok_user 700" ]] || stop "$grok_home is not $grok_user's alone (700)."
+if [[ -z "$grok_problem" ]]; then
+  ok "Grok Bot $(dpkg-query -W -f='${Version}' "$grok_pkg") for the Grok lanes, as $grok_user in $grok_home"
+else
+  echo "FAIL the Grok lanes' computer: $grok_problem; the rest of the install goes on"
+fi
+
 # 7. Checks start through tw-checks.socket (step 8), never sudo: the sudoers
 # line an earlier install made for tw-files goes, and the tw-checks group
 # holds tw-files alone.
@@ -390,13 +443,16 @@ if quotas_on; then
       "$here/src/thornswood_guard/policy.json" "$b")"
     setquota -g "tw-work-$b" 0 "$((gb * 1024 * 1024))" 0 0 "$srv_mnt"
   done
-  ok "each Bot's work group has its disk cap on $srv_mnt"
+  # The Grok lanes' account (6c) has its own cap: the lanes clone the repositories there.
+  setquota -g "$grok_user" 0 "$(( $(pol grok_lanes.disk_quota_gb) * 1024 * 1024 ))" 0 0 "$srv_mnt"
+  ok "each Bot's work group and $grok_user have their disk caps on $srv_mnt"
   # Those are the only group caps there are. A cap is kept by gid, so one left on a deleted group
   # passes to the next group given that gid: the canary deleted tw-work-canary with its 32 MB cap
   # on, tw-decide-voice got the gid, and the Whisper model's download was refused (2 Nov). So every
   # other cap is taken off here, and each one is named.
   keep=""
   for b in $bots; do keep+=" $(getent group "tw-work-$b" | cut -d: -f3)"; done
+  keep+=" $(getent group "$grok_user" | cut -d: -f3)"
   report="$(repquota -g -n "$srv_mnt")" || stop "repquota could not read the group quotas on $srv_mnt."
   # shellcheck disable=SC2086  # the gids are words on purpose
   left="$(printf '%s\n' "$report" | python3 -I "$here/src/thornswood_brokers/disk_caps.py" $keep)" \
@@ -404,7 +460,7 @@ if quotas_on; then
   for gid in $left; do
     name="$(getent group "$gid" | cut -d: -f1 || true)"
     setquota -g "$gid" 0 0 0 0 "$srv_mnt" || stop "setquota could not take the cap off gid $gid on $srv_mnt."
-    ok "took the cap off gid $gid (${name:-no group has it now}): only the Bots' work groups are capped"
+    ok "took the cap off gid $gid (${name:-no group has it now}): only the Bots' work groups and $grok_user are capped"
   done
 else
   echo "SKIP disk caps: group quotas are not on for $srv_mnt; run this again with --quotas"
@@ -519,10 +575,16 @@ fi
 # first .path unit, tw-offsite.path, was left out by a list of suffixes, and
 # enabling it failed).
 unit_dir=/etc/systemd/system
+# A broker's socket unit that changed while it listens is started again below
+# with its broker, so it listens as the new file says (#162).
+changed_sockets=""
 for f in "$here"/deploy/systemd/*; do
   name="$(basename "$f")"
   case "$name" in
     tw-hermes-gateway.service.in|user-hermes.slice.conf|tw-hermes-gateway-webhook.conf) ;;  # placed below
+    tw-policy.socket|tw-git.socket|tw-files.socket|tw-proxy.socket)
+      if [[ -f "$unit_dir/$name" ]] && ! cmp -s "$f" "$unit_dir/$name"; then changed_sockets+=" $name"; fi
+      install -m 0644 "$f" "$unit_dir/$name" ;;
     *.service|*.timer|*.slice|*.path|*.socket|*.target)
       sed "s/user@1002\.service/user@$hermes_uid.service/g" "$f" > "$unit_dir/$name" ;;
     *) stop "deploy/systemd/$name is not a kind of unit file the install places; add it to step 8." ;;
@@ -536,16 +598,94 @@ install -m 0644 "$here/deploy/systemd/tw-hermes-gateway-webhook.conf" /etc/syste
 systemctl daemon-reload
 systemctl enable --quiet tw-limits-check.service
 systemctl restart tw-limits-check.service
-systemctl enable --quiet --now tw-checks.socket tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
+# The first install with the brokers' socket units (#162): a broker started
+# before them made its own socket, and tw-proxy holds the port its socket unit
+# binds, so each such broker stops before its socket unit starts. It starts
+# again below, on the socket.
+for sock in tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket; do
+  systemctl is-active --quiet "$sock" || systemctl stop "${sock%.socket}.service"
+done
+systemctl enable --quiet --now tw-checks.socket tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket \
+  tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
   tw-offsite.timer tw-offsite.path tw-follow-main.timer
+# A path unit watches what it was started with, so a changed one is started
+# again to watch what it says now (12 Nov: PathChanged became PathExistsGlob).
+systemctl restart tw-offsite.path
 # Each broker allows 3 starts in 15 minutes (StartLimitBurst), so a crash loop
 # stops. An install's restart is not a crash: four installs inside 15 minutes
 # (2 Nov, 10:06 PM) hit the limit, the brokers stayed down and the put-back's
 # own restart was refused too. reset-failed clears the count for this restart
 # only; a broker that then fails by itself still meets the limit.
-systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
-systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
+if [[ -n "$keep_brokers" ]]; then
+  # Nothing they load changed, so the running brokers already hold this
+  # release's code; enable --now above started any that was not running.
+  for unit in tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket tw-policy.service tw-git.service tw-files.service tw-proxy.service; do
+    systemctl is-active --quiet "$unit" || stop "$unit is not running after its start; journalctl -u $unit says why."
+  done
+  ok "brokers kept running: nothing they load changed"
+else
+  # Each broker takes its socket back from systemd as it starts (#162). A
+  # socket unit whose file changed is stopped with its broker and started
+  # again first; that one alone refuses calls while it is down.
+  for sock in $changed_sockets; do
+    systemctl stop "${sock%.socket}.service" "$sock"
+    systemctl start "$sock"
+  done
+  systemctl reset-failed tw-policy.service tw-git.service tw-files.service tw-proxy.service
+  systemctl restart tw-policy.service tw-git.service tw-files.service tw-proxy.service
+  for unit in tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket; do
+    systemctl is-active --quiet "$unit" || stop "$unit is not listening: journalctl -u $unit says why."
+  done
+fi
 ok "units in place and started"
+
+# 8a. The Grok lanes' computer (6c). The app starts again only when what it
+# runs changed (the package, its unit or its scripts), so an install does not
+# end a lane's command mid-audit. The screen is open while the app has no
+# local computer registered (Patrick has not signed in and turned on
+# Execution on this computer yet), or when the policy's screen_open asks for
+# it; otherwise it is stopped. What holds goes to grok_status, which the
+# follower puts on the ledger: never an address or a link.
+grok_ready=false
+grok_screen=closed
+if [[ -z "$grok_problem" ]]; then
+  grok_runs="$( { dpkg-query -W -f='${Version}' "$grok_pkg"; cat "$unit_dir/tw-grok-lanes.service" "$here/deploy/grok-lanes/run-app" "$here/deploy/grok-lanes/open-url"; } | sha256sum | cut -d' ' -f1)"
+  grok_ran="$(python3 -I -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("runs", ""))
+except (OSError, ValueError): print("")' "$grok_status")"
+  systemctl enable --quiet tw-grok-lanes.service
+  if [[ "$grok_runs" != "$grok_ran" ]] || ! systemctl is-active --quiet tw-grok-lanes.service; then
+    systemctl reset-failed tw-grok-lanes.service 2>/dev/null || true
+    systemctl restart tw-grok-lanes.service || true  # read below: it never stops the Bots' install
+  fi
+  sleep 5
+  if ! systemctl is-active --quiet tw-grok-lanes.service; then
+    grok_problem="tw-grok-lanes did not stay up (journalctl -u tw-grok-lanes)"
+  fi
+  [[ -f "$grok_home/$(pol grok_lanes.ready_file)" ]] && grok_ready=true
+  if [[ -z "$grok_problem" ]] && { [[ "$grok_ready" == false ]] || [[ "$(pol grok_lanes.screen_open)" == true ]]; }; then
+    systemctl restart tw-grok-screen.service || true
+    sleep 3
+    if systemctl is-active --quiet tw-grok-screen.service; then
+      grok_screen=open
+    else
+      grok_problem="its screen did not start (journalctl -u tw-grok-screen)"
+    fi
+  else
+    systemctl stop tw-grok-screen.service 2>/dev/null || true
+  fi
+else
+  systemctl stop tw-grok-screen.service tw-grok-lanes.service 2>/dev/null || true
+fi
+install -d -m 0755 "$(dirname "$grok_status")"
+python3 -I -c 'import json,sys; json.dump({"ready": sys.argv[1] == "true", "screen": sys.argv[2], "version": sys.argv[3], "runs": sys.argv[4], "problem": sys.argv[5] or None}, open(sys.argv[6] + ".new", "w"))' \
+  "$grok_ready" "$grok_screen" "$(dpkg-query -W -f='${Version}' "$grok_pkg" 2>/dev/null || true)" "${grok_runs:-}" "$grok_problem" "$grok_status"
+chmod 0644 "$grok_status.new"; mv -f "$grok_status.new" "$grok_status"
+if [[ -z "$grok_problem" ]]; then
+  ok "the Grok lanes' computer runs; local computer registered: $grok_ready; screen: $grok_screen"
+else
+  echo "FAIL the Grok lanes' computer: $grok_problem"
+fi
 
 # 8b. Bramble's wake: Tailscale Funnel publishes the one webhook path, and
 # only it, on wake.funnel_port, to the gateway's loopback receiver; then the

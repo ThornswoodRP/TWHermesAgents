@@ -18,8 +18,8 @@ The Bots are six profiles in one Hermes install, under `/home/hermes/.hermes/pro
 Each Bot's config is built from the policy by `src/thornswood_guard/profile_config.py` and set by `scripts/apply.py`. The generated copies in `hermes/profiles/` are what gets set, for reading in review. Every Bot has:
 
 - the same model order: Claude (`claude-opus-5-5`) through Patrick's subscription sign-in first, then OpenAI Codex (`gpt-6.1-sol`). No provider that bills by use is allowed in a config;
-- the toolsets it may never use turned off (browser, code execution, computer use, web search, image and video generation, Discord admin and the rest in `policy.yaml` `toolsets`), and for the five workers, cron as well;
-- its terminal, file and code calls run in a rootless podman container (Hermes's docker backend) that sees only the Bot's own working folder at `/workspace`, with no network, one core and 2 GB;
+- the toolsets it may never use turned off (browser, code execution, computer use, image and video generation, Discord admin and the rest in `policy.yaml` `toolsets`), and for the five workers, cron as well; web search and page reading are on (15 Nov 2026);
+- its terminal, file and code calls run in a rootless podman container (Hermes's docker backend) that sees only the Bot's own working folder at `/workspace`, reaches the public internet and nothing of the VM, its network or the tailnet (`policy.yaml` `tier_a_network`), with one core and 2 GB;
 - two plugins: `thornswood_guard` and `thornswood_live`;
 - its skills: `thornswood-ops`, `thornswood-guide` and, for Bramble, `bramble-duties`.
 
@@ -46,7 +46,7 @@ The brokers in `src/thornswood_brokers/` run as their own users, each from a roo
 | `tw-files` | `tw-files` | Each worker's trees under `/srv/tw/work/<bot>`. It walks every path from a folder handle without following links, and runs checks through `tw-run-check` as the Bot's own user, with no network and only that tree visible |
 | `tw-proxy` | `tw-proxy` | The admission proxy on `127.0.0.1:8611`, for model routes that need a key only it can read. It admits a route only once a pull request sets it ready in `admission_proxy.ready` |
 
-The gateway reaches them only through their sockets under `/run/tw/`, each open to a named group. Checks run in `tw-sandbox.slice`, started through `tw-checks.socket` so `tw-files` never needs sudo.
+The gateway reaches them only through their sockets under `/run/tw-brokers/` (and tw-proxy on 127.0.0.1:8611), each open to a named group. systemd holds those sockets (`tw-policy.socket` and the rest), so a broker that starts again for an install takes the same socket back and a call made meanwhile waits for it instead of being refused. Checks run in `tw-sandbox.slice`, started through `tw-checks.socket` so `tw-files` never needs sudo.
 
 ### How a Bot's merge reaches GitHub
 
@@ -74,6 +74,10 @@ When a Bot needs Patrick, it opens a card in the decision core (`src/thornswood_
 ## Patrick's own Hermes
 
 His own Hermes on the VM (my-hermes, the `patrick-hermes` user) is not a Bot and is not set by `apply.py`. Each release's `deploy/decisions/install.sh` gives it two things, as that user: the `thornswood-decisions` plugin link, which adds rule zero to its prompt, and a copy of the `thornswood-coordinator` skill (`hermes/skills/thornswood-coordinator`). The skill holds Patrick's rules for talking to him and the steps for taking any ask he drops in one chat: file it on the board for the Bot that owns its field, follow it, and report status. Its status report comes from `scripts/coordinator_report.py`, which reads the board and the open pull requests with that user's own `gh` sign-in and changes nothing.
+
+## The Grok lanes' computer
+
+Patrick's Grok Bot lanes (Thornswood #5933) audit from Grok Bot's own cloud, and when its included usage runs out they do their read-only work on a "local computer" instead. Since Patrick's answer A on q-5933-lanes-fallback (12 Nov 2026) that computer is this VM, not One. `deploy/install.sh` 6c installs xAI's Grok Bot for Linux from its signed apt repository (the key pinned by fingerprint in `policy.yaml` `grok_lanes`) and makes the `grok-lanes` account: no shell, no sudo, no group but its own, a home under `/srv/tw` with an 8 GB disk cap. `tw-grok-lanes.service` runs the app on a virtual screen as that account in `tw-grok.slice`, with none of the brokers' or the Bots' folders, no `/home`, no `/etc/thornswood` and no way to gain a privilege. `tw-grok-screen.service` shows that screen and the sign-in link on the VM's Tailscale address alone, port 6080, while the app has no local computer registered, and stops by itself after two hours. Patrick signs in once there and turns on Execution on this computer. Each installed result on the ops ledger says whether the local computer is registered, whether the screen is open, the app's version and any problem. Setting `screen_open: true` opens the screen again at the next install, for a change in the app's settings.
 
 ## The live Board
 
@@ -104,6 +108,7 @@ The host's caps are in `policy.yaml` `slices`, rendered into `deploy/systemd/*.s
 | `tw-brokers.slice` | The brokers | 512 MB | 50% |
 | `tw-sandbox.slice` | `tw-files` checks | 4 GB | 100% |
 | The `hermes` user's slice | The Bots' podman containers | 4 GB | 100% |
+| `tw-grok.slice` | The Grok lanes' computer | 2 GB | 100% |
 
 At every boot, before the brokers and the gateway start, `tw-limits-check` reads each slice's caps from the cgroup tree, starts one job of each tier to see where it lands, and checks the swapfile and the Bots' disk quotas. If anything is off, `tw-policy` admits no sandbox job. Free space is not part of it: `tw-policy` reads it at every admit.
 

@@ -29,10 +29,27 @@ class Refused(Exception):
     """A request the broker will not do. The message is the reason."""
 
 
-def peer_uid(sock: socket.socket) -> int:
+def peer_creds(sock: socket.socket) -> tuple[int, int]:
+    """(pid, uid) of the process at the other end of the socket."""
     creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-    _pid, uid, _gid = struct.unpack("3i", creds)
-    return uid
+    pid, uid, _gid = struct.unpack("3i", creds)
+    return pid, uid
+
+
+def peer_uid(sock: socket.socket) -> int:
+    return peer_creds(sock)[1]
+
+
+# The calling process of the request this thread is answering, from the
+# socket like its user. tw-policy keeps it on a turn's ticket, so a reload
+# knows which turns run in a process it stops (12 Nov 2026).
+_peer = threading.local()
+
+
+def peer_pid() -> int | None:
+    """The pid of the process whose request this thread is answering; None
+    outside a request."""
+    return getattr(_peer, "pid", None)
 
 
 def user_name(uid: int) -> str:
@@ -45,7 +62,15 @@ def user_name(uid: int) -> str:
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         server: Server = self.server  # type: ignore[assignment]
-        caller = user_name(peer_uid(self.request))
+        pid, uid = peer_creds(self.request)
+        caller = user_name(uid)
+        _peer.pid = pid
+        try:
+            self._handle(server, caller)
+        finally:
+            _peer.pid = None
+
+    def _handle(self, server: "Server", caller: str):
         line = self.rfile.readline(MAX_LINE + 1)
         if not line:
             return
@@ -81,18 +106,33 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
     def __init__(self, path: str | Path, ops: dict[str, tuple[Callable, set[str]]], *,
-                 mode: int = 0o660, group: str | None = None):
-        """ops maps an op name to (handler(caller, args), users allowed to call it)."""
+                 mode: int = 0o660, group: str | None = None, fd: int | None = None):
+        """ops maps an op name to (handler(caller, args), users allowed to call it).
+
+        fd: the listening socket systemd holds for this path (its .socket
+        unit, #162). It is taken as it is; systemd made the path, its mode and
+        its group, and keeps the socket open while this process starts again,
+        so a call made meanwhile waits instead of being refused."""
         self.path = Path(path)
         self.ops = ops
-        if self.path.exists() or self.path.is_symlink():
-            self.path.unlink()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        super().__init__(str(self.path), Handler)
-        os.chmod(self.path, mode)
-        if group:
-            import grp
-            os.chown(self.path, -1, grp.getgrnam(group).gr_gid)
+        if fd is not None:
+            super().__init__(str(self.path), Handler, bind_and_activate=False)
+            self.socket.close()
+            self.socket = socket.socket(fileno=fd)
+            if self.socket.family != socket.AF_UNIX or self.socket.getsockname() != str(self.path):
+                got = self.socket.getsockname()
+                self.socket.detach()
+                raise Refused(f"the socket systemd passed listens on {got!r}, not {self.path}; "
+                              "the socket unit and the policy disagree")
+        else:
+            if self.path.exists() or self.path.is_symlink():
+                self.path.unlink()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            super().__init__(str(self.path), Handler)
+            os.chmod(self.path, mode)
+            if group:
+                import grp
+                os.chown(self.path, -1, grp.getgrnam(group).gr_gid)
         self._lock = threading.Lock()
         self._busy = 0
         self._idle = threading.Condition()
@@ -162,15 +202,23 @@ def call(path: str | Path, op: str, args: dict | None = None, *, timeout: float 
             s.connect(str(path))
         except OSError as e:
             raise Refused(f"the broker at {path} is not answering ({e.strerror or e}); nothing was done") from e
-        s.sendall((json.dumps({"op": op, "args": args or {}}) + "\n").encode("utf-8"))
         buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-            if len(buf) > MAX_LINE:
-                raise Refused("the broker's answer is larger than 4 MB")
+        try:
+            s.sendall((json.dumps({"op": op, "args": args or {}}) + "\n").encode("utf-8"))
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                if len(buf) > MAX_LINE:
+                    raise Refused("the broker's answer is larger than 4 MB")
+        except OSError as e:
+            # 12 Nov 2026: tw-policy restarting for an install reset the
+            # connector's call mid-answer, and the reset, not a refusal, ended
+            # the connector. A call dropped after it was sent has not been
+            # answered, the same as a broker that closes without a word.
+            raise Refused(f"the broker at {path} closed without answering ({e.strerror or e}); the outcome is "
+                          "unknown until it is read back") from e
     if not buf:
         raise Refused(f"the broker at {path} closed without answering; the outcome is unknown until it is read back")
     answer = json.loads(buf)

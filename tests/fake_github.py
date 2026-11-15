@@ -55,6 +55,10 @@ class FakeGitHub:
         # (repo, branch) -> the status checks the branch's rules require
         self.branch_rules: dict[tuple[str, str], list[str]] = {}
         self.auto_merged: list[tuple[str, int, str, str | None]] = []  # (repo, number, head, method) put on auto-merge
+        self.auto_merge_off: list[tuple[str, int, str]] = []  # (repo, number, head) taken off auto-merge
+        self.refuse_auto_merge_off = False
+        self.dequeued: list[tuple[str, int, str]] = []  # (repo, number, head) taken out of the merge queue
+        self.refuse_dequeue = False
         # Where each App's installation is, as on GitHub (policy github_apps.<app>.repos):
         # a token asked for any other repository gets GitHub's 422, as the VM's install
         # reports did after the workers' App came off Ops (8 Nov 2026).
@@ -145,7 +149,7 @@ class FakeGitHub:
         # Who writes: the App whose installation the token was minted for.
         self.app_login = {"177392923": "thornswood-bramble[bot]", "177393064": "thornswood-workers[bot]"}.get(
             self.tokens[int(token.split("-")[1]) - 1]["installation"], "someone")
-        refused = self._pr_write_refused(method, path, token)
+        refused = self._pr_write_refused(method, path, token) or self._workflow_merge_refused(method, path, body, token)
         if refused:
             return refused
         if path == "/search/issues":
@@ -165,6 +169,32 @@ class FakeGitHub:
         items = [dict(i, repository_url=f"{API}/repos/{r}") for (r, _), i in self.issues.items()
                  if r in repos and all(w in str(i.get("title", "")).lower() for w in words)]
         return Response(200, {"total_count": len(items), "items": items}, {})
+
+    def _workflow_merge_refused(self, method: str, path: str, body, token: str) -> Response | None:
+        """GitHub's rule for merging a change to a workflow file, measured on
+        Thornswood #5916 and #5923 (12 Nov 2026, Ops #313): an App token
+        without workflows write is refused, for auto-merge, the queue and a
+        direct merge alike."""
+        if self.token_permissions.get(token, {}).get("workflows") == "write":
+            return None
+        repo = number = None
+        if path == "/graphql" and isinstance(body, dict) and any(
+                m in body.get("query", "") for m in ("enablePullRequestAutoMerge", "enqueuePullRequest(")):
+            repo, number = body["variables"]["pr"].split("#")
+        else:
+            m = re.match(r"^/repos/([^/]+/[^/]+)/pulls/(\d+)/merge$", path)
+            if method == "PUT" and m:
+                repo, number = m.group(1), m.group(2)
+        if repo is None:
+            return None
+        files = self.pr_files.get((repo, int(number)), [])
+        wf = next((f for f in files if f.startswith(".github/workflows/")), None)
+        if wf is None:
+            return None
+        msg = f"refusing to allow a GitHub App to create or update workflow `{wf}` without `workflows` permission"
+        if path == "/graphql":
+            return Response(200, {"errors": [{"message": msg}]}, {})
+        return Response(422, {"message": msg}, {})
 
     def _pr_write_refused(self, method: str, path: str, token: str) -> Response | None:
         """GitHub's rule for a label or a comment on a pull request through the
@@ -207,6 +237,24 @@ class FakeGitHub:
                 raise Lost("connection reset after auto-merge was turned on")
             return Response(200, {"data": {"enablePullRequestAutoMerge": {"pullRequest": {
                 "autoMergeRequest": {"enabledAt": "2099-01-01T00:00:00Z"}}}}}, {})
+        if "dequeuePullRequest" in q:
+            repo, number = v["pr"].split("#")
+            pr = self.prs[(repo, int(number))]
+            if not pr.get("in_queue"):
+                return Response(200, {"errors": [{"message": "Pull request is not in the merge queue"}]}, {})
+            if self.refuse_dequeue:
+                return Response(200, {"errors": [{"message": "Resource not accessible by integration"}]}, {})
+            pr["in_queue"] = False
+            self.dequeued.append((repo, int(number), pr["head"]["sha"]))
+            return Response(200, {"data": {"dequeuePullRequest": {"mergeQueueEntry": {"id": "MQE"}}}}, {})
+        if "disablePullRequestAutoMerge" in q:
+            repo, number = v["pr"].split("#")
+            pr = self.prs[(repo, int(number))]
+            if self.refuse_auto_merge_off:
+                return Response(200, {"errors": [{"message": "Resource not accessible by integration"}]}, {})
+            pr["auto_merge"] = None
+            self.auto_merge_off.append((repo, int(number), pr["head"]["sha"]))
+            return Response(200, {"data": {"disablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": None}}}}, {})
         if "enqueuePullRequest" in q:
             repo, number = v["pr"].split("#")
             pr = self.prs[(repo, int(number))]
@@ -250,6 +298,12 @@ class FakeGitHub:
             rules = [] if not names or page > 1 else [{"type": "required_status_checks", "parameters": {
                 "required_status_checks": [{"context": n, "integration_id": 15368} for n in names]}}]
             return Response(200, rules, {})
+        if rest[:3] == ["git", "refs", "heads"] and method == "DELETE":
+            branch = urllib.parse.unquote("/".join(rest[3:]))
+            if not self.ref(repo, branch):
+                return Response(422, {"message": "Reference does not exist"}, {})
+            subprocess.run(["git", "-C", str(self.remote(repo)), "update-ref", "-d", f"refs/heads/{branch}"], check=True)
+            return Response(204, None, {})
         if rest[:3] == ["git", "ref", "heads"]:
             branch = urllib.parse.unquote("/".join(rest[3:]))
             sha = self.ref(repo, branch)

@@ -128,7 +128,12 @@ def quota_problems(run: Callable[[list[str]], subprocess.CompletedProcess], srv:
 def disk_caps(policy: Policy) -> dict[str, float]:
     files = policy.data["brokers"]["files"]
     caps = files["disk_quota_gb"]
-    return {files["work_group_prefix"] + b: caps.get(b, caps["default"]) for b in policy.bots}
+    out = {files["work_group_prefix"] + b: caps.get(b, caps["default"]) for b in policy.bots}
+    # The Grok lanes' account clones the repositories in its home (install.sh 6c, 7b).
+    grok = policy.data.get("grok_lanes")
+    if grok:
+        out[grok["user"]] = grok["disk_quota_gb"]
+    return out
 
 
 def tier_a_disk_problems(run: Callable[[list[str]], subprocess.CompletedProcess], policy: Policy) -> list[str]:

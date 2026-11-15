@@ -45,15 +45,16 @@
 set -euo pipefail
 umask 022
 
-commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>] [--connector-later]}"
+commit="${1:?usage: install.sh <commit> [--room <id>] [--origin <url>] [--connector-later] [--keep-connector]}"
 shift
-room=""; origin=""; connector_later=""
+room=""; origin=""; connector_later=""; keep_connector=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --room) room="${2:-}"; shift 2 ;;
     --origin) origin="${2:-}"; shift 2 ;;
     --connector-later) connector_later=1; shift ;;
-    *) echo "STOP: the options are --room <id>, --origin <url> and --connector-later, not $1."; exit 1 ;;
+    --keep-connector) keep_connector=1; shift ;;
+    *) echo "STOP: the options are --room <id>, --origin <url>, --connector-later and --keep-connector, not $1."; exit 1 ;;
   esac
 done
 opt=/opt/thornswood-hermes
@@ -225,7 +226,17 @@ run() { runuser -u tw-decide -- "$opt/bin/tw-decide" --db "$db" "$@"; }
 # (first, so none starts its service again), every worker that leases from the
 # core or opens its store, and the core itself stop here. Each starts again
 # below, on this release, only once the core answers on the new schema (step 8).
+#
+# --keep-connector (the follower, when nothing the connector loads changed and
+# the store does not migrate, thornswood_brokers.restart_plan): the connector
+# is left running, and with it every Bot Chat turn it carries. Stopping it
+# killed those turns at each install (12 Nov). It already runs this release's
+# code, and with no migration nothing it leased is put back; while the core
+# is down its calls fail and it keeps the results until the core answers.
 CORE_WORKERS="tw-decide-bots.service tw-decide-live.service tw-decide-voice.service tw-decide-connector.service tw-decide-push.service tw-decide-own.service tw-decide-feed.service tw-decide-peers.service"
+if [[ -n "$keep_connector" ]]; then
+  CORE_WORKERS="${CORE_WORKERS/tw-decide-connector.service /}"
+fi
 systemctl stop tw-decide-feed.timer tw-decide-peers.timer
 systemctl stop $CORE_WORKERS
 systemctl stop tw-decide.service
@@ -350,7 +361,9 @@ ok "the live Board runs"
 # apply.py and tw-reload-bots have every Bot on this release, so no message
 # reaches a Bot still running the tools of the release before.
 systemctl enable --quiet tw-decide-connector.service
-if [[ -n "$connector_later" ]]; then
+if [[ -n "$keep_connector" ]] && systemctl is-active --quiet tw-decide-connector.service; then
+  ok "the connector kept running: nothing it loads changed, so its turns go on"
+elif [[ -n "$connector_later" ]]; then
   ok "the connector stays stopped until every Bot runs this release; the follower starts it"
 else
   systemctl reset-failed tw-decide-connector.service

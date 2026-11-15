@@ -44,7 +44,34 @@ from .wire import Refused, call
 
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,60}")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+
+
+def _word(want: str) -> re.Pattern:
+    """One word of a check form as a pattern: {name} is a harness's name
+    (NAME), {tests} is the shared tests folder or a product's own one below
+    the top (game/tests, launcher/tests), where Thornswood keeps a product's
+    harnesses beside its code (Thornswood #5341). Neither takes a dot or a
+    second slash, so a form never reaches outside the tree; the rest of the
+    word is matched as written."""
+    out = []
+    for part in re.split(r"(\{name\}|\{tests\})", want):
+        if part == "{name}":
+            out.append(NAME.pattern)
+        elif part == "{tests}":
+            out.append("(?:" + NAME.pattern + "/)?tests")
+        else:
+            out.append(re.escape(part))
+    return re.compile("".join(out))
+
+
 OUT_CAP = 200_000
+# How long one search may run. A search holds its Bot's lock, so every other
+# op of that Bot waits behind it. 12 Nov 2026 (Ops #310): Rift's search with
+# '.*' over game/data/recipes.json, a 6 MB file on one line, ran git grep's
+# regex for hours (a 6 MB line and 'Forge.*Bow' took past 60 seconds of CPU
+# here without finishing), and every tw_files op of Rift's timed out
+# behind it while Bramble's answered.
+SEARCH_SECONDS = 30
 # No setgid bit in the mode: tw-files runs with RestrictSUIDSGID=yes, whose
 # filter refuses a mkdir that asks for one with EPERM, before it even looks
 # whether the folder is there (31 Oct, Rift's first checkout). The install
@@ -378,7 +405,8 @@ class FilesService:
         return gd
 
     def _git(self, tree: Path, *args: str, check: bool = True, allow_file: bool = False,
-             identity: tuple[str, str] | None = None) -> subprocess.CompletedProcess:
+             identity: tuple[str, str] | None = None, timeout: float | None = None,
+             cap: int | None = None) -> subprocess.CompletedProcess:
         gd = self._git_ok(tree)
         safe = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=",
                 "-c", "submodule.recurse=false", "-c", f"protocol.file.allow={'always' if allow_file else 'never'}",
@@ -387,8 +415,11 @@ class FilesService:
                 "-c", "core.untrackedCache=false", "-c", "transfer.fsckObjects=true"]
         if identity:
             safe += ["-c", f"user.name={identity[0]}", "-c", f"user.email={identity[1]}"]
-        r = subprocess.run(["git", f"--git-dir={gd}", f"--work-tree={tree}", *safe, *args],
-                           capture_output=True, text=True, env=_git_env(tree), cwd=tree)
+        argv = ["git", f"--git-dir={gd}", f"--work-tree={tree}", *safe, *args]
+        if timeout is not None:
+            r = _bounded(argv, env=_git_env(tree), cwd=tree, timeout=timeout, cap=cap or OUT_CAP)
+        else:
+            r = subprocess.run(argv, capture_output=True, text=True, env=_git_env(tree), cwd=tree)
         if check and r.returncode != 0:
             raise Refused(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[-400:]}")
         return r
@@ -415,9 +446,18 @@ class FilesService:
             if r.returncode != 0:
                 raise Refused(f"git init failed: {r.stderr.strip()[-300:]}")
             self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{base}:refs/remotes/origin/{base}", allow_file=True)
-            self._git(tree, "checkout", "-q", "-b", branch, f"refs/remotes/origin/{base}")
+            # A bundle tw-git made with this branch in it (tw_git base with
+            # branch) opens the tree at that branch's head (Ops #311).
+            heads = self._git(tree, "bundle", "list-heads", str(bundle), allow_file=True).stdout.split()
+            start = f"refs/remotes/origin/{base}"
+            if f"refs/heads/{branch}" in heads:
+                self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                          allow_file=True)
+                start = f"refs/remotes/origin/{branch}"
+            self._git(tree, "checkout", "-q", "-b", branch, start)
             head = self._git(tree, "rev-parse", "HEAD").stdout.strip()
-        out = {"tree": f"{repo} {tree.name}", "branch": branch, "base": base, "head": head}
+        out = {"tree": f"{repo} {tree.name}", "branch": branch, "base": base, "head": head,
+               "from": "branch" if start != f"refs/remotes/origin/{base}" else "base"}
         if finished:
             out["removed"] = finished
         return out
@@ -492,10 +532,17 @@ class FilesService:
         if not pattern or len(pattern) > 500:
             raise Refused("search takes a pattern of up to 500 characters")
         with self._lock(bot):
-            r = self._git(tree, "grep", "-n", "-I", "--no-color", "--untracked", "-e", pattern, "--", check=False)
-        if r.returncode not in (0, 1):
+            try:
+                r = self._git(tree, "grep", "-n", "-I", "--no-color", "--untracked", "-e", pattern, "--", check=False,
+                              timeout=SEARCH_SECONDS, cap=OUT_CAP)
+            except subprocess.TimeoutExpired:
+                raise Refused(f"search ran past {SEARCH_SECONDS} seconds and was stopped, so nothing else of yours "
+                              "waits behind it: a pattern like '.*' on a file that is one long line (a big JSON "
+                              "file) takes far longer than that; narrow the pattern, or read that file in parts "
+                              "with read's offset and limit") from None
+        if r.returncode not in (0, 1) and not r.cut:
             raise Refused(f"search failed: {r.stderr.strip()[-300:]}")
-        return {"matches": r.stdout[:OUT_CAP], "cut": len(r.stdout) > OUT_CAP}
+        return {"matches": r.stdout[:OUT_CAP], "cut": r.cut or len(r.stdout) > OUT_CAP}
 
     def commit(self, caller: str, args: dict) -> dict:
         bot, repo, tree = self._tree(args)
@@ -560,17 +607,10 @@ class FilesService:
         for form in self.cfg["check_commands"]:
             if len(form) != len(cmd):
                 continue
-            ok = True
-            for want, got in zip(form, cmd):
-                if "{name}" in want:
-                    pre, post = want.split("{name}")
-                    mid = got[len(pre):len(got) - len(post)] if got.startswith(pre) and got.endswith(post) else ""
-                    ok = ok and bool(NAME.fullmatch(mid)) and len(got) == len(pre) + len(mid) + len(post)
-                else:
-                    ok = ok and want == got
-            if ok:
+            if all(_word(want).fullmatch(got) for want, got in zip(form, cmd)):
                 return cmd
-        raise Refused("a check runs one harness in the forms CLAUDE.md names, Check-Words.ps1, or one of the two "
+        raise Refused("a check runs one harness in the forms CLAUDE.md names, from tests or a product's own tests "
+                      "folder (game/tests), Check-Words.ps1, or one of the two "
                       "builders (node scripts/dev/Build-Gamemode.js, python3 scripts/mods/Add-ContentRecords.py); "
                       "nothing else")
 
@@ -633,7 +673,17 @@ def check_argv(policy: Policy, bot: str, tree: str, cmd: list[str]) -> list[str]
     }
     argv = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--service-type=exec",
             f"--uid={user}", f"--gid={group}", "--slice=tw-sandbox.slice", f"--working-directory={tree}",
-            "--setenv=HOME=/tmp", "--setenv=PATH=/usr/local/bin:/usr/bin:/bin"]
+            "--setenv=HOME=/tmp", "--setenv=PATH=/usr/local/bin:/usr/bin:/bin",
+            # The tree is tw-files', the check runs as the Bot's execution
+            # user, and git refuses a repository another uid owns ("dubious
+            # ownership"), so no harness that reads the tree through git got a
+            # result (Ops #284, 10 Nov 2026: test-4161-package-notices.ps1's
+            # git ls-files). This one tree, by its own path, as command-line
+            # config, the only scope git reads safe.directory from besides
+            # the system and global files. It grants nothing the check does
+            # not have already: it runs this tree's own code as that user.
+            "--setenv=GIT_CONFIG_COUNT=1", "--setenv=GIT_CONFIG_KEY_0=safe.directory",
+            f"--setenv=GIT_CONFIG_VALUE_0={tree}"]
     for k, v in props.items():
         argv += ["-p", f"{k}={v}"]
     return argv + ["--", *cmd]
@@ -643,6 +693,51 @@ def _git_env(tree: Path) -> dict:
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tree), "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
             "LC_ALL": "C.UTF-8"}
+
+
+def _bounded(argv: list[str], *, env: dict, cwd: Path, timeout: float, cap: int) -> subprocess.CompletedProcess:
+    """Run argv for at most timeout seconds, keeping at most cap bytes of its
+    output. Past either, it is killed: TimeoutExpired past the time; past the
+    cap, what was read comes back with cut set (a search for '.*' would
+    otherwise copy every line of the tree into the broker's memory)."""
+    import selectors
+    import time
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=env, cwd=cwd)
+    out, err, cut = bytearray(), bytearray(), False
+    deadline = time.monotonic() + timeout
+    sel = selectors.DefaultSelector()
+    sel.register(p.stdout, selectors.EVENT_READ, out)
+    sel.register(p.stderr, selectors.EVENT_READ, err)
+    try:
+        while sel.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _ in sel.select(left):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fileobj)
+                    continue
+                key.data.extend(chunk)
+            if len(out) > cap:
+                cut = True
+                break
+        if cut:
+            p.kill()
+        p.wait(timeout=max(deadline - time.monotonic(), 1))
+    except BaseException:
+        p.kill()
+        p.wait()
+        raise
+    finally:
+        sel.close()
+        p.stdout.close()
+        p.stderr.close()
+    r = subprocess.CompletedProcess(argv, p.returncode, out[:cap + 1].decode(errors="replace"),
+                                    err[-4000:].decode(errors="replace"))
+    r.cut = cut
+    return r
 
 
 def _run(argv: list[str], timeout: int) -> subprocess.CompletedProcess:

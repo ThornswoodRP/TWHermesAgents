@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Grok Bot's $BROWSER on the VM (run-app). There is no browser here: the
+# app's sign-in link goes on the screen's page as sign-in.html, for Patrick to
+# open on his own phone or computer, where he is signed in to Grok Bot. The
+# app then sees the sign-in by asking xAI's server, as it does on any desktop.
+# Only an https link is taken, and it is written escaped.
+set -euo pipefail
+url="${1:-}"
+[[ "$url" =~ ^https://[A-Za-z0-9.-]+(/[^[:space:]]*)?$ ]] || { echo "open-url takes one https link, not '$url'" >&2; exit 2; }
+esc="$(python3 -I -c 'import html,sys; print(html.escape(sys.argv[1], quote=True))' "$url")"
+mkdir -p "$HOME/web"
+tmp="$(mktemp "$HOME/web/.sign-in.XXXXXX")"
+cat > "$tmp" <<HTML
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grok lanes: sign in</title>
+<p>Written $(date -u +%Y-%m-%dT%H:%M:%SZ). Open this link where you are signed in to Grok Bot, and approve:</p>
+<p><a href="$esc" rel="noreferrer">$esc</a></p>
+HTML
+chmod 0644 "$tmp"
+mv -f "$tmp" "$HOME/web/sign-in.html"
