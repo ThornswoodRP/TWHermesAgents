@@ -299,6 +299,28 @@ class Polling(unittest.TestCase):
         status, _, body = s.call("POST", "/pair", body={"code": "x" * 70000})
         self.assertEqual(status, 413)
 
+    def test_a_client_still_sending_a_big_body_reads_the_refusal(self):
+        # The 413 goes out before the body is read. The server reads what it
+        # was promised before it closes, so the client can finish sending and
+        # read the answer: a close with bytes unread sends a reset, which threw
+        # the answer away on Windows (test_sizes, WinError 10053).
+        s = Served(self)
+        body = b"x" * 70000
+        con = socket.create_connection(("127.0.0.1", s.port), timeout=10)
+        self.addCleanup(con.close)
+        con.sendall(b"POST /api/v1/pair HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: %d\r\n\r\n" % len(body) + body[:30000])
+        got = b""
+        while b"\r\n\r\n" not in got:
+            got += con.recv(4096)
+        head, _, rest = got.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.0 413") or head.startswith(b"HTTP/1.1 413"), head)
+        threading.Event().wait(0.3)  # the server has answered; without the fix it has closed by now
+        con.sendall(body[30000:])
+        while chunk := con.recv(4096):
+            rest += chunk
+        self.assertEqual(json.loads(rest)["error"], "too_big")
+
 
 class Operator(unittest.TestCase):
     def run_cli(self, *argv: str) -> tuple[int, str, str]:

@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +44,9 @@ from .voice import MAX_AUDIO, SOCKET as VOICE_SOCKET, Voice
 
 PREFIX = "/api/v1"
 MAX_REQUEST_BYTES = 64 * 1024
+# How much of a refused body is read before its connection closes (_read_what_was_sent).
+DRAIN_MOST = 32 * 1024 * 1024
+DRAIN_SECONDS = 5
 COOKIE = "tw_session"
 DEFAULT_PORT = 9135
 APP_DIR = Path(__file__).with_name("app")
@@ -567,7 +572,8 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
-        if not 0 <= length <= body_limit(urlsplit(self.path).path):
+        refused = not 0 <= length <= body_limit(urlsplit(self.path).path)
+        if refused:
             # The body is not read, so the connection cannot be used again.
             self.close_connection = True
             status, headers, out = _refusal(413, "too_big", "the request body is too big")
@@ -580,6 +586,31 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(out)))
         self.end_headers()
         self.wfile.write(out)
+        if refused:
+            self._read_what_was_sent(length)
+
+    def _read_what_was_sent(self, length: int) -> None:
+        """Reads the refused body before the socket closes, so the client gets the 413.
+
+        A socket closed with bytes it has not read sends a reset, not a close,
+        and the client loses the answer while it is still sending the body
+        (WinError 10053 on Windows). So the answer is finished first, then the
+        body the client promised is read and dropped. Up to DRAIN_MOST bytes and
+        DRAIN_SECONDS: a client that promises more is not waited for.
+        """
+        try:
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            end = time.monotonic() + DRAIN_SECONDS
+            left = min(max(length, 0), DRAIN_MOST)
+            while left > 0 and (wait := end - time.monotonic()) > 0:
+                self.connection.settimeout(wait)
+                got = self.rfile.read1(min(left, 65536))
+                if not got:
+                    break
+                left -= len(got)
+        except OSError:
+            pass  # the client went first: there is nothing left to read
 
     do_GET = _do
     do_POST = _do
