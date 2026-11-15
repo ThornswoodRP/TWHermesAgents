@@ -2,7 +2,8 @@
 
 A record is bound to what it approves (the repo, the PR or run, the exact
 commit) and to the card's revision. Text that says "Patrick approved" is never
-a record. A Main record is used once. Restoring the store from a backup kills
+a record. A Main record is used once (a merge record when its head merges,
+not when auto-merge goes on). Restoring the store from a backup kills
 every Main record in it, so an old approval can never be replayed.
 """
 

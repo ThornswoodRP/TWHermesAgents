@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.21.0
+version: 1.22.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -83,8 +83,15 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    call `tw_git merge` on it before he answers. Once he answers `authorize`,
    `tw_git merge` on that head with the card's id as `decision_id`. Without
    it tw_git refuses (Ops #276: it turned auto-merge on for Thornswood #5665
-   on 9 Nov 2026 and skymp #150 on 12 Nov 2026 with no answer). A new push
-   needs a new card.
+   on 9 Nov 2026 and skymp #150 on 12 Nov 2026 with no answer). His yes is
+   used when that head merges, not when auto-merge goes on: if the queue
+   drops it at the same head, `tw_git merge` again with the same card's id
+   (section 2, step 3) until the card expires, and never open a second
+   card for that head. Until 15 Nov 2026 the yes was spent at auto-merge
+   on, so Thornswood #5996 waited on a new card after the queue dropped it
+   on #5752's crash, though Patrick had already said yes to that head. A
+   new push needs a new card. Act on an answered card the same sweep it is
+   answered: a card left until it expires asks him twice.
 
 In ThornswoodRP/Thornswood-Ops:
 
@@ -165,7 +172,8 @@ CI_TIMEOUT.
    head stands. When the cause was not in the pull request but on main
    (a job main broke, fixed on main since), there is nothing for the owner
    to push: once main's fix has merged, `tw_git merge` at the same head
-   puts it on again, once, and says so in one comment naming main's fix
+   puts it on again, once, with the same Main card's id when one was
+   answered for that head, and says so in one comment naming main's fix
    (12 Nov 2026: #5856 left the queue on #5860's failure, which #5866
    fixed on main; until Ops #272 the merge op answered "already done").
    The hand-back comment for such a drop names the board issue that holds
@@ -591,6 +599,15 @@ in Decisions after he had run both by hand.
      closed without a merge, cancel the card and say that as the reason.
    - A card that a new card replaces is closed `superseded`, naming the new
      card.
+   For each card `my_cards` lists as answered, do what the answer says if
+   it is not done yet. A Main card answered `authorize` for a merge whose
+   pull request is still open, at the head the card names, and not on
+   auto-merge: `tw_git merge` at that head with the card's id now, and
+   `report_work_done`. The answer's wake can be missed (a turn that ended
+   on another task, a restart), and the card's link then sits until it
+   expires with his yes unused: on 15 Nov 2026 he had answered every card,
+   and #6053 and #6057 still showed as waiting on his Main card two days
+   after Bramble opened them.
 3. You close cards; you never answer one. Only Patrick answers.
 
 ## Every time
