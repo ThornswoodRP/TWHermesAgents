@@ -129,7 +129,8 @@ class MergeGreen(unittest.TestCase):
         self.assertEqual(on["workflow_run"]["workflows"], ["Guard rail tests"])
         self.assertNotIn("pull_request_target", text)
         self.assertNotIn("secrets.", text)
-        self.assertEqual(wf["permissions"], {"contents": "write", "pull-requests": "write", "checks": "read"})
+        # issues: write lets the merge close what "Closes #N" names (#126).
+        self.assertEqual(wf["permissions"], {"contents": "write", "pull-requests": "write", "issues": "write", "checks": "read"})
         steps = wf["jobs"]["merge"]["steps"]
         checkout = steps[0]
         self.assertEqual(checkout["with"], {"ref": "main", "persist-credentials": False})

@@ -5,8 +5,14 @@
 #
 # It runs main's own copy of the script, never a pull request's code: a
 # workflow_run job runs from the default branch, and the checkout below is
-# main with no credential kept. Its token can merge and delete a merged
-# branch here and nothing else; it reads no secret.
+# main with no credential kept. Its token can merge, delete a merged
+# branch and close the issues a merged pull request names here, and nothing
+# else; it reads no secret.
+#
+# issues: write (#126). GitHub closes the issue a "Closes #N" names as the
+# account that merged, so with no issues permission on this token every
+# merge it made left its issue open: #87 and #77, #79 and #76, #164 and
+# #162 (9 to 12 Nov), each closed by hand or never.
 name: Merge green pull requests
 on:
   workflow_run:
@@ -16,6 +22,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   checks: read
 concurrency:
   group: merge-green
