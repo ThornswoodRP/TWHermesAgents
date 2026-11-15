@@ -12,12 +12,21 @@ merged with a merge commit at that exact head (a push after the checks
 stops it), and its branch is deleted once every pull request stacked on
 it is aimed at main, so those are looked at in the next pass. Nothing is retried: a
 pull request that is not ready is said and left for the next run.
+
+A merge it makes closes the issues the pull request's body names with a
+closing keyword (Closes #N, Fixes #N, Resolves #N and their other forms), here
+in this repository. GitHub does that for a merge made by a person, and never
+for one made with an Actions token (#126): of the 27 pull requests this job
+merged from 4 to 15 Nov 2026 that said Closes, not one closed its issue, even
+with issues: write on the token (#141 and #136, 15 Nov), while #113, which
+Patrick merged on 10 Nov, closed #101 and #102 two seconds after.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -25,6 +34,8 @@ import urllib.request
 from urllib.parse import quote
 
 REQUIRED = ("Guard rail tests (VM's Python)", "Guard rail tests (One's Python)")
+# GitHub's closing keywords, then this repository's issue: #N or owner/name#N.
+CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?[ \t]+(?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.IGNORECASE)
 BAD = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 
 
@@ -67,6 +78,35 @@ def green(repo, sha, call):
         if not any(r.get("status") == "completed" and r.get("conclusion") == "success" for r in by_name.get(name, [])):
             return False, f"{name} has not passed on {sha[:7]}"
     return True, ""
+
+
+def closes(repo, body):
+    """The issues of repo a pull request's body names with a closing keyword, in order."""
+    out = []
+    for m in CLOSES.finditer(body or ""):
+        if (m.group(1) is None or m.group(1).lower() == repo.lower()) and int(m.group(2)) not in out:
+            out.append(int(m.group(2)))
+    return out
+
+
+def close_what_it_names(repo, p, call, say):
+    """After the merge, each issue the pull request says it closes, as GitHub would."""
+    n = p["number"]
+    for i in closes(repo, p.get("body")):
+        status, issue = call("GET", f"/repos/{repo}/issues/{i}")
+        if status != 200:
+            say(f"  #{i}, which #{n} closes, did not read ({status}); it stays open")
+            continue
+        if issue.get("pull_request"):
+            say(f"  #{i}, which #{n} names, is a pull request; left as it is")
+            continue
+        if issue.get("state") != "open":
+            continue
+        status, body = call("PATCH", f"/repos/{repo}/issues/{i}", {"state": "closed", "state_reason": "completed"})
+        if status != 200:
+            say(f"  #{i}, which #{n} closes, was not closed ({status}): {body.get('message', '')}")
+        else:
+            say(f"  #{i} closed: #{n} merged")
 
 
 def mergeable(repo, number, call, wait=time.sleep):
@@ -112,6 +152,7 @@ def one_pass(repo, call, say, wait=time.sleep):
             continue
         say(f"#{n} merged at {sha[:7]}")
         merged += 1
+        close_what_it_names(repo, p, call, say)
         ref = p["head"]["ref"]
         # GitHub aims a stacked pull request at main only when its own
         # delete-on-merge removes the branch; deleting it through the API
