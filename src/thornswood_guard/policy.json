@@ -571,7 +571,7 @@
         ],
         [
           "node",
-          "scripts/dev/Build-Gamemode.js"
+          "scripts/dev/{builder}.js"
         ],
         [
           "python3",

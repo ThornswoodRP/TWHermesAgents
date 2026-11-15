@@ -243,6 +243,32 @@ class AutoMerges(unittest.TestCase):
             self.assertFalse(v.allowed)
             self.assertIn("its owner puts it on auto-merge", v.reason)
 
+    def test_a_claude_sessions_box_change_goes_on_once_patrick_authorized_it(self):
+        # Ops #353 (Patrick's A on his page, 15 Nov 2026, "Claude branches
+        # wait for the card"): a cloud thread opens its pull request with
+        # Patrick's sign-in, so Thornswood's auto-merge holds a claude/ branch
+        # that changes what runs on the box, and Bramble puts it on once he
+        # authorized its head on a Main card.
+        verbs = ["scripts/release/New-NexusRevision.ps1", "scripts/release/nexus-collection.js"]
+        p = pr(head_ref="claude/project-thread-5id8fi", author_bot=None, author_login="EvilPatrick06",
+               files=["scripts/release/nexus-collection.js"])
+        v = self.merge(p=p, verb_paths=verbs)
+        self.assertFalse(v.allowed)
+        self.assertIn(f"merge:{APP}@{HEAD}#42", v.reason)
+        decide(self.s, id="thread-yes", kind="merge", pr_number=42)
+        v = self.merge(p=p, verb_paths=verbs, decision_id="thread-yes")
+        self.assertTrue(v.allowed, v.reason)
+        self.assertIn("auto-merge on", v.reason)
+        # The card does not reach past what it is for.
+        for other in (pr(head_ref="claude/project-thread-5id8fi", author_bot=None, author_login="EvilPatrick06",
+                         files=["game/gamemode/a.ts"]),
+                      pr(head_ref="patrick-nexus", author_bot=None, author_login="EvilPatrick06",
+                         files=["scripts/release/nexus-collection.js"]),
+                      pr(head_ref="claude/x", author_bot=None, author_login="someone-outside",
+                         files=["scripts/release/nexus-collection.js"])):
+            v = self.merge(p=other, verb_paths=verbs, decision_id="thread-yes")
+            self.assertFalse(v.allowed, other.head_ref + " " + other.author_login)
+
     def test_a_robots_pr_goes_on_auto_merge_like_a_bots(self):
         for login, ref in (("dependabot[bot]", "dependabot/github_actions/actions-abc"),
                            ("thornswood-pin-robot[bot]", "engine-pin/next")):

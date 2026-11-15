@@ -27,7 +27,7 @@ from helpers import FIXTURES, policy
 
 from test_policy_service import service as policy_service
 
-from thornswood_brokers.git_service import GitService
+from thornswood_brokers.git_service import READ_MOST, GitService
 from thornswood_brokers.github_api import GitHub, Response
 from thornswood_brokers.wire import Refused
 
@@ -807,6 +807,29 @@ class PatrickMerges(unittest.TestCase):
         sha = w2.green_pr(repo=APP, checks=False, files=["keys/box/patrick.pub"])
         self.assertTrue(w2.merge(sha=sha, repo=APP)["auto_merge"], "main names no verb that reads it")
 
+    def test_a_file_a_nexus_verb_runs_is_refused_once_its_reads_names_it(self):
+        """Ops #329: Thornswood #6007 (nexus-collection.js) and #5992
+        (collection-permissions.js) changed files New-NexusRevision runs, and
+        tw_git merge turned auto-merge on for both with no card, because the
+        Nexus verb list named only New-NexusRevision.ps1. Thornswood #6184
+        puts every file a verb runs in its reads; this holds that a file
+        named there is refused like the verb's own script."""
+        runs = ["scripts/release/collection-permissions.js", "scripts/release/nexus-collection.js"]
+        for path in runs:
+            before = self.world(verbs=False)
+            before.fake.contents[(APP, "main", "scripts/release/nexus-verbs.json")] = json.dumps(
+                {"verbs": {"New-NexusRevision": {"script": "scripts/release/New-NexusRevision.ps1"}}}).encode()
+            sha = before.green_pr(repo=APP, checks=False, files=[path])
+            self.assertTrue(before.merge(sha=sha, repo=APP)["auto_merge"], "the list as it was let it through")
+            w = self.world(verbs=False)
+            w.fake.contents[(APP, "main", "scripts/release/nexus-verbs.json")] = json.dumps(
+                {"verbs": {"New-NexusRevision": {"script": "scripts/release/New-NexusRevision.ps1", "reads": runs}}}).encode()
+            sha = w.green_pr(repo=APP, checks=False, files=[path])
+            self.refused(w, APP, sha, f"changes {path}")
+            self.assertEqual(w.fake.auto_merged, [])
+            did = self.card(w, APP, sha)
+            self.assertTrue(w.merge(sha=sha, repo=APP, decision_id=did)["auto_merge"], "Patrick's authorize at its head lets it on")
+
     def test_patricks_authorize_at_the_head_puts_it_on_once(self):
         w = self.world()
         sha = w.green_pr(repo=FORK, branch="wisp/2760-pr-write-guard", checks=False,
@@ -1289,7 +1312,11 @@ class PullRequestsAndIssues(unittest.TestCase):
         self.assertTrue(w.git.label("hermes", args)["done"])
         self.assertIn("claimed: Wisp", [l["name"] for l in w.fake.issues[(APP, 4482)]["labels"]])
 
-    def test_a_wait_counts_only_while_it_is_the_newest_comment(self):
+    def test_a_wait_holds_until_a_later_comment_says_it_is_over(self):
+        # 12 Nov 2026, 3:20 PM Mountain: a known issue note went onto many
+        # issues, and #4511 and #4507 showed as pickable with their waits
+        # still open, since the wait was read from the newest comment alone
+        # (Ops #327). A comment that says nothing about the wait leaves it.
         w = World()
         w.fake.add_issue(APP, 4482)
         w.fake.add_issue(APP, 4400)
@@ -1298,11 +1325,22 @@ class PullRequestsAndIssues(unittest.TestCase):
         with self.assertRaises(Refused) as e:
             w.git.label("hermes", args)
         self.assertIn("ThornswoodRP/Thornswood#4400", str(e.exception))
-        w.fake.comments[(APP, 4482)].append({"id": 2, "body": "Waits on PR #4400 now."})
+        w.fake.comments[(APP, 4482)].append({"id": 2, "body": "Known issue: the forge window can open twice."})
         with self.assertRaises(Refused):
             w.git.label("hermes", args)
-        w.fake.comments[(APP, 4482)].append({"id": 3, "body": "Patrick: go ahead without it."})
+        w.fake.comments[(APP, 4482)].append({"id": 3, "body": "No longer waits on #4400: Patrick said go ahead "
+                                                              "without it."})
         self.assertTrue(w.git.label("hermes", args)["done"])
+
+    def test_the_newest_stated_wait_replaces_an_older_one(self):
+        w = World()
+        for n in (4482, 4400, 4401):
+            w.fake.add_issue(APP, n)
+        w.fake.issues[(APP, 4400)]["state"] = "closed"
+        w.fake.comments[(APP, 4482)] = [{"id": 1, "body": "Waits on #4401."}, {"id": 2, "body": "Waits on #4400 now."},
+                                        {"id": 3, "body": "A note."}]
+        args = {"bot": "bramble", "repo": APP, "task": "t", "number": 4482, "label": "claimed: Wisp", "action": "add"}
+        self.assertTrue(w.git.label("hermes", args)["done"], "#4400 closed, and the wait on #4401 was replaced")
 
     def test_a_wait_on_a_repo_tw_git_does_not_read_is_refused(self):
         w = World()
@@ -1470,8 +1508,8 @@ class PullRequestsAndIssues(unittest.TestCase):
                                 "repository": {"nameWithOwner": APP}, "author": {"login": "EvilPatrick06"},
                                 "labels": {"nodes": [{"name": "area: Gamemode"}]}, "assignees": {"nodes": []}}}
 
-        w.fake.board_items = [item(n) for n in (4507, 4518, 4536, 4600, 4601, 4602)]
-        for n in (4507, 4518, 4536, 4600, 4601, 4602, 5754):
+        w.fake.board_items = [item(n) for n in (4507, 4518, 4536, 4600, 4601, 4602, 4603)]
+        for n in (4507, 4518, 4536, 4600, 4601, 4602, 4603, 5754):
             w.fake.add_issue(APP, n)
         w.fake.add_issue(OPS, 306)
         w.fake.add_issue(OPS, 307)
@@ -1480,19 +1518,46 @@ class PullRequestsAndIssues(unittest.TestCase):
         w.fake.comments[(APP, 4518)] = [{"body": "Waits on Thornswood-Ops #306. The cause can't be named yet."}]
         w.fake.comments[(APP, 4536)] = [{"body": "Waits on Thornswood-Ops #307, a broker gap."}]
         w.fake.comments[(APP, 4600)] = [{"body": "Waits on #5754."}, {"body": "Measured: it no longer waits."}]
+        w.fake.comments[(APP, 4601)] = [{"body": "Waits on #5754."}, {"body": "Known issue: posted to the forum."}]
         out = w.git.board("hermes", {"bot": "bramble", "eligible": True, "limit": 3})
-        self.assertEqual([r["number"] for r in out["issues"]], [4536, 4600, 4601], "#307 closed, so #4536 is free")
+        self.assertEqual([r["number"] for r in out["issues"]], [4536, 4600, 4602], "#307 closed, so #4536 is free")
         self.assertEqual([(r["number"], r["waits_on"]) for r in out["waiting"]],
-                         [(4507, f"{APP}#5754"), (4518, f"{OPS}#306")])
+                         [(4507, f"{APP}#5754"), (4518, f"{OPS}#306"), (4601, f"{APP}#5754")])
         for n in (4507, 4518):
             with self.subTest(n=n), self.assertRaises(Refused):
                 w.git.label("hermes", {"bot": "wisp", "repo": APP, "task": str(n), "number": n,
                                        "label": "claimed: Wisp", "action": "add"})
         # Only what a pick needs is read: once limit is reached, the rest is not.
         read = [p for m, p, _ in w.fake.calls if m == "GET" and "/comments" in p]
-        self.assertFalse([p for p in read if "/issues/4602/" in p], read)
+        self.assertFalse([p for p in read if "/issues/4603/" in p], read)
         everything = w.git.board("hermes", {"bot": "bramble", "limit": 10})
         self.assertNotIn("waiting", everything, "only an eligible read looks at waits")
+
+    def test_a_log_too_big_for_a_reply_comes_back_as_the_lines_asked_for(self):
+        # Ops #266: a job's log (252 KB to 756 KB) went over Hermes's inline
+        # size, was kept where the guard lets no Bot read, and nobody could
+        # see why a harness failed.
+        w = World()
+        path = f"/repos/{APP}/actions/jobs/129213872464/logs"
+        lines = [f"2026-11-10T05:00:{i % 60:02d}Z step {i}: building part {i}" for i in range(20000)]
+        lines[12345] = "2026-11-10T05:12:00Z FAIL test-5630: copy 1 said: plugins.txt is missing"
+        w.fake.texts[path] = "\n".join(lines)
+        args = {"bot": "rift", "repo": APP, "path": path}
+        out = w.git.read("hermes", args)
+        self.assertLessEqual(len(out["body"]), READ_MOST)
+        self.assertEqual(out["lines"], 20000)
+        self.assertTrue(out["body"].endswith("20000: " + lines[-1]), "the end of a log is where it failed")
+        self.assertIn("Pass match", out["cut"])
+        hit = w.git.read("hermes", {**args, "match": r"\bFAIL\b", "around": 2})
+        self.assertEqual(hit["body"].splitlines(), [f"{n + 1}: {lines[n]}" for n in range(12343, 12348)])
+        self.assertNotIn("cut", hit)
+        tail = w.git.read("hermes", {**args, "tail": 3})
+        self.assertEqual(tail["body"].splitlines()[0], "19998: " + lines[19997])
+        for bad in ({"match": "("}, {"match": ""}, {"tail": -1}, {"around": "x"}):
+            with self.subTest(bad=bad), self.assertRaises(Refused):
+                w.git.read("hermes", {**args, **bad})
+        w.fake.texts[path] = "short log\nok"
+        self.assertEqual(w.git.read("hermes", args), {"body": "short log\nok"}, "a log that fits comes whole")
 
     def test_the_board_reads_one_field_across_the_whole_board(self):
         # 9 Nov 2026: the first 100 eligible issues held none of Wisp's, 181 were open in its field.

@@ -162,6 +162,7 @@ const SAID = {
   passkey_unavailable: 'Passkeys are not set up on the core yet.',
   no_origin: 'The core does not know its address yet, so passkeys cannot work.',
   offline: 'Offline. Nothing was sent. Turn Tailscale on and try again.',
+  cut_off: 'The core\'s answer was cut off on the way. Asking again is the same ask, never a second one.',
   voice_off: 'Dictation is not running on the VM.',
   voice_slow: 'Whisper on the VM took too long with that. Try a shorter recording.',
 }
@@ -187,7 +188,12 @@ async function call(method, path, body) {
     return { status: 0, body: { error: 'offline' } }
   }
   let out = {}
-  try { out = await resp.json() } catch (err) { out = {} }
+  try { out = await resp.json() } catch (err) {
+    // A 200 whose body never arrived (the page being left, or the connection cut part way) is no answer, the same
+    // as a request that never reached the core. Taken as a 200 with an empty body, a chat kept that empty body as
+    // its newest page, and every later open of that chat threw before it drew (#138, #123).
+    if (resp.ok) return { status: 0, body: { error: 'cut_off' } }
+  }
   return { status: resp.status, body: out }
 }
 
@@ -2159,6 +2165,18 @@ function branchMade(rows) {
 }
 
 // While an undo or a branch waits, the chat is read again every two seconds, and drawn again once it is done.
+// Whether drawing the view again now would get in his way. The open chat's own box does not: a chat drawn again keeps
+// the box and what is in it (showChat). Another field with the focus, a box elsewhere with words in it, or a setting
+// changed and not yet saved does. The 15-second read and every watch below go by this one rule (Patrick, 2 Nov:
+// "Waiting to send" stayed on a message long after it had gone while the keyboard was up).
+const CHAT_BOX = '#view .dock .composer textarea'
+function holdsRedraw() {
+  const a = document.activeElement
+  return (!!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !a.matches(CHAT_BOX)) ||
+    [...document.querySelectorAll('textarea')].some(t => t.value && !t.matches(CHAT_BOX)) ||
+    !!document.querySelector('select[data-dirty]')
+}
+
 let rewindWatch = null
 function watchRewind(path, seqNow, id) {
   clearTimeout(rewindWatch)
@@ -2167,11 +2185,23 @@ function watchRewind(path, seqNow, id) {
     const r = await call('GET', path)
     if (seqNow !== viewSeq || r.status !== 200) return
     const row = (r.body.rewinds || []).find(x => x.id === id)
-    if (!row || !inFlight(row)) {
-      const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-      if (!typing) return route()
-    }
+    if ((!row || !inFlight(row)) && !holdsRedraw()) return route()
     watchRewind(path, seqNow, id)
+  }, 2000)
+}
+
+// A reaction he asked for shows dashed until Hermes has it. While one waits, the chat is read every 2 seconds, as
+// for a rewind, so it shows as set when it is, not at the next 15-second read.
+const reactionWaits = w => w.status === 'queued' || w.status === 'leased'
+let reactionWatch = null
+function watchReaction(path, seqNow) {
+  clearTimeout(reactionWatch)
+  reactionWatch = setTimeout(async () => {
+    if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
+    const r = await call('GET', path)
+    if (seqNow !== viewSeq || r.status !== 200) return
+    if (!(r.body.reactions || []).some(reactionWaits) && !holdsRedraw()) return route()
+    watchReaction(path, seqNow)
   }, 2000)
 }
 
@@ -2592,7 +2622,11 @@ const threads = {}       // gw:sid -> { newest, older, olderMore, note }
 // fetched only while it stayed open, and Android closes it. The copy is this
 // browser's own storage for this app, the newest KEPT_MESSAGES of the KEPT_CHATS
 // chats opened last; signing out deletes it.
-const KEPT = 'hermes.kept.v1'
+const KEPT = 'hermes.kept.v2'
+// v1 copies could hold an empty page from an answer cut off on the way (#138), which broke that chat for good,
+// so they are dropped once and each chat is read from Hermes again.
+const KEPT_OLD = 'hermes.kept.v1'
+try { localStorage.removeItem(KEPT_OLD) } catch (e) {}
 const KEPT_CHATS = 30
 const KEPT_MESSAGES = 150
 
@@ -2681,8 +2715,7 @@ function followStart(gw, v, seqNow) {
   clearTimeout(startWatch)
   startWatch = setTimeout(() => {
     if (seqNow !== viewSeq || document.visibilityState !== 'visible' || started[gw] !== mid) return
-    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-    if (typing) return followStart(gw, v, seqNow)
+    if (holdsRedraw()) return followStart(gw, v, seqNow)
     route()
   }, 2000)
   return false
@@ -2983,26 +3016,25 @@ function watchLive(mid, seqNow) {
   })()
 }
 
-// While a turn runs in the open chat, its line follows every two seconds, reading only this chat's state;
-// when the turn ends the chat is drawn again with the reply. A message still waiting to go is watched the
-// same way, so the chat is drawn again the moment it is taken and its turn's line shows (2 Nov: it waited
-// for the next 15-second read). One watch at a time, ended by any new page.
+// While any message of his in the open chat waits or runs, the chat reads its own state every two seconds and is
+// drawn again when any of them changes: taken from the queue, a question opened or settled, or a turn over with
+// its reply. The running turn's line follows meanwhile (2 Nov: a message waited for the next 15-second read).
+// All of them, not one: a message he sent while an older one still waited was not followed, and its reply came
+// only at the next 15-second read. One watch at a time, ended by any new page.
+const waiting = m => m.status === 'queued' || m.status === 'leased'
+const mineSig = mine => JSON.stringify(mine.filter(waiting).map(m => [m.id, m.status, inQueue(m), askSig(m.doing)]))
 let turnWatch = null
-function watchTurn(path, seqNow, turnId, name, was = 'leased', queued = false, drawn = '') {
+function watchTurn(path, seqNow, sig, turnId) {
   clearTimeout(turnWatch)
   turnWatch = setTimeout(async () => {
     if (seqNow !== viewSeq || document.visibilityState !== 'visible') return
     const r = await call('GET', path)
     if (seqNow !== viewSeq || r.status !== 200) return
-    const m = r.body.mine.find(x => x.id === turnId)
-    // Taken from Hermes's queue to run, or a question opened or settled: drawn again.
-    if (!m || m.status !== was || (was === 'leased' && inQueue(m) !== queued) || askSig(m.doing) !== drawn) {
-      const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)
-      if (!typing) return route()
-    }
+    if (mineSig(r.body.mine) !== sig && !holdsRedraw()) return route()
+    const m = turnId && r.body.mine.find(x => x.id === turnId)
     const line = document.querySelector('#view .msg.working .doing')
-    if (line && m && was === 'leased' && !queued) line.textContent = doingWords(m.doing)
-    watchTurn(path, seqNow, turnId, name, was, queued, drawn)
+    if (line && m) line.textContent = doingWords(m.doing)
+    watchTurn(path, seqNow, sig, turnId)
   }, 2000)
 }
 
@@ -3209,11 +3241,10 @@ async function ownChatView(gw, sid) {
     if (seqNow === viewSeq) {
       showChat('own:' + key, top, list, dock, items)
       if (turn) watchLive(turn.id, seqNow)
-      const waits = turn || v.mine.find(inQueue) || v.mine.find(m => m.status === 'queued')
-      if (waits) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, waits.id, name, waits.status, inQueue(waits),
-        waits === turn ? askSig(turn.doing) : '')
+      if (v.mine.some(waiting)) watchTurn(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, mineSig(v.mine), turn && turn.id)
       const rw = (v.rewinds || []).find(inFlight)
       if (rw) watchRewind(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow, rw.id)
+      if ((v.reactions || []).some(reactionWaits)) watchReaction(`/own/${gw}/${encodeURIComponent(sid)}`, seqNow)
     }
   }
   render()
@@ -3848,10 +3879,10 @@ async function chatView(target, tab, sid, thread) {
         if (box) box.focus()
       }
       if (turn && !room) watchLive(turn.id, seqNow)
-      const waits = room ? null : turn || v.mine.find(m => m.status === 'queued')
-      if (waits) watchTurn('/chat/' + encodeURIComponent(v.target) + inSession, seqNow, waits.id, name, waits.status)
+      if (!room && v.mine.some(waiting)) watchTurn('/chat/' + encodeURIComponent(v.target) + inSession, seqNow, mineSig(v.mine), turn && turn.id)
       const rw = room ? null : (v.rewinds || []).find(inFlight)
       if (rw) watchRewind(chatPath + inSession, seqNow, rw.id)
+      if (!room && !sid && (v.reactions || []).some(reactionWaits)) watchReaction(chatPath, seqNow)
     }
   }
   render()
@@ -3860,9 +3891,7 @@ async function chatView(target, tab, sid, thread) {
   t.newest = p.body
   keepThread(key, t)
   // Drawn again under a box being typed in, which stays as it is (showChat).
-  const other = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) &&
-    !document.activeElement.matches('.dock .composer textarea')
-  if (!other) render()
+  if (!holdsRedraw()) render()
 }
 
 // ── alerts (step 5) ───────────────────────────────────────────────────────
@@ -4893,17 +4922,11 @@ function mainView(path) {
 async function poll() {
   if (!csrf || document.visibilityState !== 'visible' || answering || document.querySelector('.sheet-back')) return
   const path = location.pathname
-  // A chat view reads itself again. Its messages are drawn again under the box Patrick is typing in, and
-  // the box stays as it is (showChat). Any other box with focus or words in it (on the desktop, the chat
-  // list's New chat box is on the page too) holds the redraw.
-  const chatBox = '#view .dock .composer textarea'
-  const writing = [...document.querySelectorAll('textarea')].some(t => t.value && !t.matches(chatBox)) ||
-    !!document.querySelector('select[data-dirty]')
-  // The Bots and rooms lists too: a Bot's answer moves its row to the top and shows as its line.
+  // A chat view reads itself again, unless that would get in his way (holdsRedraw: on the desktop, the chat
+  // list's New chat box is on the page too). The Bots and rooms lists too: a Bot's answer moves its row to
+  // the top and shows as its line.
   if (/^\/m\/(bramble$|room$|rooms$|rooms\/|bots$|bots\/|hermes\/)/.test(path)) {
-    const other = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) &&
-      !document.activeElement.matches(chatBox)
-    if (!writing && !other) route()
+    if (!holdsRedraw()) route()
     return
   }
   const r = await call('GET', '/changes?since=' + seq)

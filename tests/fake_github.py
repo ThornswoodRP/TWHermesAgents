@@ -47,6 +47,7 @@ class FakeGitHub:
         self.comments: dict[tuple[str, int], list[dict]] = {}
         self.contents: dict[tuple[str, str, str], bytes] = {}
         self.runs: list[dict] = []
+        self.texts: dict[str, object] = {}   # path -> a text answer, as a job's log
         self.board_items: list[dict] = []   # the org project's items, as GraphQL gives them
         self.repo_labels: dict[tuple[str, str], dict] = {}   # (repo, lower-case name) -> label
         self.calls: list[tuple[str, str, dict | None]] = []
@@ -157,6 +158,8 @@ class FakeGitHub:
         refused = self._pr_write_refused(method, path, token) or self._workflow_merge_refused(method, path, body, token)
         if refused:
             return refused
+        if method == "GET" and path in self.texts:  # a job's log, read as text
+            return Response(200, self.texts[path], {})
         if path == "/search/issues":
             resp = self._search(query.get("q", ""))
         else:

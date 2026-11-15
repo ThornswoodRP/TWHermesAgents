@@ -9,10 +9,10 @@
 # branch and close the issues a merged pull request names here, and nothing
 # else; it reads no secret.
 #
-# issues: write (#126). GitHub closes the issue a "Closes #N" names as the
-# account that merged, so with no issues permission on this token every
-# merge it made left its issue open: #87 and #77, #79 and #76, #164 and
-# #162 (9 to 12 Nov), each closed by hand or never.
+# issues: write (#126). GitHub never closes the issue a "Closes #N" names
+# when the merge is made with an Actions token, so merge_green.py closes
+# each one its merge finished: #87 and #77, #79 and #76, #164 and #162, and
+# #141 and #136 had all stayed open.
 name: Merge green pull requests
 on:
   workflow_run:

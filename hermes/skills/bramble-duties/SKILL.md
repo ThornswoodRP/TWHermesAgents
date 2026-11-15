@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.22.0
+version: 1.23.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -53,7 +53,15 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    robot's (Dependabot's, the pin robot's: the policy's `robot_authors`) are
    yours. A person's or a thread's is its owner's, who puts it on
    auto-merge; leave it alone, green or not. One from outside the team gets
-   the review in section 3, and never auto-merge.
+   the review in section 3, and never auto-merge. The exception is a Claude
+   session's (its branch is `claude/<what>`, opened with Patrick's sign-in)
+   that changes a file of step 5: Thornswood's auto-merge leaves it off,
+   and it is yours for its Main card alone (Patrick's A on his page, 15 Nov
+   2026, Ops #353: "Claude branches wait for the card"). Open the card for
+   its head as step 5 says, without a review or a comment of yours (the
+   thread owns its code), and once he answers `authorize`, `tw_git merge`
+   it with the card's id; tw_git refuses it without one. A conflict or a red
+   check on it is still its thread's.
 3. For each of those pull requests that is not a draft and has no auto-merge on
    (`auto_merge` is null), read it (`GET /repos/<repo>/pulls/<number>`). If
    its `mergeable` is false, it conflicts with its base: it goes back to its
@@ -87,7 +95,11 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    used when that head merges, not when auto-merge goes on: if the queue
    drops it at the same head, `tw_git merge` again with the same card's id
    (section 2, step 3) until the card expires, and never open a second
-   card for that head. Until 15 Nov 2026 the yes was spent at auto-merge
+   card for that head: `open_card` refuses one while a Main card for the
+   same release link is pending, or holds his yes unused and unexpired
+   with no `report_work_done`, and names that card, which is the one to
+   use (Ops #331: Thornswood #6048 got three Main cards for one head,
+   and he answered all three). Until 15 Nov 2026 the yes was spent at auto-merge
    on, so Thornswood #5996 waited on a new card after the queue dropped it
    on #5752's crash, though Patrick had already said yes to that head. A
    new push needs a new card. Act on an answered card the same sweep it is
@@ -548,10 +560,14 @@ work hours.
    comment names what it waits on ("Waits on #N"), and the worker gets its
    next issue now: a blocked worker is free, never "waiting" with its claim
    kept (9 Nov 2026: Wisp kept #4155 and sat idle from 9:21 AM on Ops #266).
-   An issue whose newest comment says it waits on an open issue is not
-   eligible until that issue closes. Write it as "Waits on" and the issue
-   (`#N` in the same repo, `Thornswood-Ops #N`, or `owner/repo#N`):
-   `tw_git label` reads the newest comment and refuses a claim while an
+   An issue whose newest comment about its wait says it waits on an open
+   issue is not eligible until that issue closes. Write it as "Waits on"
+   and the issue (`#N` in the same repo, `Thornswood-Ops #N`, or
+   `owner/repo#N`). A later comment that says nothing about the wait leaves
+   it (Ops #327: a known issue note cleared #4511's and #4507's waits on
+   12 Nov 2026); a comment that says "No longer waits" or "Waits on nothing"
+   ends it before the issue closes. `tw_git label` reads that comment and
+   refuses a claim while an
    issue it says the issue waits on is open (11 Nov 2026: #4482 was claimed
    again at 2:37 PM Mountain while Ops #275, which it waits on, was open),
    and `tw_git board` with eligible leaves it out, listing it under

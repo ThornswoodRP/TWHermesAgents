@@ -44,6 +44,9 @@ from .wire import Refused, call
 
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,60}")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+# A builder's name in Thornswood's scripts/dev: Build-Gamemode,
+# Build-MerchantGamemode, Build-PrWorkflow.
+BUILDER = re.compile(r"Build-[A-Z][A-Za-z0-9]{0,40}")
 
 
 def _word(want: str) -> re.Pattern:
@@ -52,11 +55,14 @@ def _word(want: str) -> re.Pattern:
     the top (game/tests, launcher/tests), where Thornswood keeps a product's
     harnesses beside its code (Thornswood #5341). Neither takes a dot or a
     second slash, so a form never reaches outside the tree; the rest of the
-    word is matched as written."""
+    word is matched as written. {builder} is a builder's file name without
+    its extension (BUILDER), with no dot or slash either."""
     out = []
-    for part in re.split(r"(\{name\}|\{tests\})", want):
+    for part in re.split(r"(\{name\}|\{tests\}|\{builder\})", want):
         if part == "{name}":
             out.append(NAME.pattern)
+        elif part == "{builder}":
+            out.append(BUILDER.pattern)
         elif part == "{tests}":
             out.append("(?:" + NAME.pattern + "/)?tests")
         else:
@@ -555,15 +561,67 @@ class FilesService:
             if not self.policy.own_branch(bot, branch):
                 raise Refused(f"the tree is on {branch}, not one of {self.policy.bot_name(bot)}'s branches")
             self._git(tree, "add", "-A")
-            names = self._git(tree, "diff", "--cached", "--name-only").stdout.split("\n")
+            merging = self._merging(tree)
+            if merging:
+                # A merge of the base: what the branch changes is measured
+                # against the base it takes in, and no conflict is left in it.
+                left = [line for line in self._git(tree, "diff", "--cached", "--check", merging,
+                                                    check=False).stdout.splitlines() if "conflict marker" in line]
+                if left:
+                    raise Refused("a conflict is not resolved yet: " + "; ".join(left[:5]))
+                names = self._git(tree, "diff", "--cached", "--name-only", merging).stdout.split("\n")
+            else:
+                names = self._git(tree, "diff", "--cached", "--name-only").stdout.split("\n")
             names = [n for n in names if n]
-            if not names:
+            if not names and not merging:
                 raise Refused("nothing to commit")
             if len(names) > self.cfg["max_changed_files"]:
                 raise Refused(f"{len(names)} files changed; a task changes at most {self.cfg['max_changed_files']}")
             self._git(tree, "commit", "-q", "--no-verify", "-m", message, identity=identity)
             head = self._git(tree, "rev-parse", "HEAD").stdout.strip()
         return {"commit": head, "files": len(names), "branch": branch}
+
+    def _merging(self, tree: Path) -> str:
+        """The base commit a merge in this tree is taking in, or ""."""
+        r = self._git(tree, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False)
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    def merge_base(self, caller: str, args: dict) -> dict:
+        """Brings the repo's current base, from a base bundle tw-git put in
+        spool/in, into the Bot's branch as a merge: the branch keeps its
+        history, so its pull request takes it without a force. Conflicts are
+        left in the files, marked, for the Bot to resolve and then commit,
+        which makes the two-parent commit. Until 15 Nov 2026 no op did this,
+        and a Bot whose pull request conflicted with main rebuilt it on main
+        and force-pushed, or left it stuck (Thornswood-Ops #328: #5892 on
+        auto-merge and dirty, #5880, #5815 and #5941 force-pushed)."""
+        bot, repo, tree = self._tree(args)
+        base = self.policy.data["merge"]["base"][repo]
+        bundle = self._spool(self.spool_in, bot, str(args.get("bundle") or ""))
+        with self._lock(bot):
+            branch = self._git(tree, "symbolic-ref", "--short", "HEAD").stdout.strip()
+            if not self.policy.own_branch(bot, branch):
+                raise Refused(f"the tree is on {branch}, not one of {self.policy.bot_name(bot)}'s branches")
+            if self._merging(tree):
+                raise Refused("a merge of the base is already under way here: resolve its conflicts, then commit")
+            if self._git(tree, "status", "--porcelain").stdout.strip():
+                raise Refused("the tree has changes not committed: commit them first, then bring the base in")
+            self._git(tree, "fetch", "-q", str(bundle), f"+refs/heads/{base}:refs/remotes/origin/{base}",
+                      allow_file=True)
+            sha = self._git(tree, "rev-parse", f"refs/remotes/origin/{base}").stdout.strip()
+            if self._git(tree, "merge-base", "--is-ancestor", sha, "HEAD", check=False).returncode == 0:
+                return {"merged": False, "base": base, "base_sha": sha, "said": f"{branch} already has {base}"}
+            # git asks who is merging even when it does not commit yet.
+            identity = (f"{self.policy.bot_name(bot)} (Thornswood Bot)", self.cfg["commit_email"].format(bot=bot))
+            r = self._git(tree, "merge", "--no-ff", "--no-commit", "--no-edit", f"refs/remotes/origin/{base}",
+                          check=False, identity=identity)
+            conflicts = [n for n in self._git(tree, "diff", "--name-only", "--diff-filter=U").stdout.split("\n") if n]
+            if r.returncode != 0 and not conflicts:
+                self._git(tree, "merge", "--abort", check=False)
+                raise Refused(f"git could not merge {base} in: {(r.stderr or r.stdout).strip()[-300:]}")
+        return {"merged": True, "base": base, "base_sha": sha, "conflicts": conflicts,
+                "next": ("resolve each conflict (the files hold <<<<<<< markers), then commit"
+                         if conflicts else "commit to make the merge")}
 
     def bundle(self, caller: str, args: dict) -> dict:
         """The Bot's branch as a bundle in spool/out, for tw-git to push."""
@@ -610,9 +668,9 @@ class FilesService:
             if all(_word(want).fullmatch(got) for want, got in zip(form, cmd)):
                 return cmd
         raise Refused("a check runs one harness in the forms CLAUDE.md names, from tests or a product's own tests "
-                      "folder (game/tests), Check-Words.ps1, or one of the two "
-                      "builders (node scripts/dev/Build-Gamemode.js, python3 scripts/mods/Add-ContentRecords.py); "
-                      "nothing else")
+                      "folder (game/tests), Check-Words.ps1, or a builder with no arguments "
+                      "(node scripts/dev/Build-<Name>.js, such as Build-Gamemode.js or Build-MerchantGamemode.js, "
+                      "or python3 scripts/mods/Add-ContentRecords.py); nothing else")
 
     def run_check(self, caller: str, args: dict) -> dict:
         bot, repo, tree = self._tree(args)
@@ -642,7 +700,7 @@ class FilesService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("trees", "read", "write", "edit", "delete", "list", "checkout", "status", "diff", "search", "commit",
-                 "bundle", "remove", "run_check")
+                 "merge_base", "bundle", "remove", "run_check")
         return {n: (getattr(self, n), {gw}) for n in names}
 
 

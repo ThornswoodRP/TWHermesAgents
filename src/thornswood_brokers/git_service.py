@@ -52,10 +52,78 @@ query($org: String!, $number: Int!, $after: String, $status: String!, $order: St
 
 logger = logging.getLogger(__name__)
 
+# The most text a read answers inline. A Hermes tool answer over its own limit
+# is written to the profile's cache, which the guard keeps every Bot out of, so
+# a CI job's log (250 KB to 760 KB) could not be read at all: Thornswood-Ops
+# #266 (Thornswood #5630, #5752, #5882, skymp #148).
+READ_MOST = 40_000
+
+
+def _lines_wanted(args: dict) -> tuple[str | None, int, int]:
+    """A text read's selection: match (a regular expression, case ignored)
+    with around lines either side of each hit, or tail (the last lines)."""
+    match = args.get("match")
+    if match is not None:
+        if not isinstance(match, str) or not match.strip() or len(match) > 200:
+            raise Refused("match is a regular expression of at most 200 characters")
+        try:
+            re.compile(match)
+        except re.error as e:
+            raise Refused(f"match is not a regular expression: {e}") from None
+    around, tail = args.get("around", 3), args.get("tail", 0)
+    for name, v in (("around", around), ("tail", tail)):
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 100_000:
+            raise Refused(f"{name} is a whole number of lines")
+    return match, min(around, 50), tail
+
+
+def _text_reply(text: str, match: str | None, around: int, tail: int) -> dict:
+    """A text body as a read answers it: whole when it fits, else the lines
+    asked for (match and around, or tail), each prefixed with its number, cut
+    to READ_MOST from the end, where a log says what failed. cut says what
+    was left out and how to read the rest."""
+    lines = text.splitlines()
+    if match is None and not tail and len(text) <= READ_MOST:
+        return {"body": text}
+    if match is not None:
+        hit = re.compile(match, re.IGNORECASE)
+        keep: list[int] = []
+        hits = 0
+        for i, line in enumerate(lines):
+            if hit.search(line):
+                hits += 1
+                keep.extend(range(max(0, i - around), min(len(lines), i + around + 1)))
+        keep = sorted(set(keep))
+        what = f"{hits} lines match {match!r}"
+    else:
+        keep = list(range(max(0, len(lines) - tail), len(lines))) if tail else list(range(len(lines)))
+        what = f"the last {tail} lines" if tail else "the whole text"
+    out, size, shown = [], 0, []
+    for i in reversed(keep):
+        row = f"{i + 1}: {lines[i]}"
+        if size + len(row) + 1 > READ_MOST:
+            break
+        out.append(row)
+        shown.append(i)
+        size += len(row) + 1
+    out.reverse()
+    reply = {"body": "\n".join(out), "lines": len(lines)}
+    if len(shown) < len(keep):
+        reply["cut"] = (f"{what}: {len(keep)} lines with context, of {len(lines)}; shown are the last {len(shown)}, "
+                        f"from line {min(shown) + 1 if shown else '-'} (at most {READ_MOST} characters). Pass match "
+                        "(a regular expression) with around, or tail, to read other lines")
+    return reply
+
+
 # What an issue's comment says it waits on, as Bramble writes it when a claim
 # comes off (bramble-duties, section 6, item 5): "Waits on #N", "waits on
 # Thornswood-Ops #N", "Waits on ThornswoodRP/skymp#N", anywhere in it.
 WAITS_ON = re.compile(r"\bwaits on\s+(?:([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?)\s*)?#(\d+)", re.I)
+# A comment that says the wait is over: "No longer waits", "no longer waits
+# on #N", "Waits on nothing". Read before WAITS_ON, so the issue it names is
+# not taken as a wait.
+WAIT_LIFTED = re.compile(r"\bno longer waits(?:\s+on\s+(?:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?\s*)?#\d+)?"
+                         r"|\bwaits on nothing\b", re.I)
 
 WRITE = {
     "push": {"contents": "write", "metadata": "read"},
@@ -877,7 +945,8 @@ class GitService:
         if action == "add" and label in self.policy.claim_labels() and not issue.pull_request:
             waits = self._waits_on(repo, number)
             if waits:
-                raise Refused(f"#{number} waits on {waits}, which is still open (the issue's newest comment says so), "
+                raise Refused(f"#{number} waits on {waits}, which is still open (the issue's newest comment about its wait "
+                              "says so), "
                               f"so it is not eligible and takes no claim until that closes: pick the next issue")
         app = "bramble" if bot == "bramble" else self._app(bot)
         perms = WRITE["pr_conversation"] if issue.pull_request else WRITE["issues"]
@@ -899,9 +968,11 @@ class GitService:
                                    read_back=read_back, undone=True)
 
     def _waits_on(self, repo: str, number: int) -> str | None:
-        """The open issue this issue waits on, by its newest comment, or None.
-        An issue whose newest comment says it waits on an open issue is not
-        eligible until that issue closes (bramble-duties, section 6, item 5).
+        """The open issue this issue waits on, by the newest comment that says
+        what it waits on, or None. An issue whose wait names an open issue is
+        not eligible until that issue closes, or until a later comment says
+        "No longer waits" or "Waits on nothing" (bramble-duties, section 6,
+        item 5).
         Until 11 Nov 2026 only the skill said so, and the board's eligible
         read cannot see a comment: Thornswood #4482's claim came off at
         "Waits on Thornswood-Ops #275", went on again at 2:37 PM Mountain
@@ -909,8 +980,18 @@ class GitService:
         Thornswood-Ops #275"), and came off again. So a claim is refused
         here, where it is made."""
         comments = self.gh.get_all(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{int(number)}/comments")
-        newest = (comments[-1].get("body") or "") if comments else ""
-        for m in WAITS_ON.finditer(newest):
+        # The newest comment that says anything about the wait is the wait.
+        # Until 15 Nov 2026 it was the newest comment of all, so any later
+        # comment cleared it: on 12 Nov a known issue note went onto many
+        # issues, and #4511 and #4507 showed as pickable with their waits
+        # still open (Ops #327).
+        said = ""
+        for c in reversed(comments):
+            body = c.get("body") or ""
+            if WAIT_LIFTED.search(body) or WAITS_ON.search(body):
+                said = WAIT_LIFTED.sub("", body)
+                break
+        for m in WAITS_ON.finditer(said):
             name, n = m.group(1), int(m.group(2))
             # A word that names no repo ("waits on PR #5797") is this repo's;
             # an owner/repo that tw-git does not read is refused.
@@ -918,8 +999,8 @@ class GitService:
                 (r for r in self.policy.data["repos"].values() if name.lower() in (r.lower(), r.split("/")[1].lower())),
                 None if "/" in name else repo)
             if where is None:
-                raise Refused(f"#{number}'s newest comment says it waits on {name} #{n}, which is not a repo tw-git "
-                              "reads; say on the issue what it waits on, as owner/repo#N")
+                raise Refused(f"#{number}'s newest comment about its wait says it waits on {name} #{n}, which is not "
+                              "a repo tw-git reads; say on the issue what it waits on, as owner/repo#N")
             raw = self.gh.get(self.policy.reader_for(where), where, f"/repos/{where}/issues/{n}")
             if raw.get("state") == "open":
                 return f"{where}#{n}"
@@ -1345,7 +1426,17 @@ class GitService:
         if not inside or ".." in path:
             raise Refused(f"reads stay inside {root}, or search its issues with repo:{repo} in the query")
         self._check(self.rules.admin_call(bot, "GET", path))
-        return {"body": self.gh.get(self.policy.reader_for(repo), repo, path)}
+        body = self.gh.get(self.policy.reader_for(repo), repo, path)
+        pick = _lines_wanted(args)
+        if isinstance(body, str):
+            return _text_reply(body, *pick)
+        if isinstance(body, dict) and isinstance(body.get("files"), dict):
+            # An artifact's zip, as its files: each text file is cut the same way.
+            files = {name: (_text_reply(text, *pick) if isinstance(text, str) and not text.startswith("(binary, ")
+                            else {"body": text}) for name, text in body["files"].items()}
+            return {"body": {"files": {n: f["body"] for n, f in files.items()}},
+                    "cut": {n: f["cut"] for n, f in files.items() if f.get("cut")}}
+        return {"body": body}
 
     def board(self, caller: str, args: dict) -> dict:
         """The board's open issues in do-order, for any Bot: each one's repo,
@@ -1405,7 +1496,7 @@ class GitService:
         out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
         if not eligible:
             return {"open": len(out), "issues": out[:limit]}
-        # An issue whose newest comment says it waits on an open issue is not
+        # An issue whose wait names an open issue is not
         # eligible, read as label reads it when a claim is asked for (Ops
         # #300, #312: on 11 and 12 Nov 2026 #4507, #4518, #4536 and Magpie's
         # field headed eligible while label refused every claim, and each was
