@@ -475,7 +475,8 @@ class Canary:
         metadata service."""
         token = f"tw-canary-{os.getpid()}-{os.urandom(8).hex()}"
         ours = vm_addresses(self.run)
-        listeners = plant_listeners(token, ["127.0.0.1", *ours])
+        arrived: list[str] = []
+        listeners = plant_listeners(token, ["127.0.0.1", *ours], arrived)
         name = (f"5c: a container reaches none of the VM's loopback, private or Tailscale addresses "
                 f"({len(ours)}) or the metadata service")
         if not listeners:
@@ -493,6 +494,8 @@ class Canary:
                 "python3", "-I", "-c", NET_PROBE, token, PUBLIC_HOST, PUBLIC_URL, *targets]
         r = self.run(argv, timeout=300, cwd="/")
         public, reached = parse_net((r.stdout or "") + (r.stderr or ""), targets)
+        # What the listeners saw, whatever the container said.
+        reached += [f"a connection arrived at the canary listener on {a}" for a in dict.fromkeys(arrived)]
         self.check(f"5c: a container resolves {PUBLIC_HOST} and reads {PUBLIC_URL}", public)
         self.check(name, reached)
 
@@ -647,25 +650,31 @@ def vm_addresses(run: Run) -> list[str]:
     return found
 
 
-def plant_listeners(token: str, addresses: list[str], tries: int = 20) -> list:
+def plant_listeners(token: str, addresses: list[str], arrived: list[str] | None = None, tries: int = 20) -> list:
     """A canary TCP listener on each address, all on one port (so whichever address a container's
     network helper turns a name into, the port is ours), each answering every connection with
-    `token` from a thread of its own until it is closed. [] when no port was free on all of them."""
+    `token` from a thread of its own until it is closed. Each connection's listener address goes on
+    `arrived` before the token is sent, so a connection counts as reached from the VM's side even
+    when the token never gets back. [] when no port was free on all of them."""
     import socket
     import threading
 
+    arrived = arrived if arrived is not None else []
+
     def serve(s: socket.socket) -> None:
+        here = s.getsockname()[0]
         while True:
             try:
                 c, _ = s.accept()
             except OSError:
-                return
-            try:
-                c.sendall(token.encode())
-            except OSError:
-                pass
-            finally:
-                c.close()
+                return  # closed by the canary's cleanup: the listener's work is done
+            arrived.append(here)
+            with c:
+                c.settimeout(5)
+                try:
+                    c.sendall(token.encode())
+                except OSError as e:
+                    arrived.append(f"{here} (the token was not sent: {type(e).__name__})")
 
     # The kernel picks a port free on the first address; when that port is taken on another address,
     # the next port the kernel picks is tried, at most `tries` times.

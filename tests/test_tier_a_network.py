@@ -151,7 +151,8 @@ class TheCanary(unittest.TestCase):
 
     def test_the_probe_tells_a_canary_listener_from_a_closed_port(self):
         token = "tw-canary-test-token"
-        listeners = self.canary.plant_listeners(token, ["127.0.0.1"])
+        arrived = []
+        listeners = self.canary.plant_listeners(token, ["127.0.0.1"], arrived)
         self.assertEqual(len(listeners), 1)
         try:
             port = listeners[0].getsockname()[1]
@@ -165,6 +166,8 @@ class TheCanary(unittest.TestCase):
         self.assertIn("BLOCKED 127.0.0.1:1 ", r.stdout)
         self.assertIn("BLOCKED 127.0.0.1:1/any ", r.stdout)
         self.assertIn("DONE", r.stdout)
+        # The listener saw the one connection that reached it, from its own side.
+        self.assertEqual(arrived, ["127.0.0.1"])
 
     def test_the_vms_own_addresses_leave_out_loopback(self):
         out = ("1: lo    inet 127.0.0.1/8 scope host lo\n2: ens3    inet 10.0.0.20/24 brd 10.0.0.255 scope global ens3\n"
