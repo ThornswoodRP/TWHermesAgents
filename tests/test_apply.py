@@ -84,7 +84,7 @@ class Apply(unittest.TestCase):
         cfg = yaml.safe_load((home / "profiles" / "rift" / "config.yaml").read_text(encoding="utf-8"))
         self.assertEqual(cfg["terminal"]["backend"], "docker")
         self.assertEqual(cfg["terminal"]["docker_image"], "docker.io/nousresearch/hermes-sandbox:desktop")
-        self.assertFalse(cfg["terminal"]["docker_network"])
+        self.assertTrue(cfg["terminal"]["docker_network"])
 
     def test_a_failed_pull_changes_nothing(self):
         home = self.home()

@@ -34,8 +34,6 @@ agent:
   - image_gen
   - video_gen
   - tts
-  - web
-  - search
   - x_search
   - discord
   - discord_admin
@@ -45,12 +43,16 @@ terminal:
   cwd: /home/hermes/tw-work/bramble
   docker_image: docker.io/nousresearch/hermes-sandbox:desktop
   docker_mount_cwd_to_workspace: true
-  docker_network: false
+  docker_network: true
   docker_volumes: []
   docker_forward_env: []
   docker_env: {}
   docker_extra_args:
   - --read-only
+  - --dns
+  - 1.1.1.1
+  - --dns
+  - 9.9.9.9
   docker_shared_container_key: ''
   container_cpu: 1
   container_memory: 2048
@@ -93,7 +95,12 @@ approvals:
     \ builds, tests, lints or\nformats the repository under /workspace with the repository's\
     \ own scripts and\ntools, or that runs local git commands which do not reach a\
     \ remote (status,\ndiff, log, show, add, commit, switch, branch, stash, restore).\n\
-    ESCALATE anything else, and anything you are not sure of: a person decides.\n"
+    APPROVE too a command that only reads from the public internet, which the\nsandbox\
+    \ reaches: a curl or wget GET, dig or nslookup, a git clone or fetch of\na public\
+    \ repository into /workspace or /tmp, installing a package into\n/workspace or\
+    \ /tmp (npm, npx, pip) to build or test with, and running an audit\ntool such\
+    \ as Lighthouse or linkinator against a public site.\nESCALATE anything else,\
+    \ and anything you are not sure of: a person decides.\n"
   timeout: 300
   cron_mode: deny
   unattended_mode: deny
@@ -129,3 +136,4 @@ plugins:
 hooks_auto_accept: false
 security:
   redact_secrets: true
+  allow_private_urls: false

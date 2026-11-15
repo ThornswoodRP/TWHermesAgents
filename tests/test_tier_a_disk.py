@@ -40,7 +40,9 @@ class TheBotsConfig(unittest.TestCase):
         self.assertEqual(p.data["tier_a_disk"]["work_root"], WORK_ROOT)
         for bot in BOTS:
             t = build(p, bot)["terminal"]
-            self.assertEqual(t["docker_extra_args"], ["--read-only"], bot)
+            self.assertEqual(t["docker_extra_args"][0], "--read-only", bot)
+            # The rest is only the public resolvers (test_tier_a_network).
+            self.assertEqual(t["docker_extra_args"][1:], ["--dns", "1.1.1.1", "--dns", "9.9.9.9"], bot)
             self.assertFalse(t["container_persistent"], bot)
             self.assertTrue(t["docker_mount_cwd_to_workspace"], bot)
             self.assertEqual(t["cwd"], f"{WORK_ROOT}/{bot}", bot)

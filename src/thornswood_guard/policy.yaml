@@ -465,6 +465,12 @@ decisions:
   default_expiry_hours: 72
 
 # Toolsets each Bot never has. The guard also refuses their tools by name.
+# web and search (web_search, web_extract) are not here since Patrick's word
+# on 15 Nov 2026: "We need to give them network access so they can do those
+# tests and so they can do web searches for research and stuff as needed".
+# Hermes runs them in the gateway with no key (its keyless tier), and its own
+# URL check refuses a private, loopback or cloud metadata address
+# (security.allow_private_urls stays false in every profile).
 toolsets:
   never:
     - browser
@@ -475,8 +481,6 @@ toolsets:
     - image_gen
     - video_gen
     - tts
-    - web
-    - search
     - x_search
     - discord
     - discord_admin
@@ -738,6 +742,10 @@ slices:
     TasksMax: 512
   # Tier A: the hermes user's own manager runs the rootless podman containers,
   # so its user slice (user-<uid of hermes>.slice) carries the sandbox caps too.
+  # scripts/render_units.py also gives it tier_a_network's deny list (below)
+  # as IPAddressDeny: the kernel refuses every packet to those addresses from
+  # anything in the slice, the containers' network helper (slirp4netns or
+  # pasta) included, whatever runs inside a container.
   hermes-user.slice:
     MemoryHigh: 3584M
     MemoryMax: 4G
@@ -849,6 +857,34 @@ backups:
 tier_a_disk:
   images: /var/lib/thornswood/tier-a
   work_root: /home/hermes/tw-work
+
+# The network inside a Tier A container (Patrick, 15 Nov 2026: "We need to
+# give them network access so they can do those tests and so they can do web
+# searches for research and stuff as needed"). Until then every container ran
+# with --network=none, so the weekly project review could not run Lighthouse,
+# linkinator or read the live site's headers ("github.com would not resolve").
+# A container now reaches the public internet and nothing else of ours:
+# - deny: the addresses no packet from the hermes user's slice may reach,
+#   rendered into that slice's IPAddressDeny (scripts/render_units.py), so
+#   the kernel holds it for the containers' network helper whatever a
+#   container asks for: this VM's own and its network's private addresses,
+#   the tailnet (Patrick's machines and the VM's Tailscale listeners), the
+#   cloud metadata service at 169.254.169.254, and multicast. Loopback stays
+#   open because a container's own lo (a test's local server, Lighthouse
+#   driving Chrome) is in the slice too; the VM's own loopback is not
+#   reachable from a container, since podman maps no host loopback into it
+#   (slirp4netns's --disable-host-loopback, pasta's --no-map-gw), and the
+#   canary holds that live.
+# - dns: the resolvers a container asks, public ones on the internet, because
+#   the VM's own (systemd-resolved, which asks Tailscale's 100.100.100.100
+#   and the cloud's 169.254.169.254) are in the deny list.
+# What a container holds does not change: only /workspace, no Hermes home, no
+# key, no token (docker_forward_env and docker_env stay empty), so the box
+# key, the brokers' keys and the Bots' proxy tokens stay where they are.
+tier_a_network:
+  deny: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4,
+         fc00::/7, fe80::/10, ff00::/8]
+  dns: [1.1.1.1, 9.9.9.9]
 
 # The VM follows main by itself (src/thornswood_brokers/follow_main.py,
 # tw-follow-main.timer). Patrick's answer A on q-retire-hermes-one, 31 Oct

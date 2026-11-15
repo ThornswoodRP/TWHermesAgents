@@ -22,10 +22,17 @@ class Toolsets(unittest.TestCase):
 
     def test_tools_no_bot_has(self):
         for tool in ("execute_code", "browser_navigate", "computer_use", "manage_catalog",
-                     "manage_connections", "image_generate", "web_search", "web_extract",
+                     "manage_connections", "image_generate",
                      "discord", "discord_admin", "delegate_task", "text_to_speech", "x_search"):
             for bot in ALL:
                 self.assertFalse(check_tool(self.p, bot, tool, {}).allowed, (bot, tool))
+
+    def test_every_bot_searches_and_reads_the_web(self):
+        # Patrick, 15 Nov 2026: the Bots do web searches for research.
+        for tool in ("web_search", "web_extract"):
+            for bot in ALL:
+                self.assertTrue(check_tool(self.p, bot, tool, {"query": "x", "urls": ["https://example.com"]}).allowed,
+                                (bot, tool))
 
     def test_15_workers_cannot_schedule(self):
         for bot in WORKERS:

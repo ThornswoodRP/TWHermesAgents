@@ -977,8 +977,7 @@ class CanaryReading(unittest.TestCase):
         from thornswood_brokers.canary import parse_container
         self.assertEqual(parse_container("IFACE lo\nDONE\n"), [])
         got = parse_container("MOUNTED tmpfs\nHOSTHOME seen\nIFACE lo\nIFACE eth0\nDONE\n")
-        self.assertEqual(got, ["the container mounted tmpfs", "the container sees /home/hermes/.hermes",
-                               "the container has a network interface eth0"])
+        self.assertEqual(got, ["the container mounted tmpfs", "the container sees /home/hermes/.hermes"])
         self.assertIn("did not run", parse_container("Error: image not known")[0])
 
     def test_18_listeners(self):
