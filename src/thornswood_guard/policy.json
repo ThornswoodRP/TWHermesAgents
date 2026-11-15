@@ -126,6 +126,9 @@
       "EvilPatrick06",
       "WiccanDjinn"
     ],
+    "tool_co_authors": [
+      "noreply@anthropic.com"
+    ],
     "workflow_authors": [
       "github-actions[bot]"
     ],
