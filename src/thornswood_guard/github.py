@@ -16,6 +16,10 @@ from .decisions import DecisionStore
 from .gate_line import GateLineError, parse_request
 from .policy import Policy, Verdict
 
+# A Claude session's branch in Thornswood and the fork (Thornswood's
+# scripts/ops/Auto-Merge.js reads the same).
+CLAUDE_BRANCH = re.compile(r"^claude/")
+
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -256,8 +260,9 @@ class GitHubRules:
         verdict = self.patrick_merge(pr, sha, verb_paths, decision_id)
         if not verdict.allowed:
             return verdict
+        held = bool(p.patrick_files(pr.repo, pr.files, verb_paths or []))
         if p.auto_merge(pr.repo):
-            return self._auto_merge(pr, sha, checks, branch_checks)
+            return self._auto_merge(pr, sha, checks, branch_checks, held=held)
         verdict = self.check_green(pr, checks)
         if not verdict.allowed:
             return verdict
@@ -281,10 +286,24 @@ class GitHubRules:
         return Verdict.no(f"PR {pr.number} changes {named}, which merges only on Patrick's authorize on a Main card "
                           f"with release link merge:{pr.repo}@{sha}#{pr.number}: {yes.reason}")
 
+    def claude_session_pr(self, pr: PullRequest) -> bool:
+        """A Claude session's pull request: a claude/ branch opened with the
+        sign-in of somebody on Patrick's list. GitHub names that person as its
+        author, so Thornswood's auto-merge reads its branch instead (Ops #353)."""
+        return (pr.author_bot is None and bool(CLAUDE_BRANCH.match(pr.head_ref or ""))
+                and self.policy.trusted_login(pr.author_login) and not self.policy.robot_author(pr.author_login)
+                and not self._hands_off_pr(pr))
+
     def _auto_merge(self, pr: PullRequest, sha: str, checks: list[CheckRun],
-                    branch_checks: set[str] | None) -> Verdict:
+                    branch_checks: set[str] | None, held: bool = False) -> Verdict:
         p = self.policy
-        if pr.author_bot is None and not p.robot_author(pr.author_login):
+        # A Claude session's pull request that changes what runs on the box
+        # waits for Patrick's Main card like a Bot's (his A on his page, 15 Nov
+        # 2026, Ops #353), so once he authorized it, Bramble puts it on. Any
+        # other of a thread's or a person's stays its owner's.
+        if held and self.claude_session_pr(pr):
+            pass
+        elif pr.author_bot is None and not p.robot_author(pr.author_login):
             return Verdict.no(f"PR {pr.number} is not a Bot's or a robot's; in {pr.repo} its owner puts it on "
                               "auto-merge, and Bramble never merges it")
         rule = p.rule_checks(pr.repo)
