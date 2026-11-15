@@ -87,7 +87,11 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    used when that head merges, not when auto-merge goes on: if the queue
    drops it at the same head, `tw_git merge` again with the same card's id
    (section 2, step 3) until the card expires, and never open a second
-   card for that head. Until 15 Nov 2026 the yes was spent at auto-merge
+   card for that head: `open_card` refuses one while a Main card for the
+   same release link is pending, or holds his yes unused and unexpired
+   with no `report_work_done`, and names that card, which is the one to
+   use (Ops #331: Thornswood #6048 got three Main cards for one head,
+   and he answered all three). Until 15 Nov 2026 the yes was spent at auto-merge
    on, so Thornswood #5996 waited on a new card after the queue dropped it
    on #5752's crash, though Patrick had already said yes to that head. A
    new push needs a new card. Act on an answered card the same sweep it is
