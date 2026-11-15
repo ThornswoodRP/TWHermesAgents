@@ -604,17 +604,24 @@ class Checks(unittest.TestCase):
             with self.subTest(cmd=cmd), self.assertRaises(Refused):
                 f.check_command(cmd)
 
-    def test_the_two_builders_run_and_nothing_else_of_them(self):
+    def test_the_builders_run_and_nothing_else_of_them(self):
         # Thornswood-Ops #275: the gate holds game/gamemode.js and the content
         # plugin to what their builders write, and no Bot could run either.
+        # Ops #314: Build-Gamemode --check runs Build-MerchantGamemode.js,
+        # which no form named, so no Bot could rebuild what it builds.
         f = World().files
-        for cmd in (["node", "scripts/dev/Build-Gamemode.js"], ["python3", "scripts/mods/Add-ContentRecords.py"]):
+        for cmd in (["node", "scripts/dev/Build-Gamemode.js"], ["python3", "scripts/mods/Add-ContentRecords.py"],
+                    ["node", "scripts/dev/Build-MerchantGamemode.js"], ["node", "scripts/dev/Build-PrWorkflow.js"],
+                    ["node", "scripts/dev/Build-TradingCompanyGamemode.js"]):
             with self.subTest(cmd=cmd):
                 self.assertEqual(f.check_command(cmd), cmd)
         for cmd in (["node", "scripts/dev/Build-Gamemode.js", "--write", "x"],
                     ["node", "scripts/dev/Build-Gamemode.js", "--source", "x"],
                     ["python3", "scripts/mods/Add-ContentRecords.py", "--masters", "/srv"],
-                    ["node", "scripts/dev/Build-Other.js"], ["python3", "scripts/mods/Add-ContentRecords.py.x"]):
+                    ["node", "scripts/dev/Build-Other.js", "--check"], ["node", "scripts/dev/Build-.js"],
+                    ["node", "scripts/dev/Build-../x.js"], ["node", "scripts/dev/Build-A/B.js"],
+                    ["node", "scripts/dev/build-gamemode.js"], ["node", "scripts/ops/Build-Gamemode.js"],
+                    ["node", "scripts/dev/Build-Gamemode.mjs"], ["python3", "scripts/mods/Add-ContentRecords.py.x"]):
             with self.subTest(cmd=cmd), self.assertRaises(Refused):
                 f.check_command(cmd)
 

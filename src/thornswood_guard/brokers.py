@@ -463,7 +463,8 @@ TW_FILES_SCHEMA = {
         "Ops: trees (your trees: each one's repo, task name and branch; needs no repo or task), checkout (a new tree on your branch from the base bundle tw_git gave you), read, write, edit (replace "
         "text found exactly once), delete, list, status, diff, search (git grep; stopped after 30 seconds, so '.*' over a big one-line JSON file is refused, not waited on), commit, bundle (your branch, for tw_git push), "
         "remove (after the PR merged or closed), run_check (one test harness, or a builder that writes a generated "
-        "file into your tree: node scripts/dev/Build-Gamemode.js after a change to game/gamemode/*.ts, python3 "
+        "file into your tree: node scripts/dev/Build-Gamemode.js after a change to game/gamemode/*.ts, any other "
+        "node scripts/dev/Build-<Name>.js with no arguments for the file it builds, python3 "
         "scripts/mods/Add-ContentRecords.py after a change to that builder; commit what it wrote with the change). "
         "Paths are inside the tree; links "
         "are never followed and .git is never a path."),

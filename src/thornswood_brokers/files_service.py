@@ -44,6 +44,9 @@ from .wire import Refused, call
 
 TASK = re.compile(r"[a-z0-9][a-z0-9-]{0,60}")
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+# A builder's name in Thornswood's scripts/dev: Build-Gamemode,
+# Build-MerchantGamemode, Build-PrWorkflow.
+BUILDER = re.compile(r"Build-[A-Z][A-Za-z0-9]{0,40}")
 
 
 def _word(want: str) -> re.Pattern:
@@ -52,11 +55,14 @@ def _word(want: str) -> re.Pattern:
     the top (game/tests, launcher/tests), where Thornswood keeps a product's
     harnesses beside its code (Thornswood #5341). Neither takes a dot or a
     second slash, so a form never reaches outside the tree; the rest of the
-    word is matched as written."""
+    word is matched as written. {builder} is a builder's file name without
+    its extension (BUILDER), with no dot or slash either."""
     out = []
-    for part in re.split(r"(\{name\}|\{tests\})", want):
+    for part in re.split(r"(\{name\}|\{tests\}|\{builder\})", want):
         if part == "{name}":
             out.append(NAME.pattern)
+        elif part == "{builder}":
+            out.append(BUILDER.pattern)
         elif part == "{tests}":
             out.append("(?:" + NAME.pattern + "/)?tests")
         else:
@@ -610,9 +616,9 @@ class FilesService:
             if all(_word(want).fullmatch(got) for want, got in zip(form, cmd)):
                 return cmd
         raise Refused("a check runs one harness in the forms CLAUDE.md names, from tests or a product's own tests "
-                      "folder (game/tests), Check-Words.ps1, or one of the two "
-                      "builders (node scripts/dev/Build-Gamemode.js, python3 scripts/mods/Add-ContentRecords.py); "
-                      "nothing else")
+                      "folder (game/tests), Check-Words.ps1, or a builder with no arguments "
+                      "(node scripts/dev/Build-<Name>.js, such as Build-Gamemode.js or Build-MerchantGamemode.js, "
+                      "or python3 scripts/mods/Add-ContentRecords.py); nothing else")
 
     def run_check(self, caller: str, args: dict) -> dict:
         bot, repo, tree = self._tree(args)
