@@ -43,6 +43,9 @@ def files(policy: Policy) -> dict[Path, str]:
     out = {}
     for name, limits in policy.data["slices"].items():
         path = OUT / ("user-hermes.slice.conf" if name == "hermes-user.slice" else name)
+        if name == "hermes-user.slice":
+            # The Tier A containers reach the internet and none of these (policy tier_a_network).
+            limits = {**limits, "IPAddressDeny": " ".join(policy.data["tier_a_network"]["deny"])}
         out[path] = render(name, limits)
     return out
 

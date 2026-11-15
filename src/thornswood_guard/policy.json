@@ -442,8 +442,6 @@
       "image_gen",
       "video_gen",
       "tts",
-      "web",
-      "search",
       "x_search",
       "discord",
       "discord_admin",
@@ -763,6 +761,24 @@
   "tier_a_disk": {
     "images": "/var/lib/thornswood/tier-a",
     "work_root": "/home/hermes/tw-work"
+  },
+  "tier_a_network": {
+    "deny": [
+      "0.0.0.0/8",
+      "10.0.0.0/8",
+      "100.64.0.0/10",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "169.254.0.0/16",
+      "224.0.0.0/4",
+      "fc00::/7",
+      "fe80::/10",
+      "ff00::/8"
+    ],
+    "dns": [
+      "1.1.1.1",
+      "9.9.9.9"
+    ]
   },
   "follow_main": {
     "url": "git@github.com:ThornswoodRP/TWHermesAgents.git",

@@ -13,8 +13,12 @@ and exits 1 when any check fails.
       another Bot's tree, the gateway's /proc/<pid>/environ, and opens a socket
   3   a Tier B check forks past TasksMax, allocates past MemoryMax, spins past
       CPUQuota; a canary group writes past its disk quota
-  5   a Tier A container (Hermes's own flags) mounts, sees the host home or
-      has any network interface but lo
+  5   a Tier A container (Hermes's own flags) mounts or sees the host home
+  5c  a Tier A container (Hermes's flags with docker_network: true and the
+      Bots' own) resolves github.com and reads https://github.com, and reaches
+      none of the VM's own loopback, private or Tailscale addresses, the
+      cloud metadata service, or a private address (policy tier_a_network),
+      each tried against a canary listener that answers with a token
   5b  a Tier A container (Hermes's flags and the Bots' own extra ones) writes
       to its system files, past its /workspace filesystem's size (a 32 MB
       canary one) and past /tmp's tmpfs size
@@ -52,10 +56,16 @@ Result = tuple[str, bool, str]
 Run = Callable[..., subprocess.CompletedProcess]
 
 # Hermes's own container flags (tools/environments/docker.py, v0.23.0) with
-# docker_network: false.
+# docker_network: true, which the Bots have since 15 Nov 2026 (policy
+# tier_a_network): Hermes then adds no --network flag, so podman gives the
+# container its default rootless network.
 HERMES_PODMAN_ARGS = ["--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--cap-add", "CHOWN", "--cap-add", "FOWNER",
-                      "--tmpfs", "/tmp:rw,nosuid,size=512m", "--network=none", "--pids-limit", "2048",
+                      "--tmpfs", "/tmp:rw,nosuid,size=512m", "--pids-limit", "2048",
                       "--memory", "2048m", "--cpus", "1"]
+
+# The public place a container must reach (attack 5c).
+PUBLIC_URL = "https://github.com/"
+PUBLIC_HOST = "github.com"
 
 PROBE_TIER_B = r'''
 import os, socket, sys
@@ -172,8 +182,49 @@ CONTAINER = r'''
 mount -t tmpfs canary /mnt 2>/dev/null && echo "MOUNTED tmpfs"
 mount -t proc proc /mnt 2>/dev/null && echo "MOUNTED proc"
 test -e /home/hermes/.hermes && echo "HOSTHOME seen"
-for i in /sys/class/net/*; do echo "IFACE ${i##*/}"; done
 echo DONE
+'''
+
+# Attack 5c, inside a container: argv is the canary's token, the public host
+# and URL, then each address:port that must not answer. A canary listener on
+# the VM's side sends the token when it is reached, so REACHED there means the
+# container got through to the VM, not that some helper answered the
+# handshake. A target ending in /any has no listener of ours (the metadata
+# service): any connection to it counts, since the containers' network helper
+# completes a connection only once its own one to the target has.
+NET_PROBE = r'''
+import socket, sys, urllib.error, urllib.request
+token, host, url, targets = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+try:
+    print("RESOLVED " + host + " " + socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)[0][4][0])
+except OSError as e:
+    print("UNRESOLVED " + host + " " + type(e).__name__)
+try:
+    with urllib.request.urlopen(url, timeout=20) as r:
+        print("PUBLIC %d" % r.status)
+except urllib.error.HTTPError as e:
+    print("PUBLIC %d" % e.code)
+except OSError as e:
+    print("NOPUBLIC " + type(e).__name__ + " " + str(e)[:120].replace("\n", " "))
+for t in targets:
+    target, _, how = t.partition("/")
+    addr, _, port = target.rpartition(":")
+    try:
+        c = socket.create_connection((addr, int(port)), timeout=5)
+    except OSError as e:
+        print("BLOCKED " + t + " " + type(e).__name__)
+        continue
+    with c:
+        if how == "any":
+            print("REACHED " + t + " connected")
+            continue
+        c.settimeout(5)
+        try:
+            got = c.recv(64)
+        except OSError:
+            got = b""
+    print(("REACHED " + t + " answered with the token") if token.encode() in got else ("BLOCKED " + t + " no token"))
+print("DONE")
 '''
 
 
@@ -238,9 +289,26 @@ def parse_container(out: str) -> list[str]:
             bad.append(f"the container mounted {line.split()[1]}")
         if line.startswith("HOSTHOME"):
             bad.append("the container sees /home/hermes/.hermes")
-        if line.startswith("IFACE ") and line.split()[1] != "lo":
-            bad.append(f"the container has a network interface {line.split()[1]}")
     return bad
+
+
+def parse_net(out: str, targets: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Attack 5c's two answers: what kept the container off the public internet, and which of
+    `targets` (address:port -> what it is) it reached. A target with no line counts as reached."""
+    if "DONE" not in out:
+        problem = [f"the container did not run the network probe ({out.strip()[:200]})"]
+        return problem, problem
+    public = []
+    if not re.search(r"^RESOLVED \S+ \S+", out, re.M):
+        line = next((l for l in out.splitlines() if l.startswith("UNRESOLVED ")), "no answer")
+        public.append(f"the container could not resolve {PUBLIC_HOST} ({line})")
+    m = re.search(r"^PUBLIC (\d+)", out, re.M)
+    if not m:
+        line = next((l for l in out.splitlines() if l.startswith("NOPUBLIC ")), "no answer")
+        public.append(f"the container could not read {PUBLIC_URL} ({line})")
+    blocked = {l.split()[1] for l in out.splitlines() if l.startswith("BLOCKED ")}
+    reached = [f"the container reached {what} ({t})" for t, what in targets.items() if t not in blocked]
+    return public, reached
 
 
 def parse_disk(out: str, workspace_mb: int, tmp_mb: int) -> list[str]:
@@ -396,8 +464,40 @@ class Canary:
         argv = ["runuser", "-u", "hermes", "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}", "podman", "run", "--rm",
                 "--pull=never", *HERMES_PODMAN_ARGS, image, "sh", "-c", CONTAINER]
         r = self.run(argv, timeout=180, cwd="/")
-        self.check("5: a container cannot mount, see the host or reach a network",
+        self.check("5: a container cannot mount or see the host",
                    parse_container(r.stdout + r.stderr))
+
+    def tier_a_network(self, image: str, extra_args: list[str]) -> None:
+        """Attack 5c: a container started the way Hermes starts a Bot's reaches the public internet and
+        nothing else of ours. Canary listeners on the VM's loopback, private and Tailscale addresses
+        each answer with a token; the container tries each, the ways a container names the VM
+        (slirp4netns's 10.0.2.2, pasta's 169.254.1.2, host.containers.internal), and the cloud's
+        metadata service."""
+        token = f"tw-canary-{os.getpid()}-{os.urandom(8).hex()}"
+        ours = vm_addresses(self.run)
+        arrived: list[str] = []
+        listeners = plant_listeners(token, ["127.0.0.1", *ours], arrived)
+        name = (f"5c: a container reaches none of the VM's loopback, private or Tailscale addresses "
+                f"({len(ours)}) or the metadata service")
+        if not listeners:
+            self.check(name, "no port was free on the VM's loopback and its own addresses for the canary listeners")
+            return
+        self.cleanup.append(lambda: [s.close() for s in listeners])
+        port = listeners[0].getsockname()[1]
+        targets = {f"{a}:{port}": f"the VM's own address {a}" for a in ours}
+        for via in ("10.0.2.2", "169.254.1.2", "host.containers.internal"):
+            targets[f"{via}:{port}"] = f"the VM by {via}"
+        targets["169.254.169.254:80/any"] = "the cloud metadata service"
+        uid = pwd.getpwnam("hermes").pw_uid
+        argv = ["runuser", "-u", "hermes", "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}", "podman", "run", "--rm",
+                "--pull=never", *HERMES_PODMAN_ARGS, *extra_args, image,
+                "python3", "-I", "-c", NET_PROBE, token, PUBLIC_HOST, PUBLIC_URL, *targets]
+        r = self.run(argv, timeout=300, cwd="/")
+        public, reached = parse_net((r.stdout or "") + (r.stderr or ""), targets)
+        # What the listeners saw, whatever the container said.
+        reached += [f"a connection arrived at the canary listener on {a}" for a in dict.fromkeys(arrived)]
+        self.check(f"5c: a container resolves {PUBLIC_HOST} and reads {PUBLIC_URL}", public)
+        self.check(name, reached)
 
     def tier_a_disk(self, image: str, extra_args: list[str]) -> None:
         """Attack 5b, on a 32 MB filesystem made the way deploy/install.sh makes each Bot's."""
@@ -538,6 +638,65 @@ def _get(url: str, method: str = "GET", body: bytes | None = None) -> tuple[int,
         return 0, ""
 
 
+def vm_addresses(run: Run) -> list[str]:
+    """The VM's own IPv4 addresses but loopback (its private address and its Tailscale one), from
+    `ip -4 -o addr show`."""
+    out = run(["ip", "-4", "-o", "addr", "show"]).stdout or ""
+    found = []
+    for m in re.finditer(r"\binet (\d+\.\d+\.\d+\.\d+)/", out):
+        a = m.group(1)
+        if not ipaddress.ip_address(a).is_loopback and a not in found:
+            found.append(a)
+    return found
+
+
+def plant_listeners(token: str, addresses: list[str], arrived: list[str] | None = None, tries: int = 20) -> list:
+    """A canary TCP listener on each address, all on one port (so whichever address a container's
+    network helper turns a name into, the port is ours), each answering every connection with
+    `token` from a thread of its own until it is closed. Each connection's listener address goes on
+    `arrived` before the token is sent, so a connection counts as reached from the VM's side even
+    when the token never gets back. [] when no port was free on all of them."""
+    import socket
+    import threading
+
+    arrived = arrived if arrived is not None else []
+
+    def serve(s: socket.socket) -> None:
+        here = s.getsockname()[0]
+        while True:
+            try:
+                c, _ = s.accept()
+            except OSError:
+                return  # closed by the canary's cleanup: the listener's work is done
+            arrived.append(here)
+            with c:
+                c.settimeout(5)
+                try:
+                    c.sendall(token.encode())
+                except OSError as e:
+                    arrived.append(f"{here} (the token was not sent: {type(e).__name__})")
+
+    # The kernel picks a port free on the first address; when that port is taken on another address,
+    # the next port the kernel picks is tried, at most `tries` times.
+    for _ in range(tries):
+        out = []
+        try:
+            for a in addresses:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind((a, out[0].getsockname()[1] if out else 0))
+                out.append(s)
+                s.listen(8)
+        except OSError:
+            s.close()
+            for s in out:
+                s.close()
+            continue
+        for s in out:
+            threading.Thread(target=serve, args=(s,), daemon=True).start()
+        return out
+    return []
+
+
 def gateway_pid(run: Run) -> int | None:
     for unit in ("tw-hermes-gateway.service",):
         out = run(["systemctl", "show", "-p", "MainPID", "--value", unit]).stdout.strip()
@@ -561,6 +720,7 @@ def main() -> int:
         c.tier_a(SANDBOX_IMAGE)
         from thornswood_guard.profile_config import build
         c.tier_a_disk(SANDBOX_IMAGE, build(policy, "rift")["terminal"]["docker_extra_args"])
+        c.tier_a_network(SANDBOX_IMAGE, build(policy, "bramble")["terminal"]["docker_extra_args"])
         c.listeners()
         c.one_executor()
         c.connector_helper()
