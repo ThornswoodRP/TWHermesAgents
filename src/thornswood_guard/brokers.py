@@ -397,8 +397,8 @@ class TurnGate:
 
 GIT_OPS = ["base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
            "close_issue", "delete_branch", "start_run", "read", "board", "ledger_event"]
-FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit", "bundle",
-             "remove", "run_check"]
+FILES_OPS = ["trees", "checkout", "read", "write", "edit", "delete", "list", "status", "diff", "search", "commit",
+             "merge_base", "bundle", "remove", "run_check"]
 
 TW_GIT_SCHEMA = {
     "name": "tw_git",
@@ -465,7 +465,7 @@ TW_FILES_SCHEMA = {
     "description": (
         "Your work trees, through the file broker: one tree per task under your own name, nothing outside it. "
         "Ops: trees (your trees: each one's repo, task name and branch; needs no repo or task), checkout (a new tree on your branch from the base bundle tw_git gave you), read, write, edit (replace "
-        "text found exactly once), delete, list, status, diff, search (git grep; stopped after 30 seconds, so '.*' over a big one-line JSON file is refused, not waited on), commit, bundle (your branch, for tw_git push), "
+        "text found exactly once), delete, list, status, diff, search (git grep; stopped after 30 seconds, so '.*' over a big one-line JSON file is refused, not waited on), commit, merge_base (brings the base from a new tw_git base bundle into your branch as a merge, when your pull request conflicts with it or is behind: resolve any conflicts it names, then commit; never a rebuild and a force push), bundle (your branch, for tw_git push), "
         "remove (after the PR merged or closed), run_check (one test harness, or a builder that writes a generated "
         "file into your tree: node scripts/dev/Build-Gamemode.js after a change to game/gamemode/*.ts, any other "
         "node scripts/dev/Build-<Name>.js with no arguments for the file it builds, python3 "
