@@ -8,6 +8,12 @@
 # writes to ~/.hermes and finds the gateway's control socket the gateway made
 # (in /run/user/<uid>, named from ~/.hermes). install.sh adds
 # XDG_RUNTIME_DIR in a drop-in, as the gateway's own unit has it.
+#
+# --policy-socket is tw-policy's socket (policy.yaml brokers.sockets.policy,
+# which a test holds it to). The connector asks tw-policy for the fleet
+# queue's room and a Bot's models there, and loads nothing of the guard or
+# the policy itself, so a change to either no longer restarts it at an
+# install, which ends every Bot Chat turn (15 Nov 2026).
 [Unit]
 Description=Thornswood decision core connector (phone chat into Hermes)
 After=tw-decide.service tw-hermes-gateway.service
@@ -19,7 +25,7 @@ Type=simple
 User=hermes
 Group=hermes
 EnvironmentFile=/etc/thornswood/tw-decide.env
-ExecStart=/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN}
+ExecStart=/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN} --policy-socket /run/tw-brokers/policy.sock
 WorkingDirectory=~
 UMask=0077
 IPAddressDeny=any

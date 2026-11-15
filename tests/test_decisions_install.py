@@ -70,7 +70,8 @@ class Unit(unittest.TestCase):
         cp.read_string((DEPLOY / "tw-decide-connector.service").read_text(encoding="utf-8"))
         s = cp["Service"]
         self.assertEqual((s["User"], s["IPAddressDeny"], s["IPAddressAllow"]), ("hermes", "any", "localhost"))
-        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN}")
+        self.assertEqual(s["ExecStart"], "/opt/thornswood-hermes/bin/tw-decide-connector --hermes ${TW_HERMES_BIN} "
+                                         "--policy-socket /run/tw-brokers/policy.sock")
         self.assertEqual((s["NoNewPrivileges"], s["CapabilityBoundingSet"]), ("yes", ""))
         self.assertNotIn("ListenStream", s)
         for key in s:

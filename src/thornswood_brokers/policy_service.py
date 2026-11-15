@@ -32,7 +32,7 @@ from typing import Callable
 
 from thornswood_guard.decisions import Decision
 from thornswood_guard.policy import Policy, Verdict
-from thornswood_guard.routes import credits_open, proxy_ready_in, route_allowed
+from thornswood_guard.routes import chain_for, credits_open, proxy_ready_in, route_allowed
 
 from . import host as hostmod
 from .wire import Refused, peer_pid
@@ -572,6 +572,26 @@ class PolicyService:
                 out[bot] = {"running": bool(row[1]), "waiting": bool(waiting), "last": row[0], "sweep_done": swept}
         return {"bots": out}
 
+    def bot_models(self, caller: str, args: dict) -> dict:
+        """[provider, model] of each route in the Bot's own list (policy.yaml
+        routes, in its order) that it reaches with its own sign-in: not one
+        behind the admission proxy, which spends credits or needs One. These
+        are the only models the app may move its chat to. Asks nothing of the
+        queue and spends nothing.
+
+        The connector asks this here rather than reading the policy itself
+        (15 Nov 2026): a process holds the code and data it loaded when it
+        started, so while the connector imported the guard, every change to
+        policy.json or to the guard's code restarted it at the install, and a
+        connector restart ends every Bot Chat turn, so tw-follow-main held all
+        new turns for up to 20 minutes first. 20 of the 23 installs from 11 to
+        15 Nov that held the Bots changed nothing the connector itself runs."""
+        bot = args.get("bot")
+        if not isinstance(bot, str) or not self.policy.is_bot(bot):
+            return {"models": []}
+        return {"models": [[r["provider"], r["model"]] for r in chain_for(self.policy, bot, proxy_ready=False)
+                           if r.get("via") != "admission-proxy"]}
+
     def set_task_risk(self, caller: str, args: dict) -> dict:
         """Bramble sets a task's risk class when it admits it; nobody else does.
         A task with no class is high risk, so it never reaches routes 2 or 4."""
@@ -1003,6 +1023,7 @@ class PolicyService:
             "wake_paid": (self.wake_paid, {gw}),
             "turn_room": (self.turn_room, {gw}),
             "bot_turns": (self.bot_turns, {gw}),
+            "bot_models": (self.bot_models, {gw}),
         }
         return {name: (self._one_at_a_time(handler), users) for name, (handler, users) in table.items()}
 

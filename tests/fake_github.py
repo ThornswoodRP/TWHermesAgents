@@ -62,6 +62,7 @@ class FakeGitHub:
         self.auto_merge_off: list[tuple[str, int, str]] = []  # (repo, number, head) taken off auto-merge
         self.refuse_auto_merge_off = False
         self.dequeued: list[tuple[str, int, str]] = []  # (repo, number, head) taken out of the merge queue
+        self.drafted: list[tuple[str, int, bool]] = []  # (repo, number, draft) after a ready or draft mutation
         self.refuse_dequeue = False
         # Where each App's installation is, as on GitHub (policy github_apps.<app>.repos):
         # a token asked for any other repository gets GitHub's 422, as the VM's install
@@ -251,6 +252,13 @@ class FakeGitHub:
             pr["in_queue"] = False
             self.dequeued.append((repo, int(number), pr["head"]["sha"]))
             return Response(200, {"data": {"dequeuePullRequest": {"mergeQueueEntry": {"id": "MQE"}}}}, {})
+        if "markPullRequestReadyForReview" in q or "convertPullRequestToDraft" in q:
+            repo, number = v["pr"].split("#")
+            pr = self.prs[(repo, int(number))]
+            pr["draft"] = "convertPullRequestToDraft" in q
+            self.drafted.append((repo, int(number), pr["draft"]))
+            name = "convertPullRequestToDraft" if pr["draft"] else "markPullRequestReadyForReview"
+            return Response(200, {"data": {name: {"pullRequest": {"isDraft": pr["draft"]}}}}, {})
         if "disablePullRequestAutoMerge" in q:
             repo, number = v["pr"].split("#")
             pr = self.prs[(repo, int(number))]
@@ -333,7 +341,9 @@ class FakeGitHub:
             if len(rest) == 2 and method == "GET":
                 return Response(200, json.loads(json.dumps(pr)), {})
             if len(rest) == 2 and method == "PATCH":
-                pr.update(body)
+                # GitHub's REST update takes no draft field: it answers 200
+                # and the pull request stays as it was (Ops #268).
+                pr.update({k: v for k, v in body.items() if k != "draft"})
                 return Response(200, pr, {})
             if rest[2] == "commits":
                 commits = self.pr_commits.get((repo, n))

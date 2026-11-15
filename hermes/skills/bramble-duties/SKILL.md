@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.20.0
+version: 1.21.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -102,10 +102,20 @@ In all three:
   comments: if one of yours already names that head, say nothing more; a new
   push gets a new comment only if it is red too. A person's or a thread's
   pull request is its owner's, red or not: no comment. Do nothing else with
-  it. The comment goes on the pull request, not its issue. (8 Nov 2026,
+  it but the assignment below. The comment goes on the pull request, not its issue. (8 Nov 2026,
   10:38 PM and 11:01 PM UTC: Bramble wrote the same red-check note twice on
   issue #5538 about a thread's pull request #5540 at one head, 79196d9,
   because this line read as every pull request on every wake.)
+  With the comment, `tw_decide assign_task` the pull request to the Bot whose branch it is,
+  as for a dropped one (section 2, step 2), and the same for a conflict
+  (step 3 above): a comment alone reaches nobody, because the worker is on
+  its next issue by then. Until 15 Nov 2026 only a dropped pull request was
+  assigned, and the Bots' red and conflicting pull requests sat with
+  Bramble's comment and no push, the oldest since 9 Nov. A
+  red check whose cause is not in the pull request (a harness it does not
+  reach, a runner, main) is not the owner's: name the board issue that
+  holds the cause in the comment, or file one, and treat it as a dropped
+  one waiting on main (section 2, step 3).
 - A Bot's branch whose work is finished and that has no open pull request
   (its work went into another pull request, or it never got one) goes:
   read its head (`GET /repos/<repo>/git/ref/heads/<branch>`), then
@@ -115,6 +125,23 @@ In all three:
 - No other merge needs a card or Patrick's yes, and none is recorded in
   DECIDED.md.
 - Never merge ThornswoodRP/TWHermesAgents. Patrick's own Hermes writes it, and merge-green merges each of its pull requests once the checks pass (the guide, section 1).
+
+### Nothing of the Bots' sits unseen
+
+On the morning sweep (section 5), list every open Bot or robot pull
+request in Thornswood, the fork and Ops whose head is more than two days
+old and that is not on auto-merge, or is on it but not in the merge queue.
+For each, say in Bot Chat what it waits on, from what GitHub shows now:
+its owner (a red check, a conflict, a draft: `tw_decide assign_task` it
+to its Bot again if that Bot has not pushed since your hand-back), main
+(the issue holding the cause, and whether it is closed: if it is, do
+section 2, step 3), or Patrick (the Main card's id, which must be open on
+his decision page; a card that is gone or answered is opened again or
+acted on now). A required check that is red only because of the body
+(Release note, Test tasks in the pull request) is the owner's too, and
+the fix is an edit of the body, not a push. On 15 Nov 2026 49 Bot and
+robot pull requests were open, 24 of them more than three days old, and
+nobody had said what most of them waited on since 13 Nov.
 
 ## 2. A pull request the merge queue dropped
 
@@ -141,6 +168,15 @@ CI_TIMEOUT.
    puts it on again, once, and says so in one comment naming main's fix
    (12 Nov 2026: #5856 left the queue on #5860's failure, which #5866
    fixed on main; until Ops #272 the merge op answered "already done").
+   The hand-back comment for such a drop names the board issue that holds
+   the cause (file one when none does). On every sweep of section 1, read
+   each issue named that way on an open Bot or robot pull request that is
+   off auto-merge at the head the comment names; once it is closed as
+   completed, that is main's fix, and the merge above follows. Nothing
+   else looks at those again: until 15 Nov 2026 #5743, #5750, #6013 and
+   #5996 sat green at their heads for two to five days after the queue
+   dropped them on harnesses they do not reach, because nothing came back
+   to them when a fix landed.
 
 ## 3. Pull requests from outside the team
 

@@ -406,7 +406,7 @@ TW_GIT_SCHEMA = {
         "The only way to write to GitHub: one op through the git broker, which reads GitHub itself and checks the "
         "guard rails before the write. Ops: base (get the base branch for a new tree; with branch, one of your own branches GitHub has, the tree tw_files checkout opens with that bundle starts at that branch's head, to add a fix on top of an open pull request), push (push your branch from "
         "the bundle tw_files made; Bramble carrying a worker's workflow change names that worker's branch and the "
-        "bundle the worker's tw_files made, by its file name; a push to a branch whose pull request is in the merge queue or on auto-merge takes it out and off first, so the new head needs its own merge), open_pr, edit_pr, open_issue (a new issue, unclaimed, with a plain title and "
+        "bundle the worker's tw_files made, by its file name; a push to a branch whose pull request is in the merge queue or on auto-merge takes it out and off first, so the new head needs its own merge), open_pr, edit_pr (title, body, or draft: false marks a draft ready for review, true makes it a draft again; done only once GitHub shows every field), open_issue (a new issue, unclaimed, with a plain title and "
         "body: no footer, no session link, no closing --- line, and label, one work label the repo has such as bug or "
         "enhancement; refused when its title may repeat an open or lately closed issue, naming each: comment there "
         "instead, or, when yours is a different problem, open it again with not_repeat naming those numbers and "

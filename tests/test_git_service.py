@@ -28,7 +28,7 @@ from helpers import FIXTURES, policy
 from test_policy_service import service as policy_service
 
 from thornswood_brokers.git_service import GitService
-from thornswood_brokers.github_api import GitHub
+from thornswood_brokers.github_api import GitHub, Response
 from thornswood_brokers.wire import Refused
 
 APP = "ThornswoodRP/Thornswood"
@@ -1162,6 +1162,43 @@ class PullRequestsAndIssues(unittest.TestCase):
                 w.git.edit_pr("hermes", {"bot": "bramble", "repo": APP, "task": "t", "number": n, "title": "x"})
             with self.assertRaises(Refused):
                 w.git.comment("hermes", {"bot": "wisp", "repo": APP, "task": "t", "number": n, "body": "x"})
+
+    def test_draft_false_marks_a_draft_ready_for_review_and_is_read_back(self):
+        # Ops #268: edit_pr took no draft field, so draft false with a body
+        # changed the body, answered done, and the pull request stayed a
+        # draft that merge then refused (Thornswood #5632, #5815 and others).
+        w = World()
+        w.fake.add_pr(APP, 5815, head_ref="sprocket/4409-x", head_sha="e" * 40, files=["a"], draft=True)
+        out = w.git.edit_pr("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 5815,
+                                       "draft": False, "body": "Closes #4409"})
+        self.assertTrue(out["done"], out)
+        self.assertFalse(w.fake.prs[(APP, 5815)]["draft"])
+        self.assertEqual(w.fake.prs[(APP, 5815)]["body"], "Closes #4409")
+        self.assertEqual(w.fake.drafted, [(APP, 5815, False)])
+        # And back to a draft, alone.
+        out = w.git.edit_pr("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 5815, "draft": True})
+        self.assertTrue(out["done"], out)
+        self.assertTrue(w.fake.prs[(APP, 5815)]["draft"])
+
+    def test_an_edit_github_did_not_apply_is_not_answered_done(self):
+        # GitHub answers the mutation and the pull request is still a draft:
+        # the read-back sees it, so the edit is refused, never "done".
+        w = World()
+        w.fake.add_pr(APP, 5822, head_ref="sprocket/4431-x", head_sha="f" * 40, files=["a"], draft=True)
+        real = w.fake._graphql
+        w.fake._graphql = lambda body: (Response(200, {"data": {"markPullRequestReadyForReview": {
+            "pullRequest": {"isDraft": True}}}}, {}) if "markPullRequestReadyForReview" in body["query"] else real(body))
+        with self.assertRaises(Refused) as e:
+            w.git.edit_pr("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 5822, "draft": False})
+        self.assertIn("does not show it yet", str(e.exception))
+        self.assertTrue(w.fake.prs[(APP, 5822)]["draft"])
+
+    def test_an_edit_says_what_it_changes(self):
+        w = World()
+        w.fake.add_pr(APP, 5830, head_ref="sprocket/4500-x", head_sha="a" * 40, files=["a"])
+        for bad in ({}, {"draft": "no"}):
+            with self.subTest(bad=bad), self.assertRaises(Refused):
+                w.git.edit_pr("hermes", dict({"bot": "sprocket", "repo": APP, "task": "t", "number": 5830}, **bad))
 
     def test_a_label_on_a_pull_request_is_sent_with_pull_requests_write(self):
         w = World()
