@@ -1,0 +1,28 @@
+# An issue opened with no label gets "triage" (#58). The issue forms label
+# what is filed through them (bug, enhancement), but an issue opened through
+# the API skips the forms: #76, #77, #99, #123 and #181 arrived with no label.
+# A person or a Claude thread then gives it its kind and takes triage off.
+#
+# It runs on the event's own data and GitHub's CLI only, checks out nothing
+# and reads no secret; its token can label issues and nothing else.
+name: Label new issues
+on:
+  issues:
+    types: [opened, reopened]
+permissions:
+  issues: write
+jobs:
+  label:
+    name: Label an issue that has none
+    if: ${{ toJSON(github.event.issue.labels) == '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Add triage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh label create triage --color fbca04 --description "Needs its kind: bug, enhancement or documentation" 2>/dev/null || true
+          gh issue edit "$NUMBER" --add-label triage
