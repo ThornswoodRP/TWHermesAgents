@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.10.0
+version: 1.11.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -80,11 +80,18 @@ This comes before every other line here. It is word for word the rule every Clau
    - `Refs #N` for a fix people would notice. The issue stays open, goes to Done on merge, and closes with its Main test task when a main Ship carries it.
    - `Closes #N` only for a change nobody would notice in the game.
    - The test task text for the issue (section 9), in the PR, ready to post.
+   - The release note line, which main's required "Release note" check holds to Ship's note rules (Thornswood docs/guide/release-to-dev.md, "Say so, then write the note"). Either `Release note: none` with nothing after it on the line, when nobody would notice the change in the game, the launcher, the site or Discord, or the title on the same line as `Release note:`, three words or more, and one `- ` line under it for each thing people will notice:
+     ```text
+     Release note: The forge shows the price before you pay
+     - The forge window lists each metal a piece takes and how much.
+     ```
+     `Release note: none, nothing people see changes.` is read as a title with no `- ` line, and a title on the line after `Release note:` leaves the line empty: both are red. On 15 Nov 2026 #5997 and #6030 had sat on auto-merge since 12 and 13 Nov with this check their only red, and #5983, #6014 and #6034 had it red too. When the check is red, edit the body: it runs again by itself, with no push.
 6. If the change needs something done once it is deployed, add a step file under `deploy/after/` in the same PR (its README has the shape): a gate verb the box deploy agent runs after the Deployment, or a check in the game, which becomes a `check: in game` issue. Never a run note: Thornswood-Ops has had none since 12 Nov 2026 (#5186).
 7. What you find on the way: anything wrong that this issue does not cover (another bug, a band-aid, a stale doc, a missing test) goes on the board, never into this PR. Search first as in section 2; if an issue already holds it, add what you found there as a plain comment. If none does, `tw_git open_issue` it: a plain title, two to five lines saying what is wrong and where, and a last line `Done when:` with one thing somebody can check, unclaimed. Name each one in your hand-back.
 8. Hand back to Bramble: PR number, exact head SHA, the CI runs, the tests you ran and what they printed, the files touched, what is left. Never merge your own work.
 9. Then take your next issue yourself, in the same turn; do not wait for Bramble to send one. Your issue now waits on its checks and review, and waiting is never a reason to sit idle (section 3). Until 12 Nov 2026 every worker stopped here and waited for Bramble's next sweep to brief it, and Bramble sweeps one at a time: at 12:15 PM Mountain Rift and Wisp had sat 17 minutes since their hand-backs, and at 2:02 PM three of the five had just handed back, so the Board showed two Bots working. In the work hours (section 3; outside them, stop):
-   - `tw_git board` with `eligible` true, `areas` your own field (section 1), `limit` 20. Take the first issue, lowest Order first, that is yours by section 1, is not covered by an open pull request (`tw_git read` `/search/issues?q=repo:<repo> is:pr is:open <number>`), and whose decisions are answered. Read it whole (section 2).
+   - First your own open pull requests, oldest first: `tw_git read` `/repos/<repo>/pulls?state=open&per_page=100` in Thornswood, the fork and Ops, the ones whose branch starts with `<you>/`. One that needs your work is the issue you take now, before anything from the board: a required check red at its head, a conflict with its base (`mergeable` false), a review or a hand-back from Bramble on its head that asks for a change, or a draft you opened that waits on nothing you named in it. Fix it on top of its head (section 11) and hand back as in step 8. A pull request that waits on Patrick's card, on a cause on main that has its own issue, or on its checks is waiting, and you go on to the board. Until 15 Nov 2026 nothing sent a worker back to its own red pull request, and step 9 sent it to the board: on that day 37 of the Bots' and robots' 49 open pull requests were red, conflicting or drafts, 24 of the 49 were more than three days old, and the red ones had no push after Bramble's hand-back.
+   - Then `tw_git board` with `eligible` true, `areas` your own field (section 1), `limit` 20. Take the first issue, lowest Order first, that is yours by section 1, is not covered by an open pull request (`tw_git read` `/search/issues?q=repo:<repo> is:pr is:open <number>`), and whose decisions are answered. Read it whole (section 2).
    - Claim it with your own label: `tw_git label` add `claimed: <you>`. When that is refused (another Bot claimed it, or it waits on an open issue), take the next one.
    - Start it at step 1. Name it in your hand-back so Bramble's Bot Chat shows what you took.
    - When nothing eligible is in your field, say so in the hand-back and stop; Bramble's wake check sends you one when something lands there.
