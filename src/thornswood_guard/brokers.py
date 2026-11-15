@@ -420,7 +420,7 @@ TW_GIT_SCHEMA = {
         "that names it; replaced_by names the merged pull request that carried it), close_issue (Bramble only: closes an "
         "issue with reason duplicate and duplicate_of, or reason completed and done_by_pr (merged, in pr_repo when "
         "the fix is in another repo, e.g. ThornswoodRP/TWHermesAgents for an Ops issue) or done_by_run "
-        "(succeeded, in run_repo), with body saying why; never as not planned), delete_branch (Bramble only: deletes a Bot's branch with no open pull request, at the head sha you read), start_run (Bramble only), read (a GET inside one repo, or /search/issues with repo:<that repo> in q), board (the board's open issues in do-order; eligible true keeps only what may be picked, and lists under waiting the ones whose newest comment says they wait on an open issue; areas keeps only issues with one of those area labels and not_areas leaves out any with one, e.g. areas Gamemode, Engine and In-game for Wisp's field, as a list; limit, at most 100), ledger_event (Bramble only). Every write names "
+        "(succeeded, in run_repo), with body saying why; never as not planned), delete_branch (Bramble only: deletes a Bot's branch with no open pull request, at the head sha you read), start_run (Bramble only), read (a GET inside one repo, or /search/issues with repo:<that repo> in q; a text answer such as /actions/jobs/<id>/logs over 40,000 characters comes back as its last lines, numbered, with cut saying so: pass match and around, or tail, for the lines you want), board (the board's open issues in do-order; eligible true keeps only what may be picked, and lists under waiting the ones whose newest comment says they wait on an open issue; areas keeps only issues with one of those area labels and not_areas leaves out any with one, e.g. areas Gamemode, Engine and In-game for Wisp's field, as a list; limit, at most 100), ledger_event (Bramble only). Every write names "
         "its task. A refusal is a stop: say what was refused and why."),
     "parameters": {
         "type": "object",
@@ -440,6 +440,10 @@ TW_GIT_SCHEMA = {
             "decision_id": {"type": "string"},
             "workflow": {"type": "string"}, "inputs": {"type": "object"}, "channel": {"type": "string"},
             "path": {"type": "string"}, "issue": {"type": "integer"},
+            "match": {"type": "string", "description": "read of a text answer (a job's log): only the lines "
+                                                       "this regular expression finds, case ignored, numbered"},
+            "around": {"type": "integer", "description": "with match: lines either side of each hit (default 3)"},
+            "tail": {"type": "integer", "description": "read of a text answer: only its last lines"},
             # ledger_event's events (tw-policy LEDGER_EVENTS). 11 refusals by
             # 9 Nov 2026 were "merged", "merge" and "merge_release": the tool
             # never named them.
@@ -495,8 +499,9 @@ TW_DECIDE_SCHEMA = {
         "(Bramble: any kind; a specialist: a question on a task Bramble assigned it), revise_card (a new revision; "
         "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
         "(Bramble: give a task to a specialist; with brief, the brief goes to its chat and starts its turn), get_card (the card, its four states and, once "
-        "Patrick answered, the answer and what to do with it), my_cards (your waiting cards and those answered in "
-        "the last two days; Bramble sees all), report_work_done (Bramble, on an answered card), ask_one (text: a "
+        "Patrick answered, the answer and what to do with it), my_cards (your waiting cards whole, and those answered or "
+        "closed in the last two days as id, title, task, links, states and answer: get_card reads one whole; "
+        "Bramble sees all), report_work_done (Bramble, on an answered card), ask_one (text: a "
         "step of the agreed plan that only Patrick's PC can run, such as the launcher, the game or a box step over "
         "ssh, sent to One's Hermes, which runs it without asking him; its answer comes back to your Bot Chat. Never "
         "a step that needs a secret, money or something destructive outside the plan: that is a card), one_answer "

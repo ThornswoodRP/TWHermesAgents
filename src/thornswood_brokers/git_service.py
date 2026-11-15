@@ -52,6 +52,69 @@ query($org: String!, $number: Int!, $after: String, $status: String!, $order: St
 
 logger = logging.getLogger(__name__)
 
+# The most text a read answers inline. A Hermes tool answer over its own limit
+# is written to the profile's cache, which the guard keeps every Bot out of, so
+# a CI job's log (250 KB to 760 KB) could not be read at all: Thornswood-Ops
+# #266 (Thornswood #5630, #5752, #5882, skymp #148).
+READ_MOST = 40_000
+
+
+def _lines_wanted(args: dict) -> tuple[str | None, int, int]:
+    """A text read's selection: match (a regular expression, case ignored)
+    with around lines either side of each hit, or tail (the last lines)."""
+    match = args.get("match")
+    if match is not None:
+        if not isinstance(match, str) or not match.strip() or len(match) > 200:
+            raise Refused("match is a regular expression of at most 200 characters")
+        try:
+            re.compile(match)
+        except re.error as e:
+            raise Refused(f"match is not a regular expression: {e}") from None
+    around, tail = args.get("around", 3), args.get("tail", 0)
+    for name, v in (("around", around), ("tail", tail)):
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 100_000:
+            raise Refused(f"{name} is a whole number of lines")
+    return match, min(around, 50), tail
+
+
+def _text_reply(text: str, match: str | None, around: int, tail: int) -> dict:
+    """A text body as a read answers it: whole when it fits, else the lines
+    asked for (match and around, or tail), each prefixed with its number, cut
+    to READ_MOST from the end, where a log says what failed. cut says what
+    was left out and how to read the rest."""
+    lines = text.splitlines()
+    if match is None and not tail and len(text) <= READ_MOST:
+        return {"body": text}
+    if match is not None:
+        hit = re.compile(match, re.IGNORECASE)
+        keep: list[int] = []
+        hits = 0
+        for i, line in enumerate(lines):
+            if hit.search(line):
+                hits += 1
+                keep.extend(range(max(0, i - around), min(len(lines), i + around + 1)))
+        keep = sorted(set(keep))
+        what = f"{hits} lines match {match!r}"
+    else:
+        keep = list(range(max(0, len(lines) - tail), len(lines))) if tail else list(range(len(lines)))
+        what = f"the last {tail} lines" if tail else "the whole text"
+    out, size, shown = [], 0, []
+    for i in reversed(keep):
+        row = f"{i + 1}: {lines[i]}"
+        if size + len(row) + 1 > READ_MOST:
+            break
+        out.append(row)
+        shown.append(i)
+        size += len(row) + 1
+    out.reverse()
+    reply = {"body": "\n".join(out), "lines": len(lines)}
+    if len(shown) < len(keep):
+        reply["cut"] = (f"{what}: {len(keep)} lines with context, of {len(lines)}; shown are the last {len(shown)}, "
+                        f"from line {min(shown) + 1 if shown else '-'} (at most {READ_MOST} characters). Pass match "
+                        "(a regular expression) with around, or tail, to read other lines")
+    return reply
+
+
 # What an issue's comment says it waits on, as Bramble writes it when a claim
 # comes off (bramble-duties, section 6, item 5): "Waits on #N", "waits on
 # Thornswood-Ops #N", "Waits on ThornswoodRP/skymp#N", anywhere in it.
@@ -1345,7 +1408,17 @@ class GitService:
         if not inside or ".." in path:
             raise Refused(f"reads stay inside {root}, or search its issues with repo:{repo} in the query")
         self._check(self.rules.admin_call(bot, "GET", path))
-        return {"body": self.gh.get(self.policy.reader_for(repo), repo, path)}
+        body = self.gh.get(self.policy.reader_for(repo), repo, path)
+        pick = _lines_wanted(args)
+        if isinstance(body, str):
+            return _text_reply(body, *pick)
+        if isinstance(body, dict) and isinstance(body.get("files"), dict):
+            # An artifact's zip, as its files: each text file is cut the same way.
+            files = {name: (_text_reply(text, *pick) if isinstance(text, str) and not text.startswith("(binary, ")
+                            else {"body": text}) for name, text in body["files"].items()}
+            return {"body": {"files": {n: f["body"] for n, f in files.items()}},
+                    "cut": {n: f["cut"] for n, f in files.items() if f.get("cut")}}
+        return {"body": body}
 
     def board(self, caller: str, args: dict) -> dict:
         """The board's open issues in do-order, for any Bot: each one's repo,
