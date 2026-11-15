@@ -1,7 +1,7 @@
 ---
 name: thornswood-guide
 description: How Thornswood work moves for the six Bots, step by step. Who owns what, picking and claiming, branches, tests and PRs, review, Bramble's merge, the Dev release ledger, Main, test tasks, decisions, failures, rooms and hand-offs, cleanup, the cutover from Claude, the two weekly reviews. Load it before any claim, PR, merge or release.
-version: 1.14.0
+version: 1.15.0
 metadata:
   hermes:
     tags: [thornswood, workflow, github]
@@ -163,6 +163,7 @@ The shapes are in Developer-Guide.md "Test tasks and known issues". The bot post
 
 - **A fix to your own open pull request** goes on top of its head, never rebuilt on today's base and force-pushed: if its tree is gone, `tw_git base` with `branch` set to that pull request's branch, then `tw_files checkout` with that bundle and the same branch opens the tree at its head (Ops #311).
 - **A red check:** reproduce it, find where it comes from (your change, the base, a dependency, the runner, the network) and fix it there, in its own PR if it isn't yours. Read its job's log with `tw_git read` `/repos/<repo>/actions/jobs/<job id>/logs`: a log over 40,000 characters comes back as its last lines, numbered, so pass `match` (a regular expression, such as `FAIL|Error|exit code`) with `around`, or `tail`, for the lines that name the failure (Ops #266). If you can't fix it, it goes on the board with what was measured. Never re-run to fish for green, never merge past it.
+- **Something on the public internet** (an action's releases and tags outside ThornswoodRP, a public Nexus collection page, a package's registry entry): your container reaches the public internet since TWHermesAgents #182 (15 Nov 2026), and `web_search` and `web_extract` work. Read it there: `curl` GitHub's public API for an action's releases, tags and `action.yml` at a tag; `web_extract` a Nexus page; for a lockfile entry, `git clone` the public repository into `/workspace`, run `yarn upgrade <package>` (yarn v1) or `npm update <package>` in that clone, and copy the changed entry, its `resolved` URL and `integrity` exactly as the registry gave them, into your tree with `tw_files edit`. Never hand-write a hash. Nothing goes out: no posting, no upload, no sign-in (Ops #278, #294, #309).
 - **A refusal** (the gate, a broker, a permission): stop. Say what was refused and why. File what's missing for its owner. Never route around it or hand it to another Bot.
 - **Quota or capacity:** the task waits in the queue with its reason. No paid route. A check that gets no runner because Actions minutes or billing ran out is quota too: the pull request waits, and it is never a card about billing (docs/DECIDED.md, "No paid Actions usage").
 - **An unknown outcome** (a merge, push, tag, Ship or deploy that timed out): read back the exact target before anything else. Never repeat it blind.
