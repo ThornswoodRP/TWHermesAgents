@@ -164,10 +164,32 @@ class Routes(unittest.TestCase):
         cfg = build(p, "bramble")
         fb = cfg["fallback_providers"]
         self.assertEqual(fb[0], {"provider": "anthropic", "model": "claude-opus-5-5",
-                                 "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+                                 "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
         self.assertEqual(fb[2]["base_url"], "http://127.0.0.1:8611/qwen/v1")
         self.assertEqual(check_config(p, "bramble", cfg, set()), [])
         self.assertEqual(check_config(p, "rift", build(p, "rift"), set()), [])
+
+    def test_hermes_binds_the_credits_route_and_its_requests_reach_the_proxy(self):
+        """#142, #181: Hermes refused http://127.0.0.1:8611/credits as "not an
+        Anthropic-compatible host", so every turn that fell back from Claude
+        skipped route 2. Hermes v0.23.0 binds an anthropic fallback only to
+        Anthropic's own host or a path ending in /anthropic or /anthropic/v1
+        (agent/auxiliary_client.py _is_anthropic_compatible_host), and its SDK
+        client posts to the address, less a trailing /v1, plus /v1/messages
+        (agent/anthropic_adapter.py _base_client_kwargs)."""
+        import re
+        from urllib.parse import urlparse
+        from thornswood_brokers.proxy import ROUTES
+        p = self.ready()
+        for bot in p.bots:
+            for fb in build(p, bot)["fallback_providers"]:
+                if fb["provider"] != "anthropic" or "base_url" not in fb:
+                    continue
+                with self.subTest(bot=bot):
+                    url = urlparse(fb["base_url"])
+                    self.assertTrue(url.path.rstrip("/").endswith(("/anthropic", "/anthropic/v1")), fb["base_url"])
+                    posted = re.sub(r"/v1/?$", "", url.path.rstrip("/")) + "/v1/messages"
+                    self.assertEqual([r for prefix, (r, up) in ROUTES.items() if posted == prefix + up], ["credits"])
 
     def test_a_proxy_route_cannot_skip_the_proxy_or_point_elsewhere(self):
         p = self.ready()
@@ -182,7 +204,7 @@ class Routes(unittest.TestCase):
                         cfg["fallback_providers"][0][k] = v
                 self.assertTrue(check_config(p, "bramble", cfg, set()))
         cfg = build(p, "rift")
-        cfg["fallback_providers"][0]["base_url"] = "http://127.0.0.1:8611/credits"
+        cfg["fallback_providers"][0]["base_url"] = "http://127.0.0.1:8611/credits/anthropic"
         self.assertTrue(check_config(p, "rift", cfg, set()))
 
     def test_before_the_proxy_is_ready_no_route_names_it(self):
@@ -190,7 +212,7 @@ class Routes(unittest.TestCase):
         cfg = build(p, "bramble")
         self.assertNotIn("base_url", str(cfg))
         cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
-                                             "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+                                             "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
         self.assertTrue(check_config(p, "bramble", cfg, set()))
 
     def test_a_route_not_ready_stays_out_while_the_other_is_in(self):
@@ -199,7 +221,7 @@ class Routes(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8611/qwen/v1", str(cfg))
         self.assertNotIn("/credits", str(cfg))
         cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
-                                             "base_url": "http://127.0.0.1:8611/credits", "key_env": "TW_PROXY_TOKEN"})
+                                             "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
         self.assertTrue(check_config(p, "bramble", cfg, set()))
 
     def test_anthropic_api_key_would_spend_the_credits_first(self):

@@ -53,8 +53,13 @@ from .wire import Refused
 logger = logging.getLogger(__name__)
 
 ROUTES = {
-    # path prefix: (route, the one upstream path it may reach)
-    "/credits": ("credits", "/v1/messages"),
+    # path prefix: (route, the one upstream path it may reach). Route 2 sits
+    # under /credits/anthropic because Hermes binds an anthropic fallback only
+    # to an address that is Anthropic's own host or ends in /anthropic
+    # (auxiliary_client._is_anthropic_compatible_host); it refused the bare
+    # /credits address as "not an Anthropic-compatible host", so route 2 never
+    # took a turn (TWHermesAgents #142, #181).
+    "/credits/anthropic": ("credits", "/v1/messages"),
     "/qwen": ("qwen", "/v1/chat/completions"),
 }
 CREDIT_WORDS = ("credit balance is too low", "credit balance too low", "insufficient credit")

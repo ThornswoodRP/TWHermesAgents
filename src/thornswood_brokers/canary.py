@@ -553,7 +553,7 @@ class Canary:
                     problems.append(f"{addr}:{port} {p}")
         self.check(f"18: each Tailscale listener ({len(set(probes))}) refuses a request with no sign-in", problems)
         listen = self.policy.data["admission_proxy"]["listen"]
-        status, _ = _get(f"http://{listen}/credits/v1/messages", method="POST", body=b"{}")
+        status, _ = _get(f"http://{listen}/credits/anthropic/v1/messages", method="POST", body=b"{}")
         self.check("18: the admission proxy refuses a request with no Bot token",
                    None if status in (401, 403, 0) else f"the proxy answered {status}")
 

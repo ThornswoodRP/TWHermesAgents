@@ -111,6 +111,15 @@ SCHEDULED = ("cron",)
 SWEEP_PLATFORMS = ("webhook",)
 OWED_WAKE_MARK = "[Thornswood owed wake]"
 OWED_WAKE_JOB = "tw-owed-wake"
+# Bramble's two weekly reviews (scripts/apply.py REVIEW_JOBS) report only and
+# change nothing, so their turns are low-risk work, which Patrick's route order
+# (29 Oct) lets Claude's included API credits take when the subscription is
+# limited. Every task the queue has no risk class for is high risk, and
+# nothing set one, so on 15 Nov 2026 the 8:37 AM board review met a spent
+# Claude limit with route 2 closed to it and was lost for the week (#181). A
+# cron turn carries its job's prompt, and only Patrick and apply.py make
+# Bramble's cron jobs, as for OWED_WAKE_MARK.
+REVIEW_MARKS = ("[Thornswood weekly board review]", "[Thornswood weekly project review]")
 OWED_FILE = ("local", "thornswood-hermes", "owed-wake")
 # Every other turn the queue turns away leaves a note here, one file per
 # session (<session id>.json: when, and why), so whoever handed the turn its
@@ -175,6 +184,23 @@ class TurnGate:
         # apply.py make Bramble's cron jobs.
         return platform in SCHEDULED and OWED_WAKE_MARK in str(kwargs.get("user_message") or "")
 
+    def _report_only(self, kwargs: dict) -> bool:
+        """Whether this turn is one of Bramble's weekly reviews (REVIEW_MARKS)."""
+        if not self.policy.is_router(self.bot) or str(kwargs.get("platform") or "") not in SCHEDULED:
+            return False
+        message = str(kwargs.get("user_message") or "")
+        return any(mark in message for mark in REVIEW_MARKS)
+
+    def _low_risk(self, task: str) -> None:
+        """Give the queue the review's risk class before its ticket is asked for,
+        so the ticket is low risk. Never raises: a refusal leaves the turn high
+        risk, as every turn was before, and says so in the log."""
+        try:
+            self.ask("policy", "set_task_risk", {"bot": self.bot, "task": task, "risk": "low"})
+        except BrokerRefused as e:
+            logger.error("a weekly review's turn could not be classed low risk (%s); it runs as high risk, "
+                         "so Claude's included credits cannot take it while the subscription is limited", e)
+
     def _owe(self, why: str) -> None:
         try:
             self.ask("policy", "owe_wake", {"bot": self.bot, "reason": why})
@@ -214,6 +240,8 @@ class TurnGate:
         ticket = held["ticket"] if held and held.get("state") == "waiting" else None
         scheduled = str(kwargs.get("platform") or "") in SCHEDULED
         sweep = self._sweep(kwargs)
+        if ticket is None and self._report_only(kwargs):
+            self._low_risk(task)
         deadline = self.clock() + self.wait_seconds
         pause = 1.0
         try:

@@ -396,6 +396,75 @@ class Waiting(unittest.TestCase):
         self.assertEqual(build_gateway(p)["plugins"]["hook_callback_timeout"], HOOK_TIMEOUT)
 
 
+class ReviewRisk(unittest.TestCase):
+    """15 Nov 2026, #181: Bramble's 8:37 AM weekly board review met a spent
+    Claude limit. Its turn was high risk, as every turn was, because nothing
+    gave the queue a risk class, so Claude's included credits (route 2, for
+    Bramble's low-risk work) could not take it and the review was lost for the
+    week. The two weekly reviews report only, so their turns are low risk."""
+
+    def credits(self, f, bot="bramble"):
+        handler, callers = f.policy.ops()["route_admit"]
+        from thornswood_brokers.wire import Refused
+        try:
+            return handler(next(iter(callers)), {"bot": bot, "route": "credits"})
+        except Refused as e:
+            return {"refused": str(e)}
+
+    def review(self, mark=0):
+        # Hermes puts its cron hint before the job's prompt.
+        return "[cron hint]\n\n" + brokers.REVIEW_MARKS[mark] + " It is Sunday: run the weekly review."
+
+    def test_each_weekly_review_turn_is_low_risk_so_claudes_credits_may_take_it(self):
+        for mark in (0, 1):
+            with self.subTest(mark=mark):
+                f = Fleet()
+                g = gate(f, "bramble")
+                self.assertIsNone(g.before_llm(session_id="cron_r", task_id="cron:abc:1", platform="cron",
+                                               user_message=self.review(mark)))
+                got = self.credits(f)
+                self.assertTrue(got.get("admitted"), got)
+                self.assertEqual(got["risk"], "low")
+                self.assertIsNone(g.before_tool("read_file", session_id="cron_r"))
+
+    def test_any_other_turn_stays_high_risk_and_credits_refuse_it(self):
+        cases = (("bramble", {"platform": "cron", "user_message": "Board review, weekly"}),
+                 ("bramble", {"platform": "desktop", "user_message": brokers.REVIEW_MARKS[0] + " from a chat"}),
+                 ("bramble", {"platform": "webhook", "user_message": brokers.REVIEW_MARKS[0]}),
+                 ("rift", {"platform": "cron", "user_message": brokers.REVIEW_MARKS[0]}))
+        for bot, kw in cases:
+            with self.subTest(bot=bot, **kw):
+                f = Fleet()
+                self.assertIsNone(gate(f, bot).before_llm(session_id="s1", task_id="t1", **kw))
+                self.assertNotIn("set_task_risk", [op for _, op, _ in f.seen])
+                self.assertIn("low-risk work only" if bot == "bramble" else "not Rift's",
+                              self.credits(f, bot).get("refused", ""))
+
+    def test_a_refused_class_leaves_the_turn_running_as_before(self):
+        f = Fleet()
+        real = f.ask
+
+        def ask(broker, op, args):
+            if op == "set_task_risk":
+                raise BrokerRefused("tw-policy is starting")
+            return real(broker, op, args)
+        g = TurnGate(ready_policy(), "bramble", ask, wait_seconds=0, sleep=lambda s: None)
+        with self.assertLogs("thornswood_guard.brokers", "ERROR") as log:
+            self.assertIsNone(g.before_llm(session_id="cron_r", task_id="cron:abc:1", platform="cron",
+                                           user_message=self.review()))
+        self.assertIn("runs as high risk", log.output[0])
+        self.assertIn("low-risk work only", self.credits(f).get("refused", ""))
+
+    def test_the_review_jobs_carry_the_marks(self):
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "scripts" / "apply.py"
+        spec = importlib.util.spec_from_file_location("apply_for_marks", path)
+        apply = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(apply)
+        self.assertEqual([j["prompt"].split("]")[0] + "]" for j in apply.REVIEW_JOBS], list(brokers.REVIEW_MARKS))
+
+
 class Tools(unittest.TestCase):
     def test_14_the_bot_comes_from_the_profile_not_the_model(self):
         f = Fleet()

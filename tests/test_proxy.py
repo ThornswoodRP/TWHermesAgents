@@ -69,7 +69,7 @@ class World:
     def credits(self, bot="bramble", body=None, headers=None):
         body = body or {"model": MODEL, "max_tokens": 1000, "messages": [{"role": "user", "content": "triage #3150"}]}
         h = {"x-api-key": TOKENS[bot], "anthropic-version": "2023-06-01", **(headers or {})}
-        a = self.proxy.handle("POST", "/credits/v1/messages", h, json.dumps(body).encode())
+        a = self.proxy.handle("POST", "/credits/anthropic/v1/messages", h, json.dumps(body).encode())
         out = b"".join(a.body)
         a.close()
         return a, out
@@ -122,17 +122,17 @@ class Credits(unittest.TestCase):
     def test_a_token_that_is_not_a_bots_is_refused(self):
         w = World()
         w.turn()
-        a = w.proxy.handle("POST", "/credits/v1/messages", {"x-api-key": "real-credits-key"}, b"{}")
+        a = w.proxy.handle("POST", "/credits/anthropic/v1/messages", {"x-api-key": "real-credits-key"}, b"{}")
         self.assertEqual(a.status, 401)
-        a = w.proxy.handle("POST", "/credits/v1/messages", {}, b"{}")
+        a = w.proxy.handle("POST", "/credits/anthropic/v1/messages", {}, b"{}")
         self.assertEqual(a.status, 401)
 
     def test_only_the_two_paths_are_reachable(self):
         w = World()
         w.turn()
-        for method, path in (("GET", "/credits/v1/models"), ("POST", "/credits/v1/messages/batches"),
-                             ("POST", "/credits/v1/files"), ("POST", "/v1/messages"), ("GET", "/qwen/health"),
-                             ("POST", "/credits/../v1/organizations")):
+        for method, path in (("GET", "/credits/anthropic/v1/models"), ("POST", "/credits/anthropic/v1/messages/batches"),
+                             ("POST", "/credits/anthropic/v1/files"), ("POST", "/v1/messages"), ("GET", "/qwen/health"),
+                             ("POST", "/credits/anthropic/../v1/organizations"), ("POST", "/credits/v1/messages")):
             with self.subTest(path=path):
                 a = w.proxy.handle(method, path, {"x-api-key": TOKENS["bramble"]}, b"{}")
                 self.assertEqual(a.status, 404)
