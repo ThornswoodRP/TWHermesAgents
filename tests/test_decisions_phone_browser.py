@@ -38,9 +38,8 @@ def node_env() -> dict | None:
 
 ENV = node_env()
 
-# The check waits on the app's own 15-second reads several times, so a whole run takes about 170 seconds alone and
-# 180 four at once (measured 15 Nov). The old limit of 180 seconds stopped passing runs part way (#123).
-LIMIT = 360
+# A whole run takes well under this; one that does not is stopped and says how far it got (#123).
+LIMIT = 180
 
 
 @unittest.skipUnless(HAVE_PASSKEY_LIB, "py_webauthn is not installed here")

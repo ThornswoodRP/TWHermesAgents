@@ -326,7 +326,8 @@ class TheApp(unittest.TestCase):
     def test_the_live_line_follows_only_the_turn_being_answered(self):
         self.assertIn("function beingAnswered(mine) { return mine.find(m => m.status === 'leased' && !inQueue(m)) }", APP)
         self.assertIn("const turn = beingAnswered(v.mine)", APP)
-        self.assertIn("(was === 'leased' && inQueue(m) !== queued)", APP)
+        # The watch draws the chat again when a message leaves Hermes's queue to run.
+        self.assertIn("mine.filter(waiting).map(m => [m.id, m.status, inQueue(m), askSig(m.doing)])", APP)
 
 
 if __name__ == "__main__":
