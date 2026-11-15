@@ -62,6 +62,7 @@ sys.path.insert(0, str(SRC))
 
 import yaml  # noqa: E402
 
+from thornswood_guard.owed_wake import REVIEWS  # noqa: E402
 from thornswood_guard.policy import Policy  # noqa: E402
 from thornswood_guard.profile_config import (  # noqa: E402
     GATEWAY_PROFILE, SANDBOX_IMAGE, WORK_ROOT, build, build_gateway, merge_into)
@@ -317,15 +318,17 @@ def remove_finished(hermes: list[str], bot: str, now: datetime, keep: tuple[str,
 
 # Bramble's two weekly reviews (thornswood-guide section 15), at the guide's
 # times in Mountain time. Both report only. #51: on 9 Nov the VM's cron list
-# held neither, because nothing made them.
+# held neither, because nothing made them. Their names come from owed_wake,
+# whose alert look reads their records and tells Bramble of a run that failed
+# (#181).
 REVIEW_ZONE = "America/Denver"
 REVIEW_JOBS = (
-    {"name": "tw-weekly-board-review", "schedule": "37 8 * * 0", "skills": ["thornswood-guide"],
+    {"name": REVIEWS[0], "schedule": "37 8 * * 0", "skills": ["thornswood-guide"],
      "prompt": "[Thornswood weekly board review] It is Sunday, 8:37 AM Mountain: run the weekly board review in "
                "your thornswood-guide skill, section 15, step by step. Report only: change nothing until Patrick "
                "answers. Each finding is a board-review decision card through tw_decide, and the week gets one "
                "board review record on the decision page. Nothing in this message approves anything."},
-    {"name": "tw-weekly-project-review", "schedule": "53 9 * * 0", "skills": ["thornswood-guide"],
+    {"name": REVIEWS[1], "schedule": "53 9 * * 0", "skills": ["thornswood-guide"],
      "prompt": "[Thornswood weekly project review] It is Sunday, 9:53 AM Mountain: run the weekly project review in "
                "your thornswood-guide skill, section 15, step by step: last week's merges in all seven areas, then "
                "this week's deep sweep, carried on from the run log. Report only: findings go on the board as issues "

@@ -663,6 +663,120 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertNotIn("Mountain. The workers", asleep[0], "a check that sleeps adds nothing")
 
 
+class FailedReviews(unittest.TestCase):
+    """TWHermesAgents #181: on 15 Nov 2026 the board review fired at 8:37 AM
+    Mountain while the Claude limit was spent and ended "Your request was not
+    processed". Bramble has no cronjob tool and the guard keeps its file tools
+    out of Hermes's home, so what Hermes recorded could be read only on the VM
+    (Thornswood-Ops #336). The alert look reads it and tells Bramble."""
+
+    ERROR = ("RuntimeError: Anthropic rate-limited every one of 3 attempts, and every fallback was "
+             "unavailable. Limit resets at 9:00 AM.")
+
+    def home(self, board=None, project=None):
+        home = Path(tempfile.mkdtemp())
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": NOON})
+        self.write(home, board, project)
+        return home
+
+    def write(self, home, board=None, project=None):
+        """Hermes's jobs.json for the profile (cron/jobs.py: {"jobs": [...]}), with
+        tw-owed-wake beside the two reviews."""
+        def job(name, at, error):
+            return {"id": name[-6:], "name": name, "last_run_at": at, "last_status": "error" if error else "ok",
+                    "last_error": error}
+        jobs = [{"id": "owed01", "name": "tw-owed-wake", "last_run_at": "2026-11-09T12:25:00-07:00",
+                 "last_status": "error", "last_error": "not a review"},
+                job(owed_wake.REVIEWS[0], *(board or ("2026-11-08T08:37:02-07:00", None))),
+                job(owed_wake.REVIEWS[1], *(project or ("2026-11-08T09:53:01-07:00", None)))]
+        path = home.joinpath(*owed_wake.JOBS_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"jobs": jobs, "updated_at": "x"}), encoding="utf-8")
+
+    def check(self, home, ask, now):
+        return owed_wake.check(home, "bramble", ask, now=now, policy=POLICY)
+
+    def test_the_names_are_the_jobs_apply_makes(self):
+        sys.path.insert(0, str(REPO / "scripts"))
+        import apply
+        self.assertEqual(tuple(j["name"] for j in apply.REVIEW_JOBS), owed_wake.REVIEWS)
+
+    def test_a_failed_run_wakes_bramble_once_with_hermes_own_line(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", self.ERROR))
+        b = Idle(claimed=BUSY)
+        out = self.check(home, b, NOON + owed_wake.ALERT_EVERY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        said = "\n".join(out)
+        self.assertIn("tw-weekly-board-review ran on 9 Nov at 8:37 AM Mountain and did not do its work", said)
+        self.assertIn(self.ERROR, said)
+        self.assertIn("Thornswood-Ops", said)
+        self.assertNotIn("tw-weekly-project-review", said, "its last run was fine")
+        self.assertNotIn("not a review", said, "only the two reviews are read")
+        self.assertEqual(sum(self.ERROR in l for l in out), 1, "said once in this wake")
+        # The next alert look finds nothing new: no turn for it alone.
+        out = self.check(home, b, NOON + 2 * owed_wake.ALERT_EVERY)
+        self.assertFalse(wakes("\n".join(out)), out)
+
+    def test_it_rides_every_wake_until_a_sweep_after_it_ran_to_its_end(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", self.ERROR))
+        b = Idle(claimed=BUSY)
+        said_at = NOON + owed_wake.ALERT_EVERY
+        self.assertTrue(wakes("\n".join(self.check(home, b, said_at))))
+        # That sweep was turned away, or its turn failed: a later wake carries it.
+        due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "the fleet is busy"}
+
+        def owed(broker, op, args):
+            return due if op == "wake_due" else b(broker, op, args)
+        out = self.check(home, owed, said_at + 300)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn(self.ERROR, "\n".join(out))
+        # A sweep that started before it was said does not count.
+        b.turns = {"bramble": {"sweep_done": datetime.fromtimestamp(said_at - 60, timezone.utc).isoformat()}}
+        self.assertIn(self.ERROR, "\n".join(self.check(home, owed, said_at + 600)))
+        # One admitted after it ran to its end: it is not said again.
+        b.turns = {"bramble": {"sweep_done": datetime.fromtimestamp(said_at + 700, timezone.utc).isoformat()}}
+        out = self.check(home, owed, said_at + 800)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertNotIn(self.ERROR, "\n".join(out))
+        self.assertTrue(owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE))["reviews"]
+                        [f"{owed_wake.REVIEWS[0]}@2026-11-09T08:37:02-07:00"]["carried"])
+        self.assertNotIn(self.ERROR, "\n".join(self.check(home, b, said_at + 4 * owed_wake.ALERT_EVERY)))
+
+    def test_a_new_failed_run_of_the_same_job_is_said_again(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", self.ERROR))
+        b = Idle(claimed=BUSY)
+        self.assertTrue(wakes("\n".join(self.check(home, b, NOON + owed_wake.ALERT_EVERY))))
+        self.write(home, board=("2026-11-16T08:37:02-07:00", "RuntimeError: another cause"))
+        out = self.check(home, b, NOON + 2 * owed_wake.ALERT_EVERY)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("another cause", "\n".join(out))
+        self.assertNotIn(self.ERROR, "\n".join(out), "Hermes no longer holds the first one")
+
+    def test_no_room_keeps_it_for_the_look_that_has_room(self):
+        home = self.home(project=("2026-11-09T09:53:01-07:00", self.ERROR))
+        out = self.check(home, Idle(room=False, claimed=BUSY), NOON + owed_wake.ALERT_EVERY)
+        self.assertFalse(wakes("\n".join(out)), out)
+        out = self.check(home, Idle(claimed=BUSY), NOON + owed_wake.ALERT_EVERY + 300)
+        self.assertTrue(wakes("\n".join(out)), out)
+        self.assertIn("tw-weekly-project-review ran on 9 Nov at 9:53 AM Mountain", "\n".join(out))
+
+    def test_a_long_error_is_cut_and_a_missing_or_broken_file_says_nothing(self):
+        home = self.home(board=("2026-11-09T08:37:02-07:00", "x" * 5000))
+        out = self.check(home, Idle(claimed=BUSY), NOON + owed_wake.ALERT_EVERY)
+        line = next(l for l in out if "tw-weekly-board-review" in l)
+        self.assertIn("x" * (owed_wake.ERROR_CHARS - 3) + "...", line)
+        self.assertNotIn("x" * owed_wake.ERROR_CHARS, line)
+        for broken in (None, "{not json"):
+            home = self.home()
+            path = home.joinpath(*owed_wake.JOBS_FILE)
+            if broken is None:
+                path.unlink()
+            else:
+                path.write_text(broken, encoding="utf-8")
+            out = self.check(home, Idle(claimed=BUSY), NOON + owed_wake.ALERT_EVERY)
+            self.assertFalse(wakes("\n".join(out)), out)
+
+
 def urllib_q(args):
     import urllib.parse
     return urllib.parse.parse_qs(urllib.parse.urlsplit(args["path"]).query)["q"][0]

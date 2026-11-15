@@ -62,6 +62,20 @@ Sprocket, Echo and Wisp free; its sweep was turned away because another was
 running, a GitHub sweep paid the wake it owed without its lines, the 6:44 PM
 sweep carried only an Ops issue, and no worker got work for the next hour.
 
+Bramble's two weekly reviews (scripts/apply.py REVIEW_JOBS) are Hermes cron
+jobs of its own profile, and nothing told anybody when one failed: Bramble
+has no cronjob tool in its turns, and the guard keeps its file tools out of
+Hermes's home. 15 Nov 2026: the board review fired at 8:37 AM Mountain while
+the Claude limit was spent, its turn ended "Your request was not processed",
+and what Hermes recorded about it could be read only on the VM
+(TWHermesAgents #181, Thornswood-Ops #336). So the alert look also reads
+those two jobs' records in <profile>/cron/jobs.json, the file Hermes keeps
+them in (contracts.json, profiles.jobs), and a run that ended with an error
+wakes Bramble once with the job, when it ran and Hermes's own error line,
+for Bramble to put on the board. The record rides every wake until a sweep
+admitted after it was said runs to its end, as the free worker look's lines
+do, so a wake that was itself turned away or failed does not lose it.
+
 Bramble itself works around the clock (Patrick, 9 Nov 2026, 1:27 AM:
 "Bramble should still be working and always be working and alert"); only
 the workers' new issues wait for 6 AM. So the alert wake looks every
@@ -114,6 +128,12 @@ IDLE_EVERY = 3600.0
 IDLE_FILE = ("local", "thornswood-hermes", "idle-wake.json")
 # How often the alert wake looks at Bramble's own work, at any hour.
 ALERT_EVERY = 900.0
+# Bramble's two weekly reviews, by the names scripts/apply.py gives them
+# (REVIEW_JOBS), and the file Hermes keeps a profile's cron jobs in.
+REVIEWS = ("tw-weekly-board-review", "tw-weekly-project-review")
+JOBS_FILE = ("cron", "jobs.json")
+# How much of Hermes's error line a wake carries.
+ERROR_CHARS = 400
 # The free worker look's pull request pages (_worked): REST reads, not
 # searches, so GitHub's search limits do not count them. Ten pages are the
 # thousand most recently updated pull requests; a claim whose pull request
@@ -141,7 +161,8 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
     if policy is None or lines[-1] == SLEEP:
         return lines
     # Every wake says the work hours as the policy has them, whatever woke it.
-    return [f"It is {_clock(now)} Mountain. {rule(policy)}", *lines, *_carried(home, now, policy)]
+    return [f"It is {_clock(now)} Mountain. {rule(policy)}", *lines, *_carried(home, now, policy),
+            *_reviews_carried(home, bot, ask, now)]
 
 
 def _carried(home: Path, now: float, policy: dict | None = None) -> list[str]:
@@ -259,6 +280,7 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     said = []
     if alert_due:
         state["alert_checked"] = now
+        failed = _new_failed_reviews(home, state, now)
         try:
             seen = _own_work(bot, ask, policy)
         except BrokerRefused as e:
@@ -268,13 +290,15 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
             new = sorted(set(seen) - set(state.get("seen") or []))
             state["seen"] = sorted(seen)
             _save(path, state)
-            if new:
-                return [f"New or changed since the last look, and yours at any hour: {', '.join(new[:8])}"
-                        + (f" and {len(new) - 8} more" if len(new) > 8 else "")
-                        + " (bramble-duties, sections 4, 5 and 7)."]
+            if new or failed:
+                return [*failed, *([f"New or changed since the last look, and yours at any hour: {', '.join(new[:8])}"
+                                    + (f" and {len(new) - 8} more" if len(new) > 8 else "")
+                                    + " (bramble-duties, sections 4, 5 and 7)."] if new else [])]
             said.append("nothing of your own is new since the last look")
         else:
             _save(path, state)
+            if failed:
+                return [*failed, *said]
     if not idle_due:
         return [*said, night if not working and night else "the free worker check is not due", SLEEP]
     if alert_due:
@@ -287,6 +311,81 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         return [*said, "the free worker check is due and runs at the next check, apart from this one's searches",
                 SLEEP]
     return [*said, *([ended_said] if ended_said else []), *_free_workers(bot, ask, now, policy, path, state)]
+
+
+def _failed_reviews(home: Path) -> dict[str, str]:
+    """{"<job>@<last run>": the line that says it} for each of Bramble's weekly
+    reviews whose last run ended with an error, read from Hermes's own record
+    (cron.jobs mark_job_run sets last_error only on a run that failed). An
+    unreadable file is no record: the next look reads it again."""
+    try:
+        data = json.loads(home.joinpath(*JOBS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    jobs = data.get("jobs") if isinstance(data, dict) else data
+    out = {}
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict) or job.get("name") not in REVIEWS:
+            continue
+        at, error = job.get("last_run_at"), " ".join(str(job.get("last_error") or "").split())
+        if not at or not error:
+            continue
+        if len(error) > ERROR_CHARS:
+            error = error[: ERROR_CHARS - 3] + "..."
+        out[f"{job['name']}@{at}"] = (
+            f"Your weekly job {job['name']} ran {_day_and_clock(str(at))} and did not do its work. "
+            f"Hermes recorded: \"{error}\". Put this on Thornswood-Ops as it is, on the open issue about that "
+            "run or a new one titled with the job and the day (bramble-duties, section 4), so its cause is "
+            "fixed where it is. Change no job.")
+    return out
+
+
+def _day_and_clock(iso: str) -> str:
+    """When a run was, as Patrick reads it ("on 15 Nov at 8:37 AM Mountain"),
+    or Hermes's own time when it cannot be read."""
+    t = _when(iso)
+    local = _local(t) if t else None
+    if local is None:
+        return f"at {iso}"
+    return f"on {local.day} {local.strftime('%b')} at {_clock(t)} Mountain"
+
+
+def _new_failed_reviews(home: Path, state: dict, now: float) -> list[str]:
+    """The failed review runs no wake has said yet, each now kept in state
+    as said at now. Records Hermes no longer holds (the job ran again) leave
+    state."""
+    failed = _failed_reviews(home)
+    kept = {k: v for k, v in (state.get("reviews") or {}).items() if k in failed}
+    new = [k for k in failed if k not in kept]
+    for k in new:
+        kept[k] = {"at": now}
+    state["reviews"] = kept
+    return [failed[k] for k in new]
+
+
+def _reviews_carried(home: Path, bot: str, ask: Caller, now: float) -> list[str]:
+    """Failed review runs already said, that no sweep admitted after the
+    saying has carried to its end (tw-policy's sweep_done): added to every
+    wake until one has. tw-policy not answering keeps them."""
+    path = home.joinpath(*IDLE_FILE)
+    state = _load(path)
+    pending = {k: v for k, v in (state.get("reviews") or {}).items() if not v.get("carried")}
+    if not pending:
+        return []
+    try:
+        mine = ((ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}).get(bot) or {}
+        done = _when(str(mine.get("sweep_done") or ""))
+    except BrokerRefused:
+        done = 0.0
+    failed = _failed_reviews(home)
+    lines = []
+    for k, v in pending.items():
+        if done and done >= float(v["at"]):
+            v["carried"] = True
+        elif float(v["at"]) != now and k in failed:
+            lines.append(failed[k])
+    _save(path, state)
+    return lines
 
 
 def _unheard(bot: str, ask: Caller, state: dict) -> tuple[bool, str | None]:
