@@ -139,14 +139,29 @@ class BotRoute:
 
     def my_cards(self, p: Principal, args: dict) -> list[dict]:
         """The cards this Bot opened that are waiting or answered in the last two
-        days; Bramble's include every card, as its Needs you list does."""
+        days; Bramble's include every card, as its Needs you list does. A
+        waiting card comes whole; one that is no longer waiting comes as its
+        id, kind, status, title, task, links and answer, and get_card reads
+        the rest. Until 15 Nov 2026 every card came whole, and on 12 Nov
+        Bramble's answer was 105,473 characters, which Hermes kept where no
+        Bot may read, so the card sweep could not run (Thornswood-Ops #266)."""
         db = self.store.db
         since = iso(self.store.clock() - timedelta(days=2))
         where = "" if p.kind == "bramble" else " AND requested_by = ?"
         params = [self.ws, since] + ([] if p.kind == "bramble" else [p.id])
         rows = db.execute("SELECT id FROM decisions WHERE workspace_id = ? AND (status = 'pending' OR updated_at >= ?)"
                           + where + " ORDER BY created_at", params).fetchall()
-        return [self._with_answer(self.core.get_card(p, r["id"])) for r in rows]
+        out = []
+        for r in rows:
+            card = self._with_answer(self.core.get_card(p, r["id"]))
+            if card.get("status") != "pending":
+                r = card.get("receipt") or {}
+                card = {k: card.get(k) for k in ("id", "kind", "status", "title", "task", "links", "superseded_by",
+                                                  "states")} | (
+                    {"answer": {"option": r.get("option_key"), "answered_at": r.get("answered_at")}
+                     | ({"words": r["words"]} if r.get("words") else {})} if r else {})
+            out.append(card)
+        return out
 
     def report_work_done(self, p: Principal, args: dict) -> dict:
         self.core.report_work_done(p, _text(args, "decision_id"), _text(args, "detail"))
