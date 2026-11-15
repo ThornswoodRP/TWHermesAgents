@@ -27,7 +27,7 @@ from helpers import FIXTURES, policy
 
 from test_policy_service import service as policy_service
 
-from thornswood_brokers.git_service import GitService
+from thornswood_brokers.git_service import READ_MOST, GitService
 from thornswood_brokers.github_api import GitHub, Response
 from thornswood_brokers.wire import Refused
 
@@ -1532,6 +1532,32 @@ class PullRequestsAndIssues(unittest.TestCase):
         self.assertFalse([p for p in read if "/issues/4603/" in p], read)
         everything = w.git.board("hermes", {"bot": "bramble", "limit": 10})
         self.assertNotIn("waiting", everything, "only an eligible read looks at waits")
+
+    def test_a_log_too_big_for_a_reply_comes_back_as_the_lines_asked_for(self):
+        # Ops #266: a job's log (252 KB to 756 KB) went over Hermes's inline
+        # size, was kept where the guard lets no Bot read, and nobody could
+        # see why a harness failed.
+        w = World()
+        path = f"/repos/{APP}/actions/jobs/129213872464/logs"
+        lines = [f"2026-11-10T05:00:{i % 60:02d}Z step {i}: building part {i}" for i in range(20000)]
+        lines[12345] = "2026-11-10T05:12:00Z FAIL test-5630: copy 1 said: plugins.txt is missing"
+        w.fake.texts[path] = "\n".join(lines)
+        args = {"bot": "rift", "repo": APP, "path": path}
+        out = w.git.read("hermes", args)
+        self.assertLessEqual(len(out["body"]), READ_MOST)
+        self.assertEqual(out["lines"], 20000)
+        self.assertTrue(out["body"].endswith("20000: " + lines[-1]), "the end of a log is where it failed")
+        self.assertIn("Pass match", out["cut"])
+        hit = w.git.read("hermes", {**args, "match": r"\bFAIL\b", "around": 2})
+        self.assertEqual(hit["body"].splitlines(), [f"{n + 1}: {lines[n]}" for n in range(12343, 12348)])
+        self.assertNotIn("cut", hit)
+        tail = w.git.read("hermes", {**args, "tail": 3})
+        self.assertEqual(tail["body"].splitlines()[0], "19998: " + lines[19997])
+        for bad in ({"match": "("}, {"match": ""}, {"tail": -1}, {"around": "x"}):
+            with self.subTest(bad=bad), self.assertRaises(Refused):
+                w.git.read("hermes", {**args, **bad})
+        w.fake.texts[path] = "short log\nok"
+        self.assertEqual(w.git.read("hermes", args), {"body": "short log\nok"}, "a log that fits comes whole")
 
     def test_the_board_reads_one_field_across_the_whole_board(self):
         # 9 Nov 2026: the first 100 eligible issues held none of Wisp's, 181 were open in its field.
