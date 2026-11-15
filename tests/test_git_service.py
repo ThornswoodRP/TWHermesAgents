@@ -315,11 +315,20 @@ class Merge(unittest.TestCase):
             w.merge(sha=sha)
         self.assertIn("nothing merges unseen", str(e.exception))
 
-    def test_a_workflow_or_gate_change_merges_with_no_yes(self):
-        # Patrick, 2 Nov 2026: "I shouldn't need to approve".
+    def test_an_ops_change_to_what_the_box_runs_merges_as_a_squash_on_patricks_yes(self):
+        # Patrick, 2 Nov 2026: "I shouldn't need to approve" each merge; a
+        # change to what runs on the box is the exception he kept (his A on
+        # Ops #276, 12 Nov, and on Ops #353, 15 Nov 2026), Ops's workflows
+        # included. Everything else in Ops merges with no yes.
         w = World()
         sha = w.green_pr(files=[".github/workflows/box-run.yml", "scripts/vps/gate/Run-Verb.ps1"])
-        out = w.merge(sha=sha)
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha)
+        self.assertIn("changes .github/workflows/box-run.yml", str(e.exception))
+        did = "dec_opsmerge000001"
+        w.mains[did] = {"decision_id": did, "for": "merge", "repo": OPS, "commit": sha, "pr": 42, "revision": 1,
+                        "option": "authorize", "answered_at": w.policy.clock().isoformat(), "restored": False}
+        out = w.merge(sha=sha, decision_id=did)
         self.assertTrue(out["done"])
         self.assertEqual(w.fake.writes("PUT", "/merge")[0][2], {"sha": sha, "merge_method": "squash"})
 
@@ -899,11 +908,45 @@ class PatrickMerges(unittest.TestCase):
         sha = w.green_pr(repo=APP, checks=False, files=["launcher/PathFence.cs", "docs/x.md"])
         self.assertTrue(w.merge(sha=sha, repo=APP)["auto_merge"])
 
-    def test_ops_is_not_held(self):
-        # Ops #276 names Thornswood and the fork; Ops has no patrick_paths.
+    def ops_pr(self, w: World, files: list[str], branch: str = "claude/project-thread-zmcsdo",
+               author: str = "EvilPatrick06") -> str:
+        sha = w.green_pr(repo=OPS, files=files)
+        w.fake.prs[(OPS, 42)]["head"]["ref"] = branch
+        w.fake.prs[(OPS, 42)]["user"]["login"] = author
+        return sha
+
+    def test_an_ops_workflow_merges_only_on_patricks_card(self):
+        # Ops #358 (a new workflow, from a cloud thread, 15 Nov 2026) waited
+        # on a card opened by hand: Ops had no patrick_paths, so tw_git merged
+        # any green Ops pull request with none. Ops's workflows run on the
+        # box's runners, and status-page runs ops/write-status.js from main.
+        for path in (".github/workflows/git-ref.yml", "ops/write-status.js"):
+            w = self.world()
+            sha = self.ops_pr(w, ["README.md", path])
+            self.refused(w, OPS, sha, f"changes {path}")
+            self.refused(w, OPS, sha, f"release link merge:{OPS}@{sha}#42")
+            self.assertEqual(w.fake.writes("PUT"), [], "nothing merged")
+            did = self.card(w, OPS, sha)
+            self.assertTrue(w.merge(sha=sha, repo=OPS, decision_id=did)["done"])
+        # A Bot's needs the card the same way.
         w = self.world()
-        sha = w.green_pr(repo=OPS, files=[".github/workflows/box-run.yml"])
+        sha = w.green_pr(repo=OPS, files=[".github/workflows/check.yml"])
+        self.refused(w, OPS, sha, "changes .github/workflows/check.yml")
+
+    def test_ops_files_the_box_does_not_run_need_no_card(self):
+        w = self.world()
+        sha = self.ops_pr(w, ["issues/6184.md", "ops/status.md", "tests/test-box-workflows.ps1"])
         self.assertTrue(w.merge(sha=sha, repo=OPS)["done"])
+
+    def test_patricks_own_ops_workflow_needs_no_card_but_a_claude_branch_does(self):
+        # His A on Ops #353: a pull request is his only when its branch is not
+        # a Claude session's, though GitHub names him as the author of both.
+        w = self.world()
+        sha = self.ops_pr(w, [".github/workflows/tunnel.yml"], branch="patrick-tunnel")
+        self.assertTrue(w.merge(sha=sha, repo=OPS)["done"])
+        w = self.world()
+        sha = self.ops_pr(w, [".github/workflows/tunnel.yml"], branch="claude/tunnel")
+        self.refused(w, OPS, sha, "changes .github/workflows/tunnel.yml")
 
 
 class AutoMerge(unittest.TestCase):

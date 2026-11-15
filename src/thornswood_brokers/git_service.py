@@ -1101,7 +1101,8 @@ class GitService:
         decision_id = args.get("decision_id")
         self._check(self.rules.merge(bot, pr, sha, method, checks, branch_checks=branch_checks,
                                      allowed_people=allowed, verb_paths=verb_paths, decision_id=decision_id))
-        uses = bool(self.policy.patrick_files(repo, pr.files, verb_paths))
+        # Patrick's own pull request needs no yes (rules.patricks_own_pr), so it spends none.
+        uses = bool(self.policy.patrick_files(repo, pr.files, verb_paths)) and not self.rules.patricks_own_pr(pr)
 
         # Where GitHub's auto-merge merges (policy merge.auto_merge), this turns
         # it on at this exact head, and GitHub merges once the checks the

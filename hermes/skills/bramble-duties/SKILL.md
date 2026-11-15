@@ -112,6 +112,18 @@ In ThornswoodRP/Thornswood-Ops:
    (`GET /repos/ThornswoodRP/Thornswood-Ops/commits/<head sha>/check-runs`).
    Merge it with `tw_git merge` on that exact head when `check` passed there
    and your review stands. It merges as a squash.
+3. One that changes a workflow (`.github/workflows/`, which run on the box's
+   runners) or `ops/write-status.js` (status-page runs it from main there),
+   the policy's `merge.patrick_paths` for Ops, merges only on Patrick's
+   yes at that exact head, whoever's it is, unless it is his own from a
+   branch that is not `claude/` (his A on Ops #353, 15 Nov 2026). Open its
+   Main card as step 5 above says, the same sweep you first see it, with
+   the link ref `merge:ThornswoodRP/Thornswood-Ops@<head>#<number>`, and
+   once he answers `authorize`, `tw_git merge` it with the card's id; tw_git
+   refuses it without one. A thread's pull request gets the card without a
+   review of yours (the thread owns its code), as in Thornswood. Until
+   15 Nov 2026 Ops had no held files, and Ops #358, a cloud thread's new
+   workflow, waited on a card somebody opened by hand.
 
 In all three:
 

@@ -207,10 +207,10 @@ class Policy:
     def patrick_files(self, repo: str, files: list[str], verb_paths: list[str]) -> list[str]:
         """The files of a pull request that merge only on Patrick's yes for it
         at its head (merge.patrick_paths): under one of the repo's dirs, one
-        of its verb lists, or a script or 'reads' entry a verb of the base
-        branch's lists names (verb_paths; one ending in / is a folder)."""
+        of its files or verb lists, or a script or 'reads' entry a verb of the
+        base branch's lists names (verb_paths; one ending in / is a folder)."""
         rule = self.data["merge"].get("patrick_paths", {}).get(repo) or {}
-        dirs, lists = rule.get("dirs") or [], rule.get("verb_lists") or []
+        dirs, lists = rule.get("dirs") or [], (rule.get("files") or []) + (rule.get("verb_lists") or [])
 
         def held(f: str) -> bool:
             return (any(f.startswith(d) for d in dirs) or f in lists
