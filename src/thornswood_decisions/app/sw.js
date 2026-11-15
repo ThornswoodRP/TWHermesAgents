@@ -28,6 +28,23 @@ const CHAT_WORDS = { answered: who => who + ' answered', asks: who => who + ' as
 const FILES = ['/m/', '/m/app.js', '/m/app.css', '/m/manifest.webmanifest', '/m/cinzel-latin.woff2',
   '/m/icon-192.png', '/m/icon-512.png', '/m/icon-maskable-512.png']
 
+// Every show of an alert and every read of the alerts on screen, one after another. Chrome writes an alert
+// down before it puts it on screen, and a read of the list in between takes the written alert for one already
+// closed and deletes it: it is then never listed again, so the app cannot take it off, and Chrome no longer
+// has it when it is tapped (#21, #34: the check lost an alert that way about once in a hundred pushes).
+let alertsBusy = Promise.resolve()
+function inTurn(work) {
+  const done = alertsBusy.then(work)
+  alertsBusy = done.catch(() => {})
+  return done
+}
+
+// The alerts on screen now, read after every show asked for before. The check reads them this way too.
+function alertsNow(filter) {
+  return inTurn(() => self.registration.getNotifications(filter))
+}
+self.alertsNow = alertsNow
+
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(SHELL).then(c => c.addAll(FILES)).then(() => self.skipWaiting()))
 })
@@ -65,26 +82,26 @@ self.addEventListener('push', event => {
   const rev = Number.isInteger(data.attention_revision) ? data.attention_revision : null
   if (id) event.waitUntil(caches.open(ALERTS).then(c => c.put(new Request('/m/alerts/' + id),
     new Response(JSON.stringify({ shown_at: new Date().toISOString(), attention_revision: rev }), { headers: { 'Content-Type': 'application/json' } }))))
-  event.waitUntil(self.registration.showNotification('Hermes needs you', {
+  event.waitUntil(inTurn(() => self.registration.showNotification('Hermes needs you', {
     tag: id ? 'decision:' + id : 'thornswood',
     renotify: false,
     silent: false,
     icon: '/m/icon-192.png',
     data: { path: id ? '/m/decisions/' + id : '/m/decisions' }
-  }))
+  })))
 })
 
 // A chat alert, unless that chat is open in front of him now.
 async function chatAlert(kind, who, path) {
   const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
   if (list.some(c => c.visibilityState === 'visible' && c.focused && new URL(c.url).pathname === path)) return
-  return self.registration.showNotification(CHAT_WORDS[kind](who), {
+  return inTurn(() => self.registration.showNotification(CHAT_WORDS[kind](who), {
     tag: 'chat:' + path,
     renotify: true,
     silent: false,
     icon: '/m/icon-192.png',
     data: { path }
-  })
+  }))
 }
 
 self.addEventListener('notificationclick', event => {
@@ -106,13 +123,13 @@ self.addEventListener('message', event => {
   let keep = null
   let only = null
   if (typeof m.opened === 'string' && CHAT_PATH.test(m.opened)) {
-    event.waitUntil(self.registration.getNotifications({ tag: 'chat:' + m.opened }).then(list => list.forEach(n => n.close())))
+    event.waitUntil(alertsNow({ tag: 'chat:' + m.opened }).then(list => list.forEach(n => n.close())))
     return
   }
   if (Array.isArray(m.pending)) keep = new Set(m.pending.filter(id => typeof id === 'string' && CARD_ID.test(id)))
   else if (typeof m.close === 'string' && CARD_ID.test(m.close)) only = m.close
   else return
-  event.waitUntil(self.registration.getNotifications().then(list => {
+  event.waitUntil(alertsNow().then(list => {
     for (const n of list) {
       const card = /^decision:(.+)$/.exec(n.tag || '')
       if (only ? card && card[1] === only : (card ? !keep.has(card[1]) : n.tag === 'thornswood')) n.close()

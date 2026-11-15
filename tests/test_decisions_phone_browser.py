@@ -38,6 +38,10 @@ def node_env() -> dict | None:
 
 ENV = node_env()
 
+# The check waits on the app's own 15-second reads several times, so a whole run takes about 170 seconds alone and
+# 180 four at once (measured 15 Nov). The old limit of 180 seconds stopped passing runs part way (#123).
+LIMIT = 360
+
 
 @unittest.skipUnless(HAVE_PASSKEY_LIB, "py_webauthn is not installed here")
 @unittest.skipUnless(ENV, "node with Playwright is not installed here")
@@ -50,9 +54,14 @@ class PhoneInChromium(unittest.TestCase):
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             info = json.loads(server.stdout.readline())
-            out = subprocess.run([shutil.which("node"), str(HERE / "decisions_phone_check.js"), str(port),
-                                  info["code"], info["card"], info["high"], info["third"], info["board_next"],
-                                  info["voice_wav"], info["voice_words"], info["voice_reply"]], env=ENV, capture_output=True, text=True, timeout=180)
+            try:
+                out = subprocess.run([shutil.which("node"), str(HERE / "decisions_phone_check.js"), str(port),
+                                      info["code"], info["card"], info["high"], info["third"], info["board_next"],
+                                      info["voice_wav"], info["voice_words"], info["voice_reply"]], env=ENV, capture_output=True, text=True, timeout=LIMIT)
+            except subprocess.TimeoutExpired as late:
+                # A run stopped at its limit said nothing before, so its failing step was never seen (#123).
+                said = "".join(x.decode(errors="replace") if isinstance(x, bytes) else x for x in (late.stdout, late.stderr) if x)
+                self.fail(f"the check was stopped after {LIMIT} seconds; what it said until then:\n" + said)
         finally:
             server.terminate()
             server.wait(timeout=10)

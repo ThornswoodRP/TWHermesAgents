@@ -40,7 +40,35 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   })
   const page = await ctx.newPage()
   const errors = []
-  page.on('pageerror', e => errors.push(String(e)))
+  // What happened just before a step fails, said under its FAIL line (#123, #138, #34: the failures came now
+  // and then, and a FAIL line alone did not say why): each API answer with its status and time, every request
+  // that failed, page errors with where they were thrown, and the service worker's starts, stops and console.
+  const t0 = Date.now()
+  const trail = []
+  const note = s => { trail.push(((Date.now() - t0) / 1000).toFixed(2).padStart(7) + ' ' + s); if (trail.length > 150) trail.shift() }
+  const asked = new Map()
+  const apiPath = q => { const u = new URL(q.url()); return u.pathname.startsWith('/api/') ? u.pathname + u.search : null }
+  page.on('request', q => { if (apiPath(q)) asked.set(q, Date.now()) })
+  // A request of a page left behind never finishes or fails: it is not waiting any more.
+  page.on('framenavigated', f => { if (f === page.mainFrame()) asked.clear() })
+  page.on('requestfinished', async q => {
+    const at = asked.get(q)
+    if (at === undefined) return
+    asked.delete(q)
+    const r = await q.response().catch(() => null)
+    note(`${q.method()} ${apiPath(q)} ${r ? r.status() : 'no answer'} after ${Date.now() - at} ms`)
+  })
+  page.on('requestfailed', q => {
+    const at = asked.get(q)
+    asked.delete(q)
+    note(`${q.method()} ${apiPath(q) || q.url()} failed: ${(q.failure() || {}).errorText}` + (at === undefined ? '' : ` after ${Date.now() - at} ms`))
+  })
+  page.on('pageerror', e => { errors.push(String(e)); note('page error ' + (e.stack || e)) })
+  ctx.on('serviceworker', w => {
+    note('service worker started: ' + w.url())
+    w.on('console', m => note('service worker: ' + m.text()))
+    w.on('close', () => note('service worker closed'))
+  })
   // A 401 is the signed-out app asking; a 404 is said below only when it is not one of the two that are answers.
   // A 409 from the sign-in options is an answer too: this phone's fingerprint key was saved in a passkey app.
   page.on('console', m => {
@@ -69,7 +97,16 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal',
     hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } })
   let failed = 0
-  const step = async (name, fn) => { try { await fn(); console.log('PASS', name) } catch (e) { failed++; console.log('FAIL', name, e.message) } }
+  const step = async (name, fn) => {
+    try { await fn(); console.log('PASS', name) } catch (e) {
+      failed++
+      console.log('FAIL', name, e.message)
+      for (const [q, at] of asked) note(`${q.method()} ${apiPath(q)} still waiting after ${Date.now() - at} ms`)
+      for (const line of trail.splice(0)) console.log('  | ' + line)
+      return
+    }
+    trail.length = 0
+  }
   await page.goto(base + '/m/decisions/' + card)
   await step('with no passkey yet, the app shows setting up this phone', async () => {
     await page.getByRole('heading', { name: 'Set up this phone' }).waitFor({ timeout: 5000 })
@@ -647,7 +684,7 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
     const pageUrl = '**/api/v1/own/one/chats/s_long/messages*'
     // One taking 6 seconds to answer, as a claim round trip to One can.
     await page.route(pageUrl, r => { setTimeout(() => r.continue().catch(() => {}), 6000) })
-    await page.evaluate(() => localStorage.removeItem('hermes.kept.v1'))
+    await page.evaluate(() => localStorage.removeItem('hermes.kept.v2'))
     const before = await openTime()
     const after = await openTime()
     await page.unroute(pageUrl)
@@ -1301,12 +1338,28 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   await ctx.grantPermissions(['notifications'], { origin: base })
   const regs = []
   cdp.on('ServiceWorker.workerRegistrationUpdated', e => regs.push(...e.registrations))
+  cdp.on('ServiceWorker.workerVersionUpdated', e => {
+    for (const v of e.versions) note(`service worker version ${v.versionId}: ${v.runningStatus}, ${v.status}`)
+  })
   await cdp.send('ServiceWorker.enable')
   await page.evaluate(() => navigator.serviceWorker.ready)
   for (let i = 0; i < 50 && !regs.some(r => r.scopeURL === base + '/m/' && !r.isDeleted); i++) await new Promise(ok => setTimeout(ok, 100))
   const reg = regs.find(r => r.scopeURL === base + '/m/' && !r.isDeleted)
-  const shown = async () => page.evaluate(async () => (await (await navigator.serviceWorker.getRegistration('/m/')).getNotifications())
-    .map(n => ({ title: n.title, body: n.body, tag: n.tag, silent: n.silent, path: n.data && n.data.path, actions: n.actions.length })))
+  // The alerts on screen, read by the service worker after every alert it was asked to show (sw.js alertsNow). A
+  // read from the page could land while an alert was being shown, and Chrome then deleted that alert (#21, #34).
+  const worker = async () => {
+    const w = ctx.serviceWorkers().find(x => x.url() === base + '/m/sw.js')
+    if (w) return w
+    const started = ctx.waitForEvent('serviceworker', { predicate: x => x.url() === base + '/m/sw.js', timeout: 5000 })
+    await page.evaluate(async () => (await navigator.serviceWorker.getRegistration('/m/')).active.postMessage({}))
+    return started
+  }
+  const shown = async () => {
+    const list = await (await worker()).evaluate(async () => (await self.alertsNow())
+      .map(n => ({ title: n.title, body: n.body, tag: n.tag, silent: n.silent, path: n.data && n.data.path, actions: n.actions.length })))
+    note('getNotifications: ' + list.map(n => n.tag).join(', '))
+    return list
+  }
   await step('a push shows only "Hermes needs you", with the phone sound, tagged by its card', async () => {
     if (!reg) throw new Error('no service worker registration seen')
     await cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId: reg.registrationId,
@@ -1360,6 +1413,24 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
       data: JSON.stringify({ v: 1, event_id: 'pa_2', kind: 'asks', who: 'Hermes', path: '/m/../api/v1/sign-out' }) })
     const list = await gone('thornswood', false)
     if (list.some(x => /asks you something/.test(x.title)) || !list.some(x => x.tag === 'thornswood' && x.path === '/m/decisions')) throw new Error(JSON.stringify(list))
+  })
+  // #138, #123: a chat's page whose answer was cut off on the way (here a body that ends part way) was taken as a
+  // 200 with an empty body and kept as the chat's newest page, and the chat then threw on every open.
+  await step('an answer cut off on the way is not kept, and the chat opens again after it', async () => {
+    await page.route('**/api/v1/chat/rift/messages*', r => r.fulfill({ status: 200, contentType: 'application/json', body: '{"pending": false, "messa' }))
+    const cut = page.waitForResponse(r => /\/api\/v1\/chat\/rift\/messages/.test(r.url()))
+    await page.goto(base + '/m/bots/rift')
+    await cut
+    await page.getByLabel('Message to Rift').waitFor({ timeout: 5000 })
+    await page.unroute('**/api/v1/chat/rift/messages*')
+    const kept = await page.evaluate(() => (JSON.parse(localStorage.getItem('hermes.kept.v2') || '{}')['chat:rift'] || {}).newest || null)
+    if (kept && !Array.isArray(kept.messages)) throw new Error('kept ' + JSON.stringify(kept))
+    await page.evaluate(() => localStorage.setItem('hermes.kept.v1', JSON.stringify({ 'chat:rift': { at: Date.now(), newest: {}, older: [] } })))
+  })
+  await step('a copy kept before that fix is dropped, and its chat opens', async () => {
+    await page.goto(base + '/m/bots/rift')
+    await page.getByLabel('Message to Rift').waitFor({ timeout: 5000 })
+    if (await page.evaluate(() => localStorage.getItem('hermes.kept.v1'))) throw new Error('the old copy is still there')
   })
   await page.goto(base + '/m/bots/rift')
   await step('opening the chat takes its alert off', async () => {
@@ -1771,10 +1842,10 @@ const DID_NOT_SIGN_IN = /^The passkey did not sign in \(\w+\)\. Nothing changed\
   console.log(mOk ? 'PASS manifest served: Hermes, opening on Decisions' : 'FAIL manifest ' + JSON.stringify(manifest))
   await step("signing out deletes the phone's copy of the chats", async () => {
     await page.goto(base + '/m/settings')
-    if (!(await page.evaluate(() => !!localStorage.getItem('hermes.kept.v1')))) throw new Error('no copy to delete')
+    if (!(await page.evaluate(() => !!localStorage.getItem('hermes.kept.v2')))) throw new Error('no copy to delete')
     await page.getByText('Sign out').click()
     await page.getByText('Signed out.').waitFor({ timeout: 5000 })
-    if (await page.evaluate(() => localStorage.getItem('hermes.kept.v1'))) throw new Error('the copy is still there')
+    if (await page.evaluate(() => localStorage.getItem('hermes.kept.v2'))) throw new Error('the copy is still there')
   })
   const sawOwn = shownNames.length === 0
   if (!sawOwn) failed++
