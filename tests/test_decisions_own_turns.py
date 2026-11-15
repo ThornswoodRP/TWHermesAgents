@@ -387,7 +387,8 @@ class TheApp(unittest.TestCase):
         self.assertIn("call('POST', `/own/${gw}/turn`, { message_id: turn.id, ...body })", APP)
         self.assertIn("once: 'Allow once', session: 'Allow in this chat', always: 'Always allow', deny: 'Deny'", APP)
         self.assertIn("'Stop'", APP)
-        self.assertIn("askSig(m.doing) !== drawn", APP, "a question opened or settled draws the chat again")
+        self.assertIn("mine.filter(waiting).map(m => [m.id, m.status, inQueue(m), askSig(m.doing)])", APP,
+                      "a question opened or settled draws the chat again")
         self.assertIn("!!v.sign_in_until", APP, "only with the passkey sign-in a message needs")
 
 
