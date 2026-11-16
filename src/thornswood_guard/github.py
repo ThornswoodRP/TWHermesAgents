@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 
 from .decisions import DecisionStore
-from .gate_line import GateLineError, parse_request
+from .gate_line import GateLineError, is_live, line_digest, parse_request
 from .policy import Policy, Verdict
 
 # A Claude session's branch in Thornswood and the fork (Thornswood's
@@ -559,9 +559,23 @@ class GitHubRules:
                 return Verdict.no(f"the gate would refuse this line: {e}")
             if verb in runs["refused_verbs"]:
                 return Verdict.no(f"{verb} handles a secret; no Bot ever runs it")
+            line = None
             if any(params.get(s) for s in runs["patrick_switches"].get(verb, [])):
                 needs_patrick = True
                 kind = "publish"
+            elif is_live(verb, listing):
+                # A live verb changes what people play on, so it runs only on
+                # Patrick's tap on a Main card in the Hermes app naming this
+                # exact line, used once, whatever main_without_patrick says
+                # (his answer on q-289-where-the-click-lives, 15 Nov 2026:
+                # "Just do it in the Hermes Agents app"; Ops #289). box-run.yml
+                # sends a live line on only when Bramble's App started it.
+                if params.get("Build") != commit:
+                    return Verdict.no(f"{verb} runs only when main is at exactly the commit its -Build names, and "
+                                      f"main is at {commit} now; a card for this commit and line is needed")
+                needs_patrick = True
+                kind = "live"
+                line = line_digest(inputs.get("line", ""))
             else:
                 kind = "main"
             extra = set(inputs) - {"line", "recipient"}
@@ -585,9 +599,12 @@ class GitHubRules:
         else:
             kind = "main"
         if needs_patrick:
-            yes = self.decisions.check(decision_id, kind=kind, repo=repo, commit=commit)
+            yes = self.decisions.check(decision_id, kind=kind, repo=repo, commit=commit,
+                                       **({"line": line} if kind == "live" else {}))
             if not yes.allowed:
                 return Verdict.no(f"this run needs Patrick's word for {commit[:12]}: {yes.reason}")
+            if kind == "live":
+                return Verdict.yes(f"{yes.reason}, for this exact live line at {commit[:12]}")
             return Verdict.yes(f"{yes.reason}; GitHub's Main environment still waits for Patrick")
         if decision_id:
             # A run that needs no card can still be started on one, and then

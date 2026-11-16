@@ -1930,6 +1930,31 @@ class Runs(unittest.TestCase):
         sent = w.fake.writes("POST", f"/repos/{OPS}/actions/workflows/box-run.yml/dispatches")
         self.assertEqual([x[2]["ref"] for x in sent], ["main"])
 
+    def test_a_live_line_starts_once_on_patricks_live_card_and_never_without(self):
+        # Ops #289: his tap in the Hermes app on a card naming main's commit
+        # and this exact line is what sends a live verb to the box.
+        from thornswood_guard.gate_line import line_digest
+        w = World()
+        self.lists(w)
+        main = w.fake.ref(APP, "main")
+        line = f"Deploy-Server -GamemodeOnly -Build {main}"
+        args = {"bot": "bramble", "task": "4989", "workflow": "box-run.yml", "inputs": {"line": line}}
+        with self.assertRaises(Refused) as e:
+            w.git.start_run("hermes", args)
+        self.assertIn("needs Patrick's word", str(e.exception))
+        w.mains["dec_live0000000001"] = {
+            "decision_id": "dec_live0000000001", "for": "live", "repo": APP, "commit": main, "pr": None,
+            "line": line_digest(line), "revision": 1, "option": "authorize",
+            "answered_at": w.policy.clock().isoformat(), "restored": False}
+        out = w.git.start_run("hermes", args | {"decision_id": "dec_live0000000001"})
+        self.assertTrue(out["done"], out)
+        self.assertEqual(len(w.fake.writes("POST", f"/repos/{OPS}/actions/workflows/box-run.yml/dispatches")), 1)
+        self.assertTrue(w.policy._decision("dec_live0000000001").used_at)
+        with self.assertRaises(Refused) as e:
+            w.git.start_run("hermes", args | {"task": "4989b", "decision_id": "dec_live0000000001"})
+        self.assertIn("used once", str(e.exception))
+        self.assertEqual(len(w.fake.writes("POST", f"/repos/{OPS}/actions/workflows/box-run.yml/dispatches")), 1)
+
     def test_box_run_still_refuses_a_line_outside_thornswoods_verbs(self):
         w = World()
         self.lists(w)

@@ -6,7 +6,9 @@
     "Get-Logs": {
       "script": "scripts/vps/Get-Logs.ps1",
       "timeoutMinutes": 15,
-      "fixed": ["-NoPause"],
+      "fixed": [
+        "-NoPause"
+      ],
       "out": "-Out",
       "params": {
         "Lines": "^[0-9]{1,6}$",
@@ -48,7 +50,10 @@
     "Install-Bot": {
       "script": "scripts/deploy/Install-Bot.ps1",
       "timeoutMinutes": 30,
-      "fixed": ["-CodeOnly", "-NoPause"],
+      "fixed": [
+        "-CodeOnly",
+        "-NoPause"
+      ],
       "params": {
         "Wait": "^[0-9]{1,4}$",
         "PutBack": "switch"
@@ -57,7 +62,9 @@
     "Install-Voice": {
       "script": "scripts/deploy/Install-Voice.ps1",
       "timeoutMinutes": 30,
-      "fixed": ["-NoPause"],
+      "fixed": [
+        "-NoPause"
+      ],
       "params": {
         "ChatRange": "^(off|on|[0-9]{1,4})$",
         "Restart": "switch",
@@ -84,6 +91,31 @@
       "fixed": [],
       "params": {
         "Days": "^[0-9]{1,3}$"
+      }
+    },
+    "Deploy-Server": {
+      "script": "scripts/deploy/Deploy-Server.ps1",
+      "timeoutMinutes": 60,
+      "build": true,
+      "fixed": [],
+      "params": {
+        "GamemodeOnly": "switch",
+        "Why": "text",
+        "Wait": "^[0-9]{1,4}$"
+      }
+    },
+    "Ship-Main": {
+      "script": "scripts/release/Ship.ps1",
+      "timeoutMinutes": 60,
+      "build": true,
+      "fixed": [
+        "-Channel",
+        "main"
+      ],
+      "params": {
+        "Title": "text",
+        "Detail": "text",
+        "Detail2": "text"
       }
     }
   }

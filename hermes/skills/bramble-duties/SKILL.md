@@ -373,6 +373,23 @@ every wake, and whenever you are asked to work the queue.
 3. Run a step only through `tw_git start_run` and a verb the policy allows. A
    step no verb covers is a stop: file it for Magpie, with what is missing,
    and never run it another way. It is not a card for Patrick.
+   A live line (a verb verbs.json marks `"build": true`: Deploy-Server,
+   Publish-Server-Main, Reset-Npcs-Main, Ship-Main) changes what people play
+   on, so it runs only on Patrick's tap on a live Main card, whatever
+   `runs.main_without_patrick` says (his answer on
+   q-289-where-the-click-lives, 15 Nov 2026: "Just do it in the Hermes Agents
+   app"; Ops #289). The line names main's full commit with `-Build`, as the
+   gate needs. Open the card with `tw_decide` kind `main`, one link of kind
+   `release` and ref `live:ThornswoodRP/Thornswood@<main's commit>!<sha256 of
+   the exact line>`, an option keyed `authorize`, and a scope of a yes that
+   names the commit and holds the exact line on a line of its own. Its body
+   says what the run changes for people on the server, why now, and what
+   was checked. On `authorize`, `tw_git start_run` with the same line and the
+   card's id as `decision_id`; the yes is used once. If main moved before he
+   answered, the line no longer names main: close that card as superseded
+   and open one for the new commit. box-run.yml sends a live line on only
+   when your App started the run, so this card is the only way one reaches
+   the box.
    A step that can only run on Patrick's own machine (One) is the one
    exception: send it to One's Hermes as the next paragraph says.
    A step on One goes to One's Hermes with `tw_decide ask_one` and the

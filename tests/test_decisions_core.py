@@ -519,6 +519,38 @@ class MainCards(unittest.TestCase):
         self.assertEqual(self.w.store.db.execute("SELECT count(*) FROM decisions WHERE kind = 'main'").fetchone()[0], 4)
         self.assertNotEqual(e["id"], d["id"])
 
+    def test_a_live_card_names_main_and_the_exact_line_patrick_reads(self):
+        # Ops #289: a live box run waits for his tap here, on the line itself.
+        import hashlib
+        line = f'Deploy-Server -GamemodeOnly -Build {SHA} -Why "the creation fix"'
+        digest = hashlib.sha256(line.encode()).hexdigest()
+        scope = f"One live box run at {SHA}, exactly this line:\n{line}\nUsed once."
+        c = main_card(self.w, link=f"live:{REPO}@{SHA}!{digest}", scope_of_yes=scope)
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "authorize"))
+        a = self.w.core.main_answer(self.w.ws, c["id"])
+        self.assertEqual((a["for"], a["commit"], a["pr"], a["line"]), ("live", SHA, None, digest))
+        # Another line at the same commit is its own card; the same line is not.
+        other = f"Deploy-Server -Build {SHA}"
+        main_card(self.w, link=f"live:{REPO}@{SHA}!{hashlib.sha256(other.encode()).hexdigest()}",
+                  scope_of_yes=f"At {SHA}:\n{other}")
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, link=f"live:{REPO}@{SHA}!{digest}", scope_of_yes=scope)
+        self.assertEqual(e.exception.reason, "main_already_authorized")
+
+    def test_a_live_card_holds_its_line_in_its_scope_and_its_link(self):
+        import hashlib
+        line = f"Deploy-Server -Build {SHA}"
+        digest = hashlib.sha256(line.encode()).hexdigest()
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, link=f"live:{REPO}@{SHA}!{digest}", scope_of_yes=f"A live run at {SHA}.")
+        self.assertEqual(e.exception.reason, "main_scope")
+        for link, why in ((f"live:{REPO}@{SHA}", "no line"), (f"main:{REPO}@{SHA}!{digest}", "a line on a main card"),
+                          (f"live:{REPO}@{SHA}#5!{digest}", "a pull request"),
+                          (f"live:{REPO}@{SHA}!{digest[:40]}", "a short digest")):
+            with self.subTest(why), self.assertRaises(CoreError) as e:
+                main_card(self.w, link=link, scope_of_yes=f"At {SHA}:\n{line}")
+            self.assertEqual(e.exception.reason, "release_link")
+
     def test_main_answer_is_for_main_cards_only(self):
         c = self.w.card()
         with self.assertRaises(CoreError) as e:

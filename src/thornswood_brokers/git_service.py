@@ -200,13 +200,13 @@ class RemoteDecisions:
         self.ask = ask
         self.ask_decide = ask_decide
 
-    def check(self, decision_id, *, kind, repo, commit, revision=None, pr=None, at=None) -> Verdict:
+    def check(self, decision_id, *, kind, repo, commit, revision=None, pr=None, at=None, line=None) -> Verdict:
         if isinstance(decision_id, str) and decision_id.startswith("dec_"):
             no = self._bring(decision_id)
             if no:
                 return Verdict.no(no)
         r = self.ask("decision_check", {"id": decision_id, "kind": kind, "repo": repo, "commit": commit,
-                                        "revision": revision, "pr": pr})
+                                        "revision": revision, "pr": pr, "line": line})
         return Verdict(bool(r["allowed"]), r["reason"])
 
     def _bring(self, decision_id: str) -> str | None:
