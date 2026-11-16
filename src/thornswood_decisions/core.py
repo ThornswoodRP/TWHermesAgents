@@ -613,14 +613,17 @@ class DecisionCore:
     def main_standing(self, workspace_id: str, ref: str) -> dict | None:
         """The Main card that stands for a release link, as open_card would
         name it when it refuses a second one: {decision_id, state} with state
-        "asked" (pending, Patrick has not answered) or "authorized" (his
-        authorize, unused and unexpired), or None when the link has none and
-        a card for it is owed. tw-git reads it for each held pull request, so
+        "asked" (pending, Patrick has not answered), "authorized" (his
+        authorize, unused and unexpired) or "used" (his authorize, unexpired,
+        that Bramble reported done when it put the pull request on auto-merge:
+        the yes holds until that head merges, so a drop from the queue goes
+        back on with it and no second card is owed), or None when the link
+        has none and a card for it is owed. tw-git reads it for each held pull request, so
         Bramble's sweep sees which heads have no card (16 Nov 2026: Thornswood
         #6235, #6243 and #6259, Claude sessions' changes to the gate and verb
         scripts, sat for hours with none)."""
         release = self._release_of("main", [("release", ref)])
-        return self._main_standing(self.s.db, workspace_id, release)
+        return self._main_standing(self.s.db, workspace_id, release, with_used=True)
 
     @staticmethod
     def _link_head(release: dict) -> str:
@@ -630,13 +633,14 @@ class DecisionCore:
             head += "!" + release["line"]
         return head
 
-    def _main_standing(self, db, workspace_id: str, release: dict) -> dict | None:
+    def _main_standing(self, db, workspace_id: str, release: dict, with_used: bool = False) -> dict | None:
         head = self._link_head(release)
         rows = db.execute("SELECT d.id, d.status, d.expires_at, d.revision FROM decisions d JOIN task_links l "
                           "ON l.decision_id = d.id AND l.kind = 'release' WHERE d.workspace_id = ? "
                           "AND d.kind = 'main' AND d.status IN ('pending', 'resolved') AND (l.ref = ? OR l.ref LIKE ?)",
                           (workspace_id, head, head + "#%")).fetchall()
         now = self.s.clock()
+        used = None
         for r in rows:
             if r["status"] == "pending" and now < parse(r["expires_at"]):
                 return {"decision_id": r["id"], "state": "asked"}
@@ -648,9 +652,10 @@ class DecisionCore:
             if now >= parse(a["answered_at"]) + DEFAULT_EXPIRY:
                 continue
             if db.execute("SELECT 1 FROM events WHERE kind = 'work.done' AND subject = ?", (r["id"],)).fetchone():
+                used = used or {"decision_id": r["id"], "state": "used"}
                 continue
             return {"decision_id": r["id"], "state": "authorized"}
-        return None
+        return used if with_used else None
 
     def _release_row(self, db, decision_id: str) -> dict:
         r = db.execute("SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'release'",
