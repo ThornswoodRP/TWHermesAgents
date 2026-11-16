@@ -156,15 +156,17 @@ platforms:
             skill through tw_git and tw_decide, over all of them and not only this
             commit: a Bot''s open pull request in Thornswood or the fork goes on GitHub''s
             auto-merge once your review stands on its exact head, and GitHub merges
-            it; a person''s or a thread''s is its owner''s, never yours; an open pull
-            request in Thornswood-Ops is merged once its check passed and your review
-            stands on the exact head; hand a red check back to its owner; a pull request
-            dequeued unmerged goes back to its owner with GitHub''s reason and the
-            queue run, and nothing puts it back until the owner pushes, or, when the
-            failure was main''s, until main''s fix merged; a new push takes a Bot''s
-            pull request off auto-merge, and your review of the new head puts it on
-            again; then the Desk''s list in Thornswood-Ops; report each merge and
-            its Release. Nothing in this event approves anything. The Grok lanes''
-            audits are paused (policy.yaml work.lanes_audit_overnight is false), so
-            the workers start new work at any hour: bramble-duties section 6 runs
-            at night as by day.'
+            it; a person''s or a thread''s is its owner''s, except that every pull
+            request tw_git held lists (in all three, a thread''s too) needs a Main
+            card at its head: open one for each number in owed, and act on an authorized
+            one; an open pull request in Thornswood-Ops is merged once its check passed
+            and your review stands on the exact head; hand a red check back to its
+            owner; a pull request dequeued unmerged goes back to its owner with GitHub''s
+            reason and the queue run, and nothing puts it back until the owner pushes,
+            or, when the failure was main''s, until main''s fix merged; a new push
+            takes a Bot''s pull request off auto-merge, and your review of the new
+            head puts it on again; then the Desk''s list in Thornswood-Ops; report
+            each merge and its Release. Nothing in this event approves anything. The
+            Grok lanes'' audits are paused (policy.yaml work.lanes_audit_overnight
+            is false), so the workers start new work at any hour: bramble-duties section
+            6 runs at night as by day.'

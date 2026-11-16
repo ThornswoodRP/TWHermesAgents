@@ -241,8 +241,9 @@ class BotRoute:
         return out
 
     def git_ops(self) -> dict:
-        """tw-git's ops, for its own socket: read Patrick's outside answers, and
-        his answer on one Main card."""
+        """tw-git's ops, for its own socket: read Patrick's outside answers, his
+        answer on one Main card, and the Main card that stands for a release
+        link (tw_git held)."""
         def outside(caller: str, args: dict):
             with self.lock:
                 return self.outside_answers()
@@ -254,7 +255,16 @@ class BotRoute:
                 except CoreError as e:
                     from thornswood_brokers.wire import Refused
                     raise Refused(f"{e.reason}: {e}") from None
-        return {"outside_answers": (outside, set(GIT_CALLERS)), "main_answer": (main, set(GIT_CALLERS))}
+
+        def standing(caller: str, args: dict):
+            with self.lock:
+                try:
+                    return self.core.main_standing(self.ws, _text(args, "ref"))
+                except CoreError as e:
+                    from thornswood_brokers.wire import Refused
+                    raise Refused(f"{e.reason}: {e}") from None
+        return {"outside_answers": (outside, set(GIT_CALLERS)), "main_answer": (main, set(GIT_CALLERS)),
+                "main_standing": (standing, set(GIT_CALLERS))}
 
     def _with_answer(self, card: dict) -> dict:
         """The four states, and once Patrick answered, the words the Bot is told."""

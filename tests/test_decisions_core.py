@@ -507,6 +507,22 @@ class MainCards(unittest.TestCase):
         self.w.core.report_work_done(self.w.bramble, c["id"], "merged")
         main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
 
+    def test_main_standing_names_the_card_a_link_has_or_none(self):
+        # tw_git held reads this for each held pull request, so Bramble sees
+        # which heads still owe a card (Thornswood #6235, 16 Nov 2026).
+        link = f"merge:{REPO}@{SHA}#6235"
+        self.assertIsNone(self.w.core.main_standing(self.w.ws, link))
+        c = main_card(self.w, link=link, scope_of_yes=f"PR 6235 merges at {SHA}.")
+        self.assertEqual(self.w.core.main_standing(self.w.ws, link), {"decision_id": c["id"], "state": "asked"})
+        self.assertIsNone(self.w.core.main_standing(self.w.ws, f"merge:{REPO}@{'1' * 40}#6235"), "another head")
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "authorize"))
+        self.assertEqual(self.w.core.main_standing(self.w.ws, link), {"decision_id": c["id"], "state": "authorized"})
+        self.w.core.report_work_done(self.w.bramble, c["id"], "merged")
+        self.assertIsNone(self.w.core.main_standing(self.w.ws, link))
+        with self.assertRaises(CoreError) as e:
+            self.w.core.main_standing(self.w.ws, "merge:not a link")
+        self.assertEqual(e.exception.reason, "release_link")
+
     def test_a_main_card_that_got_no_or_expired_leaves_the_link_free(self):
         c = main_card(self.w)
         self.w.core.answer(self.w.patrick(), **World.answer_args(c, "not_now"))

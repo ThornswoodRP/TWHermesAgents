@@ -63,6 +63,8 @@ class World:
         self.answers: list[dict] = []
         # Patrick's answers on Main cards, by card id, as main_answer gives them (step 6).
         self.mains: dict[str, dict] = {}
+        # The Main card standing for each release link (main_standing); none when absent.
+        self.standing: dict[str, dict] = {}
         self.git = GitService(p, gh, self.ask, mirrors=self.root / "mirrors", spool=self.spool,
                               git_base=f"file://{self.fake.remotes}/", allow_file_protocol=True,
                               ask_decide=self.ask_decide)
@@ -70,6 +72,9 @@ class World:
     def ask_decide(self, op: str, args: dict):
         if op == "main_answer":
             return json.loads(json.dumps(self.mains.get(args["decision_id"])))
+        if op == "main_standing":
+            # The card that stands for a release link, by link, as the core says (main_standing).
+            return json.loads(json.dumps(self.standing.get(args["ref"])))
         assert op == "outside_answers", op
         return json.loads(json.dumps(self.answers))
 
@@ -947,6 +952,89 @@ class PatrickMerges(unittest.TestCase):
         w = self.world()
         sha = self.ops_pr(w, [".github/workflows/tunnel.yml"], branch="claude/tunnel")
         self.refused(w, OPS, sha, "changes .github/workflows/tunnel.yml")
+
+
+class Held(unittest.TestCase):
+    """16 Nov 2026: Thornswood #6235, #6243 and #6259, Claude sessions'
+    changes to the gate and verb scripts, waited hours for Main cards Bramble
+    never opened. Only tw_git merge said a pull request was held, by refusing
+    it, and Bramble never calls merge on a thread's pull request. tw_git held
+    lists every held pull request, whoever's, and the card standing for its
+    head, so the sweep sees each one that owes a card."""
+
+    def world(self) -> World:
+        w = World()
+        for name, raw in (("scripts/vps/gate/verbs.json", FIXTURES / "verbs.json"),
+                          ("scripts/release/nexus-verbs.json", FIXTURES / "nexus-verbs.json")):
+            w.fake.contents[(APP, "main", name)] = raw.read_bytes()
+        return w
+
+    def add(self, w: World, number: int, branch: str, files: list[str], author: str = "EvilPatrick06",
+            repo: str = APP, draft: bool = False) -> str:
+        sha = f"{number:040x}"
+        w.fake.add_pr(repo, number, head_ref=branch, head_sha=sha, files=files, author=author, draft=draft)
+        return sha
+
+    def held(self, w: World, repo: str = APP, bot: str = "bramble") -> dict:
+        return w.git.held("hermes", {"bot": bot, "repo": repo})
+
+    def test_a_claude_sessions_verb_change_is_listed_and_owes_a_card(self):
+        w = self.world()
+        sha = self.add(w, 6235, "claude/project-thread-xmjtoz",
+                       ["scripts/vps/gate/verbs.json", "scripts/deploy/Deploy-Docs.ps1", "docs/DEPLOY-AGENT.md"])
+        self.add(w, 6276, "claude/project-thread-trades", ["game/gamemode/trade.ts"])          # holds nothing
+        self.add(w, 6277, "patrick-gate", ["scripts/vps/gate/Gate.ps1"])                     # Patrick's own
+        self.add(w, 6278, "claude/draft", ["scripts/vps/gate/Gate.ps1"], draft=True)          # a draft
+        self.add(w, 6279, "claude/djinn", [".github/workflows/x.yml"], author="WiccanDjinn")  # hands off
+        bot = self.add(w, 6260, "rift/4517-help", [".github/workflows/build-pr.yml"],
+                       author="thornswood-workers[bot]")
+        out = self.held(w)
+        self.assertEqual([h["number"] for h in out["held"]], [6235, 6260])
+        first = out["held"][0]
+        self.assertEqual(first["whose"], "claude session")
+        self.assertEqual(first["release_link"], f"merge:{APP}@{sha}#6235")
+        self.assertEqual(first["held_files"], ["scripts/vps/gate/verbs.json", "scripts/deploy/Deploy-Docs.ps1"])
+        self.assertIsNone(first["card"])
+        self.assertEqual(out["held"][1]["whose"], "bot:rift")
+        self.assertEqual(out["owed"], [6235, 6260])
+        # A card that stands for the head takes it off what is owed.
+        w.standing[f"merge:{APP}@{sha}#6235"] = {"decision_id": "dec_cardfor6235abc", "state": "asked"}
+        w.standing[f"merge:{APP}@{bot}#6260"] = {"decision_id": "dec_cardfor6260abc", "state": "authorized"}
+        out = self.held(w)
+        self.assertEqual(out["owed"], [])
+        self.assertEqual(out["held"][0]["card"], {"decision_id": "dec_cardfor6235abc", "state": "asked"})
+        self.assertEqual([c for c in w.fake.writes() if "access_tokens" not in c[1]], [], "held writes nothing")
+        self.assertTrue(all(set(t["permissions"].values()) == {"read"} for t in w.fake.tokens), "it asks for read tokens only")
+
+    def test_a_new_head_owes_a_new_card(self):
+        w = self.world()
+        old = self.add(w, 6235, "claude/project-thread-xmjtoz", ["scripts/vps/gate/verbs.json"])
+        w.standing[f"merge:{APP}@{old}#6235"] = {"decision_id": "dec_cardfor6235abc", "state": "asked"}
+        w.fake.prs[(APP, 6235)]["head"]["sha"] = "7c90618b58c26e082d06291a2bd49320f788d597"
+        self.assertEqual(self.held(w)["owed"], [6235])
+
+    def test_ops_and_the_fork_are_read_against_their_own_paths(self):
+        w = self.world()
+        self.add(w, 358, "claude/ops-workflow", [".github/workflows/git-ref.yml"], repo=OPS)
+        self.add(w, 359, "claude/ops-notes", ["ops/status.md"], repo=OPS)
+        self.assertEqual(self.held(w, OPS)["owed"], [358])
+        w.fake.add_pr(FORK, 160, head_ref="claude/fork-ci", head_sha="e" * 40, base="thornswood/engine-changes",
+                      files=[".github/workflows/thornswood-pr-windows.yml"], author="EvilPatrick06")
+        self.assertEqual(self.held(w, FORK)["owed"], [160])
+
+    def test_a_file_list_github_cut_short_is_named_not_passed(self):
+        w = self.world()
+        self.add(w, 6235, "claude/big", ["scripts/vps/gate/verbs.json"])
+        w.fake.prs[(APP, 6235)]["changed_files"] = 5000
+        out = self.held(w)
+        self.assertEqual(out["held"], [])
+        self.assertEqual([u["number"] for u in out["unread"]], [6235])
+
+    def test_only_bramble_reads_it(self):
+        w = self.world()
+        with self.assertRaises(Refused) as e:
+            self.held(w, bot="sprocket")
+        self.assertIn("only Bramble", str(e.exception))
 
 
 class AutoMerge(unittest.TestCase):
