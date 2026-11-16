@@ -1000,11 +1000,52 @@ class Held(unittest.TestCase):
         # A card that stands for the head takes it off what is owed.
         w.standing[f"merge:{APP}@{sha}#6235"] = {"decision_id": "dec_cardfor6235abc", "state": "asked"}
         w.standing[f"merge:{APP}@{bot}#6260"] = {"decision_id": "dec_cardfor6260abc", "state": "authorized"}
+        before = len(w.fake.writes())
+        self.assertEqual([c for c in w.fake.writes() if "access_tokens" not in c[1]], [], "a card owed writes nothing")
         out = self.held(w)
         self.assertEqual(out["owed"], [])
         self.assertEqual(out["held"][0]["card"], {"decision_id": "dec_cardfor6235abc", "state": "asked"})
-        self.assertEqual([c for c in w.fake.writes() if "access_tokens" not in c[1]], [], "held writes nothing")
-        self.assertTrue(all(set(t["permissions"].values()) == {"read"} for t in w.fake.tokens), "it asks for read tokens only")
+        self.assertGreater(len(w.fake.writes()), before)
+
+    def test_each_held_head_shows_its_card_on_the_pull_request(self):
+        """TWHermesAgents #214: the card lives only on the VM, so nobody else
+        could tell #6235's missing card from one waiting on Patrick. One
+        comment per head says where its card stands, edited as that moves."""
+        w = self.world()
+        sha = self.add(w, 6259, "claude/project-thread-2m64g9", ["scripts/vps/gate/verbs.json"])
+        link = f"merge:{APP}@{sha}#6259"
+        self.assertEqual(self.held(w)["owed"], [6259])
+        self.assertEqual(w.fake.comments.get((APP, 6259), []), [], "no card, nothing said yet")
+        w.standing[link] = {"decision_id": "dec_cardfor6259abc", "state": "asked"}
+        out = self.held(w)
+        self.assertEqual(out["held"][0]["shown"], "asked")
+        notes = w.fake.comments[(APP, 6259)]
+        self.assertEqual(len(notes), 1)
+        self.assertIn(f"A Main card for this head, {sha[:7]}, waits for Patrick", notes[0]["body"])
+        self.assertIn(f"<!-- tw:main-card:{sha} -->", notes[0]["body"])
+        self.assertNotIn("dec_", notes[0]["body"], "a public comment names no card id")
+        self.assertEqual(notes[0]["user"]["login"], "thornswood-bramble[bot]")
+        self.held(w)
+        self.assertEqual(len(w.fake.comments[(APP, 6259)]), 1, "said once per head")
+        w.standing[link] = {"decision_id": "dec_cardfor6259abc", "state": "authorized"}
+        self.held(w)
+        notes = w.fake.comments[(APP, 6259)]
+        self.assertEqual(len(notes), 1, "the same comment, edited")
+        self.assertIn(f"Patrick authorized this head, {sha[:7]}", notes[0]["body"])
+        # A new head gets its own comment.
+        new = "7c90618b58c26e082d06291a2bd49320f788d597"
+        w.fake.prs[(APP, 6259)]["head"]["sha"] = new
+        w.standing[f"merge:{APP}@{new}#6259"] = {"decision_id": "dec_cardfor6259new", "state": "asked"}
+        self.held(w)
+        self.assertEqual(len(w.fake.comments[(APP, 6259)]), 2)
+
+    def test_before_the_cutover_nothing_is_written(self):
+        w = self.world()
+        w.git.policy.data["executor"] = "patrick"
+        sha = self.add(w, 6259, "claude/project-thread-2m64g9", ["scripts/vps/gate/verbs.json"])
+        w.standing[f"merge:{APP}@{sha}#6259"] = {"decision_id": "dec_cardfor6259abc", "state": "asked"}
+        self.assertIn("not written", self.held(w)["held"][0]["shown"])
+        self.assertEqual(w.fake.comments.get((APP, 6259), []), [])
 
     def test_a_new_head_owes_a_new_card(self):
         w = self.world()
