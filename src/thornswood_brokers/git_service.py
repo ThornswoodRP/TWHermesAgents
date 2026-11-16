@@ -1224,12 +1224,69 @@ class GitService:
                 card = self.ask_decide("main_standing", {"ref": link})
             except Refused as e:
                 raise Refused(f"the decision core did not say which Main card stands for {link}: {e}") from None
-            out.append({"number": number, "head": head, "branch": head_ref, "whose": whose,
-                        "held_files": held[:10], "held_count": len(held), "release_link": link,
-                        "card": card})
+            entry = {"number": number, "head": head, "branch": head_ref, "whose": whose,
+                     "held_files": held[:10], "held_count": len(held), "release_link": link, "card": card}
+            if card:
+                entry["shown"] = self._card_note(repo, number, head, card["state"])
+            out.append(entry)
         return {"repo": repo, "base": base, "held": out,
                 "owed": [h["number"] for h in out if not h["card"]],
                 **({"unread": unread} if unread else {})}
+
+    # One comment per held head, which says where its Main card stands
+    # (TWHermesAgents #214). The card itself lives only in the decision core
+    # on the VM, so until 16 Nov 2026 nobody off the VM could tell a card
+    # waiting on Patrick from one never opened: Thornswood #6235 waited hours
+    # on a card that did not exist, and #6259's could not be read back.
+    CARD_NOTE = {
+        "asked": "A Main card for this head, {short}, waits for Patrick in the Hermes Agents app. "
+                 "This pull request merges only once he authorizes it there.",
+        "authorized": "Patrick authorized this head, {short}, on its Main card. Bramble puts it on auto-merge.",
+    }
+
+    def _card_note(self, repo: str, number: int, head: str, state: str) -> str:
+        """Keeps the one comment for this head saying its card's state:
+        written when the card is first seen, edited when the state moves
+        (an edit sends nobody a notice). Says what it did, or why not."""
+        if self.policy.data["executor"] != "bramble":
+            return "not written: until the cutover the Bots write nothing"
+        marker = f"<!-- tw:main-card:{head} -->"
+        body = self.CARD_NOTE[state].format(short=head[:7]) + "\n\n" + marker
+        perms = WRITE["pr_conversation"]
+
+        def mine():
+            for c in self.gh.get_all("bramble", repo, f"/repos/{repo}/issues/{number}/comments"):
+                if marker in (c.get("body") or "") and (c.get("user") or {}).get("login") == APP_LOGIN["bramble"]:
+                    return c
+            return None
+
+        have = mine()
+        if have and (have.get("body") or "") == body:
+            return state
+
+        def read_back():
+            c = mine()
+            return {"comment": c["id"]} if c and (c.get("body") or "") == body else None
+
+        def write():
+            if have:
+                r = self.gh.call("bramble", repo, perms, "PATCH", f"/repos/{repo}/issues/comments/{have['id']}",
+                                 {"body": body})
+                ok = 200
+            else:
+                r = self.gh.call("bramble", repo, perms, "POST", f"/repos/{repo}/issues/{number}/comments",
+                                 {"body": body})
+                ok = 201
+            if r.status != ok:
+                raise GitHubError(r.status, str(r.body))
+            return {"comment": r.body["id"]}
+
+        try:
+            self._guarded_write("bramble", f"main-card-{number}", "comment", repo,
+                                f"pr/{number}/main-card/{head[:12]}/{state}", head, write=write, read_back=read_back)
+        except Refused as e:
+            return f"not written: {e}"
+        return state
 
     # Patrick's answers on outside pull request cards (#132)
 

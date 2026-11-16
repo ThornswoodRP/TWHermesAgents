@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.24.0
+version: 1.25.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -58,7 +58,11 @@ its branch or its files yourself. A Claude session's (`whose` "claude
 session") gets its card with no review of yours, because its thread owns its
 code; a Bot's gets it once your review of that head stands. A `card` in
 state `authorized` is Patrick's yes, unused: act on it this sweep (`tw_git
-merge` at that head with its `decision_id`). `asked` waits on him. A number
+merge` at that head with its `decision_id`). `asked` waits on him. For each
+held head with a card, `held` itself keeps one comment on the pull request
+saying whether that card waits on Patrick or he authorized it (`shown`),
+so a thread and the coordinator can read it off GitHub (TWHermesAgents
+#214); write nothing more on a thread's pull request yourself. A number
 under `unread` is one GitHub listed only part of: say so in Bot Chat, and
 open no card for it until its files can be read. (16 Nov 2026: Thornswood
 #6235, #6243 and #6259, Claude sessions' changes to the gate and verb

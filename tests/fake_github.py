@@ -398,6 +398,16 @@ class FakeGitHub:
                                       "state": "open", "title": body["title"], "body": body.get("body"),
                                       "html_url": f"https://github.com/{repo}/issues/{n}"}
             return Response(201, json.loads(json.dumps(self.issues[(repo, n)])), {})
+        if rest[:2] == ["issues", "comments"] and len(rest) == 3 and method == "PATCH":
+            # An edit of a comment, by its id; GitHub lets only its author edit it this way.
+            for cs in self.comments.values():
+                for c in cs:
+                    if c["id"] == int(rest[2]):
+                        if (c.get("user") or {}).get("login") not in (None, self.app_login):
+                            return Response(403, {"message": "Resource not accessible by integration"}, {})
+                        c["body"] = body["body"]
+                        return Response(200, c, {})
+            return Response(404, {"message": "Not Found"}, {})
         if rest[0] == "issues":
             n = int(rest[1])
             issue = self.issues.get((repo, n))
@@ -411,7 +421,7 @@ class FakeGitHub:
                 if method == "GET":
                     return Response(200, self.comments.get((repo, n), [])[(page - 1) * 100: page * 100], {})
                 self._next_id += 1
-                c = {"id": self._next_id, "body": body["body"]}
+                c = {"id": self._next_id, "body": body["body"], "user": {"login": self.app_login}}
                 self.comments.setdefault((repo, n), []).append(c)
                 return Response(201, c, {})
             if rest[2] == "labels":
