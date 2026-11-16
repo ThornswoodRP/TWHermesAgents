@@ -1165,6 +1165,72 @@ class GitService:
             out["auto_merge"] = True
         return out
 
+    def held(self, caller: str, args: dict) -> dict:
+        """Bramble's list of the open pull requests in one repo that merge only
+        on Patrick's authorize on a Main card (merge.patrick_paths), each with
+        the release link its card names and the card that stands for it: none
+        (a card is owed), "asked" (pending) or "authorized" (his yes, unused).
+
+        Until 16 Nov 2026 only tw_git merge said a pull request was held, by
+        refusing it. Bramble calls merge on the Bots' and the robots' pull
+        requests, so those got their cards; a Claude session's pull request
+        is its thread's, Bramble never calls merge on it, and nothing else
+        told it which of them change a workflow, the gate or a verb script.
+        Thornswood #6235, #6243 and #6259 sat for hours with no card, and
+        Patrick waited on one he could not see. This reads the same files and
+        the same base verb lists merge does, for every open pull request."""
+        bot, repo = self._bot(args), self._repo(args)
+        if not self.policy.is_router(bot):
+            raise Refused("only Bramble opens Main cards, so only Bramble reads which pull requests wait on one")
+        if self.ask_decide is None:
+            raise Refused("tw-git has no route to the decision core, so which Main cards stand cannot be read")
+        base = self.policy.data["merge"]["base"].get(repo)
+        verb_lists = self.policy.patrick_verb_lists(repo)
+        verb_paths = self._verb_paths(repo, base) if verb_lists else []
+        out, unread = [], []
+        for raw in self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls?state=open&base={quote(base)}&per_page=100"):
+            if raw.get("draft"):
+                continue
+            number = int(raw["number"])
+            head_repo = ((raw.get("head") or {}).get("repo") or {}).get("full_name")
+            head_ref, head = raw["head"]["ref"], raw["head"]["sha"]
+            files = []
+            for f in self.gh.get_all("bramble", repo, f"/repos/{repo}/pulls/{number}/files"):
+                files.append(f["filename"])
+                if f.get("previous_filename"):
+                    files.append(f["previous_filename"])
+            listed = len(set(files))
+            if raw.get("changed_files", listed) > listed:
+                # Nothing merges unseen, so nothing is called free of a card unseen.
+                unread.append({"number": number, "head": head,
+                               "why": f"it changes {raw['changed_files']} files and GitHub listed {listed}"})
+                continue
+            pr = PullRequest(repo=repo, number=number, head_sha=head, head_ref=head_ref, base_ref=base,
+                             author_bot=self.policy.branch_owner(head_ref) if head_repo == repo else None,
+                             author_login=(raw.get("user") or {}).get("login") or "", files=files)
+            held = self.policy.patrick_files(repo, files, verb_paths)
+            if not held or self.rules.patricks_own_pr(pr) or self.rules._hands_off_pr(pr) or self.rules.outside_pr(pr):
+                continue
+            if pr.author_bot:
+                whose = f"bot:{pr.author_bot}"
+            elif self.policy.robot_author(pr.author_login):
+                whose = "robot"
+            elif self.rules.claude_session_pr(pr):
+                whose = "claude session"
+            else:
+                whose = "person"
+            link = f"merge:{repo}@{head}#{number}"
+            try:
+                card = self.ask_decide("main_standing", {"ref": link})
+            except Refused as e:
+                raise Refused(f"the decision core did not say which Main card stands for {link}: {e}") from None
+            out.append({"number": number, "head": head, "branch": head_ref, "whose": whose,
+                        "held_files": held[:10], "held_count": len(held), "release_link": link,
+                        "card": card})
+        return {"repo": repo, "base": base, "held": out,
+                "owed": [h["number"] for h in out if not h["card"]],
+                **({"unread": unread} if unread else {})}
+
     # Patrick's answers on outside pull request cards (#132)
 
     def _outside_answers(self) -> list[dict]:
@@ -1572,7 +1638,7 @@ class GitService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-                 "close_issue", "delete_branch", "start_run", "read", "board", "refused", "ledger_event")
+                 "close_issue", "delete_branch", "start_run", "read", "board", "held", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
         # root's follower alone, never a Bot.

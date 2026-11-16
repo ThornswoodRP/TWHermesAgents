@@ -304,6 +304,17 @@ class MainAnswers(unittest.TestCase):
         a = self.main_answer(card["id"])
         self.assertEqual((a["for"], a["commit"], a["option"], a["restored"]), ("publish", self.SHA, "authorize", False))
 
+    def test_tw_git_reads_which_main_card_stands_for_a_link(self):
+        from thornswood_brokers.wire import Refused
+        handler, callers = self.route.git_ops()["main_standing"]
+        self.assertEqual(callers, {"tw-git", "root"})
+        link = f"publish:ThornswoodRP/Thornswood@{self.SHA}"
+        self.assertIsNone(handler("tw-git", {"ref": link}))
+        card = self.open()
+        self.assertEqual(handler("tw-git", {"ref": link}), {"decision_id": card["id"], "state": "asked"})
+        with self.assertRaises(Refused):
+            handler("tw-git", {"ref": "not a link"})
+
     def test_a_specialist_cannot_open_one_and_an_ordinary_card_is_no_main_answer(self):
         from thornswood_brokers.wire import Refused
         with self.assertRaises(Refused):

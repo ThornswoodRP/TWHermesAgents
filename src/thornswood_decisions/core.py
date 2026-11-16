@@ -598,10 +598,40 @@ class DecisionCore:
         lives DEFAULT_EXPIRY (tw-policy's default_expiry_hours), so a card
         whose yes Bramble reported done, that expired, or that was answered
         before a restore leaves the link free for a new card."""
+        found = self._main_standing(db, workspace_id, release)
+        if not found:
+            return
+        head = self._link_head(release)
+        if found["state"] == "asked":
+            raise CoreError(409, "main_already_asked", f"Main card {found['decision_id']} already asks Patrick about "
+                            f"{head}: use it (revise_card if it changed) instead of opening another",
+                            decision_id=found["decision_id"])
+        raise CoreError(409, "main_already_authorized", f"Patrick already authorized {head} on Main card "
+                        f"{found['decision_id']}: act on that answer, then report_work_done, instead of asking again",
+                        decision_id=found["decision_id"])
+
+    def main_standing(self, workspace_id: str, ref: str) -> dict | None:
+        """The Main card that stands for a release link, as open_card would
+        name it when it refuses a second one: {decision_id, state} with state
+        "asked" (pending, Patrick has not answered) or "authorized" (his
+        authorize, unused and unexpired), or None when the link has none and
+        a card for it is owed. tw-git reads it for each held pull request, so
+        Bramble's sweep sees which heads have no card (16 Nov 2026: Thornswood
+        #6235, #6243 and #6259, Claude sessions' changes to the gate and verb
+        scripts, sat for hours with none)."""
+        release = self._release_of("main", [("release", ref)])
+        return self._main_standing(self.s.db, workspace_id, release)
+
+    @staticmethod
+    def _link_head(release: dict) -> str:
         head = f"{release['for']}:{release['repo']}@{release['commit']}"
         if release.get("line"):
             # A live card is for one line: another line at the same commit is its own card.
             head += "!" + release["line"]
+        return head
+
+    def _main_standing(self, db, workspace_id: str, release: dict) -> dict | None:
+        head = self._link_head(release)
         rows = db.execute("SELECT d.id, d.status, d.expires_at, d.revision FROM decisions d JOIN task_links l "
                           "ON l.decision_id = d.id AND l.kind = 'release' WHERE d.workspace_id = ? "
                           "AND d.kind = 'main' AND d.status IN ('pending', 'resolved') AND (l.ref = ? OR l.ref LIKE ?)",
@@ -609,8 +639,7 @@ class DecisionCore:
         now = self.s.clock()
         for r in rows:
             if r["status"] == "pending" and now < parse(r["expires_at"]):
-                raise CoreError(409, "main_already_asked", f"Main card {r['id']} already asks Patrick about {head}: "
-                                "use it (revise_card if it changed) instead of opening another", decision_id=r["id"])
+                return {"decision_id": r["id"], "state": "asked"}
             if r["status"] != "resolved":
                 continue
             a = self.main_answer(workspace_id, r["id"])
@@ -620,9 +649,8 @@ class DecisionCore:
                 continue
             if db.execute("SELECT 1 FROM events WHERE kind = 'work.done' AND subject = ?", (r["id"],)).fetchone():
                 continue
-            raise CoreError(409, "main_already_authorized", f"Patrick already authorized {head} on Main card "
-                            f"{r['id']}: act on that answer, then report_work_done, instead of asking again",
-                            decision_id=r["id"])
+            return {"decision_id": r["id"], "state": "authorized"}
+        return None
 
     def _release_row(self, db, decision_id: str) -> dict:
         r = db.execute("SELECT ref FROM task_links WHERE decision_id = ? AND kind = 'release'",

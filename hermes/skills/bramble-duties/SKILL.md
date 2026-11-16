@@ -1,7 +1,7 @@
 ---
 name: bramble-duties
 description: Bramble's standing work. Put the Bots' reviewed pull requests on GitHub's auto-merge, merge green Ops pull requests, hand a pull request the merge queue dropped back to its owner, review pull requests from outside the team, work the Desk's list, and keep each worker on one issue from the board. Use on every GitHub wake and whenever asked to work the queue.
-version: 1.23.0
+version: 1.24.0
 author: TWHermesAgents (repo-owned; scripts/apply.py installs it, never edit it on the VM)
 platforms: [linux]
 metadata:
@@ -46,6 +46,26 @@ Every finished check suite in the three repositories is gathered into one
 wake, so a wake is never only about the commit it names. Sweep all of them,
 every time.
 
+First, in each of the three: `tw_git held` with the repo. It lists every
+open pull request there that merges only on Patrick's authorize on a Main
+card (it changes a workflow, the deploy gate, a verb list, or a file a verb
+of the base branch's lists runs or reads: the policy's `merge.patrick_paths`),
+whoever's it is, with its head, its `release_link` and `card`, the Main card
+that stands for that head. Each number in `owed` has none: open its card
+this sweep, as step 5 below says, with that `release_link`. That is the
+whole test of whether a pull request needs a card; do not work it out from
+its branch or its files yourself. A Claude session's (`whose` "claude
+session") gets its card with no review of yours, because its thread owns its
+code; a Bot's gets it once your review of that head stands. A `card` in
+state `authorized` is Patrick's yes, unused: act on it this sweep (`tw_git
+merge` at that head with its `decision_id`). `asked` waits on him. A number
+under `unread` is one GitHub listed only part of: say so in Bot Chat, and
+open no card for it until its files can be read. (16 Nov 2026: Thornswood
+#6235, #6243 and #6259, Claude sessions' changes to the gate and verb
+scripts, sat for hours with no card, because only a refused `tw_git merge`
+said a pull request was held, and a thread's pull request never reaches
+your merge. Patrick waited on a card that was never opened.)
+
 In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
 
 1. `tw_git read` `GET /repos/<repo>/pulls?state=open&per_page=100`.
@@ -55,13 +75,13 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    auto-merge; leave it alone, green or not. One from outside the team gets
    the review in section 3, and never auto-merge. The exception is a Claude
    session's (its branch is `claude/<what>`, opened with Patrick's sign-in)
-   that changes a file of step 5: Thornswood's auto-merge leaves it off,
-   and it is yours for its Main card alone (Patrick's A on his page, 15 Nov
-   2026, Ops #353: "Claude branches wait for the card"). Open the card for
-   its head as step 5 says, without a review or a comment of yours (the
-   thread owns its code), and once he answers `authorize`, `tw_git merge`
-   it with the card's id; tw_git refuses it without one. A conflict or a red
-   check on it is still its thread's.
+   that `tw_git held` lists: Thornswood's auto-merge leaves it off, and it
+   is yours for its Main card alone (Patrick's A on his page, 15 Nov 2026,
+   Ops #353: "Claude branches wait for the card"). Open the card for its
+   head as step 5 says, without a review or a comment of yours (the thread
+   owns its code), and once he answers `authorize`, `tw_git merge` it with
+   the card's id; tw_git refuses it without one. A conflict or a red check
+   on it is still its thread's.
 3. For each of those pull requests that is not a draft and has no auto-merge on
    (`auto_merge` is null), read it (`GET /repos/<repo>/pulls/<number>`). If
    its `mergeable` is false, it conflicts with its base: it goes back to its
@@ -80,9 +100,10 @@ In ThornswoodRP/Thornswood and ThornswoodRP/skymp:
    12 Nov 2026), so nothing merges at a
    head you have not read (Ops #272: #5651 went into the queue at an unread
    head on 9 Nov 2026), and the merge op at the new head is a new one.
-5. One that changes a workflow (`.github/workflows/`), the deploy gate
-   (`scripts/vps/gate/`), a verb list, or a script or file a verb of main's
-   verb lists runs or reads (the policy's `merge.patrick_paths`) merges only
+5. One that `tw_git held` lists, because it changes a workflow
+   (`.github/workflows/`), the deploy gate (`scripts/vps/gate/`), a verb
+   list, or a script or file a verb of main's verb lists runs or reads (the
+   policy's `merge.patrick_paths`), merges only
    on Patrick's yes for it at that exact head (his decision of 2 Nov 2026,
    dec_IL6elJT7TwyCVC_wzMIveA, and his answer A on Ops #276 on 12 Nov
    2026). Once your review stands, open one Main card for it: `tw_decide` kind `main`, one link of kind `release` and ref
@@ -116,9 +137,10 @@ In ThornswoodRP/Thornswood-Ops:
    runners) or `ops/write-status.js` (status-page runs it from main there),
    the policy's `merge.patrick_paths` for Ops, merges only on Patrick's
    yes at that exact head, whoever's it is, unless it is his own from a
-   branch that is not `claude/` (his A on Ops #353, 15 Nov 2026). Open its
-   Main card as step 5 above says, the same sweep you first see it, with
-   the link ref `merge:ThornswoodRP/Thornswood-Ops@<head>#<number>`, and
+   branch that is not `claude/` (his A on Ops #353, 15 Nov 2026); `tw_git
+   held` lists it. Open its Main card as step 5 above says, the same sweep
+   you first see it, with the link ref
+   `merge:ThornswoodRP/Thornswood-Ops@<head>#<number>`, and
    once he answers `authorize`, `tw_git merge` it with the card's id; tw_git
    refuses it without one. A thread's pull request gets the card without a
    review of yours (the thread owns its code), as in Thornswood. Until
