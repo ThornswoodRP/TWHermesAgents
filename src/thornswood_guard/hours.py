@@ -32,7 +32,8 @@ def rule(data: dict | None) -> str:
         return ("The Grok lanes' audits are paused (policy.yaml work.lanes_audit_overnight is false), so the "
                 "workers start new work at any hour: bramble-duties section 6 runs at night as by day.")
     return (f"The workers start new work only from {says(work_hours(data))} Mountain; the Grok lanes audit "
-            "overnight, and a worker on an issue at the end of the day finishes it.")
+            "overnight, and a worker on an issue at the end of the day finishes it. You do not stop: every "
+            "other duty of yours (merges, Main cards, runs, the Desk's list) is yours at any hour.")
 
 
 def says(hours: tuple[int, int]) -> str:
