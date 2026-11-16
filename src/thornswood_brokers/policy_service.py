@@ -740,10 +740,16 @@ class PolicyService:
             raise Refused(f"Patrick's answer on card {did} was given before the decision core was restored from a "
                           "backup; it authorizes nothing, so a new card is needed")
         kind, repo, commit, pr, rev = a.get("for"), a.get("repo"), a.get("commit"), a.get("pr"), a.get("revision")
-        if kind not in ("main", "publish", "cutover", "merge") or not isinstance(repo, str) or "/" not in repo:
-            raise Refused(f"card {did} does not name a main, publish, cutover or merge for a repository")
+        line = a.get("line")
+        if kind not in ("main", "publish", "cutover", "merge", "live") or not isinstance(repo, str) or "/" not in repo:
+            raise Refused(f"card {did} does not name a main, publish, cutover, merge or live run for a repository")
         if kind == "merge" and pr is None:
             raise Refused(f"card {did} is a merge and names no pull request")
+        if (kind == "live") != (line is not None):
+            raise Refused(f"card {did} names a line only when it is a live run, and a live run always names one")
+        if line is not None and not (isinstance(line, str) and len(line) == 64
+                                     and all(c in "0123456789abcdef" for c in line)):
+            raise Refused(f"card {did} does not name its live line by its sha256")
         if not (isinstance(commit, str) and len(commit) == 40 and all(c in "0123456789abcdef" for c in commit)):
             raise Refused(f"card {did} does not name a 40-character commit")
         if not (pr is None or (isinstance(pr, int) and not isinstance(pr, bool) and pr > 0)):
@@ -760,11 +766,12 @@ class PolicyService:
         hours = self.policy.data["decisions"]["default_expiry_hours"]
         d = Decision(id=did, kind=kind, repo=repo, commit=commit, revision=rev,
                      answered_by=self.policy.data["decisions"]["answered_by"], answered_at=iso(at),
-                     expires_at=iso(at + timedelta(hours=hours)), pr=pr, scope=f"Main card {did}")
+                     expires_at=iso(at + timedelta(hours=hours)), pr=pr, scope=f"Main card {did}", line=line)
         with self._tx():
             have = self._decision(did)
             if have is not None:
-                if (have.kind, have.repo, have.commit, have.revision, have.pr) != (kind, repo, commit, rev, pr):
+                if (have.kind, have.repo, have.commit, have.revision, have.pr, have.line) != (
+                        kind, repo, commit, rev, pr, line):
                     raise Refused(f"decision {did} is already recorded for something else")
                 return {"id": did, "recorded": False}
             self.db.execute("INSERT INTO decisions(id, body) VALUES(?, ?)", (did, json.dumps(d.__dict__)))
@@ -777,10 +784,10 @@ class PolicyService:
 
     def decision_check(self, caller: str, args: dict) -> dict:
         v = self.check_decision(args.get("id"), kind=args["kind"], repo=args["repo"], commit=args["commit"],
-                                revision=args.get("revision"), pr=args.get("pr"))
+                                revision=args.get("revision"), pr=args.get("pr"), line=args.get("line"))
         return {"allowed": v.allowed, "reason": v.reason}
 
-    def check_decision(self, decision_id, *, kind, repo, commit, revision=None, pr=None) -> Verdict:
+    def check_decision(self, decision_id, *, kind, repo, commit, revision=None, pr=None, line=None) -> Verdict:
         # The same rules as thornswood_guard.decisions.DecisionStore.check, on
         # the SQLite copy.
         from thornswood_guard.decisions import DecisionStore
@@ -788,7 +795,8 @@ class PolicyService:
         tmp = DecisionStore.__new__(DecisionStore)
         tmp.policy = self.policy
         tmp._records = {d.id: d} if d else {}
-        return tmp.check(decision_id, kind=kind, repo=repo, commit=commit, revision=revision, pr=pr, at=self.clock())
+        return tmp.check(decision_id, kind=kind, repo=repo, commit=commit, revision=revision, pr=pr, at=self.clock(),
+                         line=line)
 
     def decision_use(self, caller: str, args: dict) -> dict:
         with self._tx():
@@ -807,7 +815,7 @@ class PolicyService:
         with self._tx():
             for (body,) in self.db.execute("SELECT body FROM decisions").fetchall():
                 d = Decision(**json.loads(body))
-                if d.kind in ("main", "publish", "cutover", "merge") and not d.dead:
+                if d.kind in ("main", "publish", "cutover", "merge", "live") and not d.dead:
                     d.dead = True
                     d.notes.append("dead: store restored from a backup")
                     self.db.execute("UPDATE decisions SET body=? WHERE id=?", (json.dumps(d.__dict__), d.id))

@@ -87,9 +87,9 @@ def issue(**kw) -> Issue:
 
 
 def decide(s: DecisionStore, *, id="d1", kind="main", commit=HEAD, pr_number=42,
-           revision=1, answered_by="EvilPatrick06", hours=72, at=None):
+           revision=1, answered_by="EvilPatrick06", hours=72, at=None, line=None):
     d = new_decision(id=id, kind=kind, repo=APP, commit=commit, revision=revision,
-                     answered_by=answered_by, pr=pr_number, hours=hours, at=at)
+                     answered_by=answered_by, pr=pr_number, hours=hours, at=at, line=line)
     s.record(d)
     return d
 

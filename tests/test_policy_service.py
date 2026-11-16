@@ -875,6 +875,21 @@ class MainCardImport(unittest.TestCase):
             with self.subTest(bad), self.assertRaises(Refused):
                 s.decision_import("tw-git", {"answer": self.answer(s, **bad)})
 
+    def test_a_live_run_is_bound_to_its_line(self):
+        # Ops #289: a live box run names the sha256 of its exact gate line.
+        s = service()
+        line = "a" * 64
+        s.decision_import("tw-git", {"answer": self.answer(s, **{"for": "live", "line": line})})
+        did = "dec_abcdefghijklmnop"
+        self.assertTrue(s.check_decision(did, kind="live", repo=APP, commit=HEAD, line=line).allowed)
+        self.assertFalse(s.check_decision(did, kind="live", repo=APP, commit=HEAD, line="b" * 64).allowed)
+        self.assertFalse(s.check_decision(did, kind="live", repo=APP, commit=HEAD).allowed)
+        for bad in ({"for": "live"}, {"for": "live", "line": "short"}, {"for": "main", "line": line}):
+            with self.subTest(bad), self.assertRaises(Refused):
+                s.decision_import("tw-git", {"answer": self.answer(s, decision_id="dec_other0000000", **bad)})
+        with self.assertRaises(Refused):
+            s.decision_import("tw-git", {"answer": self.answer(s, **{"for": "live", "line": "b" * 64})})
+
     def test_an_answer_from_before_a_restore_authorizes_nothing(self):
         clock = Clock()
         s = service(clock=clock)

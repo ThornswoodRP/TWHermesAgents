@@ -26,7 +26,7 @@ def now_utc() -> datetime:
 @dataclass
 class Decision:
     id: str
-    kind: str            # "main", "publish", "cutover", "merge"
+    kind: str            # "main", "publish", "cutover", "merge", "live"
     repo: str
     commit: str          # the exact head or build commit the yes is for
     revision: int        # the card revision Patrick answered
@@ -38,6 +38,8 @@ class Decision:
     used_at: str | None = None
     dead: bool = False
     notes: list[str] = field(default_factory=list)
+    # A live record (a live box run, Ops #289): the sha256 of the exact gate line.
+    line: str | None = None
 
 
 class DecisionStore:
@@ -74,7 +76,7 @@ class DecisionStore:
 
     def check(self, decision_id: str | None, *, kind: str, repo: str, commit: str,
               revision: int | None = None, pr: int | None = None,
-              at: datetime | None = None) -> Verdict:
+              at: datetime | None = None, line: str | None = None) -> Verdict:
         at = at or now_utc()
         if not decision_id:
             return Verdict.no(f"this needs Patrick's yes on a {kind} card for {commit[:12]}, and there is no decision record")
@@ -89,6 +91,8 @@ class DecisionStore:
             return Verdict.no(f"decision {decision_id} is for {d.repo}, not {repo}")
         if d.commit != commit:
             return Verdict.no(f"decision {decision_id} is for {d.commit[:12]}, not {commit[:12]}; a new head needs a new yes")
+        if (kind == "live" or line is not None) and (not line or d.line != line):
+            return Verdict.no(f"decision {decision_id} is for another live line; a different line needs its own yes")
         if pr is not None and d.pr != pr:
             return Verdict.no(f"decision {decision_id} is for PR {d.pr}, not PR {pr}")
         if revision is not None and d.revision != revision:
@@ -108,7 +112,7 @@ class DecisionStore:
         """Called once after a restore from backup: every Main record dies."""
         killed = 0
         for d in self._records.values():
-            if d.kind in ("main", "publish", "cutover", "merge") and not d.dead:
+            if d.kind in ("main", "publish", "cutover", "merge", "live") and not d.dead:
                 d.dead = True
                 d.notes.append("dead: store restored from a backup")
                 killed += 1
@@ -118,9 +122,9 @@ class DecisionStore:
 
 def new_decision(*, id: str, kind: str, repo: str, commit: str, revision: int,
                  answered_by: str, pr: int | None = None, scope: str = "",
-                 hours: int = 72, at: datetime | None = None) -> Decision:
+                 hours: int = 72, at: datetime | None = None, line: str | None = None) -> Decision:
     at = at or now_utc()
     return Decision(id=id, kind=kind, repo=repo, commit=commit, revision=revision,
                     answered_by=answered_by, answered_at=at.isoformat(),
                     expires_at=(at + timedelta(hours=hours)).isoformat(),
-                    pr=pr, scope=scope)
+                    pr=pr, scope=scope, line=line)

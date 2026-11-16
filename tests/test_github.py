@@ -787,3 +787,79 @@ class Settings(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveRuns(unittest.TestCase):
+    """A live verb (verbs.json "build": true) changes what people play on, so
+    Bramble starts it only on Patrick's tap on a Main card in the Hermes app
+    that names main's commit and the exact line, used once, whatever
+    main_without_patrick says (his answer on q-289-where-the-click-lives,
+    15 Nov 2026; Ops #289)."""
+
+    LINE = f'Deploy-Server -GamemodeOnly -Build {HEAD} -Why "the creation fix"'
+
+    def setUp(self):
+        self.p = policy()
+        self.s = store(self.p)
+        self.r = rules(self.p, self.s)
+        self.lists = verb_lists()
+
+    def run_(self, line=None, **kw):
+        return self.r.start_run("bramble", APP, "box-run.yml", "main", {"line": line or self.LINE}, self.lists,
+                                commit=HEAD, **kw)
+
+    def test_the_shipped_policy_still_holds_a_live_line_without_a_card(self):
+        self.assertIs(self.p.data["runs"]["main_without_patrick"], True)
+        v = self.run_()
+        self.assertFalse(v.allowed)
+        self.assertIn("needs Patrick's word", v.reason)
+
+    def test_a_live_card_for_this_line_starts_it(self):
+        from thornswood_guard.gate_line import line_digest
+        decide(self.s, id="live1", kind="live", pr_number=None, line=line_digest(self.LINE))
+        v = self.run_(decision_id="live1")
+        self.assertTrue(v.allowed, v.reason)
+        self.assertIn("live line", v.reason)
+
+    def test_a_card_for_another_line_or_kind_does_not(self):
+        from thornswood_guard.gate_line import line_digest
+        other = f"Deploy-Server -Build {HEAD}"
+        decide(self.s, id="live2", kind="live", pr_number=None, line=line_digest(other))
+        v = self.run_(decision_id="live2")
+        self.assertFalse(v.allowed)
+        self.assertIn("another live line", v.reason)
+        decide(self.s, id="main1", kind="main", pr_number=None)
+        self.assertFalse(self.run_(decision_id="main1").allowed, "a main yes is no live yes")
+
+    def test_a_used_card_starts_nothing_again(self):
+        from thornswood_guard.gate_line import line_digest
+        decide(self.s, id="live3", kind="live", pr_number=None, line=line_digest(self.LINE))
+        self.s.use("live3")
+        v = self.run_(decision_id="live3")
+        self.assertFalse(v.allowed)
+        self.assertIn("already used", v.reason)
+
+    def test_the_line_names_main_as_it_is_now(self):
+        line = f"Deploy-Server -GamemodeOnly -Build {OTHER}"
+        from thornswood_guard.gate_line import line_digest
+        decide(self.s, id="live4", kind="live", commit=OTHER, pr_number=None, line=line_digest(line))
+        v = self.run_(line=line, decision_id="live4")
+        self.assertFalse(v.allowed)
+        self.assertIn("main is at", v.reason)
+
+    def test_a_live_line_without_build_is_refused_as_the_gate_refuses_it(self):
+        v = self.run_(line="Deploy-Server -GamemodeOnly")
+        self.assertFalse(v.allowed)
+        self.assertIn("-Build", v.reason)
+        self.assertFalse(self.run_(line=f"Deploy-Server -Build {HEAD[:12]}").allowed)
+        self.assertFalse(self.run_(line=f"Deploy-Server -Build {HEAD} -Build {HEAD}").allowed)
+
+    def test_build_is_no_word_for_a_verb_that_is_not_live(self):
+        v = self.run_(line=f"Get-Logs -Dev -Build {HEAD}")
+        self.assertFalse(v.allowed)
+        self.assertIn("does not take -Build", v.reason)
+
+    def test_a_name_may_end_in_digits_as_the_gate_reads_it(self):
+        from thornswood_guard.gate_line import parse_request
+        verb, params = parse_request(f'Ship-Main -Build {HEAD} -Detail2 "second line"', self.lists[BOX])
+        self.assertEqual((verb, params["Detail2"], params["Build"]), ("Ship-Main", "second line", HEAD))
