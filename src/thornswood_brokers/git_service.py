@@ -1243,6 +1243,7 @@ class GitService:
                  "This pull request merges only once he authorizes it there.",
         "authorized": "Patrick authorized this head, {short}, on its Main card. Bramble puts it on auto-merge.",
     }
+    CARD_NOTE["used"] = CARD_NOTE["authorized"]
 
     def _card_note(self, repo: str, number: int, head: str, state: str) -> str:
         """Keeps the one comment for this head saying its card's state:

@@ -517,8 +517,13 @@ class MainCards(unittest.TestCase):
         self.assertIsNone(self.w.core.main_standing(self.w.ws, f"merge:{REPO}@{'1' * 40}#6235"), "another head")
         self.w.core.answer(self.w.patrick(), **World.answer_args(c, "authorize"))
         self.assertEqual(self.w.core.main_standing(self.w.ws, link), {"decision_id": c["id"], "state": "authorized"})
-        self.w.core.report_work_done(self.w.bramble, c["id"], "merged")
-        self.assertIsNone(self.w.core.main_standing(self.w.ws, link))
+        # Bramble reports it done when the pull request goes on auto-merge, but
+        # his yes holds until that head merges: nothing more is owed for it
+        # (Thornswood #6243 sat on auto-merge on his yes, 16 Nov 2026).
+        self.w.core.report_work_done(self.w.bramble, c["id"], "on auto-merge")
+        self.assertEqual(self.w.core.main_standing(self.w.ws, link), {"decision_id": c["id"], "state": "used"})
+        self.w.clock.advance(days=3)
+        self.assertIsNone(self.w.core.main_standing(self.w.ws, link), "an expired yes stands for nothing")
         with self.assertRaises(CoreError) as e:
             self.w.core.main_standing(self.w.ws, "merge:not a link")
         self.assertEqual(e.exception.reason, "release_link")

@@ -1032,6 +1032,11 @@ class Held(unittest.TestCase):
         notes = w.fake.comments[(APP, 6259)]
         self.assertEqual(len(notes), 1, "the same comment, edited")
         self.assertIn(f"Patrick authorized this head, {sha[:7]}", notes[0]["body"])
+        # Reported done at auto-merge on, his yes still stands for that head.
+        w.standing[link] = {"decision_id": "dec_cardfor6259abc", "state": "used"}
+        out = self.held(w)
+        self.assertEqual((out["owed"], out["held"][0]["shown"]), ([], "used"))
+        self.assertEqual(len(w.fake.comments[(APP, 6259)]), 1, "the authorized note stands as it is")
         # A new head gets its own comment.
         new = "7c90618b58c26e082d06291a2bd49320f788d597"
         w.fake.prs[(APP, 6259)]["head"]["sha"] = new
