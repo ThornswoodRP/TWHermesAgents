@@ -109,6 +109,7 @@ class Idle:
         self.cards = []
         self.turns = {}
         self.queued = {}
+        self.dispatches, self.attempts = {}, {}
         self.asked = []
 
     def __call__(self, broker, op, args):
@@ -120,9 +121,28 @@ class Idle:
         if op == "bot_turns":
             return {"bots": self.turns}
         if op == "queued_for":
-            return {"bots": self.queued}
+            return {"bots": self.queued, **({"dispatches": self.dispatches, "attempts": self.attempts}
+                                          if "since" in args else {}),
+                    **({"receipts": {row["id"]: dict(row, target=worker, superseded=False)
+                                     for worker, row in self.attempts.items() if row["id"] in args["receipts"]}}
+                       if "receipts" in args else {})}
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour"}
+        if op == "board":
+            import re
+            items = []
+            for key, n in self.open.items():
+                shared = key.startswith("-")
+                labels = ["area: Shared"] if shared else re.findall(r'"(area: [^"]+)"', key)
+                base = len(items)
+                items.extend({"number": 9000 + base + i, "labels": labels} for i in range(n))
+            groups = {}
+            for name, selector in args["groups"].items():
+                areas, excluded = set(selector.get("areas") or []), set(selector.get("not_areas") or [])
+                selected = [row for row in items if (not areas or areas & {l[6:] for l in row["labels"]})
+                            and not excluded & {l[6:] for l in row["labels"]}]
+                groups[name] = {"open": len(selected), "issues": selected[:args["limit"]], "waiting": []}
+            return {"groups": groups}
         if op == "read":
             import re
             import urllib.parse
@@ -224,10 +244,10 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)))
         self.assertIn("sprocket", out[-1])
-        search = [urllib_q(a) for a in b.reads() if "/search/" in a["path"]][-1]
-        for term in ('-label:"claimed: Bramble"', '-label:"claimed: Wyrd"', "-author:WiccanDjinn",
-                     "-assignee:Jhinswife", "repo:ThornswoodRP/Thornswood "):
-            self.assertIn(term, search)
+        boards = [a for _, op, a in b.asked if op == "board"]
+        self.assertEqual(len(boards), 1)
+        self.assertTrue(boards[0]["eligible"])
+        self.assertEqual(boards[0]["groups"]["sprocket"], {"areas": ["Launcher", "Packaging"]})
 
     def test_wisp_is_busy_with_a_claim_in_the_fork(self):
         claimed = dict(BUSY, **{"claimed: Wisp": 0})
@@ -449,7 +469,8 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertIn("in the field of sprocket", out[-1])
         # The sweep it woke was turned away: no ticket. GitHub sweeps ran.
         later = datetime.fromtimestamp(NOON + 200, timezone.utc).isoformat()
-        b.turns = {"bramble": {"running": False, "last": later, "sweep_done": None}}
+        b.turns = {"bramble": {"running": False, "last": later, "sweep_done": None},
+                   "sprocket": {"running": False, "waiting": False}}
         b.asked.clear()
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "another sweep is running"}
 
@@ -475,9 +496,12 @@ class MorningAndFreeWorkers(unittest.TestCase):
         out = owed_wake.check(home, "bramble", b, now=NOON + 600, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), out)
         self.assertEqual(b.reads(), [])
-        # The sweep ran to its end: its lines are gone, and the next look is the hourly one.
+        # The sweep actually dispatched work. Its end alone cannot pay the
+        # observation (the regression in test_worker_wake_progress).
         b.turns["bramble"] = {"running": False, "last": later,
                               "sweep_done": datetime.fromtimestamp(NOON + 305, timezone.utc).isoformat()}
+        b.dispatches["sprocket"] = {"id": "cx_actual_assignment", "status": "sent",
+                                    "at": datetime.fromtimestamp(NOON + 400, timezone.utc).isoformat()}
         out = owed_wake.check(home, "bramble", b, now=NOON + 900, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)), out)
         self.assertNotIn("said_at", owed_wake._load(home.joinpath(*owed_wake.IDLE_FILE)))
@@ -620,12 +644,12 @@ class MorningAndFreeWorkers(unittest.TestCase):
                                          '"area: Website","area: Discord","area: Voice"': 4})
         out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
-        self.assertIn("in the field of rift, wisp", out[-1])
-        self.assertIn("maybe of sprocket, echo, magpie, past the first 100", out[-1],
-                      "a field the first page did not reach is still named for Bramble's pick")
+        self.assertIn("in the field of rift, echo, wisp", out[-1])
+        self.assertNotIn("past the first 100", out[-1], "each field is filtered before its result limit")
         self.assertIn("pick for each free worker", out[-1])
         searches = [a for a in b.reads() if "/search/" in a["path"]]
         self.assertLessEqual(len(searches), 3, [urllib_q(a) for a in searches])
+        self.assertEqual(sum(op == "board" for _, op, _ in b.asked), 1)
 
     def test_an_owed_wake_runs_the_free_worker_look_too(self):
         # 12 Nov 2026: a wake was owed nearly all evening (GitHub's wakes

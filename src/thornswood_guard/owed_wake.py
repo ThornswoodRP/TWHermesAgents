@@ -53,11 +53,14 @@ while Wisp alone worked. The look waits while Bramble has a turn running,
 in line or queued, because a hand-back is answered in that turn and the
 look must read what it did; the hourly look runs whatever Bramble is doing.
 
-A look that wakes Bramble keeps its lines in IDLE_FILE until a scheduled
-sweep admitted after it runs to its end (tw-policy's sweep_done): those are
-the only sweeps that carry them. Until then every wake this check gives
-carries them too, and while Bramble has no turn running the look runs again,
-fresh. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
+A worker opportunity stays in IDLE_FILE until its exact assignment is sent,
+or a fresh canonical board read proves no eligible work is available. A
+completed coordinator sweep alone cannot acknowledge it. Pending idle
+workers share one board snapshot at the next five-minute check while
+Bramble has no turn running or queued. Source failure retains observations
+and defers passive reads for an hour. Cached assignment hints never ride an
+unrelated wake. Legacy stopped-claim guidance still can, until a scheduled
+sweep carries it. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
 Sprocket, Echo and Wisp free; its sweep was turned away because another was
 running, a GitHub sweep paid the wake it owed without its lines, the 6:44 PM
 sweep carried only an Ops issue, and no worker got work for the next hour.
@@ -89,6 +92,7 @@ look, so a quiet night spends GitHub reads and no model turn.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
@@ -166,20 +170,22 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
 
 
 def _carried(home: Path, now: float, policy: dict | None = None) -> list[str]:
-    """The free worker look's lines that no sweep has yet carried to its end,
-    added to any wake from 7 AM to midnight: an owed wake, the alert wake, the
-    morning wake. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped
-    and Sprocket, Echo and Wisp free; its sweep was turned away (another was
-    running), a GitHub sweep paid the wake it owed without its lines, the
-    6:44 PM sweep carried only an Ops issue, and no worker got work. The lines
-    go once a scheduled sweep admitted after the look ran to its end
-    (_idle)."""
+    """Carry legacy stopped-claim guidance within work hours. Typed worker
+    assignment hints require fresh receipt and eligibility checks instead
+    of cached prose that may name a worker already given work."""
     state = _load(home.joinpath(*IDLE_FILE))
     at, said = state.get("said_at"), state.get("said")
     if not at or not said or float(at) == now or not _working(now, policy):
         return []
-    return [f"What the free worker look at {_clock(float(at))} Mountain said, which no sweep has carried to its "
-            "end yet (bramble-duties, section 6):", *said]
+    # Typed assignment hints are never replayed from cached prose: receipts
+    # and current eligibility may have changed for just one named worker.
+    if state.get("pending_workers"):
+        return []
+    said = [line for line in said if isinstance(line, str) and "hold no active issue" not in line]
+    if not said:
+        return []
+    return [f"What the free worker look at {_clock(float(at))} Mountain said, which no sweep has carried to its end yet "
+            "(bramble-duties, section 6). Respect Patrick's Stop; never replay an uncertain or cancelled assignment:", *said]
 
 
 def _check(home: Path, bot: str, ask: Caller, now: float, policy: dict | None) -> list[str]:
@@ -252,13 +258,17 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
                                         f"new work outside {says((start, end))}; overnight is the requested audit window")
     ended_said = None
     if state.get("said_at"):
-        unheard, ended_said = _unheard(bot, ask, state)
-        if not unheard:
-            _save(path, state)
+        unheard, ended_said = _unheard(bot, ask, state, now, policy)
+        _save(path, state)
         idle_due = idle_due or (working and unheard)
-    if working and not idle_due:
-        ended, ended_said = _turns_ended(bot, ask, policy, float(state.get("idle_checked") or 0))
-        idle_due = bool(ended)
+    if working and (not idle_due or state.get("progress_workers")):
+        ended, why_ended = _turns_ended(bot, ask, policy, float(state.get("idle_checked") or 0))
+        ended_said = why_ended or ended_said
+        idle_due = idle_due or bool(ended)
+        if ended and state.get("progress_workers"):
+            state["progress_workers"] = sorted(set(state["progress_workers"]) | set(ended))
+    if now < float(state.get("progress_retry_after") or 0):
+        idle_due = False
     if not morning and not idle_due and not alert_due:
         if local is None:
             return [why_no_morning, SLEEP]
@@ -388,15 +398,43 @@ def _reviews_carried(home: Path, bot: str, ask: Caller, now: float) -> list[str]
     return lines
 
 
-def _unheard(bot: str, ask: Caller, state: dict) -> tuple[bool, str | None]:
-    """Whether the last free worker look that woke Bramble was never carried
-    to the end of a sweep: no scheduled sweep admitted since it ran to its
-    end (tw-policy's sweep_done), and Bramble has no turn running or in line
-    that may be that sweep. Then the look runs again, fresh, at this check.
-    Once one has, the look's lines leave state. tw-policy not answering
-    keeps them and runs nothing: the next check asks again."""
+def _pending_workers(state: dict, policy: dict) -> dict[str, float] | None:
+    raw = state.get("pending_workers")
+    if (not isinstance(raw, dict) or set(raw) - set(_workers(policy))
+            or any(isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at) or at <= 0
+                   for at in raw.values())):
+        return None  # old or malformed state needs a fresh, guarded look
+    return dict(raw)
+
+
+def _forget_workers(state: dict) -> None:
+    for key in ("said_at", "said", "pending_workers", "pending_reviews", "progress_workers",
+                "progress_retry_after", "review_retry_after"):
+        state.pop(key, None)
+
+
+def _receipt_after(row, at: float, *, accepted=False) -> bool:
+    if row is None:
+        return False
     try:
-        mine = ((ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}).get(bot) or {}
+        if not isinstance(row, dict) or not re.fullmatch(r"cx_[A-Za-z0-9_-]{1,128}", row.get("id", "")):
+            raise ValueError()
+        when = datetime.fromisoformat(row["at"])
+        if when.tzinfo is None or (accepted and row.get("status") not in ("queued", "leased", "sent")):
+            raise ValueError()
+        return when.timestamp() > at
+    except (TypeError, ValueError, KeyError, OverflowError):
+        raise BrokerRefused("the assignment receipt metadata is unavailable or malformed") from None
+
+
+def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tuple[bool, str | None]:
+    """Keep an observed opportunity until a newer accepted assignment receipt
+    or a fresh canonical no-work result settles that worker. A completed
+    coordinator sweep alone cannot settle it. Busy/queued coordinators
+    coalesce checks; unavailable metadata retains state with bounded retry."""
+    try:
+        turns = (ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}
+        mine = turns.get(bot) or {}
     except BrokerRefused:
         return False, None
     at = float(state["said_at"])
@@ -405,12 +443,64 @@ def _unheard(bot: str, ask: Caller, state: dict) -> tuple[bool, str | None]:
         carried = bool(done) and datetime.fromisoformat(done).timestamp() >= at
     except (TypeError, ValueError):
         carried = False
-    if carried:
-        state.pop("said_at", None)
-        state.pop("said", None)
-        return False, None
     if mine.get("running") or mine.get("waiting"):
         return False, None
+    pending = _pending_workers(state, policy)
+    if pending == {} and carried:
+        _forget_workers(state)
+        return False, None
+    try:
+        args = {"bot": bot}
+        if pending:
+            args["since"] = datetime.fromtimestamp(min(pending.values()), timezone.utc).isoformat()
+        queued = ask("decide", "queued_for", args)
+        if not isinstance(queued, dict) or not isinstance(queued.get("bots"), dict):
+            raise BrokerRefused("the assignment queue metadata is unavailable")
+        if queued["bots"].get(bot):
+            return False, None
+        if pending:
+            if not all(isinstance(queued.get(k), dict) for k in ("dispatches", "attempts")):
+                raise BrokerRefused("the assignment receipts are unavailable")
+            pending = {w: at for w, at in pending.items()
+                       if not (_receipt_after(queued["dispatches"].get(w), at, accepted=True)
+                               and queued["dispatches"][w]["status"] == "sent")}
+            state["pending_workers"] = pending
+            if not pending:
+                _forget_workers(state)
+                return False, None
+            state["pending_reviews"] = {w: queued["attempts"][w] for w, at in pending.items()
+                                        if _receipt_after(queued["attempts"].get(w), at)
+                                        and queued["attempts"][w].get("status") in
+                                        ("dead", "uncertain", "cancelled", "quarantined")}
+            held = state.setdefault("review_receipts", {})
+            for w, row in state["pending_reviews"].items():
+                held[row["id"]] = dict(row, target=w)
+            if len(held) > 32:
+                raise BrokerRefused("too many assignment outcomes need exact receipt review")
+            deferred = state.get("review_retry_after") or {}
+            state["review_retry_after"] = {w: until for w, until in deferred.items()
+                                            if w in state["pending_reviews"] and isinstance(until, (int, float))}
+            if any(not isinstance(turns.get(w), dict) for w in pending):
+                raise BrokerRefused("the worker activity metadata is unavailable")
+            available = [w for w in pending if not queued["bots"].get(w)
+                         and now >= state["review_retry_after"].get(w, 0)
+                         and not (turns.get(w) or {}).get("running") and not (turns.get(w) or {}).get("waiting")]
+            if not available:
+                state.pop("progress_workers", None)
+                return False, None
+            state["progress_workers"] = available
+    except BrokerRefused:
+        state["progress_retry_after"] = now + IDLE_EVERY
+        return False, None
+    if now < float(state.get("progress_retry_after") or 0):
+        return False, None
+    if pending is not None and pending:
+        return True, ("the observed idle workers still have no assignment receipt; "
+                      + ("no sweep carried its lines to the end; " if not carried else "")
+                      + "refresh eligibility before "
+                      "routing work, respecting Patrick's Stop and never replaying an uncertain or cancelled assignment")
+    if carried and pending is None:
+        return True, "the earlier worker observation has no typed dispatch proof; refresh eligibility once"
     return True, (f"the free worker look at {_clock(at)} Mountain woke you, but no sweep carried its lines to the "
                   "end (it was turned away, or a sweep that never saw them paid its wake): it looks again now")
 
@@ -479,34 +569,86 @@ def _own_work(bot: str, ask: Caller, policy: dict) -> list[str]:
 def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, state: dict) -> list[str]:
     """The free worker wake, 7 AM to midnight: its lines, the last SLEEP unless a free
     worker has work on the board."""
+    progress = state.pop("progress_workers", None)
+    all_due = now - float(state.get("all_workers_checked") or 0) >= IDLE_EVERY
+    names = _workers(policy) if all_due or not progress else [w for w in progress if w in _workers(policy)]
+    if all_due:
+        state["all_workers_checked"] = now
     state["idle_checked"] = now
     state.pop("stopped", None)
     _save(path, state)
-    workers = {name: policy["bots"][name]["claim_label"] for name in _workers(policy)}
+    workers = {name: policy["bots"][name]["claim_label"] for name in names}
     repo = policy["repos"]["app"]
     asked = _asked(bot, ask)
+    observed = {"workers": set(), "no_work": set()}
     try:
-        lines = _look(bot, ask, now, policy, workers, repo, asked)
+        held = state.get("review_receipts") or {}
+        if held:
+            reply = ask("decide", "queued_for", {"bot": bot, "receipts": list(held)})
+            current = reply.get("receipts") if isinstance(reply, dict) else None
+            if not isinstance(current, dict) or set(current) != set(held):
+                raise BrokerRefused("the exact held assignment receipts are unavailable")
+            for row in current.values():
+                _receipt_after(row, 0)
+                if row.get("target") not in _workers(policy) or not isinstance(row.get("superseded"), bool):
+                    raise BrokerRefused("the held assignment receipt metadata is malformed")
+            state["review_receipts"] = {key: row for key, row in current.items()
+                                         if not row["superseded"] and row["status"] != "sent"}
+        lines = _look(bot, ask, now, policy, workers, repo, asked, observed,
+                      state.get("review_receipts") or {})
     except BrokerRefused as e:
+        state["progress_retry_after"] = now + IDLE_EVERY
+        _save(path, state)
         return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
+    state.pop("progress_retry_after", None)
+    if observed.get("ambiguous"):
+        # An incomplete old receipt cannot identify which claim may be
+        # resumed. Review it without replay; passive checks remain bounded.
+        deferred = state.setdefault("review_retry_after", {})
+        deferred.update({w: now + IDLE_EVERY for w in observed["ambiguous"]})
+    pending = _pending_workers(state, policy) or {}
+    pending = {w: at for w, at in pending.items() if w not in observed["no_work"]}
+    for worker in observed["workers"]:
+        pending.setdefault(worker, now)
     if lines[-1] == SLEEP:
-        state.pop("said_at", None)
-        state.pop("said", None)
+        if not pending:
+            _forget_workers(state)
     else:
         # check() puts the work hours line first on every wake.
         state["said_at"], state["said"] = now, lines
+    if pending or lines[-1] != SLEEP:
+        state["pending_workers"] = pending
     _save(path, state)
     return lines
 
 
 def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, str], repo: str,
-          asked: set[str]) -> list[str]:
-    """The free worker look itself, in at most five GitHub searches: the
-    workers' claims in each repo (one search each, every claim label at
-    once), the free workers' fields (one), and the parts no worker owns (one,
-    only when the fields hold nothing). Until 10 Nov 2026 it searched once
-    per worker and once per free worker's field, up to twelve searches in
-    seven seconds with the alert look's, and GitHub refused the tenth."""
+          asked: set[str], observed: dict | None = None, reviews: dict | None = None) -> list[str]:
+    """Read claims and PRs in bounded batches, then one complete canonical
+    board snapshot for all free fields. Exact failed/cancelled receipts
+    require review of that task, never replay or a worker-wide stop."""
+    reviews = reviews or {}
+    excluded, review_lines, ambiguous = [], [], set()
+    allowed_repos = {repo, policy["repos"]["fork"]}
+    for receipt in reviews.values():
+        worker = receipt.get("target")
+        if worker not in workers:
+            continue
+        issue = receipt.get("issue")
+        if (isinstance(issue, dict) and isinstance(issue.get("repo"), str) and issue["repo"] in allowed_repos
+                and isinstance(issue.get("number"), int) and not isinstance(issue["number"], bool)
+                and 0 < issue["number"] <= 9999999999):
+            excluded.append(issue)
+            task = f'{issue["repo"]}#{issue["number"]}'
+            asked = asked | {task}  # only this claim waits for review
+        else:
+            task = "an unidentified legacy task"
+            ambiguous.add(worker)
+            if observed is not None:
+                observed.setdefault("ambiguous", set()).add(worker)
+        review_lines.append(f"{worker}'s receipt {receipt['id']} is {receipt['status']} for {task}: "
+                            "review that exact outcome; never replay it. A different eligible issue may still be picked, "
+                            "subject to Patrick's explicit pause and Stop.")
     # A worker's pull request for a Thornswood issue may be in the fork:
     # Wisp's engine fixes are (10 Nov 2026: #4513's fix merged as fork
     # #148 at 5:49 AM, and Wisp, seen as still working it, got nothing
@@ -525,10 +667,11 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
         if w == "wisp":
             busy = _active(policy["repos"]["fork"], w, fork_claims.get(workers[w], []), prs, asked,
                            parked) or busy
-        if not busy:
+        if not busy and w not in ambiguous:
             free.append(w)
-    stopped = _stopped(bot, ask, [w for w in workers if w not in free], now)
-    said = []
+    reviewed_workers = {row.get("target") for row in reviews.values()}
+    stopped = _stopped(bot, ask, [w for w in workers if w not in free and w not in reviewed_workers], now)
+    said = review_lines
     if parked:
         said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
                     "each holds a claimed issue with no pull request that it has moved on from (it opened a "
@@ -545,30 +688,29 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                     "every look until it runs a turn or its claim comes off.")
     if not free:
         return said or ["every worker is on an active issue", SLEEP]
-    # Open, unclaimed, and nobody's whose work is hands off: the board's
-    # eligible rule (bramble-duties, section 6) as one search can say it.
-    # Bramble's own pick reads the board's Order and Status.
-    rest = " ".join([*(f'-label:"{b["claim_label"]}"' for b in policy["bots"].values()),
-                     *(f'-label:"{l}"' for l in policy["hands_off"]["lanes"]["labels"]),
-                     *(f"-author:{p} -assignee:{p}" for p in policy["hands_off"]["people"])])
-    # Every free worker is looked at, not only the first with work (at
-    # 2:00 PM on 9 Nov 2026 the line named Rift's field alone, and Wisp's
-    # 181 issues went unsaid), in one search for all their fields: the
-    # labels of what comes back say whose field each issue is in.
-    fields = _search(bot, ask, repo, "label:" + ",".join(f'"area: {a}"' for w in free for a in AREAS.get(w, ()))
-                     + f" {rest}", 100) if any(AREAS.get(w) for w in free) else {}
-    seen = {l for i in fields.get("items") or [] for l in _labels(i)}
-    fed = [w for w in free if any(f"area: {a}" in seen for a in AREAS.get(w, ()))]
-    unread = int(fields.get("total_count") or 0) > len(fields.get("items") or [])
+    # Filter each field before truncation, from the same complete snapshot.
+    groups = {w: {"areas": list(AREAS.get(w, ()))} for w in free}
+    groups["shared"] = {"not_areas": [*(a for mine in AREAS.values() for a in mine), *BRAMBLES_OWN]}
+    board = ask("git", "board", {"bot": bot, "eligible": True, "limit": 1, "groups": groups,
+                                  **({"excluded_issues": excluded} if excluded else {})})
+    results = board.get("groups") if isinstance(board, dict) else None
+    if not isinstance(results, dict) or set(results) != set(groups):
+        raise BrokerRefused("the grouped eligible board snapshot is unavailable")
+    for group in results.values():
+        if (not isinstance(group, dict) or not isinstance(group.get("issues"), list)
+                or not isinstance(group.get("open"), int) or isinstance(group.get("open"), bool)
+                or group["open"] < 0 or (not group["issues"] and group["open"] != 0)):
+            raise BrokerRefused("the grouped eligible board snapshot is malformed or incomplete")
+    shared = bool(results["shared"]["issues"])
+    fed = [w for w in free if results[w]["issues"]]
+    if observed is not None:
+        observed["workers"].update(w for w in free if w in fed or shared)
+        observed["no_work"].update(w for w in free if w not in fed and not shared)
     if fed:
-        more = [w for w in free if w not in fed and AREAS.get(w)] if unread else []
         return [*said, f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits), and "
                 f"open unclaimed issues are in the field of {', '.join(fed)}"
-                + (f" (and maybe of {', '.join(more)}, past the first 100 the look read)" if more else "")
                 + ": pick for each free worker, reading the board by its area (bramble-duties, section 6)."]
-    owned = " ".join(f'-label:"area: {a}"' for mine in AREAS.values() for a in (*mine,)) + " " + \
-        " ".join(f'-label:"area: {a}"' for a in BRAMBLES_OWN)
-    if _count(bot, ask, repo, f"{owned} {rest}"):
+    if shared:
         return [*said, f"{', '.join(free)} hold no active issue, and open unclaimed issues are picked by the "
                 "part they name: pick for the free workers (bramble-duties, section 6)."]
     if said:

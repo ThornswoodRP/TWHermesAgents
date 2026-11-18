@@ -1,5 +1,25 @@
 # Running it
 
+The free-worker wake keeps each observed opportunity until the decision
+core confirms its assignment was sent, or a fresh eligible-board read proves
+no work is available for that worker. A completed Bramble sweep alone does
+not settle it. Queued or leased deliveries remain in flight. At the next
+five-minute check, idle unresolved workers share one complete board snapshot,
+with each field filtered before the result limit. Running or queued work
+coalesces the check. The existing admission caps, work hours and explicit
+pause or Stop still apply. Source failures retain observations and defer
+passive retries for an hour without a model turn for the failure itself.
+
+A cancelled or uncertain receipt is reviewed by its canonical task reference,
+never replayed. That exact issue is excluded from fresh eligibility while a
+different issue remains available. Its receipt hold survives a no-work result
+and is rechecked by exact ID; only a confirmed delivery or a newer explicit
+assignment for the same task releases it. An incomplete legacy reference is
+reported as ambiguous and defers only that worker's automatic hint until
+review; the others remain available. These summaries contain identifiers,
+status and timestamps, never briefs or chat. This is delivery bookkeeping,
+never proof of task completion.
+
 Once the first install is done ([setup.md](setup.md)), the VM looks after itself: it installs each merge to `main`, backs itself up every night and checks its own limits at every boot. This page is for watching it and stepping in.
 
 ## Updates
