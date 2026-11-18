@@ -8,8 +8,9 @@ runs only when a wake is owed and the queue would admit it now.
 
 Hermes runs the agent when the script fails or times out, with the error as
 its context (cron/scheduler.py, the wake gate), so this check never fails:
-every error ends in {"wakeAgent": false}, and each broker call gives up after
-ASK_SECONDS, well inside Hermes's script timeout.
+every error ends in {"wakeAgent": false}. Control calls give up after
+ASK_SECONDS; the complete grouped board read uses the standard broker
+full-read deadline. Both stay inside the pinned Hermes script timeout.
 
 A wake the fleet queue turned away is owed in tw-policy (brokers.TurnGate).
 When tw-policy itself did not answer, the turn left the debt in OWED_FILE in
@@ -949,15 +950,30 @@ def _save(path: Path, state: dict) -> None:
     os.replace(tmp, path)
 
 
+def _wake_caller(policy) -> Caller:
+    """Use the existing full-read budget only for the grouped snapshot.
+    That read traverses the project; live single board calls took33 seconds,
+    beyond the10-second control budget but within the standard120-second RPC
+    budget and Hermes's3600-second pre-run script deadline."""
+    from .brokers import socket_caller
+    short = socket_caller(policy, timeout=ASK_SECONDS)
+    snapshot = socket_caller(policy)
+
+    def ask(broker, op, args):
+        caller = snapshot if (broker == "git" and op == "board" and args.get("eligible") is True
+                              and isinstance(args.get("groups"), dict)) else short
+        return caller(broker, op, args)
+    return ask
+
+
 def main() -> int:
     """Run from <profile>/scripts/, with <profile>/plugins on the path."""
     try:
-        from .brokers import socket_caller
         from .policy import Policy
 
         home = Path(__file__).resolve().parents[2]
         policy = Policy.load()
-        lines = check(home, policy.data["wake"]["app"], socket_caller(policy, timeout=ASK_SECONDS),
+        lines = check(home, policy.data["wake"]["app"], _wake_caller(policy),
                       policy=policy.data)
     except Exception as e:  # never a failed script: Hermes would run the agent on it
         lines = [f"the owed-wake check could not run ({type(e).__name__}: {e})", SLEEP]

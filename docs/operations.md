@@ -34,6 +34,14 @@ is incomplete source data. Fresh assignment hints name a finite set of
 checked issue references. A bounded tail scan suppresses the hint and keeps
 the observation if new receipt outcomes arrived during the board read.
 
+The grouped eligible-board snapshot uses the broker client's existing
+120-second full-read deadline. Retained individual board reads took about
+34 seconds, so the wake script's 10-second control-call deadline cannot
+serve that complete traversal. Policy, decision and ordinary Git calls
+retain the 10-second deadline. No retry is added. The pinned Hermes cron
+pre-run script budget is 3,600 seconds, with no live override recorded at
+the rollout check on 18 November.
+
 Once the first install is done ([setup.md](setup.md)), the VM looks after itself: it installs each merge to `main`, backs itself up every night and checks its own limits at every boot. This page is for watching it and stepping in.
 
 ## Updates
