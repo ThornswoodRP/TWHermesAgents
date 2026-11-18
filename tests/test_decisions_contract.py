@@ -38,9 +38,9 @@ class Pinned(unittest.TestCase):
 
     def test_pinned_version_and_commit(self):
         h = self.c["hermes"]
-        self.assertEqual(h["version"], "0.23.0")
-        self.assertEqual(h["tag"], "v0.23.0")
-        self.assertRegex(h["commit"], r"^[0-9a-f]{40}$")
+        self.assertEqual(h["version"], "0.23.2")
+        self.assertEqual(h["tag"], "v0.23.2")
+        self.assertEqual(h["commit"], "ae2a81ccc00e9b7c06301523e5bb09608397149c")
 
     def test_profile_ids_are_ones_hermes_accepts(self):
         for pid in SIX:
@@ -87,7 +87,7 @@ class VmCheck(unittest.TestCase):
         self.fake.write_text(textwrap.dedent(f"""\
             import sys
             if sys.argv[1:] == ["--version"]:
-                print("Hermes Agent v0.23.0 (2026.11.5) · stable")
+                print("Hermes Agent v{self.c["hermes"]["version"]} (test fixture) · stable")
                 print("Install directory: {self.install.as_posix()}")
                 print("Python: 3.12.3")
             """), encoding="utf-8")
@@ -161,6 +161,12 @@ class VmCheck(unittest.TestCase):
         self.add_room("room-wb", "Thornswood Workbench", SIX[:5] + ["patrick-hermes"])
         stops = check_script.run_room(self.home, "room-wb", self.c)["stop"]
         self.assertTrue(any("but the policy seats" in s for s in stops), stops)
+
+    def test_previous_release_is_stopped_even_with_a_healthy_room(self):
+        self.stamp("2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19")
+        r = self.run_check()
+        self.assertTrue(any("not the pinned" in s for s in r["stop"]), r["stop"])
+        self.assertEqual(len(r["facts"]["rooms"]), 1)
 
     def test_the_check_writes_nothing(self):
         before = hashlib.sha256(self.db.read_bytes()).hexdigest()
