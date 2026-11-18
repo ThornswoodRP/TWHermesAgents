@@ -1590,13 +1590,13 @@ class GitService:
         excluded_issues = args.get("excluded_issues", [])
         excluded_refs = set()
         if "excluded_issues" in args:
-            if (groups is None or not isinstance(excluded_issues, list) or len(excluded_issues) > 32
+            if (groups is None or not isinstance(excluded_issues, list) or len(excluded_issues) > 256
                     or any(not isinstance(i, dict) or set(i) != {"repo", "number"}
                            or not isinstance(i["repo"], str)
                            or i["repo"] not in {self.policy.data["repos"]["app"], self.policy.data["repos"]["fork"]}
                            or not isinstance(i["number"], int) or isinstance(i["number"], bool)
                            or not 0 < i["number"] <= 9999999999 for i in excluded_issues)):
-                raise Refused("excluded_issues contains at most 32 exact receipt task references for a grouped read")
+                raise Refused("excluded_issues contains at most 256 exact receipt task references for a grouped read")
             excluded_refs = {(i["repo"], i["number"]) for i in excluded_issues}
         if groups is not None:
             if not self.policy.is_router(bot) or not eligible:
@@ -1652,9 +1652,23 @@ class GitService:
         out, area_sets = [], {}
         for node in items:
             c = node.get("content") or {}
+            if groups is not None and c.get("__typename") == "Issue" and c.get("state") not in ("OPEN", "CLOSED"):
+                raise Refused("the grouped board issue state is unavailable")
             if c.get("__typename") != "Issue" or c.get("state") != "OPEN":
                 continue
             if groups is not None:
+                repository = c.get("repository")
+                if not isinstance(repository, dict) or not isinstance(repository.get("nameWithOwner"), str):
+                    raise Refused("the grouped board repository metadata is incomplete")
+                if repository["nameWithOwner"] not in {repo, self.policy.data["repos"]["fork"]}:
+                    continue
+                status = node.get("status")
+                # GitHub's nullable fieldValueByName is unset on some
+                # legitimate items. They are not Todo, rather than an outage.
+                if status is not None and (not isinstance(status, dict) or not isinstance(status.get("name"), str)):
+                    raise Refused("the grouped board status metadata is malformed")
+                if status is None or status["name"] != "Todo":
+                    continue
                 for container, field in (("labels", "name"), ("assignees", "login")):
                     raw = c.get(container)
                     values = raw.get("nodes") if isinstance(raw, dict) else None
@@ -1664,8 +1678,7 @@ class GitService:
                 if (not isinstance(c.get("repository"), dict)
                         or not isinstance(c["repository"].get("nameWithOwner"), str)
                         or not isinstance(c.get("number"), int) or isinstance(c["number"], bool)
-                        or c["number"] <= 0 or not isinstance(node.get("status"), dict)
-                        or not isinstance(node["status"].get("name"), str)):
+                        or c["number"] <= 0):
                     raise Refused("the grouped board issue metadata is incomplete")
             labels = [l["name"] for l in (c.get("labels") or {}).get("nodes") or []]
             assignees = [a["login"] for a in (c.get("assignees") or {}).get("nodes") or []]
@@ -1709,6 +1722,8 @@ class GitService:
                         try:
                             dependencies[key] = self._waits_on(*key)
                         except Refused as e:
+                            if groups is not None:
+                                raise  # refusal is not verified no-work
                             dependencies[key] = str(e)
                     if dependencies[key]:
                         waiting.append({"repo": row["repo"], "number": row["number"], "waits_on": dependencies[key]})

@@ -115,9 +115,25 @@ class GroupedBoard(unittest.TestCase):
             self.read(self.board([page([issue(1)], True, "same")]))
 
     def test_nested_eligibility_data_cannot_disappear_silently(self):
-        for change in ({"labels": None}, {"assignees": None}, {"number": True}, {"repository": None}):
+        for change in ({"labels": None}, {"assignees": None}, {"number": True}, {"repository": None}, {"state": None}):
             with self.subTest(change=change), self.assertRaises(Refused):
                 self.read(self.board([page([issue(1, **change)])]))
+
+    def test_nullable_unset_status_and_unrelated_repository_do_not_block_real_work(self):
+        unset = issue(1)
+        unset["status"] = None
+        unrelated = issue(2, repository={"nameWithOwner": "other/repo"}, labels=None)
+        unrelated["status"] = None
+        b = self.board([page([unset, unrelated, issue(3)])])
+        self.assertEqual(self.read(b)["groups"]["echo"]["issues"][0]["number"], 3)
+
+    def test_dependency_source_refusal_is_not_no_work_in_grouped_mode(self):
+        b = self.board([page([issue(1)])])
+        def refused(*args):
+            raise Refused("dependency source unavailable")
+        b._waits_on = refused
+        with self.assertRaisesRegex(Refused, "source unavailable"):
+            self.read(b)
 
     def test_snapshot_page_budget_refuses_incomplete_projection(self):
         b = self.board([page([issue(1)])])

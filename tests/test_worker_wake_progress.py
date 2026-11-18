@@ -112,6 +112,24 @@ class DispatchReceipts(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(Exception):
                 self.route.queued_for(self.world.bramble, {"receipts": bad})
 
+    def test_a_newer_cancelled_same_task_transfers_the_hold_instead_of_releasing_it(self):
+        task = "ThornswoodRP/Thornswood#12"
+        self.world.core.assign_task(self.world.bramble, task, "echo", "Original.")
+        first = self.world.store.db.execute("SELECT id FROM connector_outbox WHERE target='echo'").fetchone()[0]
+        self.world.store.db.execute("UPDATE connector_outbox SET status='uncertain' WHERE id=?", (first,))
+        state = {"review_receipts": {first: {"id": first}}}
+        self.world.clock.advance(seconds=1)
+        self.world.core.assign_task(self.world.bramble, task, "sprocket", "Explicit new brief.")
+        latest = self.world.store.db.execute("SELECT id FROM connector_outbox WHERE target='sprocket'").fetchone()[0]
+        self.world.store.db.execute("UPDATE connector_outbox SET status='cancelled' WHERE id=?", (latest,))
+        ask = lambda broker, op, args: self.route.queued_for(self.world.bramble, args)
+        owed_wake._refresh_receipts("bramble", ask, state, POLICY)
+        self.assertEqual(set(state["review_receipts"]), {latest})
+        self.assertEqual(state["review_receipts"][latest]["status"], "cancelled")
+        self.world.store.db.execute("UPDATE connector_outbox SET status='sent' WHERE id=?", (latest,))
+        owed_wake._refresh_receipts("bramble", ask, state, POLICY)
+        self.assertEqual(state["review_receipts"], {})
+
     def test_dispatch_timestamp_requires_an_unambiguous_zone(self):
         for bad in (None, 1, True, "no", "2026-11-18T08:00:00", "9999-12-31T23:59:59-23:00"):
             with self.subTest(bad=bad), self.assertRaises(Exception):
@@ -195,6 +213,55 @@ class OpportunityLifecycle(unittest.TestCase):
         self.b.queued.clear()
         self.assertFalse(wakes(self.check(NOON + 600)))
         self.assertNotIn("said_at", owed_wake._load(self.path))
+
+    def test_old_accepted_delivery_does_not_erase_new_unrelated_cancelled_task_hold(self):
+        self.check()
+        self.b.dispatches["echo"] = receipt("old_accepted", NOON + 5)
+        self.b.attempts["echo"] = receipt("different_cancelled", NOON + 6, "cancelled",
+                                          {"repo": POLICY["repos"]["app"], "number": 12})
+        self.check(NOON + 300)
+        self.assertNotIn("echo", owed_wake._load(self.path)["pending_workers"])
+        self.assertIn("cx_different_cancelled", owed_wake._load(self.path)["review_receipts"])
+        grouped = [a for _, op, a in self.b.asked if op == "board"][-1]
+        self.assertIn({"repo": POLICY["repos"]["app"], "number": 12}, grouped["excluded_issues"],
+                      "an Echo hold still applies on a Sprocket-only snapshot")
+
+    def test_preexisting_uncertain_receipt_is_reviewed_without_replaying_active_claim(self):
+        self.b.attempts["echo"] = receipt("historical", NOON - 100, "uncertain",
+                                          {"repo": POLICY["repos"]["app"], "number": 300})
+        self.b.claimed["claimed: Echo"] = 1
+        out = self.check()
+        self.assertIn("receipt cx_historical is uncertain", out)
+        self.assertNotIn("echo hold an active issue", out)
+
+    def test_more_than_thirty_two_holds_reconcile_in_bounded_batches_without_stopping_other_workers(self):
+        held = {}
+        for i in range(33):
+            row = dict(receipt(f"held_{i:02}", NOON - 100, "uncertain",
+                               {"repo": POLICY["repos"]["app"], "number": i + 1}), target="echo")
+            held[row["id"]] = row
+        state = owed_wake._load(self.path)
+        state["review_receipts"] = held
+        owed_wake._save(self.path, state)
+        self.b.receipt_rows = dict(held)
+        self.b.receipt_rows["cx_held_32"]["status"] = "sent"
+        out = self.check()
+        self.assertIn("in the field of sprocket, echo", out)
+        self.check(NOON + 300)
+        self.assertNotIn("cx_held_32", owed_wake._load(self.path)["review_receipts"])
+        requests = [a["receipts"] for _, op, a in self.b.asked if op == "queued_for" and "receipts" in a]
+        self.assertTrue(requests)
+        self.assertTrue(all(len(ids) <= 32 for ids in requests))
+
+    def test_held_claim_does_not_suppress_guidance_for_a_different_inactive_claim(self):
+        for w in ("rift", "wisp", "magpie"):
+            self.b.turns[w]["running"] = True
+        self.b.claimed["claimed: Sprocket"] = 2  # #200 held, #201 unrelated active
+        self.b.attempts["sprocket"] = receipt("held", NOON - 100, "cancelled",
+                                             {"repo": POLICY["repos"]["app"], "number": 200})
+        out = self.check()
+        self.assertIn("sprocket hold an active issue", out)
+        self.assertIn("never to an exact receipt task held for review", out)
 
     def test_canonical_no_work_settles_without_an_assignment_or_model_turn(self):
         self.check()

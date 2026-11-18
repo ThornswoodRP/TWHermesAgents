@@ -110,6 +110,7 @@ class Idle:
         self.turns = {}
         self.queued = {}
         self.dispatches, self.attempts = {}, {}
+        self.receipt_rows = {}
         self.asked = []
 
     def __call__(self, broker, op, args):
@@ -123,8 +124,10 @@ class Idle:
         if op == "queued_for":
             return {"bots": self.queued, **({"dispatches": self.dispatches, "attempts": self.attempts}
                                           if "since" in args else {}),
-                    **({"receipts": {row["id"]: dict(row, target=worker, superseded=False)
-                                     for worker, row in self.attempts.items() if row["id"] in args["receipts"]}}
+                    **({"receipts": {row["id"]: dict(row, target=worker, superseded=False, successor=None)
+                                     for worker, row in [*self.dispatches.items(), *self.attempts.items(),
+                                                         *((r["target"], r) for r in self.receipt_rows.values())]
+                                     if row["id"] in args["receipts"]}}
                        if "receipts" in args else {})}
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour"}

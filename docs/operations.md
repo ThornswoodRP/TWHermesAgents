@@ -13,8 +13,9 @@ passive retries for an hour without a model turn for the failure itself.
 A cancelled or uncertain receipt is reviewed by its canonical task reference,
 never replayed. That exact issue is excluded from fresh eligibility while a
 different issue remains available. Its receipt hold survives a no-work result
-and is rechecked by exact ID; only a confirmed delivery or a newer explicit
-assignment for the same task releases it. An incomplete legacy reference is
+and is rechecked by exact ID in rotating batches of at most 32. A newer
+explicit assignment for the same task transfers the hold to that receipt;
+confirmed delivery releases it. An incomplete legacy reference is
 reported as ambiguous and defers only that worker's automatic hint until
 review; the others remain available. These summaries contain identifiers,
 status and timestamps, never briefs or chat. This is delivery bookkeeping,

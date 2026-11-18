@@ -338,15 +338,23 @@ class BotRoute:
             if wanted:
                 rows = self.store.db.execute(
                     "SELECT o.id,o.target,o.status,o.created_at,json_extract(o.body_json,'$.task') AS task, "
-                    "EXISTS(SELECT 1 FROM connector_outbox newer WHERE newer.workspace_id=o.workspace_id "
+                    "n.id AS newer_id,n.target AS newer_target,n.status AS newer_status,n.created_at AS newer_at, "
+                    "json_extract(n.body_json,'$.task') AS newer_task "
+                    "FROM connector_outbox o LEFT JOIN connector_outbox n ON n.rowid=(SELECT newer.rowid "
+                    "FROM connector_outbox newer WHERE newer.workspace_id=o.workspace_id "
                     "AND newer.kind='task.assigned' AND json_extract(newer.body_json,'$.task')="
                     "json_extract(o.body_json,'$.task') AND (newer.created_at>o.created_at OR "
-                    "(newer.created_at=o.created_at AND newer.rowid>o.rowid))) AS superseded "
-                    "FROM connector_outbox o WHERE o.workspace_id=? AND o.kind='task.assigned' AND o.id IN ("
+                    "(newer.created_at=o.created_at AND newer.rowid>o.rowid)) "
+                    "ORDER BY newer.created_at DESC,newer.rowid DESC LIMIT 1) "
+                    "WHERE o.workspace_id=? AND o.kind='task.assigned' AND o.id IN ("
                     + ",".join("?" for _ in wanted) + ")", (self.ws, *wanted)).fetchall()
                 result["receipts"] = {r["id"]: {"id": r["id"], "target": r["target"], "status": r["status"],
                                                 "at": r["created_at"], "issue": issue_ref(r["task"]),
-                                                "superseded": bool(r["superseded"])}
+                                                "superseded": bool(r["newer_id"]),
+                                                "successor": ({"id": r["newer_id"], "target": r["newer_target"],
+                                                               "status": r["newer_status"], "at": r["newer_at"],
+                                                               "issue": issue_ref(r["newer_task"])}
+                                                              if r["newer_id"] else None)}
                                        for r in rows if r["target"] in self.bots}
         return result
 

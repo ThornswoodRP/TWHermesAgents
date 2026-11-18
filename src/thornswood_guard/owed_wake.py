@@ -427,6 +427,36 @@ def _receipt_after(row, at: float, *, accepted=False) -> bool:
         raise BrokerRefused("the assignment receipt metadata is unavailable or malformed") from None
 
 
+def _refresh_receipts(bot: str, ask: Caller, state: dict, policy: dict) -> None:
+    """Reconcile at most 32 exact tracked receipts per check. The rotating
+    batch can recover oversized old state without dropping any task hold."""
+    held = state.get("review_receipts") or {}
+    if not held:
+        return
+    keys = sorted(held)
+    start = int(state.get("receipt_cursor") or 0) % len(keys)
+    batch = (keys[start:] + keys[:start])[:32]
+    reply = ask("decide", "queued_for", {"bot": bot, "receipts": batch})
+    current = reply.get("receipts") if isinstance(reply, dict) else None
+    if not isinstance(current, dict) or set(current) != set(batch):
+        raise BrokerRefused("the exact held assignment receipts are unavailable")
+    for key, row in current.items():
+        _receipt_after(row, 0)
+        if row["id"] != key or row.get("target") not in _workers(policy) or not isinstance(row.get("superseded"), bool):
+            raise BrokerRefused("the held assignment receipt metadata is malformed")
+        successor = row.get("successor")
+        if row["superseded"]:
+            _receipt_after(successor, 0)
+            if not isinstance(successor, dict) or successor.get("target") not in _workers(policy):
+                raise BrokerRefused("the successor assignment receipt is unavailable")
+            row = successor
+        held.pop(key, None)
+        if row["status"] != "sent":
+            held[row["id"]] = row
+    state["review_receipts"] = held
+    state["receipt_cursor"] = (start + len(batch)) % max(1, len(held))
+
+
 def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tuple[bool, str | None]:
     """Keep an observed opportunity until a newer accepted assignment receipt
     or a fresh canonical no-work result settles that worker. A completed
@@ -461,6 +491,14 @@ def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tu
         if pending:
             if not all(isinstance(queued.get(k), dict) for k in ("dispatches", "attempts")):
                 raise BrokerRefused("the assignment receipts are unavailable")
+            held = state.setdefault("review_receipts", {})
+            # Record outcomes before settling workers, including a later
+            # different cancellation beside an earlier confirmed delivery.
+            for rows in (queued["dispatches"], queued["attempts"]):
+                for w, row in rows.items():
+                    if w in pending and _receipt_after(row, pending[w]) and row.get("status") != "sent":
+                        held[row["id"]] = dict(row, target=w)
+            _refresh_receipts(bot, ask, state, policy)
             pending = {w: at for w, at in pending.items()
                        if not (_receipt_after(queued["dispatches"].get(w), at, accepted=True)
                                and queued["dispatches"][w]["status"] == "sent")}
@@ -472,11 +510,6 @@ def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tu
                                         if _receipt_after(queued["attempts"].get(w), at)
                                         and queued["attempts"][w].get("status") in
                                         ("dead", "uncertain", "cancelled", "quarantined")}
-            held = state.setdefault("review_receipts", {})
-            for w, row in state["pending_reviews"].items():
-                held[row["id"]] = dict(row, target=w)
-            if len(held) > 32:
-                raise BrokerRefused("too many assignment outcomes need exact receipt review")
             deferred = state.get("review_retry_after") or {}
             state["review_retry_after"] = {w: until for w, until in deferred.items()
                                             if w in state["pending_reviews"] and isinstance(until, (int, float))}
@@ -582,18 +615,21 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     asked = _asked(bot, ask)
     observed = {"workers": set(), "no_work": set()}
     try:
-        held = state.get("review_receipts") or {}
-        if held:
-            reply = ask("decide", "queued_for", {"bot": bot, "receipts": list(held)})
-            current = reply.get("receipts") if isinstance(reply, dict) else None
-            if not isinstance(current, dict) or set(current) != set(held):
-                raise BrokerRefused("the exact held assignment receipts are unavailable")
-            for row in current.values():
-                _receipt_after(row, 0)
-                if row.get("target") not in _workers(policy) or not isinstance(row.get("superseded"), bool):
-                    raise BrokerRefused("the held assignment receipt metadata is malformed")
-            state["review_receipts"] = {key: row for key, row in current.items()
-                                         if not row["superseded"] and row["status"] != "sent"}
+        # Initialize from structured current receipts too: after an upgrade,
+        # a historical uncertain assignment must not become a carry-on hint
+        # merely because it predates this observation's timestamp.
+        latest = ask("decide", "queued_for", {"bot": bot, "since": "1970-01-01T00:00:00+00:00"})
+        if (not isinstance(latest, dict) or not isinstance(latest.get("bots"), dict)
+                or not isinstance(latest.get("attempts"), dict)):
+            raise BrokerRefused("the current assignment metadata is unavailable")
+        for w, row in latest["attempts"].items():
+            if w in _workers(policy) and _receipt_after(row, 0) and row.get("status") != "sent":
+                state.setdefault("review_receipts", {})[row["id"]] = dict(row, target=w)
+        _refresh_receipts(bot, ask, state, policy)
+        workers = {w: label for w, label in workers.items() if not latest["bots"].get(w)}
+        if not workers:
+            _save(path, state)
+            return ["the workers already have deliveries in flight; this check coalesces with them", SLEEP]
         lines = _look(bot, ask, now, policy, workers, repo, asked, observed,
                       state.get("review_receipts") or {})
     except BrokerRefused as e:
@@ -632,8 +668,6 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     allowed_repos = {repo, policy["repos"]["fork"]}
     for receipt in reviews.values():
         worker = receipt.get("target")
-        if worker not in workers:
-            continue
         issue = receipt.get("issue")
         if (isinstance(issue, dict) and isinstance(issue.get("repo"), str) and issue["repo"] in allowed_repos
                 and isinstance(issue.get("number"), int) and not isinstance(issue["number"], bool)
@@ -646,6 +680,8 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
             ambiguous.add(worker)
             if observed is not None:
                 observed.setdefault("ambiguous", set()).add(worker)
+        if worker not in workers:
+            continue  # holds apply globally; prose is scoped to this scan
         review_lines.append(f"{worker}'s receipt {receipt['id']} is {receipt['status']} for {task}: "
                             "review that exact outcome; never replay it. A different eligible issue may still be picked, "
                             "subject to Patrick's explicit pause and Stop.")
@@ -669,8 +705,7 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                            parked) or busy
         if not busy and w not in ambiguous:
             free.append(w)
-    reviewed_workers = {row.get("target") for row in reviews.values()}
-    stopped = _stopped(bot, ask, [w for w in workers if w not in free and w not in reviewed_workers], now)
+    stopped = _stopped(bot, ask, [w for w in workers if w not in free and w not in ambiguous], now)
     said = review_lines
     if parked:
         said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
@@ -685,7 +720,8 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                     "with no pull request or stopped mid-issue, and nothing wakes it by itself. If its hand-back "
                     "says it is blocked, comment what it waits on, take the claim off and give it its next issue; "
                     "otherwise tell it to carry on (bramble-duties, section 6, items 5 and 6). This is said at "
-                    "every look until it runs a turn or its claim comes off.")
+                    "every look until it runs a turn or its claim comes off. This applies only to its other "
+                    "active claims, never to an exact receipt task held for review above.")
     if not free:
         return said or ["every worker is on an active issue", SLEEP]
     # Filter each field before truncation, from the same complete snapshot.
