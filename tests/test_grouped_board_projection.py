@@ -133,6 +133,17 @@ class GroupedBoard(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "missing"):
             self.read(self.board([page([malformed])]))
 
+    def test_nullable_author_is_valid_but_missing_or_malformed_author_cannot_bypass_hands_off(self):
+        for value in ({}, {"login": None}, "unknown", False):
+            with self.subTest(value=value), self.assertRaises(Refused):
+                self.read(self.board([page([issue(1, author=value)])]))
+        missing = issue(1)
+        missing["content"].pop("author")
+        with self.assertRaises(Refused):
+            self.read(self.board([page([missing])]))
+        b = self.board([page([issue(1, author=None)])])
+        self.assertEqual(self.read(b)["groups"]["echo"]["issues"][0]["number"], 1)
+
     def test_explicit_redacted_items_do_not_hide_readable_eligible_work(self):
         b = self.board([page([{"type": "REDACTED", "content": None}], True, "redacted"),
                         page([issue(1)])])

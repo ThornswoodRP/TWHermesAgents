@@ -1685,6 +1685,10 @@ class GitService:
                     raise Refused("the grouped board status metadata is malformed")
                 if status is None or status["name"] != "Todo":
                     continue
+                if ("author" not in c or (c["author"] is not None
+                        and (not isinstance(c["author"], dict)
+                             or not isinstance(c["author"].get("login"), str) or not c["author"]["login"]))):
+                    raise Refused("the grouped board author metadata is incomplete")
                 for container, field in (("labels", "name"), ("assignees", "login")):
                     raw = c.get(container)
                     values = raw.get("nodes") if isinstance(raw, dict) else None
