@@ -79,6 +79,8 @@ For every chat:
 
 ## The Board
 
+The reader checks each writer's process identity and the session in that Bot's own read-only store. A session recorded as ended since the displayed turn began is no longer running, even when its gateway process stays alive. An old end before a newer turn does not hide that newer turn. If the store or its timestamps cannot establish an end, the reader keeps the live writer's row; it does not guess from the turn's age or change the session.
+
 One row for each Bot turn running right now: the Bot, the session's title, what the turn is doing, and for how long it has been doing that (the `thornswood_live` plugin's `step_since`, never the whole turn's age). A row opens that very session as a chat like any other: its messages from the Bot's own store, what the turn is doing under them while it runs, and the box with dictation and voice chat. A message sent there goes into that session through the Bot's own gateway, the way Desktop sends into an open chat: while the Bot's turn runs, the session's busy setting steers it into the turn, interrupts it, or queues it behind, and it never runs beside it. It is the Bot's own unattended turn under its guard rails, as a Bot Chat message is. Reactions stay in the Bot Chat. With nothing running it says "No Bot is working right now", and when the reader goes quiet for 90 seconds it says when it last heard from the Bots, instead of showing what may have ended.
 
 ## Alerts
