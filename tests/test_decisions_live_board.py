@@ -156,8 +156,8 @@ class TheReader(unittest.TestCase):
 
     def titles(self, bot, rows):
         con = sqlite3.connect(self.h.hh / "profiles" / bot / "state.db")
-        con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
-        con.executemany("INSERT INTO sessions VALUES(?,?)", rows)
+        con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, ended_at REAL)")
+        con.executemany("INSERT INTO sessions(id,title) VALUES(?,?)", rows)
         con.commit()
         con.close()
 
@@ -179,6 +179,39 @@ class TheReader(unittest.TestCase):
     def test_nothing_running_is_no_rows(self):
         self.write("rift", 10, [])
         self.assertEqual(live_reader.snapshot(self.h.hh, BOTS, NOW, alive=lambda *_: True)["doing"], [])
+
+    def test_a_live_gateway_does_not_keep_an_ended_session_thinking(self):
+        since = "2026-11-02T19:58:00+00:00"
+        for bot in ("rift", "echo"):
+            self.write(bot, 10, [{"session_id": "shared-id", "state": "thinking", "since": since}])
+            con = sqlite3.connect(self.h.hh / "profiles" / bot / "state.db")
+            con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, ended_at REAL)")
+            con.execute("INSERT INTO sessions VALUES(?,?,?)", ("shared-id", bot,
+                        NOW.timestamp() if bot == "rift" else None))
+            con.commit()
+            con.close()
+        rows = live_reader.snapshot(self.h.hh, BOTS, NOW, alive=lambda *_: True)["doing"]
+        self.assertEqual([(r["bot"], r["session_id"], r["title"]) for r in rows],
+                         [("echo", "shared-id", "echo")])
+
+    def test_old_session_end_cannot_hide_a_new_turn_or_unknown_times(self):
+        turns = [{"session_id": sid, "state": "thinking", "since": since} for sid, since in
+                 [("resumed", NOW.isoformat()), ("unknown-time", "not-a-time"), ("unknown-session", NOW.isoformat())]]
+        self.write("rift", 10, turns)
+        con = sqlite3.connect(self.h.hh / "profiles" / "rift" / "state.db")
+        con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, ended_at REAL)")
+        con.executemany("INSERT INTO sessions VALUES(?,?,?)", [("resumed", "new turn", NOW.timestamp() - 60),
+                         ("unknown-time", "unknown time", NOW.timestamp())])
+        con.commit()
+        con.close()
+        rows = live_reader.snapshot(self.h.hh, BOTS, NOW, alive=lambda *_: True)["doing"]
+        self.assertEqual({r["session_id"] for r in rows}, {t["session_id"] for t in turns})
+
+    def test_unreadable_session_database_preserves_live_rows(self):
+        self.write("rift", 10, [{"session_id": "s1", "state": "thinking", "since": NOW.isoformat()}])
+        (self.h.hh / "profiles" / "rift" / "state.db").write_bytes(b"not SQLite")
+        rows = live_reader.snapshot(self.h.hh, BOTS, NOW, alive=lambda *_: True)["doing"]
+        self.assertEqual([r["session_id"] for r in rows], ["s1"])
 
     def test_odd_files_and_rows_are_skipped(self):
         folder = self.h.hh / "profiles" / "rift" / live.FOLDER

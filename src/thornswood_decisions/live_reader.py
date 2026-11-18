@@ -12,7 +12,9 @@ sends the core one snapshot: one row for each turn running now, with the Bot, th
 or the tool it runs, and since when. A Bot with no turn running has no row. It sends when the snapshot
 changes, and otherwise once in each 30 seconds, so the core's "as of" says the Board is being read.
 
-It reads each Bot's `state.db` read-only for a running session's title, and nothing else; it writes nothing
+It reads each Bot's `state.db` read-only for the session's title and end time. A live gateway process can
+outlast a failed session whose end hook never fired, so a session proven ended since the recorded turn
+started has no row. Unknown sessions or an unreadable database do not hide ongoing work. It writes nothing
 to Hermes, holds only the work feed's token (~/.config/thornswood/feed-work.token, 0600) and logs no words
 of any turn.
 """
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -85,19 +88,34 @@ def _turns(folder: Path, alive) -> list[dict]:
     return out
 
 
-def _titles(state_db: Path, ids: list[str]) -> dict[str, str]:
+def _sessions(state_db: Path, ids: list[str]) -> dict[str, dict]:
     if not ids or not state_db.exists():
         return {}
     try:
         con = _ro(state_db)
         try:
-            rows = con.execute(f"SELECT id, title FROM sessions WHERE id IN ({','.join('?' * len(ids))})",
-                               ids).fetchall()
+            rows = []
+            for offset in range(0, len(ids), MAX_ROWS):
+                batch = ids[offset:offset + MAX_ROWS]
+                rows.extend(con.execute(
+                    f"SELECT id, title, ended_at FROM sessions WHERE id IN ({','.join('?' * len(batch))})",
+                    batch).fetchall())
         finally:
             con.close()
     except sqlite3.Error:
-        return {}  # the title is a help, never the reason a Bot's row is missing
-    return {r["id"]: (r["title"] or "")[:200] for r in rows}
+        return {}  # no authoritative end is known; preserve the writer's rows
+    return {r["id"]: {"title": (r["title"] or "")[:200], "ended_at": r["ended_at"]} for r in rows}
+
+
+def _ended(turn: dict, session: dict) -> bool:
+    end = session.get("ended_at")
+    if not isinstance(end, (int, float)) or isinstance(end, bool) or not math.isfinite(end):
+        return False
+    try:
+        start = datetime.fromisoformat(turn["since"])
+        return start.tzinfo is not None and end >= start.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return False
 
 
 def _alive(pid: int, start) -> bool:
@@ -110,13 +128,16 @@ def snapshot(hermes_home: Path, bots: list[str], now: datetime, alive=_alive) ->
     for bot in bots:
         pdir = hermes_home / "profiles" / bot
         turns = _turns(pdir / FOLDER, alive)
-        titles = _titles(pdir / "state.db", sorted({t["session_id"] for t in turns}))
+        sessions = _sessions(pdir / "state.db", sorted({t["session_id"] for t in turns}))
         seen = set()
         for t in sorted(turns, key=lambda t: t["since"]):
+            session = sessions.get(t["session_id"], {})
+            if _ended(t, session):
+                continue
             if t["session_id"] in seen:
                 continue  # one turn at a time in a session: two processes never both run it
             seen.add(t["session_id"])
-            rows.append({"bot": bot, "title": titles.get(t["session_id"], ""), **t})
+            rows.append({"bot": bot, "title": session.get("title", ""), **t})
     return {"source_time": now.isoformat(), "doing": rows[:MAX_ROWS]}
 
 
