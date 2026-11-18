@@ -43,6 +43,7 @@ query($org: String!, $number: Int!, $after: String, $status: String!, $order: St
   organization(login: $org) { projectV2(number: $number) { items(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
+      type
       status: fieldValueByName(name: $status) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
       order: fieldValueByName(name: $order) { ... on ProjectV2ItemFieldNumberValue { number } }
       content { __typename ... on Issue { number title state repository { nameWithOwner } author { login }
@@ -1577,32 +1578,128 @@ class GitService:
         worker's field is read across the whole board: until 9 Nov 2026 a
         pick read the first 100 eligible issues of every field, found none
         of Wisp's (Gamemode, Engine, In-game) there, and Wisp sat idle with
-        181 open in its field."""
+        181 open in its field. Bramble's private grouped wake read shares
+        one complete snapshot across at most six selectors, failing closed
+        on incomplete source data. Exact receipt tasks may be excluded from
+        that read for outcome review; legacy reads are unchanged."""
         bot = self._bot(args)
         cfg = self.policy.data["board"]
         limit = max(1, min(int(args.get("limit") or 20), 100))
         eligible = bool(args.get("eligible"))
         areas, not_areas = (self._areas(args, k) for k in ("areas", "not_areas"))
+        groups = args.get("groups")
+        excluded_issues = args.get("excluded_issues", [])
+        excluded_refs = set()
+        if "excluded_issues" in args:
+            if (groups is None or not isinstance(excluded_issues, list)
+                    or any(not isinstance(i, dict) or set(i) != {"repo", "number"}
+                           or not isinstance(i["repo"], str)
+                           or i["repo"] not in {self.policy.data["repos"]["app"], self.policy.data["repos"]["fork"]}
+                           or not isinstance(i["number"], int) or isinstance(i["number"], bool)
+                           or not 0 < i["number"] <= 9999999999 for i in excluded_issues)):
+                raise Refused("excluded_issues contains exact receipt task references for a grouped read")
+            excluded_refs = {(i["repo"], i["number"]) for i in excluded_issues}
+        if groups is not None:
+            if not self.policy.is_router(bot) or not eligible:
+                raise Refused("only Bramble's wake check groups eligible board reads")
+            if not isinstance(groups, dict) or not 1 <= len(groups) <= 6:
+                raise Refused("groups names at most six area selectors")
+            for name, selector in groups.items():
+                if (not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z_]{0,31}", name)
+                        or not isinstance(selector, dict) or set(selector) - {"areas", "not_areas"}):
+                    raise Refused("each group names its areas or not_areas")
+            selectors = {name: (self._areas(g, "areas"), self._areas(g, "not_areas")) for name, g in groups.items()}
+        else:
+            selectors = {"": (areas, not_areas)}
         repo = self.policy.data["repos"]["app"]
-        items, after = [], None
+        items, after, cursors = [], None, set()
         while True:
+            if groups is not None and len(cursors) >= 200:
+                raise Refused("the grouped board snapshot exceeded its bounded page count")
             data = self.gh.graphql("workers", repo, BOARD_READ, BOARD_QUERY,
                                    {"org": cfg["org"], "number": int(cfg["number"]), "after": after,
                                     "status": cfg["status_field"], "order": cfg["order_field"]})
-            page = ((data.get("organization") or {}).get("projectV2") or {}).get("items") or {}
+            if groups is not None:
+                organization = data.get("organization") if isinstance(data, dict) else None
+                project = organization.get("projectV2") if isinstance(organization, dict) else None
+                page = project.get("items") if isinstance(project, dict) else None
+                info = page.get("pageInfo") if isinstance(page, dict) else None
+                nodes = page.get("nodes") if isinstance(page, dict) else None
+                if (not isinstance(nodes, list) or len(nodes) > 100 or any(not isinstance(n, dict) for n in nodes)
+                        or not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool)):
+                    raise Refused("the grouped board snapshot is unavailable or malformed")
+                nodes = [n for n in nodes if n.get("type") != "REDACTED"]
+                if any(not isinstance(n.get("content"), dict) or not isinstance(n["content"].get("__typename"), str)
+                       for n in nodes):
+                    raise Refused("a grouped board node is unavailable or malformed")
+                if info["hasNextPage"]:
+                    cursor = info.get("endCursor")
+                    if (not page["nodes"] or not isinstance(cursor, str) or not cursor or cursor == after
+                            or cursor in cursors or len(cursors) >= 200):
+                        raise Refused("the grouped board snapshot did not advance")
+                    cursors.add(cursor)
+                page = dict(page, nodes=nodes)
+            else:
+                page = ((data.get("organization") or {}).get("projectV2") or {}).get("items") or {}
             items.extend(page.get("nodes") or [])
-            if not (page.get("pageInfo") or {}).get("hasNextPage") or len(items) >= 20000:
+            more = (page.get("pageInfo") or {}).get("hasNextPage")
+            if groups is not None and more and len(items) >= 20000:
+                raise Refused("the bounded board snapshot is incomplete; no no-work conclusion was made")
+            if not more or len(items) >= 20000:
                 break
             after = page["pageInfo"]["endCursor"]
         prefix = self.policy.data["claims"]["prefix"]
         people = set(self.policy.data["hands_off"]["people"])
         lane_labels = set(self.policy.data["hands_off"]["lanes"]["labels"])
         patrick = self.policy.data["decisions"]["answered_by"]
-        out = []
+        out, area_sets, closed_exclusions = [], {}, set()
         for node in items:
             c = node.get("content") or {}
+            if groups is not None and c.get("__typename") == "Issue":
+                repository = c.get("repository")
+                if not isinstance(repository, dict) or not isinstance(repository.get("nameWithOwner"), str):
+                    raise Refused("the grouped board repository metadata is incomplete")
+                if repository["nameWithOwner"] not in {repo, self.policy.data["repos"]["fork"]}:
+                    continue
+                if c.get("state") not in ("OPEN", "CLOSED"):
+                    raise Refused("the grouped board issue state is unavailable")
+                number = c.get("number")
+                if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                    raise Refused("the grouped board issue number is unavailable")
+                if c["state"] == "CLOSED" and (repository["nameWithOwner"], number) in excluded_refs:
+                    closed_exclusions.add((repository["nameWithOwner"], number))
             if c.get("__typename") != "Issue" or c.get("state") != "OPEN":
                 continue
+            if groups is not None:
+                repository = c.get("repository")
+                if not isinstance(repository, dict) or not isinstance(repository.get("nameWithOwner"), str):
+                    raise Refused("the grouped board repository metadata is incomplete")
+                if repository["nameWithOwner"] not in {repo, self.policy.data["repos"]["fork"]}:
+                    continue
+                if "status" not in node:
+                    raise Refused("the grouped board status field is missing")
+                status = node["status"]
+                # GitHub's nullable fieldValueByName is unset on some
+                # legitimate items. They are not Todo, rather than an outage.
+                if status is not None and (not isinstance(status, dict) or not isinstance(status.get("name"), str)):
+                    raise Refused("the grouped board status metadata is malformed")
+                if status is None or status["name"] != "Todo":
+                    continue
+                if ("author" not in c or (c["author"] is not None
+                        and (not isinstance(c["author"], dict)
+                             or not isinstance(c["author"].get("login"), str) or not c["author"]["login"]))):
+                    raise Refused("the grouped board author metadata is incomplete")
+                for container, field in (("labels", "name"), ("assignees", "login")):
+                    raw = c.get(container)
+                    values = raw.get("nodes") if isinstance(raw, dict) else None
+                    if (not isinstance(values, list) or any(not isinstance(v, dict)
+                            or not isinstance(v.get(field), str) for v in values)):
+                        raise Refused("the grouped board eligibility metadata is incomplete")
+                if (not isinstance(c.get("repository"), dict)
+                        or not isinstance(c["repository"].get("nameWithOwner"), str)
+                        or not isinstance(c.get("number"), int) or isinstance(c["number"], bool)
+                        or c["number"] <= 0):
+                    raise Refused("the grouped board issue metadata is incomplete")
             labels = [l["name"] for l in (c.get("labels") or {}).get("nodes") or []]
             assignees = [a["login"] for a in (c.get("assignees") or {}).get("nodes") or []]
             row = {"repo": (c.get("repository") or {}).get("nameWithOwner"), "number": c.get("number"),
@@ -1610,38 +1707,52 @@ class GitService:
                    "status": (node.get("status") or {}).get("name"),
                    "order": (node.get("order") or {}).get("number"),
                    "labels": labels, "assignees": assignees}
+            if groups is not None and row["repo"] not in {repo, self.policy.data["repos"]["fork"]}:
+                continue
+            if (row["repo"], row["number"]) in excluded_refs:
+                continue
             if eligible and (row["status"] != "Todo" or any(l.startswith(prefix) for l in labels)
                              or set(labels) & lane_labels or row["author"] in people
                              or set(assignees) & people or set(assignees) - {patrick}):
                 continue
-            mine = {l[len("area: "):] for l in labels if l.startswith("area: ")}
-            if (areas and not mine & areas) or mine & not_areas:
-                continue
             out.append(row)
+            area_sets[(row["repo"], row["number"])] = {l[6:] for l in labels if l.startswith("area: ")}
         out.sort(key=lambda r: (r["order"] is None, r["order"] or 0, r["number"]))
-        if not eligible:
-            return {"open": len(out), "issues": out[:limit]}
         # An issue whose wait names an open issue is not
         # eligible, read as label reads it when a claim is asked for (Ops
         # #300, #312: on 11 and 12 Nov 2026 #4507, #4518, #4536 and Magpie's
         # field headed eligible while label refused every claim, and each was
         # picked, briefed and re-measured again). Read in do-order until limit
         # are found, so a pick costs one comments read per issue it passes.
-        picks, waiting = [], []
         reads = set(self.policy.data["repos"].values())
-        for row in out:
-            if len(picks) >= limit:
-                break
-            if row["repo"] in reads:
-                try:
-                    waits = self._waits_on(row["repo"], row["number"])
-                except Refused as e:  # it names a repo tw-git does not read; label refuses it the same way
-                    waits = str(e)
-                if waits:
-                    waiting.append({"repo": row["repo"], "number": row["number"], "waits_on": waits})
-                    continue
-            picks.append(row)
-        return {"open": len(out) - len(waiting), "issues": picks, "waiting": waiting}
+        dependencies, results = {}, {}
+        for name, (mine, excluded) in selectors.items():
+            selected = [row for row in out if (not mine or mine & area_sets[(row["repo"], row["number"])])
+                        and not excluded & area_sets[(row["repo"], row["number"])]]
+            if not eligible:
+                results[name] = {"open": len(selected), "issues": selected[:limit]}
+                continue
+            picks, waiting = [], []
+            for row in selected:
+                if len(picks) >= limit:
+                    break
+                if row["repo"] in reads:
+                    key = (row["repo"], row["number"])
+                    if key not in dependencies:
+                        try:
+                            dependencies[key] = self._waits_on(*key)
+                        except Refused as e:
+                            if groups is not None:
+                                raise  # refusal is not verified no-work
+                            dependencies[key] = str(e)
+                    if dependencies[key]:
+                        waiting.append({"repo": row["repo"], "number": row["number"], "waits_on": dependencies[key]})
+                        continue
+                picks.append(row)
+            results[name] = {"open": len(selected) - len(waiting), "issues": picks, "waiting": waiting}
+        return {"groups": results, "closed_exclusions": [{"repo": r, "number": n}
+                                                         for r, n in sorted(closed_exclusions)]} \
+            if groups is not None else results[""]
 
     @staticmethod
     def _areas(args: dict, key: str) -> set[str]:

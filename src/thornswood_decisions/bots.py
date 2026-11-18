@@ -31,7 +31,7 @@ from .auth import Principal
 from .chat import Chat
 from .core import DecisionCore
 from .own import OwnChat
-from .store import CoreError, Store, iso
+from .store import CoreError, Store, iso, parse
 
 # Who may connect. Each op is open to both; the Bot inside is the tool's.
 CALLERS = {"hermes", "root"}
@@ -291,9 +291,84 @@ class BotRoute:
         tw_decide ops (brokers.DECIDE_OPS)."""
         if p.kind != "bramble":
             raise CoreError(403, "not_bramble", "only Bramble's wake check reads the connector's queue")
+        def issue_ref(task):
+            ref = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})",
+                               task if isinstance(task, str) else "")
+            return {"repo": ref[1], "number": int(ref[2])} if ref else None
+
+        wanted = args.get("receipts", [])
+        if (not isinstance(wanted, list) or len(wanted) > 32
+                or any(not isinstance(i, str) or not re.fullmatch(r"cx_[A-Za-z0-9_-]{1,128}", i) for i in wanted)):
+            raise CoreError(400, "bad_receipts", "receipts names at most 32 exact assignment receipt IDs")
+        since = None
+        if "since" in args:
+            try:
+                raw = args["since"]
+                if not isinstance(raw, str) or len(raw) > 80:
+                    raise ValueError()
+                at = parse(raw)
+                if at.tzinfo is None:
+                    raise ValueError()
+                since = iso(at)
+            except (TypeError, ValueError, OverflowError):
+                raise CoreError(400, "bad_since", "since is an observation time with its time zone") from None
         rows = self.store.db.execute("SELECT target, COUNT(*) AS n FROM connector_outbox WHERE workspace_id = ? "
                                      "AND status IN ('queued', 'leased') GROUP BY target", (self.ws,)).fetchall()
-        return {"bots": {r["target"]: r["n"] for r in rows if r["target"] in self.bots}}
+        result = {"bots": {r["target"]: r["n"] for r in rows if r["target"] in self.bots}}
+        if since is not None:
+            # Exact outbox receipts, not task_assignments.assigned_at: an
+            # idempotent repeated brief updates that time without sending work.
+            for key, accepted in (("dispatches", True), ("attempts", False)):
+                statuses = "AND status IN ('queued','leased','sent') " if accepted else ""
+                rows = self.store.db.execute(
+                    "SELECT target,id,status,created_at,task FROM (SELECT target,id,status,created_at, "
+                    "json_extract(body_json,'$.task') AS task, "
+                    "row_number() OVER (PARTITION BY target ORDER BY created_at DESC,rowid DESC) AS n "
+                    "FROM connector_outbox WHERE workspace_id=? AND kind='task.assigned' AND created_at>? "
+                    + statuses + ") WHERE n=1", (self.ws, since)).fetchall()
+                result[key] = {r["target"]: {"id": r["id"], "at": r["created_at"], "status": r["status"]}
+                               for r in rows if r["target"] in self.bots}
+                if not accepted:
+                    for row in rows:
+                        if row["target"] not in result[key]:
+                            continue
+                        result[key][row["target"]]["issue"] = issue_ref(row["task"])
+        if "receipts" in args:
+            result["receipts"] = {}
+            if wanted:
+                rows = self.store.db.execute(
+                    "SELECT o.id,o.target,o.status,o.created_at,json_extract(o.body_json,'$.task') AS task, "
+                    "n.id AS newer_id,n.target AS newer_target,n.status AS newer_status,n.created_at AS newer_at, "
+                    "json_extract(n.body_json,'$.task') AS newer_task "
+                    "FROM connector_outbox o LEFT JOIN connector_outbox n ON n.rowid=(SELECT newer.rowid "
+                    "FROM connector_outbox newer WHERE newer.workspace_id=o.workspace_id "
+                    "AND newer.kind='task.assigned' AND json_extract(newer.body_json,'$.task')="
+                    "json_extract(o.body_json,'$.task') AND (newer.created_at>o.created_at OR "
+                    "(newer.created_at=o.created_at AND newer.rowid>o.rowid)) "
+                    "ORDER BY newer.created_at DESC,newer.rowid DESC LIMIT 1) "
+                    "WHERE o.workspace_id=? AND o.kind='task.assigned' AND o.id IN ("
+                    + ",".join("?" for _ in wanted) + ")", (self.ws, *wanted)).fetchall()
+                result["receipts"] = {r["id"]: {"id": r["id"], "target": r["target"], "status": r["status"],
+                                                "at": r["created_at"], "issue": issue_ref(r["task"]),
+                                                "superseded": bool(r["newer_id"]),
+                                                "successor": ({"id": r["newer_id"], "target": r["newer_target"],
+                                                               "status": r["newer_status"], "at": r["newer_at"],
+                                                               "issue": issue_ref(r["newer_task"])}
+                                                              if r["newer_id"] else None)}
+                                       for r in rows if r["target"] in self.bots}
+        if "scan_after" in args:
+            cursor = args["scan_after"]
+            if not isinstance(cursor, int) or isinstance(cursor, bool) or not 0 <= cursor < 2**63:
+                raise CoreError(400, "bad_scan", "scan_after is a nonnegative receipt scan cursor")
+            rows = self.store.db.execute(
+                "SELECT rowid AS cursor,id,target,status,created_at,json_extract(body_json,'$.task') AS task "
+                "FROM connector_outbox WHERE workspace_id=? AND kind='task.assigned' AND rowid>? "
+                "AND status!='sent' ORDER BY rowid LIMIT 33", (self.ws, cursor)).fetchall()
+            result["outcomes"] = [{"id": r["id"], "target": r["target"], "status": r["status"],
+                                    "at": r["created_at"], "issue": issue_ref(r["task"])} for r in rows[:32]]
+            result["scan_more"] = len(rows) > 32
+            result["scan_after"] = rows[min(31, len(rows) - 1)]["cursor"] if rows else cursor
+        return result
 
     OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
            "keep_turned_away", "queued_for", "ask_one", "one_answer")
