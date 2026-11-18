@@ -277,6 +277,62 @@ class OpportunityLifecycle(unittest.TestCase):
         grouped = [a for _, op, a in self.b.asked if op == "board"][-1]
         self.assertEqual(grouped["excluded_issues"], [{"repo": POLICY["repos"]["app"], "number": n} for n in (12, 13)])
 
+    def test_historical_ambiguous_notices_do_not_pause_any_of_the_five_workers(self):
+        workers = owed_wake._workers(POLICY)
+        self.b.claimed = {POLICY["bots"][w]["claim_label"]: 0 for w in workers}
+        self.b.open = {f'"area: {owed_wake.AREAS[w][0]}"': 1 for w in workers}
+        self.b.scan_rows = [dict(receipt(f"historical_{w}", NOON - 86400, "uncertain"), target=w) for w in workers]
+        self.b.receipt_rows = {r["id"]: r for r in self.b.scan_rows}
+        out = self.check()
+        for w in workers:
+            self.assertIn(f"Checked next issue for {w}:", out)
+        self.assertIn("Historical ambiguity is not a worker pause", out)
+        self.assertNotIn("otherwise tell it to carry on", out)
+
+    def test_fresh_hint_names_only_safe_checked_candidate_even_when_ordinary_board_first_is_held(self):
+        from test_grouped_board_projection import issue, page, projection, Snapshot
+        state = owed_wake._load(self.path)
+        row = dict(receipt("echo_hold", NOON - 10, "cancelled",
+                           {"repo": POLICY["repos"]["app"], "number": 12}), target="echo")
+        state.update(review_receipts={row["id"]: row}, pending_workers={"sprocket": NOON - 10},
+                     said_at=NOON - 10, said=["old"], all_workers_checked=NOON)
+        owed_wake._save(self.path, state)
+        self.b.receipt_rows = {row["id"]: row}
+        board = projection()()
+        board.policy = type("Policy", (), {"data": POLICY, "is_bot": lambda _, name: name in POLICY["bots"],
+                                           "is_router": lambda _, name: name == "bramble"})()
+        board.gh = Snapshot([page([issue(12, "Launcher"), issue(13, "Launcher")])])
+        board._waits_on = lambda *args: None
+        def broker(kind, op, args):
+            return board.board("gateway", args) if op == "board" else self.b(kind, op, args)
+        out = self.check(broker=broker)
+        ordinary = board.board("gateway", {"bot": "bramble", "eligible": True, "areas": ["Launcher"]})
+        self.assertEqual(ordinary["issues"][0]["number"], 12)
+        checked = [line for line in out.splitlines() if line.startswith("Checked next issue")]
+        self.assertEqual(checked, [f"Checked next issue for sprocket: {POLICY['repos']['app']}#13."])
+        self.assertIn("Only pick these checked issue refs", out)
+
+    def test_two_failures_between_scan_and_latest_read_suppress_the_stale_hint(self):
+        self.b.open['"area: Website"'] = 3
+        injected = False
+        def broker(kind, op, args):
+            nonlocal injected
+            if op == "queued_for" and "since" in args and not injected:
+                injected = True
+                rows = [dict(receipt(f"raced_{n}", NOON, status,
+                                     {"repo": POLICY["repos"]["app"], "number": n}), target="echo")
+                        for n, status in ((9000, "uncertain"), (9001, "cancelled"))]
+                self.b.scan_rows.extend(rows)
+                self.b.receipt_rows.update({r["id"]: r for r in rows})
+                self.b.attempts["echo"] = rows[-1]
+            return self.b(kind, op, args)
+        out = self.check(broker=broker)
+        self.assertFalse(wakes(out))
+        self.assertNotIn("Checked next issue", out)
+        self.assertTrue(owed_wake._load(self.path)["receipt_scan_pending"])
+        out = self.check(NOON + 300, broker)
+        self.assertIn(f"Checked next issue for echo: {POLICY['repos']['app']}#9002.", out)
+
     def test_257_closed_holds_do_not_stop_unrelated_work_and_prune_only_with_board_proof(self):
         from test_grouped_board_projection import issue, page, projection, Snapshot
         held = {f"cx_old_{n}": dict(receipt(f"old_{n}", NOON - 100, "uncertain",
@@ -384,11 +440,11 @@ class OpportunityLifecycle(unittest.TestCase):
         self.b.attempts["echo"] = receipt("legacy", NOON + 5, "uncertain")
         out = self.check(NOON + 300)
         self.assertIn("unidentified legacy task", out)
-        self.assertIn("in the field of sprocket", out)
+        self.assertIn("Checked next issue for sprocket:", out)
         out = self.check(NOON + 600)
-        self.assertIn("in the field of sprocket", out)
-        self.assertNotIn("in the field of echo", out)
-        self.assertNotIn("receipt cx_legacy", out, "one worker's ambiguity is not repeated every five minutes")
+        self.assertIn("Checked next issue for sprocket:", out)
+        self.assertIn("Checked next issue for echo:", out, "an ambiguous old notice is not a worker pause")
+        self.assertIn("Historical ambiguity is not a worker pause", out)
 
     def test_cached_multiworker_hint_cannot_ride_an_unrelated_alert_or_midnight(self):
         self.check()

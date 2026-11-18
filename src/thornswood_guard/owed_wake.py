@@ -460,6 +460,31 @@ def _refresh_receipts(bot: str, ask: Caller, state: dict, policy: dict) -> None:
     state["receipt_cursor"] = (start + len(batch)) % max(1, len(held))
 
 
+def _scan_receipts(bot: str, ask: Caller, state: dict, policy: dict, pages: int) -> tuple[bool, int]:
+    """Bounded unseen-outcome catch-up, with a durable monotonic cursor."""
+    count = 0
+    for _ in range(pages):
+        cursor = state.get("receipt_scan_after", 0)
+        scan = ask("decide", "queued_for", {"bot": bot, "scan_after": cursor})
+        if (not isinstance(scan, dict) or not isinstance(scan.get("outcomes"), list)
+                or len(scan["outcomes"]) > 32 or not isinstance(scan.get("scan_more"), bool)
+                or not isinstance(scan.get("scan_after"), int) or isinstance(scan["scan_after"], bool)
+                or scan["scan_after"] < cursor or (scan["outcomes"] and scan["scan_after"] <= cursor)
+                or (scan["scan_more"] and (not scan["outcomes"] or scan["scan_after"] <= cursor))):
+            raise BrokerRefused("the assignment outcome scan is unavailable or malformed")
+        for row in scan["outcomes"]:
+            _receipt_after(row, 0)
+            if row.get("target") not in _workers(policy):
+                raise BrokerRefused("the assignment outcome scan target is malformed")
+            state.setdefault("review_receipts", {})[row["id"]] = row
+        count += len(scan["outcomes"])
+        state["receipt_scan_after"] = scan["scan_after"]
+        state["receipt_scan_pending"] = scan["scan_more"]
+        if not scan["scan_more"]:
+            return True, count
+    return False, count
+
+
 def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tuple[bool, str | None]:
     """Keep an observed opportunity until a newer accepted assignment receipt
     or a fresh canonical no-work result settles that worker. A completed
@@ -513,13 +538,9 @@ def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tu
                                         if _receipt_after(queued["attempts"].get(w), at)
                                         and queued["attempts"][w].get("status") in
                                         ("dead", "uncertain", "cancelled", "quarantined")}
-            deferred = state.get("review_retry_after") or {}
-            state["review_retry_after"] = {w: until for w, until in deferred.items()
-                                            if w in state["pending_reviews"] and isinstance(until, (int, float))}
             if any(not isinstance(turns.get(w), dict) for w in pending):
                 raise BrokerRefused("the worker activity metadata is unavailable")
             available = [w for w in pending if not queued["bots"].get(w)
-                         and now >= state["review_retry_after"].get(w, 0)
                          and not (turns.get(w) or {}).get("running") and not (turns.get(w) or {}).get("waiting")]
             if not available:
                 state.pop("progress_workers", None)
@@ -623,25 +644,8 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
         # merely because it predates this observation's timestamp.
         # Scan every unseen non-sent receipt, not just the latest per worker:
         # two failures between scheduler ticks must retain both exact tasks.
-        for _ in range(4):
-            cursor = state.get("receipt_scan_after", 0)
-            scan = ask("decide", "queued_for", {"bot": bot, "scan_after": cursor})
-            if (not isinstance(scan, dict) or not isinstance(scan.get("outcomes"), list)
-                    or len(scan["outcomes"]) > 32 or not isinstance(scan.get("scan_more"), bool)
-                    or not isinstance(scan.get("scan_after"), int) or isinstance(scan["scan_after"], bool)
-                    or scan["scan_after"] < cursor or (scan["outcomes"] and scan["scan_after"] <= cursor)
-                    or (scan["scan_more"] and (not scan["outcomes"] or scan["scan_after"] <= cursor))):
-                raise BrokerRefused("the assignment outcome scan is unavailable or malformed")
-            for row in scan["outcomes"]:
-                _receipt_after(row, 0)
-                if row.get("target") not in _workers(policy):
-                    raise BrokerRefused("the assignment outcome scan target is malformed")
-                state.setdefault("review_receipts", {})[row["id"]] = row
-            state["receipt_scan_after"] = scan["scan_after"]
-            state["receipt_scan_pending"] = scan["scan_more"]
-            if not scan["scan_more"]:
-                break
-        if state["receipt_scan_pending"]:
+        complete, _ = _scan_receipts(bot, ask, state, policy, 4)
+        if not complete:
             _save(path, state)
             return ["the bounded assignment receipt scan continues at the next check; no uncertain task is replayed", SLEEP]
         latest = ask("decide", "queued_for", {"bot": bot, "since": "1970-01-01T00:00:00+00:00"})
@@ -658,6 +662,11 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
             return ["the workers already have deliveries in flight; this check coalesces with them", SLEEP]
         lines = _look(bot, ask, now, policy, workers, repo, asked, observed,
                       state.get("review_receipts") or {})
+        _, arrived = _scan_receipts(bot, ask, state, policy, 1)
+        if arrived:
+            state["receipt_scan_pending"] = True
+            _save(path, state)
+            return ["new assignment outcomes arrived during the board read; refresh the checked candidates next tick", SLEEP]
         if observed.get("closed"):
             state["review_receipts"] = {key: row for key, row in (state.get("review_receipts") or {}).items()
                                          if not isinstance(row.get("issue"), dict)
@@ -668,11 +677,6 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
         _save(path, state)
         return [f"tw-git did not answer ({e}); the free worker check runs again in {int(IDLE_EVERY)} seconds", SLEEP]
     state.pop("progress_retry_after", None)
-    if observed.get("ambiguous"):
-        # An incomplete old receipt cannot identify which claim may be
-        # resumed. Review it without replay; passive checks remain bounded.
-        deferred = state.setdefault("review_retry_after", {})
-        deferred.update({w: now + IDLE_EVERY for w in observed["ambiguous"]})
     pending = _pending_workers(state, policy) or {}
     pending = {w: at for w, at in pending.items() if w not in observed["no_work"]}
     for worker in observed["workers"]:
@@ -713,9 +717,7 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                 observed.setdefault("ambiguous", set()).add(worker)
         if worker not in workers:
             continue  # holds apply globally; prose is scoped to this scan
-        review_lines.append(f"{worker}'s receipt {receipt['id']} is {receipt['status']} for {task}: "
-                            "review that exact outcome; never replay it. A different eligible issue may still be picked, "
-                            "subject to Patrick's explicit pause and Stop.")
+        review_lines.append(f"{worker}'s receipt {receipt['id']} is {receipt['status']} for {task}.")
     # A worker's pull request for a Thornswood issue may be in the fork:
     # Wisp's engine fixes are (10 Nov 2026: #4513's fix merged as fork
     # #148 at 5:49 AM, and Wisp, seen as still working it, got nothing
@@ -734,10 +736,15 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
         if w == "wisp":
             busy = _active(policy["repos"]["fork"], w, fork_claims.get(workers[w], []), prs, asked,
                            parked) or busy
-        if not busy and w not in ambiguous:
+        if not busy:
             free.append(w)
     stopped = _stopped(bot, ask, [w for w in workers if w not in free and w not in ambiguous], now)
-    said = review_lines
+    said = review_lines[:5]
+    if len(review_lines) > 5:
+        said.append(f"{len(review_lines) - 5} more exact receipt outcomes remain held for review.")
+    if review_lines:
+        said.append("Review these outcomes without replaying an old brief. Historical ambiguity is not a worker pause; "
+                    "only fresh checked issue refs below may be assigned, subject to Patrick's explicit pause or Stop.")
     if parked:
         said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
                     "each holds a claimed issue with no pull request that it has moved on from (it opened a "
@@ -781,13 +788,23 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     if observed is not None:
         observed["workers"].update(w for w in free if w in fed or shared)
         observed["no_work"].update(w for w in free if w not in fed and not shared)
+    candidates = []
+    for worker in free:
+        rows = results[worker]["issues"] or results["shared"]["issues"]
+        if rows:
+            item = rows[0]
+            if (not isinstance(item, dict) or item.get("repo") not in allowed_repos
+                    or not isinstance(item.get("number"), int) or isinstance(item["number"], bool)):
+                raise BrokerRefused("the checked candidate issue reference is malformed")
+            candidates.append(f"Checked next issue for {worker}: {item['repo']}#{item['number']}.")
+    direction = " Only pick these checked issue refs; recheck claim eligibility before assigning. Never replay a held receipt."
     if fed:
-        return [*said, f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits), and "
+        return [*said, *candidates, f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits), and "
                 f"open unclaimed issues are in the field of {', '.join(fed)}"
-                + ": pick for each free worker, reading the board by its area (bramble-duties, section 6)."]
+                + ": pick for each free worker from the checked refs (bramble-duties, section 6)." + direction]
     if shared:
-        return [*said, f"{', '.join(free)} hold no active issue, and open unclaimed issues are picked by the "
-                "part they name: pick for the free workers (bramble-duties, section 6)."]
+        return [*said, *candidates, f"{', '.join(free)} hold no active issue, and open unclaimed issues are picked by the "
+                "part they name: pick for the free workers (bramble-duties, section 6)." + direction]
     if said:
         return said
     return [f"{', '.join(free)} hold no active issue, but no open unclaimed issue is theirs", SLEEP]

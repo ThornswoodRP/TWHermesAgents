@@ -143,7 +143,9 @@ class Idle:
                 shared = key.startswith("-")
                 labels = ["area: Shared"] if shared else re.findall(r'"(area: [^"]+)"', key)
                 base = len(items)
-                items.extend({"number": 9000 + base + i, "labels": labels} for i in range(n))
+                items.extend({"repo": POLICY["repos"]["app"], "number": 9000 + base + i, "labels": labels} for i in range(n))
+            excluded_refs = {(i["repo"], i["number"]) for i in args.get("excluded_issues", [])}
+            items = [i for i in items if (i["repo"], i["number"]) not in excluded_refs]
             groups = {}
             for name, selector in args["groups"].items():
                 areas, excluded = set(selector.get("areas") or []), set(selector.get("not_areas") or [])
@@ -541,7 +543,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
         b.turns = {"sprocket": {"running": False, "last": None}}
         out = owed_wake.check(self.day(), "bramble", b, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
-        self.assertIn("sprocket hold an active issue", out[-2])
+        self.assertIn("sprocket hold an active issue", "\n".join(out))
         self.assertIn("in the field of wisp", out[-1])
 
     def test_every_free_worker_with_work_in_its_field_is_named(self):
@@ -596,8 +598,8 @@ class MorningAndFreeWorkers(unittest.TestCase):
             return r
         out = owed_wake.check(self.day(), "bramble", ask, now=NOON, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
-        self.assertIn(f"rift #{rift}", out[-2])
-        self.assertIn("take the claim off", out[-2])
+        self.assertIn(f"rift #{rift}", "\n".join(out))
+        self.assertIn("take the claim off", "\n".join(out))
         self.assertIn("in the field of rift", out[-1])
         # Claimed after its last pull request: that is the issue it is on now.
         changed["at"] = "2026-11-10T17:54:06Z"

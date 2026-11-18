@@ -16,8 +16,9 @@ different issue remains available. Its receipt hold survives a no-work result
 and is rechecked by exact ID in rotating batches of at most 32. A newer
 explicit assignment for the same task transfers the hold to that receipt;
 confirmed delivery releases it. An incomplete legacy reference is
-reported as ambiguous and defers only that worker's automatic hint until
-review; the others remain available. These summaries contain identifiers,
+reported as ambiguous and suppresses generic continuation of an unidentified
+old task. It does not pause that worker or bar a fresh checked eligible issue.
+These summaries contain identifiers,
 status and timestamps, never briefs or chat. This is delivery bookkeeping,
 never proof of task completion.
 
@@ -29,7 +30,9 @@ deduplicated and filtered against the actual board snapshot, under the
 existing IPC message-size bound. Only a board item explicitly read CLOSED
 releases a closed-issue hold; absent or redacted items do not. Nullable unset
 project fields are legitimate non-Todo items, while a missing selected field
-is incomplete source data.
+is incomplete source data. Fresh assignment hints name a finite set of
+checked issue references. A bounded tail scan suppresses the hint and keeps
+the observation if new receipt outcomes arrived during the board read.
 
 Once the first install is done ([setup.md](setup.md)), the VM looks after itself: it installs each merge to `main`, backs itself up every night and checks its own limits at every boot. This page is for watching it and stepping in.
 
