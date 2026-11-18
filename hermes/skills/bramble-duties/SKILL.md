@@ -554,6 +554,19 @@ claim and assignment gates. If it is no longer eligible or admission is
 refused, leave it for a fresh check. This exception never resumes an old
 task or overrides Patrick's explicit pause or Stop.
 
+When the current wake names checked candidates, account for each checked
+worker before unrelated sweep work. Recheck that exact issue through the
+normal steps below, then record its assignment receipt or the concrete
+current eligibility, activity, admission or explicit Stop blocker. Do not
+end that obligation after assigning another worker. A completed sweep or
+your own summary is not delivery proof; reporting a blocker does not clear
+the scheduler's pending observation. If a source is unavailable, say so
+and leave that worker unresolved for the next guarded check; never invent
+no-work, release retained claims, or replay an old brief to finish the list.
+The later general pass covers remaining workers. Do not repeat this wake's
+checked-worker handling or turn an unresolved checked target into generic
+continuation; a replacement candidate needs the next guarded check.
+
 1. For each worker (Rift, Sprocket, Echo, Magpie, Wisp), see whether it
    holds an open issue: `tw_git read`
    `/search/issues?q=repo:ThornswoodRP/Thornswood is:issue is:open label:"claimed: <Bot>"`
