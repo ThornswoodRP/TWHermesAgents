@@ -518,13 +518,6 @@ def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tu
         if pending:
             if not all(isinstance(queued.get(k), dict) for k in ("dispatches", "attempts")):
                 raise BrokerRefused("the assignment receipts are unavailable")
-            held = state.setdefault("review_receipts", {})
-            # Record outcomes before settling workers, including a later
-            # different cancellation beside an earlier confirmed delivery.
-            for rows in (queued["dispatches"], queued["attempts"]):
-                for w, row in rows.items():
-                    if w in pending and _receipt_after(row, pending[w]) and row.get("status") != "sent":
-                        held[row["id"]] = dict(held.get(row["id"], {}), **row, target=w)
             _refresh_receipts(bot, ask, state, policy)
             pending = {w: at for w, at in pending.items()
                        if not (_receipt_after(queued["dispatches"].get(w), at, accepted=True)
@@ -634,22 +627,15 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
     asked = _asked(bot, ask)
     observed = {"workers": set(), "no_work": set()}
     try:
-        # Initialize from structured current receipts too: after an upgrade,
-        # a historical uncertain assignment must not become a carry-on hint
-        # merely because it predates this observation's timestamp.
         # Scan every unseen non-sent receipt, not just the latest per worker:
         # two failures between scheduler ticks must retain both exact tasks.
         complete, _ = _scan_receipts(bot, ask, state, policy, 4)
         if not complete:
             _save(path, state)
             return ["the bounded assignment receipt scan continues at the next check; no uncertain task is replayed", SLEEP]
-        latest = ask("decide", "queued_for", {"bot": bot, "since": "1970-01-01T00:00:00+00:00"})
-        if (not isinstance(latest, dict) or not isinstance(latest.get("bots"), dict)
-                or not isinstance(latest.get("attempts"), dict)):
+        latest = ask("decide", "queued_for", {"bot": bot})
+        if not isinstance(latest, dict) or not isinstance(latest.get("bots"), dict):
             raise BrokerRefused("the current assignment metadata is unavailable")
-        for w, row in latest["attempts"].items():
-            if w in _workers(policy) and _receipt_after(row, 0) and row.get("status") != "sent":
-                state.setdefault("review_receipts", {})[row["id"]] = dict(row, target=w)
         _refresh_receipts(bot, ask, state, policy)
         workers = {w: label for w, label in workers.items() if not latest["bots"].get(w)}
         if not workers:
@@ -734,7 +720,10 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     stopped = _stopped(bot, ask, [w for w in workers if w not in free and w not in ambiguous], now)
     said = review_lines[:5]
     if len(review_lines) > 5:
-        said.append(f"{len(review_lines) - 5} more exact receipt outcomes remain held for review.")
+        said.append(f"{len(review_lines) - 5} more receipt outcomes remain held for review.")
+    if ambiguous & set(workers):
+        said.append("Historical ambiguous task notices need review for: " + ", ".join(sorted(ambiguous & set(workers)))
+                    + ". These are not worker pauses and do not authorize generic old-task continuation.")
     if review_lines:
         said.append("Review these outcomes without replaying an old brief. Historical ambiguity is not a worker pause; "
                     "only fresh checked issue refs below may be assigned, subject to Patrick's explicit pause or Stop.")

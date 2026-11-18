@@ -123,6 +123,15 @@ class Idle:
         if op == "bot_turns":
             return {"bots": self.turns}
         if op == "queued_for":
+            if "scan_after" in args:
+                for worker, row in [*self.dispatches.items(), *self.attempts.items()]:
+                    ids = [r["id"] for r in self.scan_rows]
+                    if row["id"] in ids:
+                        self.scan_rows[ids.index(row["id"])] = dict(row, target=worker)
+                    elif row["status"] != "sent":
+                        self.scan_rows.append(dict(row, target=worker))
+                unseen = [(n, r) for n, r in enumerate(self.scan_rows, 1)
+                          if n > args["scan_after"] and r["status"] != "sent"]
             return {"bots": self.queued, **({"dispatches": self.dispatches, "attempts": self.attempts}
                                           if "since" in args else {}),
                     **({"receipts": {row["id"]: dict(row, target=worker, superseded=False, successor=None)
@@ -130,9 +139,9 @@ class Idle:
                                                          *((r["target"], r) for r in self.receipt_rows.values())]
                                      if row["id"] in args["receipts"]}}
                        if "receipts" in args else {}),
-                    **({"outcomes": self.scan_rows[args["scan_after"]:args["scan_after"] + 32],
-                        "scan_after": min(len(self.scan_rows), args["scan_after"] + 32),
-                        "scan_more": len(self.scan_rows) > args["scan_after"] + 32}
+                    **({"outcomes": [r for _, r in unseen[:32]],
+                        "scan_after": unseen[min(31, len(unseen) - 1)][0] if unseen else args["scan_after"],
+                        "scan_more": len(unseen) > 32}
                        if "scan_after" in args else {})}
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour"}

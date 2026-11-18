@@ -289,6 +289,32 @@ class OpportunityLifecycle(unittest.TestCase):
         self.assertIn("Historical ambiguity is not a worker pause", out)
         self.assertNotIn("otherwise tell it to carry on", out)
 
+    def test_ambiguous_workers_remain_named_when_canonical_notices_use_the_display_limit(self):
+        rows = [dict(receipt(f"canonical_{n}", NOON - 100, "uncertain",
+                             {"repo": POLICY["repos"]["app"], "number": n}), target="sprocket") for n in range(1, 7)]
+        rows.append(dict(receipt("ambiguous_echo", NOON - 100, "uncertain"), target="echo"))
+        self.b.scan_rows = rows
+        self.b.receipt_rows = {r["id"]: r for r in rows}
+        out = self.check()
+        self.assertIn("Historical ambiguous task notices need review for: echo.", out)
+        self.assertIn("Checked next issue for echo:", out)
+
+    def test_source_proven_closed_hold_is_not_readded_by_its_latest_attempt_on_next_check(self):
+        self.b.attempts["echo"] = receipt("closed", NOON - 100, "uncertain",
+                                          {"repo": POLICY["repos"]["app"], "number": 12})
+        board_requests = []
+        def broker(kind, op, args):
+            reply = self.b(kind, op, args)
+            if op == "board":
+                board_requests.append(args)
+                reply["closed_exclusions"] = args.get("excluded_issues", [])
+            return reply
+        self.check(broker=broker)
+        self.assertEqual(owed_wake._load(self.path)["review_receipts"], {})
+        out = self.check(NOON + 300, broker)
+        self.assertNotIn("receipt cx_closed", out)
+        self.assertNotIn("excluded_issues", board_requests[-1])
+
     def test_fresh_hint_names_only_safe_checked_candidate_even_when_ordinary_board_first_is_held(self):
         from test_grouped_board_projection import issue, page, projection, Snapshot
         state = owed_wake._load(self.path)
@@ -317,7 +343,7 @@ class OpportunityLifecycle(unittest.TestCase):
         injected = False
         def broker(kind, op, args):
             nonlocal injected
-            if op == "queued_for" and "since" in args and not injected:
+            if op == "queued_for" and set(args) == {"bot"} and not injected:
                 injected = True
                 rows = [dict(receipt(f"raced_{n}", NOON, status,
                                      {"repo": POLICY["repos"]["app"], "number": n}), target="echo")
