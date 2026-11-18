@@ -224,6 +224,11 @@ class Outlives(unittest.TestCase):
         self.left(mid, "bramble")
         c = self.connector()
         c.adopt()
+        # adopt() follows even an unstarted turn on a thread. Reporting an
+        # empty result snapshot before that thread ends is not completion.
+        for worker in c.running:
+            worker.join(20)
+            self.assertFalse(worker.is_alive(), "the adopted unstarted turn did not finish")
         c._report()
         self.assertEqual(self.status(mid)[0], "queued")
         self.assertEqual(c.waiting, {}, "a gateway was taken for not ready")
