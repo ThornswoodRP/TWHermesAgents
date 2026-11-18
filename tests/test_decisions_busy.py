@@ -83,7 +83,7 @@ MAIN = textwrap.dedent('''
         args = sys.argv[1:]
         assert args[0] == "chat", args
         text = open(args[args.index("--query-file") + 1], encoding="utf-8").read()
-        snapshot = {"stored_session_id": "s1", "execution_generation": 7,
+        snapshot = {"stored_session_id": S.get("session_id", "s1"), "execution_generation": 7,
                     "prompts": [{"prompt_id": "p1"}] if S.get("parked") else [],
                     "pending": [{"admission_id": "a1", "status": "started"}] if S["running"] else []}
         view = gateway_chat_view.GatewayChatView(Client(), snapshot, quiet=True)
@@ -91,6 +91,7 @@ MAIN = textwrap.dedent('''
         receipt = asyncio.run(view.submit(text))
         admission = receipt["admission_id"]
         if receipt.get("status") == "queued":
+            view.session_id = S.get("promotion_session", view.session_id)
             view._session_info(None, {"pending": [{"admission_id": "a2", "status": "started"}]})
         print(json.dumps({"type": "text", "text": "answer"}))
         print(json.dumps({"type": "result", "session_id": "s1", "exit_code": 0, "admission": admission}))
@@ -161,6 +162,16 @@ class TheTurn(unittest.TestCase):
             self.assertTrue(admissions)
             self.assertTrue(all(line.get("admission_id") == "a2" for line in admissions), admissions)
         self.run_turn(busy="steer", running=True)
+        self.assertTrue(all("admission_id" not in line for line in self.lines if line["type"] == "admission"))
+
+    def test_queue_promotion_repeats_only_the_original_submission_identity(self):
+        self.run_turn(busy="queue", session_id="s1", promotion_session="s2")
+        admissions = [line for line in self.lines if line["type"] == "admission"]
+        self.assertEqual([(line.get("session_id"), line.get("admission_id")) for line in admissions],
+                         [("s1", "a2"), ("s1", "a2")])
+
+    def test_queue_promotion_cannot_repair_an_invalid_original_identity(self):
+        self.run_turn(busy="queue", session_id="s" * 128 + "/bad", promotion_session="s2")
         self.assertTrue(all("admission_id" not in line for line in self.lines if line["type"] == "admission"))
 
     def test_a_file_a_slash_command_or_a_parked_turn_always_queues(self):

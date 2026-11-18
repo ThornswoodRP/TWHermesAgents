@@ -1336,13 +1336,15 @@ def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None,
                     if got.get("status") in ("queued", "redirected"):
                         announce("steered" if mode == "steer" else "redirected", self.session_id)
                         return {"admission_id": running}
+            submitted_session = self.session_id
             receipt = await super().submit(text)
             status = (receipt or {}).get("status")
             if status in ("started", "queued"):
                 # Only this submit's authoritative receipt, never the admission
                 # already running when a message was steered into its turn.
-                announce(status, self.session_id, receipt.get("admission_id"))
+                announce(status, submitted_session, receipt.get("admission_id"))
                 self._queued = (receipt.get("admission_id") if status == "queued" else None)
+                self._queued_session = submitted_session if status == "queued" else None
             return receipt
 
         async def _tw_rewind(self, text):
@@ -1380,7 +1382,9 @@ def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None,
             if mine and any(isinstance(r, dict) and r.get("admission_id") == mine and r.get("status") == "started"
                             for r in self.pending):
                 self._queued = None
-                announce("started", self.session_id, mine)
+                submitted_session = self._queued_session
+                self._queued_session = None
+                announce("started", submitted_session, mine)
 
     gateway_chat_view.GatewayChatView = BusyAware
 
