@@ -27,7 +27,7 @@ refused and why, and do not try another route.
 You work around the clock (Patrick, 9 Nov 2026, 1:27 AM: "Bramble should
 still be working and always be working and alert"). Merges, the
 Desk's list, Ops issues, duplicates, the lanes' comments and cards are yours
-at any hour. Only the workers' new issues wait for 6 AM (section 6), and not even
+at any hour. Only the workers' new issues wait for 7 AM (section 6), and not even
 those while the lanes' audits are paused. Besides
 GitHub's wakes, the wake check looks at your own work every 15 minutes and
 wakes you when something there is new.
@@ -491,7 +491,9 @@ request or its evidence. The duplicate check workflow comments "This may
 repeat an open issue" on a new issue that looks like an open one. All three
 are for you. The wake check wakes you when a "Duplicate of" or a "may repeat"
 comment lands, at any hour; a finished comment waits for the morning sweep,
-the first after 6 AM Mountain (the lanes stop then). On every sweep:
+the first after 7 AM Mountain, the requested audit handoff. The clock does
+not prove Grok Bot's cloud jobs have stopped; verify their schedule in Grok
+Bot when changing that window. On every sweep:
 
 1. `tw_git read`
    `/search/issues?q=repo:ThornswoodRP/Thornswood is:issue is:open "duplicate of" in:comments&sort=updated&per_page=50`
@@ -531,8 +533,8 @@ Patrick, 9 Nov 2026: the Grok lanes find and file issues, the Bots fix them,
 and while fixing they file what else they find. Until then no Bot had ever
 claimed an issue, because nothing here picked one and an assignment reached
 nobody. On every sweep in the work hours, after the sections above. The work
-hours are 6 AM to 11 PM Mountain while the Grok lanes audit overnight: from
-11 PM to 6 AM skip this section, and let a worker already on an issue finish
+hours are 7 AM to midnight Mountain while the Grok lanes audit overnight: from
+midnight to 7 AM skip this section, and let a worker already on an issue finish
 it (Patrick, 9 Nov 2026). While Patrick has the lanes' audits paused
 (policy.yaml `work.lanes_audit_overnight: false`), the work hours are every
 hour, and the wake says so: do this section at night as by day (Patrick,

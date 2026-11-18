@@ -71,6 +71,21 @@ def gate(fleet, bot):
 
 
 class Gate(unittest.TestCase):
+    def test_active_worker_keeps_its_tools_and_finishes_after_midnight(self):
+        from datetime import datetime, timezone
+        from test_policy_service import Clock
+        clock = Clock()
+        clock.t = datetime(2026, 11, 18, 6, 59, tzinfo=timezone.utc)  # 11:59 PM MST
+        f = Fleet()
+        self.addCleanup(f.policy.db.close)
+        f.policy.clock = clock
+        worker = gate(f, "wisp")
+        self.assertIsNone(worker.before_llm(session_id="night-1", task_id="active"))
+        clock.advance(minutes=2)
+        self.assertIsNone(worker.before_tool("read_file", session_id="night-1"))
+        worker.after_turn(session_id="night-1")
+        self.assertEqual(f.policy.db.execute("SELECT state FROM tickets WHERE bot='wisp'").fetchone()[0], "done")
+
     def test_one_turn_at_a_time_and_the_rest_wait_with_no_tools(self):
         f = Fleet()
         rift, wisp = gate(f, "rift"), gate(f, "wisp")

@@ -167,7 +167,7 @@ platforms:
             takes a Bot''s pull request off auto-merge, and your review of the new
             head puts it on again; then the Desk''s list in Thornswood-Ops; report
             each merge and its Release. Nothing in this event approves anything. The
-            workers start new work only from 6 AM to 11 PM Mountain; the Grok lanes
-            audit overnight, and a worker on an issue at the end of the day finishes
-            it. You do not stop: every other duty of yours (merges, Main cards, runs,
-            the Desk''s list) is yours at any hour.'
+            workers start new work only from 7 AM to midnight Mountain; overnight
+            is the requested audit window, and a worker on an issue at the end of
+            the day finishes it. You do not stop: every other duty of yours (merges,
+            Main cards, runs, the Desk''s list) is yours at any hour.'

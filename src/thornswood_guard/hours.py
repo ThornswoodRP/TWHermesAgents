@@ -3,8 +3,8 @@ free worker look (owed_wake.py) and the decision core's assign_task."""
 
 from __future__ import annotations
 
-# 6 AM to 11 PM Mountain, while the Grok lanes audit overnight (Patrick, 9 Nov 2026).
-DEFAULT = (6, 23)
+# 7 AM to midnight Mountain, while the Grok lanes audit overnight (Patrick, 17 Nov 2026).
+DEFAULT = (7, 24)
 ALL_DAY = (0, 24)
 
 
@@ -31,17 +31,19 @@ def rule(data: dict | None) -> str:
     if paused(data):
         return ("The Grok lanes' audits are paused (policy.yaml work.lanes_audit_overnight is false), so the "
                 "workers start new work at any hour: bramble-duties section 6 runs at night as by day.")
-    return (f"The workers start new work only from {says(work_hours(data))} Mountain; the Grok lanes audit "
-            "overnight, and a worker on an issue at the end of the day finishes it. You do not stop: every "
+    return (f"The workers start new work only from {says(work_hours(data))} Mountain; overnight is the requested "
+            "audit window, and a worker on an issue at the end of the day finishes it. You do not stop: every "
             "other duty of yours (merges, Main cards, runs, the Desk's list) is yours at any hour.")
 
 
 def says(hours: tuple[int, int]) -> str:
-    """The hours as people say them: "6 AM to 11 PM", or "at any hour"."""
+    """The hours as people say them: "7 AM to midnight", or "at any hour"."""
     if hours == ALL_DAY:
         return "at any hour"
 
     def h(n: int) -> str:
         n %= 24
+        if n == 0:
+            return "midnight"
         return f"{12 if n % 12 == 0 else n % 12} {'AM' if n < 12 else 'PM'}"
     return f"{h(hours[0])} to {h(hours[1])}"

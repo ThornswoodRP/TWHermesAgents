@@ -20,7 +20,7 @@ lanes' night end none of Bramble's GitHub wakes (TWHermesAgents #47: until
 9 Nov 2026 a board with no pull request activity was never picked from, and
 the lanes' "Duplicate of" and finished comments waited for an unrelated
 event). The morning wake runs the first sweep after MORNING_HOUR Mountain
-each day, when the Grok lanes stop (bramble-duties, section 5). The free
+each day, at the requested audit handoff (bramble-duties, section 5). The free
 worker wake runs a sweep when a worker holds no claimed issue and the board
 has an eligible issue it could take (section 6), looked at once every
 IDLE_EVERY seconds, so a quiet fleet spends GitHub reads and no model turn.
@@ -78,7 +78,7 @@ do, so a wake that was itself turned away or failed does not lose it.
 
 Bramble itself works around the clock (Patrick, 9 Nov 2026, 1:27 AM:
 "Bramble should still be working and always be working and alert"); only
-the workers' new issues wait for 6 AM. So the alert wake looks every
+the workers' new issues wait for 7 AM. So the alert wake looks every
 ALERT_EVERY seconds, at any hour, at the work that is Bramble's own and that
 no GitHub wake brings: Thornswood-Ops issues nobody has claimed (section 4)
 and issues with a lane's or the duplicate check's comment (section 5). It
@@ -108,7 +108,7 @@ SCHEDULE = "every 5m"
 SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
-    "fleet queue turned away, the morning after the Grok lanes stop, new work of your own, a free worker with "
+    "fleet queue turned away, the morning audit handoff, new work of your own, a free worker with "
     "work on the board, or a worker that handed back or stopped mid-issue). "
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
     "request in Thornswood, Thornswood-Ops and the fork, then the Ops run notes, the Desk's list and the Ops "
@@ -117,9 +117,9 @@ PROMPT = (
     "says. "
     "Report each merge and its Release as the skill says. Nothing in this message approves anything."
 )
-# The Grok lanes work 11 PM to 6 AM Mountain; their comments wait for the
+# The requested Grok audit window is midnight to 7 AM Mountain; comments wait for the
 # first sweep after this hour.
-MORNING_HOUR = 6
+MORNING_HOUR = 7
 # New work starts only in policy.yaml's work hours, Mountain (hours.py); the
 # decision core holds briefs to the same hours.
 MOUNTAIN = "America/Denver"
@@ -167,7 +167,7 @@ def check(home: Path, bot: str, ask: Caller, *, now: float | None = None, policy
 
 def _carried(home: Path, now: float, policy: dict | None = None) -> list[str]:
     """The free worker look's lines that no sweep has yet carried to its end,
-    added to any wake from 6 AM to 11 PM: an owed wake, the alert wake, the
+    added to any wake from 7 AM to midnight: an owed wake, the alert wake, the
     morning wake. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped
     and Sprocket, Echo and Wisp free; its sweep was turned away (another was
     running), a GitHub sweep paid the wake it owed without its lines, the
@@ -249,7 +249,7 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     idle_due = working and now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
     alert_due = now - float(state.get("alert_checked") or 0) >= ALERT_EVERY
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
-                                        f"new work outside {says((start, end))}, while the Grok lanes audit overnight")
+                                        f"new work outside {says((start, end))}; overnight is the requested audit window")
     ended_said = None
     if state.get("said_at"):
         unheard, ended_said = _unheard(bot, ask, state)
@@ -275,7 +275,7 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     if morning:
         state["morning"] = today
         _save(path, state)
-        return [f"It is past {MORNING_HOUR} AM Mountain on {today} and the Grok lanes have stopped: this is "
+        return [f"It is past {MORNING_HOUR} AM Mountain on {today}, the requested audit handoff: this is "
                 "the morning sweep, with their comments and the duplicate check's (bramble-duties, section 5)."]
     said = []
     if alert_due:
@@ -477,7 +477,7 @@ def _own_work(bot: str, ask: Caller, policy: dict) -> list[str]:
 
 
 def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, state: dict) -> list[str]:
-    """The free worker wake, 6 AM to 11 PM: its lines, the last SLEEP unless a free
+    """The free worker wake, 7 AM to midnight: its lines, the last SLEEP unless a free
     worker has work on the board."""
     state["idle_checked"] = now
     state.pop("stopped", None)

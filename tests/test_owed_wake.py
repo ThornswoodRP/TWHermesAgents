@@ -93,9 +93,9 @@ class Check(unittest.TestCase):
 
 POLICY = json.loads((REPO / "src" / "thornswood_guard" / "policy.json").read_text(encoding="utf-8"))
 # 9 Nov 2026, 7:30 AM and 3:30 AM Mountain (UTC-7).
-AFTER_SIX = 1794234600.0
-BEFORE_SIX = AFTER_SIX - 4 * 3600
-NOON = AFTER_SIX + 5 * 3600
+AFTER_SEVEN = 1794234600.0
+BEFORE_SEVEN = AFTER_SEVEN - 4 * 3600
+NOON = AFTER_SEVEN + 5 * 3600
 
 
 class Idle:
@@ -179,32 +179,43 @@ class MorningAndFreeWorkers(unittest.TestCase):
         owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": NOON})
         return home
 
-    def test_the_first_check_after_six_mountain_wakes_once_that_day(self):
+    def test_the_first_check_after_seven_mountain_wakes_once_that_day(self):
         home, b = self.home(), Idle(claimed=BUSY)
-        out = owed_wake.check(home, "bramble", b, now=AFTER_SIX, policy=POLICY)
+        out = owed_wake.check(home, "bramble", b, now=AFTER_SEVEN, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)))
         self.assertIn("morning sweep", out[-1])
         self.assertIn(("policy", "turn_room", {"bot": "bramble", "sweep": True}), b.asked)
-        again = owed_wake.check(home, "bramble", b, now=AFTER_SIX + 300, policy=POLICY)
+        again = owed_wake.check(home, "bramble", b, now=AFTER_SEVEN + 300, policy=POLICY)
         self.assertFalse(wakes("\n".join(again)), "the next check is the alert look, and nothing is new")
         self.assertIn("runs at the next check", again[-2], "the free worker look never shares a run with it")
         self.assertFalse([a for a in b.reads()[-3:] if "/pulls?" in a["path"]], "no free worker read in that run")
-        again = owed_wake.check(home, "bramble", b, now=AFTER_SIX + 600, policy=POLICY)
+        again = owed_wake.check(home, "bramble", b, now=AFTER_SEVEN + 600, policy=POLICY)
         self.assertFalse(wakes("\n".join(again)), "the next check is the free worker one, and all are busy")
         self.assertIn("every worker is on an active issue", again[-2])
-        tomorrow = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=AFTER_SIX + 86400, policy=POLICY)
+        tomorrow = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=AFTER_SEVEN + 86400, policy=POLICY)
         self.assertTrue(wakes("\n".join(tomorrow)))
 
-    def test_no_morning_wake_before_six(self):
-        out = owed_wake.check(self.home(), "bramble", Idle(claimed=BUSY), now=BEFORE_SIX, policy=POLICY)
+    def test_no_morning_wake_before_seven(self):
+        out = owed_wake.check(self.home(), "bramble", Idle(claimed=BUSY), now=BEFORE_SEVEN, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)))
+
+    def test_morning_boundary_waits_until_seven_in_winter_summer_and_dst(self):
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo("America/Denver")
+        for day in ((2026, 11, 17), (2026, 7, 15), (2026, 3, 8), (2026, 11, 1)):
+            home = self.home()
+            for hour, minute, should_wake in ((6, 59, False), (7, 0, True), (7, 5, False)):
+                local = datetime(*day, hour, minute, tzinfo=zone)
+                out = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=local.timestamp(), policy=POLICY)
+                with self.subTest(local=local.isoformat()):
+                    self.assertEqual(any("morning sweep," in line for line in out), should_wake)
 
     def test_no_room_waits_and_keeps_the_morning_owed(self):
         home = self.home()
-        out = owed_wake.check(home, "bramble", Idle(room=False), now=AFTER_SIX, policy=POLICY)
+        out = owed_wake.check(home, "bramble", Idle(room=False), now=AFTER_SEVEN, policy=POLICY)
         self.assertFalse(wakes("\n".join(out)))
         self.assertIn("no room", out[-2])
-        out = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=AFTER_SIX + 300, policy=POLICY)
+        out = owed_wake.check(home, "bramble", Idle(claimed=BUSY), now=AFTER_SEVEN + 300, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)))
 
     def test_a_free_worker_with_an_issue_in_its_area_wakes(self):
@@ -261,11 +272,11 @@ class MorningAndFreeWorkers(unittest.TestCase):
         self.assertFalse(wakes("\n".join(out)))
         self.assertIn("tw-git did not answer", out[-2])
 
-    def test_no_free_worker_check_from_11_pm_to_6_am(self):
-        # Patrick, 9 Nov 2026: the workers start new work only from 6 AM to 11 PM Mountain,
+    def test_no_free_worker_check_from_midnight_to_7_am(self):
+        # Patrick, 9 Nov 2026: the workers start new work only from 7 AM to midnight Mountain,
         # while the Grok lanes audit overnight.
-        lanes = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": True})
-        for t in (BEFORE_SIX, AFTER_SIX + 16 * 3600):  # 3:30 AM, 11:30 PM
+        lanes = dict(POLICY, work={"hours": [7, 24], "lanes_audit_overnight": True})
+        for t in (BEFORE_SEVEN, AFTER_SEVEN + 17 * 3600):  # 3:30 AM, 12:30 AM
             with self.subTest(t=t):
                 b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 4})
                 out = owed_wake.check(self.day(), "bramble", b, now=t, policy=lanes)
@@ -277,11 +288,11 @@ class MorningAndFreeWorkers(unittest.TestCase):
     def test_while_the_lanes_audits_are_paused_the_look_runs_at_night_and_says_so(self):
         # Patrick, 11 Nov 2026, 11:22 PM: "I want my Hermes Agents to work
         # through tonight since I pauased the audits".
-        paused = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": False})
+        paused = dict(POLICY, work={"hours": [7, 24], "lanes_audit_overnight": False})
         b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 4})
         home = self.day()
-        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": AFTER_SIX + 16 * 3600})
-        out = owed_wake.check(home, "bramble", b, now=AFTER_SIX + 16 * 3600, policy=paused)  # 11:30 PM
+        owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"morning": "2026-11-09", "alert_checked": AFTER_SEVEN + 17 * 3600})
+        out = owed_wake.check(home, "bramble", b, now=AFTER_SEVEN + 17 * 3600, policy=paused)  # 12:30 AM
         self.assertTrue(wakes("\n".join(out)), out)
         self.assertIn("audits are paused", "\n".join(out))
         self.assertIn("in the field of echo", out[-1])
@@ -299,17 +310,17 @@ class MorningAndFreeWorkers(unittest.TestCase):
                     return {"body": {"total_count": len(items[repo]), "items": items[repo]}}
                 return {"body": {"total_count": 0, "items": []}}
             return Idle()(broker, op, args)
-        out = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX, policy=POLICY)
+        out = owed_wake.check(home, "bramble", ask, now=BEFORE_SEVEN, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)), out)
         self.assertIn("Thornswood-Ops#261", out[-1])
-        later = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX + owed_wake.ALERT_EVERY, policy=POLICY)
+        later = owed_wake.check(home, "bramble", ask, now=BEFORE_SEVEN + owed_wake.ALERT_EVERY, policy=POLICY)
         self.assertFalse(wakes("\n".join(later)), "nothing changed, so no turn")
         self.assertIn("nothing of your own is new", "\n".join(later))
-        soon = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX + owed_wake.ALERT_EVERY + 60, policy=POLICY)
+        soon = owed_wake.check(home, "bramble", ask, now=BEFORE_SEVEN + owed_wake.ALERT_EVERY + 60, policy=POLICY)
         self.assertFalse(wakes("\n".join(soon)))
         items["Thornswood-Ops"] = [{"number": 261, "updated_at": "2026-11-09T09:00:00Z"},
                                    {"number": 262, "updated_at": "2026-11-09T09:05:00Z"}]
-        changed = owed_wake.check(home, "bramble", ask, now=BEFORE_SIX + 2 * owed_wake.ALERT_EVERY, policy=POLICY)
+        changed = owed_wake.check(home, "bramble", ask, now=BEFORE_SEVEN + 2 * owed_wake.ALERT_EVERY, policy=POLICY)
         self.assertTrue(wakes("\n".join(changed)))
         self.assertIn("Thornswood-Ops#262", changed[-1])
 
@@ -642,7 +653,7 @@ class MorningAndFreeWorkers(unittest.TestCase):
 
     def test_an_owed_wake_comes_first(self):
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
-        out = owed_wake.check(self.home(), "bramble", Broker(due), now=AFTER_SIX, policy=POLICY)
+        out = owed_wake.check(self.home(), "bramble", Broker(due), now=AFTER_SEVEN, policy=POLICY)
         self.assertTrue(wakes("\n".join(out)))
         self.assertIn("turned away", out[1], "first after the work hours line")
 
@@ -650,13 +661,13 @@ class MorningAndFreeWorkers(unittest.TestCase):
         # 12 Nov 2026: twice at night a sweep whose wake had no free worker
         # lines told Patrick the lanes' audits were not paused, while they were.
         due = {"owed": True, "due": True, "since": "t", "refused": 1, "reason": "r"}
-        night = AFTER_SIX + 16 * 3600  # 11:30 PM
-        paused = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": False})
+        night = AFTER_SEVEN + 17 * 3600  # 12:30 AM
+        paused = dict(POLICY, work={"hours": [7, 24], "lanes_audit_overnight": False})
         out = owed_wake.check(self.home(), "bramble", Broker(due), now=night, policy=paused)
-        self.assertIn("It is 11:30 PM Mountain. The Grok lanes' audits are paused", out[0])
-        lanes = dict(POLICY, work={"hours": [6, 23], "lanes_audit_overnight": True})
+        self.assertIn("It is 12:30 AM Mountain. The Grok lanes' audits are paused", out[0])
+        lanes = dict(POLICY, work={"hours": [7, 24], "lanes_audit_overnight": True})
         out = owed_wake.check(self.home(), "bramble", Broker(due), now=night, policy=lanes)
-        self.assertIn("only from 6 AM to 11 PM Mountain", out[0])
+        self.assertIn("only from 7 AM to midnight Mountain", out[0])
         self.assertNotIn("paused", out[0])
         asleep = owed_wake.check(self.home(), "bramble", Broker({"owed": False}), now=night, policy=lanes)
         self.assertFalse(wakes("\n".join(asleep)))

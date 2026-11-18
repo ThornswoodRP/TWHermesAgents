@@ -45,11 +45,8 @@ from .wakes import BOTS_GW
 MAX_BRIEF = 8000
 # How a kept message begins when the connector delivers it (chat.Chat._kept_text).
 KEPT_HEAD = "[Thornswood queue] This message reached your Bot Chat at "
-# The Bots take up new work from 6 AM to 11 PM Mountain, and the Grok lanes
-# audit from 11 PM to 6 AM (Patrick, 9 Nov 2026: "have them auto work between
-# 6 am and 11 pm so that there is nice transaction and not overload on the VM,
-# VPS, One and GitHub"; "If it is in the middle of something by the time it
-# may Finnish but not start on a new issue"). A brief told outside it is
+# The Bots take up new work from 7 AM to midnight Mountain, and the Grok lanes
+# audit from midnight to 7 AM (Patrick, 17 Nov 2026). A brief told outside it is
 # refused, so no worker starts a new issue at night; one already working
 # finishes. The hours are policy.yaml's work section (thornswood_guard/hours.py):
 # around the clock while Patrick has the lanes' audits paused (11 Nov 2026).

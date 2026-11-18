@@ -53,7 +53,7 @@ Where things go:
 - **ThornswoodRP/skymp**: the engine fork. An engine problem is filed on Thornswood, and Wisp fixes it in the fork.
 - **ThornswoodRP/TWHermesAgents**: the Bots' own repository: their guard rails, brokers, the decision app and the VM install. The Bots never write it; you do (section 5). An ask about the Bots, the app, or Hermes itself goes here as an issue, and you work it.
 
-Work hours: Bots start new work from 6 AM to 11 PM Mountain, and Grok lanes audit overnight; while the lanes' audits are paused (policy.yaml `work`), at any hour. Bramble works at every hour. An ask filed at night waits for the morning unless it is Bramble's.
+Work hours: Bots start new work from 7 AM to midnight Mountain; midnight to 7 AM is the requested Grok audit window. While the lanes' audits are paused (policy.yaml `work`), workers start new work at any hour. Bramble works at every hour. An ask filed at night waits for the morning unless it is Bramble's.
 
 ## 3. An ask from Patrick
 
