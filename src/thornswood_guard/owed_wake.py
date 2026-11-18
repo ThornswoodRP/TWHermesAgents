@@ -253,7 +253,8 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     morning = local is not None and local.hour >= MORNING_HOUR and state.get("morning") != today
     start, end = work_hours(policy)
     working = local is not None and start <= local.hour < end
-    idle_due = working and (now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
+    periodic_checked = state.get("all_workers_checked", state.get("idle_checked"))
+    idle_due = working and (now - float(periodic_checked or 0) >= IDLE_EVERY
                             or state.get("receipt_scan_pending", False))
     alert_due = now - float(state.get("alert_checked") or 0) >= ALERT_EVERY
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
