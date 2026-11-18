@@ -99,6 +99,8 @@ It checks everything first and writes nothing if any check fails; `--check` only
 
 The GPT6.2Sol upgrade also changes explicit auxiliary helpers on the Bot's old `openai-codex/gpt-6.1-sol` route to `gpt-6.2-sol`, when that new route is in its policy chain. Other helper settings remain and are still checked. The gateway, which has no Codex fallback, gains no route through this migration.
 
+The Bots' connector watches each local chat viewer for fifteen minutes. The gateway owns the accepted admission and can keep working after that viewer detaches. When the helper has reported its own exact submission receipt, that deadline confirms delivery, without claiming the turn finished or stopping its work. An init line, tool progress or an admission without that receipt does not prove delivery; conflicting receipts stay uncertain. A message left uncertain is never replayed automatically. Patrick's Stop and the worker hours are unchanged.
+
 ## The canary
 
 After each install the canary attacks the live VM with planted canary files: reading secrets, breaking the caps, escaping a container, and reaching a listener with no sign-in. It prints a `PASS` or `FAIL` line for each. On the VM:

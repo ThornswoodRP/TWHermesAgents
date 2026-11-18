@@ -1183,6 +1183,16 @@ def follow_turn(stream, seen: dict, tell, live: LiveTurn | None = None) -> None:
             sid = ev.get("session_id")
             if isinstance(sid, str) and SESSION_ID.match(sid):
                 seen["session"] = sid  # the chat's id, a new chat's too, while its first turn runs
+            aid = ev.get("admission_id")
+            if (ev["status"] in ("queued", "started") and isinstance(sid, str) and SESSION_ID.fullmatch(sid)
+                    and isinstance(aid, str) and SESSION_ID.fullmatch(aid)):
+                receipt = {"session": sid, "admission": aid}
+                before = seen.get("delivery_receipt")
+                if before is not None and before != receipt:
+                    seen.pop("delivery_receipt", None)
+                    seen["delivery_receipt_conflict"] = True
+                elif not seen.get("delivery_receipt_conflict"):
+                    seen["delivery_receipt"] = receipt
             if ev["status"] in ("steered", "redirected"):
                 seen["taken"] = ev["status"]
             state = (ADMISSIONS[ev["status"]], None)
