@@ -280,14 +280,14 @@ class ConnectorSide(unittest.TestCase):
             with self.subTest(brief=len(bad)), self.assertRaises(CoreError):
                 self.w.core.assign_task(self.w.bramble, "5549", "wisp", bad)
 
-    def test_no_new_work_is_handed_out_from_11_pm_to_6_am_mountain(self):
-        # Patrick, 9 Nov 2026: the Bots auto work 6 AM to 11 PM; at night the Grok lanes audit.
+    def test_no_new_work_is_handed_out_from_midnight_to_7_am_mountain(self):
+        # Patrick, 17 Nov 2026: the Bots auto work 7 AM to midnight; at night the Grok lanes audit.
         flags(self.w, "connector_effects")
-        self.w.core.work_hours = lambda: (6, 23)
-        cases = [(datetime(2026, 11, 9, 12, 59, tzinfo=timezone.utc), False),  # 5:59 AM MST
-                 (datetime(2026, 11, 9, 13, 0, tzinfo=timezone.utc), True),    # 6:00 AM
-                 (datetime(2026, 11, 10, 5, 59, tzinfo=timezone.utc), True),   # 10:59 PM
-                 (datetime(2026, 11, 10, 6, 0, tzinfo=timezone.utc), False)]   # 11:00 PM
+        self.w.core.work_hours = lambda: (7, 24)
+        cases = [(datetime(2026, 11, 9, 13, 59, tzinfo=timezone.utc), False),  # 6:59 AM MST
+                 (datetime(2026, 11, 9, 14, 0, tzinfo=timezone.utc), True),    # 7:00 AM
+                 (datetime(2026, 11, 10, 6, 59, tzinfo=timezone.utc), True),   # 11:59 PM
+                 (datetime(2026, 11, 10, 7, 0, tzinfo=timezone.utc), False)]   # midnight
         for n, (t, ok) in enumerate(cases):
             self.w.clock.t = t
             with self.subTest(t=t.isoformat()):
@@ -301,9 +301,39 @@ class ConnectorSide(unittest.TestCase):
         self.assertFalse(self.w.core.assign_task(self.w.bramble, "70", "echo")["queued"])
         # While the lanes' audits are paused, a brief goes at any hour (Patrick, 11 Nov 2026, 11:22 PM).
         from thornswood_guard.hours import work_hours
-        self.w.core.work_hours = lambda: work_hours({"work": {"hours": [6, 23], "lanes_audit_overnight": False}})
-        self.w.clock.t = datetime(2026, 11, 10, 6, 30, tzinfo=timezone.utc)  # 11:30 PM
+        self.w.core.work_hours = lambda: work_hours({"work": {"hours": [7, 24], "lanes_audit_overnight": False}})
+        self.w.clock.t = datetime(2026, 11, 10, 7, 30, tzinfo=timezone.utc)  # 12:30 AM
         self.assertTrue(self.w.core.assign_task(self.w.bramble, "71", "echo", "Do it.")["queued"])
+
+    def test_policy_shift_boundaries_use_mountain_time_including_dst(self):
+        from zoneinfo import ZoneInfo
+        flags(self.w, "connector_effects")
+        zone = ZoneInfo("America/Denver")
+        # Standard time, daylight time, and both transition dates. The real
+        # policy lookup and the real assignment gate are used, not a stub.
+        for day in ((2026, 11, 17), (2026, 7, 15), (2026, 3, 8), (2026, 11, 1)):
+            for hour, minute, allowed in ((6, 59, False), (7, 0, True), (23, 59, True), (0, 0, False)):
+                local = datetime(*day, hour, minute, tzinfo=zone)
+                self.w.clock.t = local.astimezone(timezone.utc)
+                with self.subTest(local=local.isoformat()):
+                    task = local.isoformat()
+                    if allowed:
+                        self.assertTrue(self.w.core.assign_task(self.w.bramble, task, "echo", "Do it.")["queued"])
+                    else:
+                        with self.assertRaises(CoreError) as e:
+                            self.w.core.assign_task(self.w.bramble, task, "echo", "Do it.")
+                        self.assertEqual(e.exception.reason, "after_hours")
+
+    def test_active_task_acknowledgment_can_complete_after_midnight(self):
+        flags(self.w, "connector_effects")
+        self.w.clock.t = datetime(2026, 11, 18, 6, 59, tzinfo=timezone.utc)  # 11:59 PM MST
+        self.assertTrue(self.w.core.assign_task(self.w.bramble, "night-finish", "echo", "Finish this issue.")["queued"])
+        item = self.chat.claim(self.w.ws, self.tok)["items"][0]
+        self.assertEqual(item["target"], "echo")
+        self.w.clock.t += timedelta(minutes=2)
+        self.chat.result(self.w.ws, self.tok, item["id"], "confirmed", "turn finished")
+        self.assertEqual(self.w.store.db.execute("SELECT status FROM connector_outbox WHERE id = ?",
+                                                 (item["id"],)).fetchone()[0], "sent")
 
     def test_the_bot_that_asked_is_told_and_that_is_bot_told(self):
         flags(self.w, "connector_effects")
