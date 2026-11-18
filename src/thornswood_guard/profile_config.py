@@ -198,6 +198,19 @@ def merge_into(existing: dict, ours: dict) -> dict:
             out[key] = value
         else:
             out[key] = merge_into(out[key], value)
+    # The 17 Nov GPT6.2Sol upgrade also moves previously valid explicit
+    # Codex helper choices. Otherwise apply preserves 6.1, then its new
+    # route check refuses the whole profile. Do this only when our chain
+    # authorizes 6.2, and preserve every other helper setting for validation.
+    upgraded = any(isinstance(r, dict) and r.get("provider") == "openai-codex"
+                   and r.get("model") == "gpt-6.2-sol" for r in ours.get("fallback_providers", []))
+    if upgraded and isinstance(out.get("auxiliary"), dict):
+        helpers = dict(out["auxiliary"])
+        for name, helper in helpers.items():
+            if (isinstance(helper, dict) and str(helper.get("provider") or "").strip().lower() == "openai-codex"
+                    and helper.get("model") == "gpt-6.1-sol"):
+                helpers[name] = {**helper, "model": "gpt-6.2-sol"}
+        out["auxiliary"] = helpers
     return out
 
 

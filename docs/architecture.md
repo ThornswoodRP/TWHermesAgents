@@ -17,7 +17,7 @@ The Bots are six profiles in one Hermes install, under `/home/hermes/.hermes/pro
 
 Each Bot's config is built from the policy by `src/thornswood_guard/profile_config.py` and set by `scripts/apply.py`. The generated copies in `hermes/profiles/` are what gets set, for reading in review. Every Bot has:
 
-- the same model order: Claude (`claude-opus-5-5`) through Patrick's subscription sign-in first, then OpenAI Codex (`gpt-6.1-sol`). No provider that bills by use is allowed in a config;
+- the same model order: Claude (`claude-opus-5-5`) through Patrick's subscription sign-in first, then OpenAI Codex (`gpt-6.2-sol`). ChatGPT keeps the same issue priority, work scope, investigation and verification as Claude; a fallback never selects smaller or less important work because of its provider (Patrick, 17 Nov 2026). No provider that bills by use is allowed in a config;
 - the toolsets it may never use turned off (browser, code execution, computer use, image and video generation, Discord admin and the rest in `policy.yaml` `toolsets`), and for the five workers, cron as well; web search and page reading are on (15 Nov 2026);
 - its terminal, file and code calls run in a rootless podman container (Hermes's docker backend) that sees only the Bot's own working folder at `/workspace`, reaches the public internet and nothing of the VM, its network or the tailnet (`policy.yaml` `tier_a_network`), with one core and 2 GB;
 - two plugins: `thornswood_guard` and `thornswood_live`;

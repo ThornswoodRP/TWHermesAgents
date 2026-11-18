@@ -2,6 +2,7 @@
 decision records. The phone push's rules are the decision core's
 (src/thornswood_decisions/push.py, tests/test_decisions_push.py)."""
 
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -40,6 +41,16 @@ class Routes(unittest.TestCase):
         self.assertEqual(next_route(self.p, "bramble", "high", {"max"}, **kw), "chatgpt")
         for bot in WORKERS:
             self.assertEqual(next_route(self.p, bot, "low", {"max"}, **kw), "chatgpt")
+
+    def test_chatgpt_uses_gpt62_sol_without_reducing_the_work_class(self):
+        for bot in ("bramble",) + WORKERS:
+            with self.subTest(bot=bot):
+                fallback = next(r for r in build(self.p, bot)["fallback_providers"]
+                                if r["provider"] == "openai-codex")
+                self.assertEqual(fallback["model"], "gpt-6.2-sol")
+                for risk in ("low", "high"):
+                    self.assertEqual(next_route(self.p, bot, risk, {"max", "credits"},
+                                                one_on=True, proxy_ready=True), "chatgpt")
 
     def test_two_claude_limits_are_apart(self):
         kw = dict(one_on=True, proxy_ready=True)
@@ -108,8 +119,45 @@ class Routes(unittest.TestCase):
         cfg["auxiliary"]["vision"]["base_url"] = "https://example.invalid/v1"
         self.assertTrue(any("auxiliary.vision.base_url is set" in x for x in check_config(self.p, "rift", cfg, set())))
         cfg = build(self.p, "rift")
-        cfg["auxiliary"]["session_search"] = {"provider": "openai-codex", "model": "gpt-6.1-sol"}
+        cfg["auxiliary"]["session_search"] = {"provider": "openai-codex", "model": "gpt-6.2-sol"}
         self.assertEqual(check_config(self.p, "rift", cfg, set()), [])
+
+    def test_old_codex_helper_models_move_with_the_authorized_route(self):
+        for bot in ("bramble",) + WORKERS:
+            with self.subTest(bot=bot):
+                existing = build(self.p, bot)
+                existing["auxiliary"]["session_search"] = {
+                    "provider": "openai-codex", "model": "gpt-6.1-sol", "timeout": 17}
+                before = copy.deepcopy(existing)
+                merged = merge_into(existing, build(self.p, bot))
+                self.assertEqual(merged["auxiliary"]["session_search"], {
+                    "provider": "openai-codex", "model": "gpt-6.2-sol", "timeout": 17})
+                self.assertEqual(existing, before)
+                self.assertEqual(check_config(self.p, bot, merged, set()), [])
+
+    def test_helper_model_migration_does_not_clean_an_untrusted_address(self):
+        existing = build(self.p, "rift")
+        existing["auxiliary"]["session_search"] = {
+            "provider": "openai-codex", "model": "gpt-6.1-sol",
+            "base_url": "https://example.invalid/v1"}
+        merged = merge_into(existing, build(self.p, "rift"))
+        self.assertTrue(any("base_url is set" in why for why in check_config(self.p, "rift", merged, set())))
+
+    def test_helper_model_migration_requires_the_new_route(self):
+        from thornswood_guard.profile_config import build_gateway
+        existing = {"auxiliary": {"session_search": {"provider": "openai-codex", "model": "gpt-6.1-sol"}}}
+        merged = merge_into(existing, build_gateway(self.p))
+        self.assertEqual(merged["auxiliary"]["session_search"]["model"], "gpt-6.1-sol")
+
+    def test_helper_model_migration_uses_the_validators_provider_normalization(self):
+        for provider in ("OPENAI-CODEX", " OpenAI-Codex "):
+            with self.subTest(provider=provider):
+                existing = build(self.p, "rift")
+                existing["auxiliary"]["session_search"] = {"provider": provider, "model": "gpt-6.1-sol"}
+                merged = merge_into(existing, build(self.p, "rift"))
+                self.assertEqual(merged["auxiliary"]["session_search"], {
+                    "provider": provider, "model": "gpt-6.2-sol"})
+                self.assertEqual(check_config(self.p, "rift", merged, set()), [])
 
     def test_the_gateways_own_profile_keeps_to_one_route(self):
         from thornswood_guard.profile_config import build_gateway
@@ -118,8 +166,8 @@ class Routes(unittest.TestCase):
         self.assertEqual(check_gateway_config(self.p, cfg, set()), [])
         self.assertEqual(cfg["fallback_providers"], [])
         bad = build_gateway(self.p)
-        bad["fallback_providers"] = [{"provider": "openai-codex", "model": "gpt-6.1-sol"}]
-        self.assertTrue(check_gateway_config(self.p, bad, set()))
+        bad["fallback_providers"] = [{"provider": "openai-codex", "model": "gpt-6.2-sol"}]
+        self.assertTrue(any("route order" in why for why in check_gateway_config(self.p, bad, set())))
         bad = build_gateway(self.p)
         bad["auxiliary"]["vision"] = {"provider": "nous", "model": ""}
         self.assertTrue(any("not one of" in x for x in check_gateway_config(self.p, bad, set())))
@@ -140,9 +188,11 @@ class Routes(unittest.TestCase):
 
     def test_wrong_order_is_caught(self):
         cfg = build(self.p, "wisp")
-        cfg["model"], cfg["fallback_providers"] = {"provider": "openai-codex", "default": "gpt-6.1-sol"}, [
-            {"provider": "anthropic", "model": "claude-opus-5-5"}]
-        self.assertTrue(check_config(self.p, "wisp", cfg, set()))
+        primary = cfg["model"]
+        fallback = cfg["fallback_providers"][0]
+        cfg["model"] = {"provider": fallback["provider"], "default": fallback["model"]}
+        cfg["fallback_providers"][0] = {"provider": primary["provider"], "model": primary["default"]}
+        self.assertTrue(any("route order" in why for why in check_config(self.p, "wisp", cfg, set())))
 
     def test_credits_stop_at_the_margin_of_200_a_month(self):
         self.assertTrue(credits_open(self.p, 0).allowed)
