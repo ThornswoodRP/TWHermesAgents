@@ -71,6 +71,8 @@ For each of the six profiles under `/home/hermes/.hermes/profiles/`, and for the
 
 It checks everything first and writes nothing if any check fails; `--check` only reports. It records the applied commit in each profile's `local/thornswood-hermes/applied.json`.
 
+The GPT6.2Sol upgrade also changes explicit auxiliary helpers on the Bot's old `openai-codex/gpt-6.1-sol` route to `gpt-6.2-sol`, when that new route is in its policy chain. Other helper settings remain and are still checked. The gateway, which has no Codex fallback, gains no route through this migration.
+
 ## The canary
 
 After each install the canary attacks the live VM with planted canary files: reading secrets, breaking the caps, escaping a container, and reaching a listener with no sign-in. It prints a `PASS` or `FAIL` line for each. On the VM:

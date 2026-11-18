@@ -12,7 +12,7 @@ model:
   default: claude-opus-5-5
 fallback_providers:
 - provider: openai-codex
-  model: gpt-6.1-sol
+  model: gpt-6.2-sol
 - provider: custom
   model: qwen3.5-9b
   base_url: http://127.0.0.1:8611/qwen/v1

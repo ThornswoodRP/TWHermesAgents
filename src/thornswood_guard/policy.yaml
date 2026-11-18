@@ -327,7 +327,9 @@ routes:
       cache_write_1h: 8.00
   - id: chatgpt
     provider: openai-codex
-    model: gpt-6.1-sol
+    model: gpt-6.2-sol
+    # Patrick, 17 Nov 2026: ChatGPT does the same level of work as Claude.
+    # Fallback changes the provider, not the issue's scope or priority.
     who: all
     risk: any
   - id: qwen
