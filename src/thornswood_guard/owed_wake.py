@@ -718,7 +718,12 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                            parked) or busy
         if not busy:
             free.append(w)
-    stopped = _stopped(bot, ask, [w for w in workers if w not in free and w not in ambiguous], now)
+    busy = set(workers) - set(free)
+    idle = _stopped(bot, ask, [w for w in workers if w in busy or w in ambiguous], now,
+                    require_verified=ambiguous)
+    recovered = busy & ambiguous & set(idle)
+    free = [w for w in workers if (w in free and w not in ambiguous) or (w in ambiguous and w in idle)]
+    stopped = {w: last for w, last in idle.items() if w in busy and w not in ambiguous}
     said = review_lines[:5]
     if len(review_lines) > 5:
         said.append(f"{len(review_lines) - 5} more receipt outcomes remain held for review.")
@@ -728,6 +733,10 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     if review_lines:
         said.append("Review these outcomes without replaying an old brief. Historical ambiguity is not a worker pause; "
                     "only fresh checked issue refs below may be assigned, subject to Patrick's explicit pause or Stop.")
+    if recovered:
+        said.append(f"{', '.join(sorted(recovered))} have no running or waiting turn and no queued delivery. "
+                    "Keep their prior claims and ambiguous old briefs for review; only a separate checked unclaimed "
+                    "issue below may be assigned. Do not resume or release the prior claims from this notice.")
     if parked:
         said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
                     "each holds a claimed issue with no pull request that it has moved on from (it opened a "
@@ -781,12 +790,14 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                 raise BrokerRefused("the checked candidate issue reference is malformed")
             candidates.append(f"Checked next issue for {worker}: {item['repo']}#{item['number']}.")
     direction = " Only pick these checked issue refs; recheck claim eligibility before assigning. Never replay a held receipt."
+    capacity = (f"{', '.join(free)} have capacity for checked new issues"
+                if recovered else f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits)")
     if fed:
-        return [*said, *candidates, f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits), and "
+        return [*said, *candidates, capacity + ", and "
                 f"open unclaimed issues are in the field of {', '.join(fed)}"
                 + ": pick for each free worker from the checked refs (bramble-duties, section 6)." + direction]
     if shared:
-        return [*said, *candidates, f"{', '.join(free)} hold no active issue, and open unclaimed issues are picked by the "
+        return [*said, *candidates, capacity + ", and open unclaimed issues are picked by the "
                 "part they name: pick for the free workers (bramble-duties, section 6)." + direction]
     if said:
         return said
@@ -902,7 +913,8 @@ def _when(iso: str) -> float:
         return 0.0
 
 
-def _stopped(bot: str, ask: Caller, busy: list[str], now: float) -> dict[str, str | None]:
+def _stopped(bot: str, ask: Caller, busy: list[str], now: float, *,
+             require_verified: set[str] | frozenset[str] = frozenset()) -> dict[str, str | None]:
     """Each busy worker with no model turn running, none in line and no
     message queued for it in the decision core, with when its last turn was
     heard from (None when it never ran one). A worker works an issue only
@@ -910,18 +922,27 @@ def _stopped(bot: str, ask: Caller, busy: list[str], now: float) -> dict[str, st
     turn ended (until 11 Nov 2026 it also had to be quiet for IDLE_EVERY,
     and a worker that handed back blocked waited up to two hours for its
     next issue). tw-policy or tw-decide not answering finds none: that costs
-    one look."""
+    one look. Workers in require_verified need explicit false runtime flags
+    and a valid queue counter before they may receive a separate new issue;
+    absent legacy activity fields are not proof of idle capacity."""
     if not busy:
         return {}
     try:
-        turns = (ask("policy", "bot_turns", {"bot": bot}) or {}).get("bots") or {}
-        queued = (ask("decide", "queued_for", {"bot": bot}) or {}).get("bots") or {}
+        turn_reply = ask("policy", "bot_turns", {"bot": bot})
+        queue_reply = ask("decide", "queued_for", {"bot": bot})
+        if (not isinstance(turn_reply, dict) or not isinstance(turn_reply.get("bots"), dict)
+                or not isinstance(queue_reply, dict) or not isinstance(queue_reply.get("bots"), dict)):
+            return {}
+        turns, queued = turn_reply["bots"], queue_reply["bots"]
     except BrokerRefused:
         return {}
     out = {}
     for w in busy:
         t = turns.get(w)
         if not isinstance(t, dict) or t.get("running") or t.get("waiting") or queued.get(w):
+            continue
+        if w in require_verified and (t.get("running") is not False or t.get("waiting") is not False
+                or not isinstance(queued.get(w, 0), int) or isinstance(queued.get(w, 0), bool)):
             continue
         out[w] = t.get("last")
     return out

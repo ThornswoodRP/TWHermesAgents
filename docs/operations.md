@@ -18,6 +18,11 @@ explicit assignment for the same task transfers the hold to that receipt;
 confirmed delivery releases it. An incomplete legacy reference is
 reported as ambiguous and suppresses generic continuation of an unidentified
 old task. It does not pause that worker or bar a fresh checked eligible issue.
+For a worker still holding a claim, explicit runtime flags must show no
+running or waiting turn and the core queue must show no delivery in flight.
+Then the wake may offer a separate canonical unclaimed issue. The old claims
+and briefs remain for review; the wake neither resumes nor releases them.
+Unknown or unavailable runtime metadata offers no new issue through this path.
 These summaries contain identifiers,
 status and timestamps, never briefs or chat. This is delivery bookkeeping,
 never proof of task completion.
