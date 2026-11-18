@@ -9,6 +9,11 @@ with each field filtered before the result limit. Running or queued work
 coalesces the check. The existing admission caps, work hours and explicit
 pause or Stop still apply. Source failures retain observations and defer
 passive retries for an hour without a model turn for the failure itself.
+The hourly full-worker cadence uses the last full-worker check, independently
+of recent partial checks for pending workers or hand-backs. Those partial
+checks cannot postpone other fields indefinitely. Older state without a
+full-check timestamp keeps its existing last-check cadence until the first
+full refresh. Hours, admission and source-failure backoff still take priority.
 
 A cancelled or uncertain receipt is reviewed by its canonical task reference,
 never replayed. That exact issue is excluded from fresh eligibility while a
