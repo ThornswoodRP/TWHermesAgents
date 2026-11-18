@@ -8,8 +8,9 @@ runs only when a wake is owed and the queue would admit it now.
 
 Hermes runs the agent when the script fails or times out, with the error as
 its context (cron/scheduler.py, the wake gate), so this check never fails:
-every error ends in {"wakeAgent": false}, and each broker call gives up after
-ASK_SECONDS, well inside Hermes's script timeout.
+every error ends in {"wakeAgent": false}. Control calls give up after
+ASK_SECONDS; the complete grouped board read uses the standard broker
+full-read deadline. Both stay inside the pinned Hermes script timeout.
 
 A wake the fleet queue turned away is owed in tw-policy (brokers.TurnGate).
 When tw-policy itself did not answer, the turn left the debt in OWED_FILE in
