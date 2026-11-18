@@ -196,9 +196,9 @@ ORDER BY at DESC LIMIT 1
 
 def bot_route(state_db: Path) -> dict | None:
     """Latest observed main-loop model/provider; a fallback prefix only when Hermes confirms that route."""
-    if not state_db.exists():
-        return None
     try:
+        if not state_db.exists():
+            return None
         con = _ro(state_db)
         try:
             try:

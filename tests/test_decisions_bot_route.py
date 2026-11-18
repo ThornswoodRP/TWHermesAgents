@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import REPO  # sets up this checkout's src
 from thornswood_decisions.feed_reader import bot_route
@@ -83,6 +84,11 @@ class ActualBotRoute(unittest.TestCase):
         with sqlite3.connect(self.db) as con:
             con.execute("ALTER TABLE session_model_usage RENAME COLUMN task TO future_task")
         self.assertEqual(bot_route(self.db)["model"], "gpt-6.1-sol")
+
+    def test_unreadable_parent_gives_no_route_on_python_312(self):
+        # Python 3.12 Path.exists propagates EACCES; only later Python suppresses all OSError.
+        with mock.patch.object(Path, "exists", side_effect=PermissionError("metadata unavailable")):
+            self.assertIsNone(bot_route(self.db))
 
     def test_corrupt_store_gives_no_route(self):
         self.db.write_bytes(b"not a sqlite database")
