@@ -1037,11 +1037,14 @@ def say(line) -> None:
         sys.stdout.flush()
 
 
-def announce(status: str, session_id=None) -> None:
+def announce(status: str, session_id=None, admission_id=None) -> None:
     # With the chat's id: a new chat has none until Hermes makes it, and the app goes into it from here, while
     # its first turn runs, not once that turn ends (10 Nov: a long first turn sat on "Sending" with no chat).
+    valid_session = isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", session_id)
+    valid_admission = isinstance(admission_id, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", admission_id)
     say({"type": "admission", "status": status,
-         **({"session_id": session_id[:128]} if isinstance(session_id, str) and session_id else {})})
+         **({"session_id": session_id} if valid_session else {}),
+         **({"admission_id": admission_id} if valid_session and valid_admission else {})})
 
 
 def steerable(text, has_file: bool) -> bool:
@@ -1336,7 +1339,9 @@ def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None,
             receipt = await super().submit(text)
             status = (receipt or {}).get("status")
             if status in ("started", "queued"):
-                announce(status, self.session_id)
+                # Only this submit's authoritative receipt, never the admission
+                # already running when a message was steered into its turn.
+                announce(status, self.session_id, receipt.get("admission_id"))
                 self._queued = (receipt.get("admission_id") if status == "queued" else None)
             return receipt
 
@@ -1375,7 +1380,7 @@ def follow_busy_setting(has_file: bool, orders=None, photos: list | None = None,
             if mine and any(isinstance(r, dict) and r.get("admission_id") == mine and r.get("status") == "started"
                             for r in self.pending):
                 self._queued = None
-                announce("started", self.session_id)
+                announce("started", self.session_id, mine)
 
     gateway_chat_view.GatewayChatView = BusyAware
 

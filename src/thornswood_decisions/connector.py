@@ -66,7 +66,10 @@ each change, a few times a second at most, held by the core in memory only.
 For each message, it tells the core what came of it (`POST /api/v1/connector/result`):
 confirmed only when Hermes said so, failed only when nothing was sent, and
 uncertain for everything else. An uncertain message is never sent again by
-itself. A gateway that is not ready (it is starting, stopped, being reloaded by
+itself. At the local viewer's deadline, an exact receipt for its own queued or
+started admission confirms delivery only. The gateway owns that work and may
+keep running after the viewer detaches; this is never reported as turn finished.
+A gateway that is not ready (it is starting, stopped, being reloaded by
 an install, or its check did not answer in time) is not a failure of the message:
 nothing was sent, so the outcome is not_ready and the core puts the message back
 in the queue as it was. The connector then claims nothing more until that
@@ -697,6 +700,11 @@ class Hermes:
         if sid is not None and seen.get("taken"):
             return "confirmed", f"{seen['taken']} into the running turn", ""
         if how == "timeout":
+            if seen.get("delivery_receipt"):
+                # The deadline bounds this local viewer. Hermes owns the exact
+                # accepted admission and can keep working after it detaches.
+                # Confirm delivery, never task completion or a reason to replay.
+                return "confirmed", "handed to Hermes; its turn may still be running", ""
             return "uncertain", "", "no end to the Bot's turn in 15 minutes; it may have the message"
         if code == NOT_STARTED:
             return "failed", "", "could not start the hermes command"

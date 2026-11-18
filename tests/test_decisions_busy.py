@@ -154,6 +154,15 @@ class TheTurn(unittest.TestCase):
         methods, _, said, _ = self.run_turn(running=False)
         self.assertEqual((methods, said), (["prompt.submit"], ["started"]))
 
+    def test_only_our_own_submission_receipt_is_exported_for_delivery(self):
+        for running in (False, True):
+            self.run_turn(busy="queue", running=running)
+            admissions = [line for line in self.lines if line["type"] == "admission"]
+            self.assertTrue(admissions)
+            self.assertTrue(all(line.get("admission_id") == "a2" for line in admissions), admissions)
+        self.run_turn(busy="steer", running=True)
+        self.assertTrue(all("admission_id" not in line for line in self.lines if line["type"] == "admission"))
+
     def test_a_file_a_slash_command_or_a_parked_turn_always_queues(self):
         for kw in ({"extra": ("--tw-files",)}, {"text": "/model gpt"}, {"parked": True}):
             methods, _, said, _ = self.run_turn(busy="interrupt", **kw)
