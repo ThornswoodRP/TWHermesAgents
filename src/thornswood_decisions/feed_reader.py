@@ -166,11 +166,24 @@ def bot_chat(state_db: Path) -> dict | None:
          "at": _iso(r["timestamp"])} for r in reversed(rows)]}
 
 
-# The model a Bot's newest turn ran on. After each turn the gateway writes the model it really used on that
-# session's row, with the route it took in model_config.gateway_runtime: its provider and fallback_active,
-# true while Hermes has moved the session off its main model (Hermes 0.23.0
-# gateway/run_turn_prepare.py _sync_session_model_from_agent, called from gateway/run_turn_runner.py after a
-# turn). So the newest such row says what the Bot is on now, a fallback included, in Hermes's own words.
+# Hermes's own get_recent_session_model_route (hermes_state_sessions.py) reads per-call main-loop usage,
+# ordered by last_seen then rowid. A resumed session can retain its first-accounted sessions.model while
+# its current calls use another model. Auxiliary calls have a nonempty task and never name the Bot's route.
+USAGE_ROUTE_SQL = """
+SELECT u.model, u.billing_provider AS provider, u.last_seen AS at,
+  s.model AS snapshot_model,
+  CASE WHEN json_valid(s.model_config) THEN json_extract(s.model_config, '$.gateway_runtime.provider') END
+    AS snapshot_provider,
+  CASE WHEN json_valid(s.model_config) THEN json_type(s.model_config, '$.gateway_runtime.fallback_active') END
+    AS snapshot_fallback
+FROM session_model_usage u LEFT JOIN sessions s ON s.id = u.session_id
+WHERE u.task = '' AND u.model IS NOT NULL AND u.model NOT IN ('', 'unknown')
+  AND u.billing_provider IS NOT NULL AND u.billing_provider != ''
+ORDER BY u.last_seen DESC, u.rowid DESC LIMIT 1
+"""
+
+# Older Hermes stores have only the completed gateway-turn snapshot. Keep that reader when no per-call
+# main-loop route is available; it remains historical evidence, never a requested but unused model.
 ROUTE_SQL = """
 SELECT model, json_extract(model_config, '$.gateway_runtime.provider') AS provider,
   json_extract(model_config, '$.gateway_runtime.fallback_active') AS fallback,
@@ -182,18 +195,32 @@ ORDER BY at DESC LIMIT 1
 
 
 def bot_route(state_db: Path) -> dict | None:
-    """The model, provider and fallback state of one profile's newest turn; None before its first turn."""
+    """Latest observed main-loop model/provider; a fallback prefix only when Hermes confirms that route."""
     if not state_db.exists():
         return None
-    con = _ro(state_db)
     try:
-        r = con.execute(ROUTE_SQL).fetchone()
-    finally:
-        con.close()
-    if not r:
-        return None
-    return {"model": str(r["model"]), "provider": str(r["provider"] or ""), "fallback": r["fallback"] in (1, True),
-            "at": _iso(r["at"])}
+        con = _ro(state_db)
+        try:
+            try:
+                r = con.execute(USAGE_ROUTE_SQL).fetchone()
+            except sqlite3.OperationalError:
+                r = None  # absent/older usage schema: the legacy snapshot can still be read
+            if r:
+                # Do not attach an old route's fallback flag to a different observed model/provider.
+                confirmed_fallback = (r["snapshot_model"] == r["model"]
+                                      and r["snapshot_provider"] == r["provider"]
+                                      and r["snapshot_fallback"] == "true")
+                return {"model": str(r["model"]), "provider": str(r["provider"]),
+                        "fallback": confirmed_fallback, "at": _iso(r["at"])}
+            r = con.execute(ROUTE_SQL).fetchone()
+            if r:
+                return {"model": str(r["model"]), "provider": str(r["provider"] or ""),
+                        "fallback": r["fallback"] in (1, True), "at": _iso(r["at"])}
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError, TypeError, OverflowError):
+        return None  # unavailable/corrupt metadata is unknown; it must not stop the Bot Chat feed
+    return None
 
 
 def bots_snapshot(hermes_home: Path, bots: list[str], now: datetime) -> dict:
