@@ -82,6 +82,28 @@ class IdleAmbiguousClaims(unittest.TestCase):
         self.assertNotIn(f"Checked next issue for echo: {POLICY['repos']['app']}#9000.", out)
         self.assertIn("echo", observed["workers"])
 
+    def test_mixed_parked_and_active_ambiguous_claims_are_kept_without_generic_recovery(self):
+        self.b.claimed["claimed: Echo"] = 2
+        self.b.pulls = [{"head": {"ref": "echo/12345-newer"}, "state": "open",
+                         "created_at": "2026-11-09T18:00:00Z", "updated_at": "2026-11-09T18:00:00Z"}]
+        def broker(kind, op, args):
+            reply = self.b(kind, op, args)
+            if op == "read" and "/search/issues" in args["path"]:
+                for issue in reply["body"].get("items", []):
+                    if {"name": "claimed: Echo"} in issue.get("labels", []):
+                        issue["created_at"] = "2026-11-01T00:00:00Z"
+                        issue["updated_at"] = ("2026-11-09T17:00:00Z" if issue["number"] == 300
+                                               else "2026-11-09T19:00:00Z")
+            return reply
+        before = copy.deepcopy(self.b.claimed)
+        out, observed = self.look(broker)
+        self.assertIn("Checked next issue for echo:", out)
+        self.assertIn("echo", observed["workers"])
+        self.assertIn("prior claims", out)
+        self.assertNotIn("each holds a claimed issue with no pull request that it has moved on from", out)
+        self.assertNotIn("otherwise tell it to carry on", out)
+        self.assertEqual(self.b.claimed, before)
+
     def test_unavailable_runtime_metadata_cannot_be_treated_as_verified_idle(self):
         for unavailable in ("policy", "decide"):
             def broker(kind, op, args):

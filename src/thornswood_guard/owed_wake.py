@@ -721,7 +721,8 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     busy = set(workers) - set(free)
     idle = _stopped(bot, ask, [w for w in workers if w in busy or w in ambiguous], now,
                     require_verified=ambiguous)
-    recovered = busy & ambiguous & set(idle)
+    review_capacity = ambiguous & set(idle)
+    recovered = busy & review_capacity
     free = [w for w in workers if (w in free and w not in ambiguous) or (w in ambiguous and w in idle)]
     stopped = {w: last for w, last in idle.items() if w in busy and w not in ambiguous}
     said = review_lines[:5]
@@ -733,12 +734,13 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     if review_lines:
         said.append("Review these outcomes without replaying an old brief. Historical ambiguity is not a worker pause; "
                     "only fresh checked issue refs below may be assigned, subject to Patrick's explicit pause or Stop.")
-    if recovered:
-        said.append(f"{', '.join(sorted(recovered))} have no running or waiting turn and no queued delivery. "
+    if review_capacity:
+        said.append(f"{', '.join(sorted(review_capacity))} have no running or waiting turn and no queued delivery. "
                     "Keep their prior claims and ambiguous old briefs for review; only a separate checked unclaimed "
                     "issue below may be assigned. Do not resume or release the prior claims from this notice.")
-    if parked:
-        said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked[w])) for w in sorted(parked))}: "
+    parked_guidance = {w: numbers for w, numbers in parked.items() if w not in ambiguous}
+    if parked_guidance:
+        said.append(f"{'; '.join(w + ' ' + ', '.join(f'#{n}' for n in sorted(parked_guidance[w])) for w in sorted(parked_guidance))}: "
                     "each holds a claimed issue with no pull request that it has moved on from (it opened a "
                     "pull request for another issue since the issue last changed), so it is not working it: "
                     "comment what it waits on and take the claim off, or send it back to the worker as its "
