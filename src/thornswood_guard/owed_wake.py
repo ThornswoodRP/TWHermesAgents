@@ -409,8 +409,7 @@ def _pending_workers(state: dict, policy: dict) -> dict[str, float] | None:
 
 
 def _forget_workers(state: dict) -> None:
-    for key in ("said_at", "said", "pending_workers", "pending_reviews", "progress_workers",
-                "progress_retry_after", "review_retry_after"):
+    for key in ("said_at", "said", "pending_workers", "progress_workers", "progress_retry_after"):
         state.pop(key, None)
 
 
@@ -534,10 +533,6 @@ def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tu
             if not pending:
                 _forget_workers(state)
                 return False, None
-            state["pending_reviews"] = {w: queued["attempts"][w] for w, at in pending.items()
-                                        if _receipt_after(queued["attempts"].get(w), at)
-                                        and queued["attempts"][w].get("status") in
-                                        ("dead", "uncertain", "cancelled", "quarantined")}
             if any(not isinstance(turns.get(w), dict) for w in pending):
                 raise BrokerRefused("the worker activity metadata is unavailable")
             available = [w for w in pending if not queued["bots"].get(w)
@@ -713,8 +708,6 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
         else:
             task = "an unidentified legacy task"
             ambiguous.add(worker)
-            if observed is not None:
-                observed.setdefault("ambiguous", set()).add(worker)
         if worker not in workers:
             continue  # holds apply globally; prose is scoped to this scan
         review_lines.append(f"{worker}'s receipt {receipt['id']} is {receipt['status']} for {task}.")
