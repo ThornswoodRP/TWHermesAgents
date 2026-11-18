@@ -21,6 +21,16 @@ review; the others remain available. These summaries contain identifiers,
 status and timestamps, never briefs or chat. This is delivery bookkeeping,
 never proof of task completion.
 
+An incremental private receipt scan reads at most four pages of 32 unseen
+non-sent assignments per check, so multiple outcomes between ticks are kept
+even when they belong to the same worker. Larger catch-up scans continue at
+the next check before an eligibility conclusion. Exact issue references are
+deduplicated and filtered against the actual board snapshot, under the
+existing IPC message-size bound. Only a board item explicitly read CLOSED
+releases a closed-issue hold; absent or redacted items do not. Nullable unset
+project fields are legitimate non-Todo items, while a missing selected field
+is incomplete source data.
+
 Once the first install is done ([setup.md](setup.md)), the VM looks after itself: it installs each merge to `main`, backs itself up every night and checks its own limits at every boot. This page is for watching it and stepping in.
 
 ## Updates

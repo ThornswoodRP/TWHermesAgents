@@ -111,6 +111,7 @@ class Idle:
         self.queued = {}
         self.dispatches, self.attempts = {}, {}
         self.receipt_rows = {}
+        self.scan_rows = []
         self.asked = []
 
     def __call__(self, broker, op, args):
@@ -128,7 +129,11 @@ class Idle:
                                      for worker, row in [*self.dispatches.items(), *self.attempts.items(),
                                                          *((r["target"], r) for r in self.receipt_rows.values())]
                                      if row["id"] in args["receipts"]}}
-                       if "receipts" in args else {})}
+                       if "receipts" in args else {}),
+                    **({"outcomes": self.scan_rows[args["scan_after"]:args["scan_after"] + 32],
+                        "scan_after": min(len(self.scan_rows), args["scan_after"] + 32),
+                        "scan_more": len(self.scan_rows) > args["scan_after"] + 32}
+                       if "scan_after" in args else {})}
         if op == "turn_room":
             return {"room": self.room, "why_not": "" if self.room else "bramble started 50 turns in the last hour; each Bot starts at most 50 an hour"}
         if op == "board":

@@ -356,6 +356,18 @@ class BotRoute:
                                                                "issue": issue_ref(r["newer_task"])}
                                                               if r["newer_id"] else None)}
                                        for r in rows if r["target"] in self.bots}
+        if "scan_after" in args:
+            cursor = args["scan_after"]
+            if not isinstance(cursor, int) or isinstance(cursor, bool) or not 0 <= cursor < 2**63:
+                raise CoreError(400, "bad_scan", "scan_after is a nonnegative receipt scan cursor")
+            rows = self.store.db.execute(
+                "SELECT rowid AS cursor,id,target,status,created_at,json_extract(body_json,'$.task') AS task "
+                "FROM connector_outbox WHERE workspace_id=? AND kind='task.assigned' AND rowid>? "
+                "AND status!='sent' ORDER BY rowid LIMIT 33", (self.ws, cursor)).fetchall()
+            result["outcomes"] = [{"id": r["id"], "target": r["target"], "status": r["status"],
+                                    "at": r["created_at"], "issue": issue_ref(r["task"])} for r in rows[:32]]
+            result["scan_more"] = len(rows) > 32
+            result["scan_after"] = rows[min(31, len(rows) - 1)]["cursor"] if rows else cursor
         return result
 
     OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",

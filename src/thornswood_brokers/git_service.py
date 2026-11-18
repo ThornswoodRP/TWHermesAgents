@@ -43,6 +43,7 @@ query($org: String!, $number: Int!, $after: String, $status: String!, $order: St
   organization(login: $org) { projectV2(number: $number) { items(first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
+      type
       status: fieldValueByName(name: $status) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
       order: fieldValueByName(name: $order) { ... on ProjectV2ItemFieldNumberValue { number } }
       content { __typename ... on Issue { number title state repository { nameWithOwner } author { login }
@@ -1590,13 +1591,13 @@ class GitService:
         excluded_issues = args.get("excluded_issues", [])
         excluded_refs = set()
         if "excluded_issues" in args:
-            if (groups is None or not isinstance(excluded_issues, list) or len(excluded_issues) > 256
+            if (groups is None or not isinstance(excluded_issues, list)
                     or any(not isinstance(i, dict) or set(i) != {"repo", "number"}
                            or not isinstance(i["repo"], str)
                            or i["repo"] not in {self.policy.data["repos"]["app"], self.policy.data["repos"]["fork"]}
                            or not isinstance(i["number"], int) or isinstance(i["number"], bool)
                            or not 0 < i["number"] <= 9999999999 for i in excluded_issues)):
-                raise Refused("excluded_issues contains at most 256 exact receipt task references for a grouped read")
+                raise Refused("excluded_issues contains exact receipt task references for a grouped read")
             excluded_refs = {(i["repo"], i["number"]) for i in excluded_issues}
         if groups is not None:
             if not self.policy.is_router(bot) or not eligible:
@@ -1627,15 +1628,17 @@ class GitService:
                 if (not isinstance(nodes, list) or len(nodes) > 100 or any(not isinstance(n, dict) for n in nodes)
                         or not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool)):
                     raise Refused("the grouped board snapshot is unavailable or malformed")
+                nodes = [n for n in nodes if n.get("type") != "REDACTED"]
                 if any(not isinstance(n.get("content"), dict) or not isinstance(n["content"].get("__typename"), str)
                        for n in nodes):
                     raise Refused("a grouped board node is unavailable or malformed")
                 if info["hasNextPage"]:
                     cursor = info.get("endCursor")
-                    if (not nodes or not isinstance(cursor, str) or not cursor or cursor == after
+                    if (not page["nodes"] or not isinstance(cursor, str) or not cursor or cursor == after
                             or cursor in cursors or len(cursors) >= 200):
                         raise Refused("the grouped board snapshot did not advance")
                     cursors.add(cursor)
+                page = dict(page, nodes=nodes)
             else:
                 page = ((data.get("organization") or {}).get("projectV2") or {}).get("items") or {}
             items.extend(page.get("nodes") or [])
@@ -1649,11 +1652,22 @@ class GitService:
         people = set(self.policy.data["hands_off"]["people"])
         lane_labels = set(self.policy.data["hands_off"]["lanes"]["labels"])
         patrick = self.policy.data["decisions"]["answered_by"]
-        out, area_sets = [], {}
+        out, area_sets, closed_exclusions = [], {}, set()
         for node in items:
             c = node.get("content") or {}
-            if groups is not None and c.get("__typename") == "Issue" and c.get("state") not in ("OPEN", "CLOSED"):
-                raise Refused("the grouped board issue state is unavailable")
+            if groups is not None and c.get("__typename") == "Issue":
+                repository = c.get("repository")
+                if not isinstance(repository, dict) or not isinstance(repository.get("nameWithOwner"), str):
+                    raise Refused("the grouped board repository metadata is incomplete")
+                if repository["nameWithOwner"] not in {repo, self.policy.data["repos"]["fork"]}:
+                    continue
+                if c.get("state") not in ("OPEN", "CLOSED"):
+                    raise Refused("the grouped board issue state is unavailable")
+                number = c.get("number")
+                if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                    raise Refused("the grouped board issue number is unavailable")
+                if c["state"] == "CLOSED" and (repository["nameWithOwner"], number) in excluded_refs:
+                    closed_exclusions.add((repository["nameWithOwner"], number))
             if c.get("__typename") != "Issue" or c.get("state") != "OPEN":
                 continue
             if groups is not None:
@@ -1662,7 +1676,9 @@ class GitService:
                     raise Refused("the grouped board repository metadata is incomplete")
                 if repository["nameWithOwner"] not in {repo, self.policy.data["repos"]["fork"]}:
                     continue
-                status = node.get("status")
+                if "status" not in node:
+                    raise Refused("the grouped board status field is missing")
+                status = node["status"]
                 # GitHub's nullable fieldValueByName is unset on some
                 # legitimate items. They are not Todo, rather than an outage.
                 if status is not None and (not isinstance(status, dict) or not isinstance(status.get("name"), str)):
@@ -1730,7 +1746,9 @@ class GitService:
                         continue
                 picks.append(row)
             results[name] = {"open": len(selected) - len(waiting), "issues": picks, "waiting": waiting}
-        return {"groups": results} if groups is not None else results[""]
+        return {"groups": results, "closed_exclusions": [{"repo": r, "number": n}
+                                                         for r, n in sorted(closed_exclusions)]} \
+            if groups is not None else results[""]
 
     @staticmethod
     def _areas(args: dict, key: str) -> set[str]:

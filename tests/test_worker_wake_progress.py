@@ -130,6 +130,19 @@ class DispatchReceipts(unittest.TestCase):
         owed_wake._refresh_receipts("bramble", ask, state, POLICY)
         self.assertEqual(state["review_receipts"], {})
 
+    def test_every_unseen_failure_is_scanned_even_when_one_worker_has_two_between_ticks(self):
+        ids = []
+        for n, status in ((12, "uncertain"), (13, "cancelled")):
+            self.world.core.assign_task(self.world.bramble, f"ThornswoodRP/Thornswood#{n}", "echo", f"Brief {n}.")
+            row = self.world.store.db.execute("SELECT id FROM connector_outbox ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+            self.world.store.db.execute("UPDATE connector_outbox SET status=? WHERE id=?", (status, row))
+            ids.append(row)
+        scan = self.route.queued_for(self.world.bramble, {"scan_after": 0})
+        self.assertEqual([r["id"] for r in scan["outcomes"]], ids)
+        self.assertEqual([r["issue"]["number"] for r in scan["outcomes"]], [12, 13])
+        self.assertFalse(scan["scan_more"])
+        self.assertEqual(self.route.queued_for(self.world.bramble, {"scan_after": scan["scan_after"]})["outcomes"], [])
+
     def test_dispatch_timestamp_requires_an_unambiguous_zone(self):
         for bad in (None, 1, True, "no", "2026-11-18T08:00:00", "9999-12-31T23:59:59-23:00"):
             with self.subTest(bad=bad), self.assertRaises(Exception):
@@ -252,6 +265,39 @@ class OpportunityLifecycle(unittest.TestCase):
         requests = [a["receipts"] for _, op, a in self.b.asked if op == "queued_for" and "receipts" in a]
         self.assertTrue(requests)
         self.assertTrue(all(len(ids) <= 32 for ids in requests))
+
+    def test_two_unseen_failed_tasks_are_both_excluded(self):
+        rows = [dict(receipt(f"unseen_{n}", NOON - 10, status,
+                             {"repo": POLICY["repos"]["app"], "number": n}), target="echo")
+                for n, status in ((12, "uncertain"), (13, "cancelled"))]
+        self.b.scan_rows = rows
+        self.b.receipt_rows = {r["id"]: r for r in rows}
+        self.b.attempts["echo"] = rows[-1]
+        self.check()
+        grouped = [a for _, op, a in self.b.asked if op == "board"][-1]
+        self.assertEqual(grouped["excluded_issues"], [{"repo": POLICY["repos"]["app"], "number": n} for n in (12, 13)])
+
+    def test_257_closed_holds_do_not_stop_unrelated_work_and_prune_only_with_board_proof(self):
+        from test_grouped_board_projection import issue, page, projection, Snapshot
+        held = {f"cx_old_{n}": dict(receipt(f"old_{n}", NOON - 100, "uncertain",
+                                            {"repo": POLICY["repos"]["app"], "number": n}), target="echo")
+                for n in range(1, 258)}
+        state = owed_wake._load(self.path)
+        state["review_receipts"] = held
+        owed_wake._save(self.path, state)
+        self.b.receipt_rows = held
+        nodes = [issue(n, state="CLOSED") for n in range(1, 258)] + [issue(9000, "Launcher")]
+        board = projection()()
+        board.policy = type("Policy", (), {"data": POLICY, "is_bot": lambda _, name: name in POLICY["bots"],
+                                           "is_router": lambda _, name: name == "bramble"})()
+        board.gh = Snapshot([page(nodes[:100], True, "100"), page(nodes[100:200], True, "200"), page(nodes[200:])])
+        board._waits_on = lambda *args: None
+        def broker(kind, op, args):
+            return board.board("gateway", args) if op == "board" else self.b(kind, op, args)
+        out = self.check(broker=broker)
+        self.assertIn("in the field of sprocket", out)
+        self.assertEqual(owed_wake._load(self.path)["review_receipts"], {})
+        self.assertEqual(len(board.gh.calls), 3, "one whole snapshot, not one query per held issue")
 
     def test_held_claim_does_not_suppress_guidance_for_a_different_inactive_claim(self):
         for w in ("rift", "wisp", "magpie"):

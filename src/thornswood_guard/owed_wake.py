@@ -252,7 +252,8 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     morning = local is not None and local.hour >= MORNING_HOUR and state.get("morning") != today
     start, end = work_hours(policy)
     working = local is not None and start <= local.hour < end
-    idle_due = working and now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
+    idle_due = working and (now - float(state.get("idle_checked") or 0) >= IDLE_EVERY
+                            or state.get("receipt_scan_pending", False))
     alert_due = now - float(state.get("alert_checked") or 0) >= ALERT_EVERY
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
                                         f"new work outside {says((start, end))}; overnight is the requested audit window")
@@ -420,7 +421,9 @@ def _receipt_after(row, at: float, *, accepted=False) -> bool:
         if not isinstance(row, dict) or not re.fullmatch(r"cx_[A-Za-z0-9_-]{1,128}", row.get("id", "")):
             raise ValueError()
         when = datetime.fromisoformat(row["at"])
-        if when.tzinfo is None or (accepted and row.get("status") not in ("queued", "leased", "sent")):
+        if (when.tzinfo is None or row.get("status") not in
+                ("queued", "leased", "sent", "dead", "uncertain", "cancelled", "quarantined")
+                or (accepted and row.get("status") not in ("queued", "leased", "sent"))):
             raise ValueError()
         return when.timestamp() > at
     except (TypeError, ValueError, KeyError, OverflowError):
@@ -497,7 +500,7 @@ def _unheard(bot: str, ask: Caller, state: dict, now: float, policy: dict) -> tu
             for rows in (queued["dispatches"], queued["attempts"]):
                 for w, row in rows.items():
                     if w in pending and _receipt_after(row, pending[w]) and row.get("status") != "sent":
-                        held[row["id"]] = dict(row, target=w)
+                        held[row["id"]] = dict(held.get(row["id"], {}), **row, target=w)
             _refresh_receipts(bot, ask, state, policy)
             pending = {w: at for w, at in pending.items()
                        if not (_receipt_after(queued["dispatches"].get(w), at, accepted=True)
@@ -618,6 +621,29 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
         # Initialize from structured current receipts too: after an upgrade,
         # a historical uncertain assignment must not become a carry-on hint
         # merely because it predates this observation's timestamp.
+        # Scan every unseen non-sent receipt, not just the latest per worker:
+        # two failures between scheduler ticks must retain both exact tasks.
+        for _ in range(4):
+            cursor = state.get("receipt_scan_after", 0)
+            scan = ask("decide", "queued_for", {"bot": bot, "scan_after": cursor})
+            if (not isinstance(scan, dict) or not isinstance(scan.get("outcomes"), list)
+                    or len(scan["outcomes"]) > 32 or not isinstance(scan.get("scan_more"), bool)
+                    or not isinstance(scan.get("scan_after"), int) or isinstance(scan["scan_after"], bool)
+                    or scan["scan_after"] < cursor or (scan["outcomes"] and scan["scan_after"] <= cursor)
+                    or (scan["scan_more"] and (not scan["outcomes"] or scan["scan_after"] <= cursor))):
+                raise BrokerRefused("the assignment outcome scan is unavailable or malformed")
+            for row in scan["outcomes"]:
+                _receipt_after(row, 0)
+                if row.get("target") not in _workers(policy):
+                    raise BrokerRefused("the assignment outcome scan target is malformed")
+                state.setdefault("review_receipts", {})[row["id"]] = row
+            state["receipt_scan_after"] = scan["scan_after"]
+            state["receipt_scan_pending"] = scan["scan_more"]
+            if not scan["scan_more"]:
+                break
+        if state["receipt_scan_pending"]:
+            _save(path, state)
+            return ["the bounded assignment receipt scan continues at the next check; no uncertain task is replayed", SLEEP]
         latest = ask("decide", "queued_for", {"bot": bot, "since": "1970-01-01T00:00:00+00:00"})
         if (not isinstance(latest, dict) or not isinstance(latest.get("bots"), dict)
                 or not isinstance(latest.get("attempts"), dict)):
@@ -632,6 +658,11 @@ def _free_workers(bot: str, ask: Caller, now: float, policy: dict, path: Path, s
             return ["the workers already have deliveries in flight; this check coalesces with them", SLEEP]
         lines = _look(bot, ask, now, policy, workers, repo, asked, observed,
                       state.get("review_receipts") or {})
+        if observed.get("closed"):
+            state["review_receipts"] = {key: row for key, row in (state.get("review_receipts") or {}).items()
+                                         if not isinstance(row.get("issue"), dict)
+                                         or (row["issue"].get("repo"), row["issue"].get("number"))
+                                         not in observed["closed"]}
     except BrokerRefused as e:
         state["progress_retry_after"] = now + IDLE_EVERY
         _save(path, state)
@@ -664,7 +695,7 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     board snapshot for all free fields. Exact failed/cancelled receipts
     require review of that task, never replay or a worker-wide stop."""
     reviews = reviews or {}
-    excluded, review_lines, ambiguous = [], [], set()
+    excluded, review_lines, ambiguous = set(), [], set()
     allowed_repos = {repo, policy["repos"]["fork"]}
     for receipt in reviews.values():
         worker = receipt.get("target")
@@ -672,7 +703,7 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
         if (isinstance(issue, dict) and isinstance(issue.get("repo"), str) and issue["repo"] in allowed_repos
                 and isinstance(issue.get("number"), int) and not isinstance(issue["number"], bool)
                 and 0 < issue["number"] <= 9999999999):
-            excluded.append(issue)
+            excluded.add((issue["repo"], issue["number"]))
             task = f'{issue["repo"]}#{issue["number"]}'
             asked = asked | {task}  # only this claim waits for review
         else:
@@ -728,7 +759,8 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     groups = {w: {"areas": list(AREAS.get(w, ()))} for w in free}
     groups["shared"] = {"not_areas": [*(a for mine in AREAS.values() for a in mine), *BRAMBLES_OWN]}
     board = ask("git", "board", {"bot": bot, "eligible": True, "limit": 1, "groups": groups,
-                                  **({"excluded_issues": excluded} if excluded else {})})
+                                  **({"excluded_issues": [{"repo": repo, "number": n} for repo, n in sorted(excluded)]}
+                                     if excluded else {})})
     results = board.get("groups") if isinstance(board, dict) else None
     if not isinstance(results, dict) or set(results) != set(groups):
         raise BrokerRefused("the grouped eligible board snapshot is unavailable")
@@ -737,6 +769,13 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
                 or not isinstance(group.get("open"), int) or isinstance(group.get("open"), bool)
                 or group["open"] < 0 or (not group["issues"] and group["open"] != 0)):
             raise BrokerRefused("the grouped eligible board snapshot is malformed or incomplete")
+    if observed is not None:
+        closed = board.get("closed_exclusions", [])
+        if not isinstance(closed, list) or any(not isinstance(i, dict) or set(i) != {"repo", "number"}
+                or not isinstance(i["repo"], str) or not isinstance(i["number"], int)
+                or (i["repo"], i["number"]) not in excluded for i in closed):
+            raise BrokerRefused("the closed receipt task proof is malformed")
+        observed["closed"] = {(i["repo"], i["number"]) for i in closed}
     shared = bool(results["shared"]["issues"])
     fed = [w for w in free if results[w]["issues"]]
     if observed is not None:

@@ -127,6 +127,17 @@ class GroupedBoard(unittest.TestCase):
         b = self.board([page([unset, unrelated, issue(3)])])
         self.assertEqual(self.read(b)["groups"]["echo"]["issues"][0]["number"], 3)
 
+    def test_omitted_status_is_not_the_supported_explicit_null(self):
+        malformed = issue(1)
+        malformed.pop("status")
+        with self.assertRaisesRegex(Refused, "missing"):
+            self.read(self.board([page([malformed])]))
+
+    def test_explicit_redacted_items_do_not_hide_readable_eligible_work(self):
+        b = self.board([page([{"type": "REDACTED", "content": None}], True, "redacted"),
+                        page([issue(1)])])
+        self.assertEqual(self.read(b)["groups"]["echo"]["issues"][0]["number"], 1)
+
     def test_dependency_source_refusal_is_not_no_work_in_grouped_mode(self):
         b = self.board([page([issue(1)])])
         def refused(*args):
