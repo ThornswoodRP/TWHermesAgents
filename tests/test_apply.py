@@ -197,6 +197,22 @@ class Apply(unittest.TestCase):
         self.assertEqual((job["name"], job["schedule"], job["script"], job["skills"], job["deliver"]),
                          ("tw-owed-wake", "every 5m", "tw-owed-wake.py", ["bramble-duties"], "local"))
         self.assertIn(owed_wake.OWED_WAKE_MARK, job["prompt"])
+        # The final cron instruction follows the multi-worker script output.
+        # It must not narrow that checked list to one worker (#238).
+        self.assertIn("each checked worker", job["prompt"])
+        self.assertIn("before unrelated sweep work", job["prompt"])
+        self.assertIn("assignment receipt", job["prompt"])
+        self.assertNotIn("then a free worker's next issue", job["prompt"])
+        installed_skill = (home / "profiles" / "bramble" / "skills" / "thornswood" /
+                           "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("account for each checked worker before unrelated sweep work",
+                      " ".join(installed_skill.split()))
+        self.assertIn("A completed sweep or your own summary is not delivery proof",
+                      " ".join(installed_skill.split()))
+        self.assertIn("reporting a blocker does not clear the scheduler's pending observation",
+                      " ".join(installed_skill.split()))
+        self.assertIn("The later general pass covers remaining workers",
+                      " ".join(installed_skill.split()))
         self.assertIn(f"owed-wake job {job['id']} is active", r.stdout)
         for bot in policy().bots:
             if bot != "bramble":

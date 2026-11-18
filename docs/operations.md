@@ -15,6 +15,14 @@ checks cannot postpone other fields indefinitely. Older state without a
 full-check timestamp keeps its existing last-check cadence until the first
 full refresh. Hours, admission and source-failure backoff still take priority.
 
+The cron instruction and Bramble's skill handle every current checked worker
+before unrelated sweep work, rather than narrowing the list to one worker
+after the general sweep. Bramble accounts for each with the existing
+assignment receipt or a concrete current blocker. A reported blocker does
+not clear the pending observation, and prose is never delivery evidence.
+These instructions do not dispatch work automatically or change any gate.
+Actual worker receipt and native turn evidence remain the acceptance check.
+
 A cancelled or uncertain receipt is reviewed by its canonical task reference,
 never replayed. That exact issue is excluded from fresh eligibility while a
 different issue remains available. Its receipt hold survives a no-work result
