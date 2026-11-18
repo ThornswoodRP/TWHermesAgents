@@ -11,6 +11,32 @@ Once the first install is done ([setup.md](setup.md)), the VM looks after itself
 3. It works out which processes load anything the release changed (`thornswood_brokers.restart_plan`: each one's modules followed through their imports, the files beside them, and its launcher and unit). The brokers start again only when something they load changed. The connector keeps running when nothing it or the brokers load changed and the core's store does not migrate. When only the connector's own code changed, it starts again and its Bot Chat turns do not: its unit stops only the connector (`KillMode=process`), each turn runs under `turn_run.py` writing its stream into a file in `~/.local/state/thornswood/connector-turns`, and the connector that starts next follows each turn to its end and says what came of it (#163). In both cases new turns are not held at all. Only when the brokers start again without systemd holding their sockets, or the store migrates, does it hold new turns and wait for the running ones to end, as before. It installs the release and applies it to the six profiles and the gateway's own profile. It reloads every Bot process only when the apply changed a file a running Bot loads (its config, or a file of a plugin it imports) or the install changed the gateway's unit. A reload's own hold waits only for the turns in the gateway and Desktop's sessions, which it stops; the connector's turns go on and keep their tickets. The reload does not hold and wait again after the follower's hold (`tw-reload-bots --held`). Skills, the owed-wake script and cron jobs are read fresh each time they are used. Then it runs the canary and ends any hold.
 4. If any step fails, it puts the release that ran before back the same way and says both. A commit that failed is not tried again: the fix is the next merge.
 
+### Updating the Hermes runtime
+
+The follower updates this repository, not Hermes Agent itself. A runtime update is a separate maintenance operation: review the official release and its exact source against `src/thornswood_decisions/contracts.json`, update that pin in a pull request, and pass both guard rail suites before applying either part. A new contract must not reach the old runtime first.
+
+For v0.23.2 the official release resolves to `ae2a81ccc00e9b7c06301523e5bb09608397149c`. This release passes the requested Codex model to credential selection; a limit on another model no longer blocks the healthy fallback (#142). It preserves the actual model's cooldown and an account-wide refusal. The Board's ended-session reconciliation is a separate fix (#220); this release is not evidence that upstream terminal failures now call every end hook.
+
+Before the maintenance window, read the installed commit and clean source status, the normal follower's result and whether it is running, and the count of actual running turns. As the `hermes` user, inspect the supported read-only plan:
+
+```bash
+/home/hermes/.local/bin/hermes update --plan --channel stable
+```
+
+Finish any follower install first. Record whether `follow-main.paused` already existed, then pause the follower as above before making the pin ready to merge. Use the policy broker's normal `hold_turns` operation with `spare_connector: false`, and poll `turns_running` until zero. Do not interrupt a running turn when a wait expires: end this maintenance attempt and preserve its work. A hold has an expiry; require it to remain valid throughout the update and reload.
+
+The normal `hermes update --channel stable --yes --no-gateway-restart` follows a mutable release. For an exact reviewed pin, use the official installer's documented `--commit` path over the existing source install ([upstream updating instructions](https://github.com/NousResearch/hermes-agent/blob/ae2a81ccc00e9b7c06301523e5bb09608397149c/website/docs/getting-started/updating.md#updating)). Download `scripts/install.sh` from that immutable commit, verify SHA256 `c73dad4dcf7c9ecadb98578e28cc763d23d7be3fa1b513545319038795493214`, and run the verified local file as `hermes` while held:
+
+```bash
+bash /path/to/verified-install-v0232.sh --commit ae2a81ccc00e9b7c06301523e5bb09608397149c --dir /home/hermes/.hermes/hermes-agent --hermes-home /home/hermes/.hermes --non-interactive
+```
+
+Do not pass `--channel`: the installer's final channel-setting command would run a mutable update. The explicit commit selects the source before hash-verified dependency and product installation. Noninteractive mode skips setup and gateway installation, leaving the fleet restart to the controlled reload. Check the installed checkout and `hermes --version` both agree with the reviewed commit afterward. Any different source is a stop. Keep all auth, credential cooldowns, chat stores, connector journals and uncertain-send records. Never replay an uncertain message to test recovery.
+
+After the reviewed pin has merged, apply it through the normal follower and verify its offline tests, install, canary and applied commit. A runtime-only update still needs `tw-reload-bots --held` while the external hold is active, even if the follower finds no changed Bot config. Read back the gateway's actual running source, all six profile readiness states and the exact contract check. Only after compatibility, readiness and canary verification succeed, end the hold and restore the follower's previous pause state; a pre-existing pause stays paused. On failure retain the follower pause and admission containment, report the exact failed stage and remaining hold lifetime, and resolve it before the hold expires. Do not let a cleanup clause resume turns against a partial runtime. Verify a newly admitted, legitimate fallback turn independently of catalog discovery before calling work restored.
+
+Before source movement, an aborted attempt can simply end the hold and restore the previous follower pause state after confirming the old runtime remains healthy. After movement, preserve the installer receipt and inspect the actual source and dependency state before doing anything else; do not assume the installer has the updater's automatic rollback guards. Restoring an old policy release does not restore Hermes. Do not restore a whole `HERMES_HOME` snapshot, reset cooldowns, or force a source downgrade across newer session state. A source/dependency rollback needs its own checked compatibility plan; otherwise keep the failed update contained and repair forward while retaining every chat and uncertain outcome.
+
 ### What it did
 
 ```bash
