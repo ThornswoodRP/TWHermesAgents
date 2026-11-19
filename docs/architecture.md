@@ -9,7 +9,7 @@ This page walks through every part of TWHermesAgents: where it runs, as which us
 | **The Bots' VM** | An Ubuntu 24.04 VM (4 cores, 24 GB) on the tailnet. Hermes, the six Bot profiles, the brokers, the decision core, the backups and the follower. Everything in this repository is installed here |
 | **The game box** | Thornswood's game servers. Nothing from this repository runs there. Its nightly backup is sent to the VM through an add-only drop |
 | **Patrick's machines** | His own Hermes, Hermes Desktop and his phone. They reach the decision core over the tailnet |
-| **GitHub** | The repositories the Bots work in, the two GitHub Apps they act through, and this repository's CI |
+| **GitHub** | The repositories the Bots work in, their GitHub Apps, and this repository's CI |
 
 ## Hermes and the six profiles
 
@@ -42,7 +42,7 @@ The brokers in `src/thornswood_brokers/` run as their own users, each from a roo
 | Broker | User | What it does |
 |---|---|---|
 | `tw-policy` | `tw-policy` | The fleet admission queue, exactly-once receipts, Patrick's decision records, route and credit state, and leases, in one SQLite store |
-| `tw-git` | `tw-git` | Every GitHub call. It holds the two Apps' keys (mode 400, its own), checks each write against `src/thornswood_guard/github.py`, writes a receipt first, and reads GitHub back before any retry |
+| `tw-git` | `tw-git` | Every GitHub call. It holds the Apps' keys (mode 400, its own), checks each write against `src/thornswood_guard/github.py`, writes a receipt first, and reads GitHub back before any retry |
 | `tw-files` | `tw-files` | Each worker's trees under `/srv/tw/work/<bot>`. It walks every path from a folder handle without following links, and runs checks through `tw-run-check` as the Bot's own user, with no network and only that tree visible |
 | `tw-proxy` | `tw-proxy` | The admission proxy on `127.0.0.1:8611`, for model routes that need a key only it can read. It admits a route only once a pull request sets it ready in `admission_proxy.ready` |
 
@@ -58,14 +58,15 @@ The gateway reaches them only through their sockets under `/run/tw-brokers/` (an
 
 A worker's push follows the same path with the workers' App, and is refused if it touches `main`, a tag, another Bot's branch or a workflow file.
 
-## The two GitHub Apps
+## GitHub Apps
 
 | App | Used by | May |
 |---|---|---|
 | **thornswood-bramble** | Bramble | Merge, turn on auto-merge, start the listed release and deploy runs, and push a workflow change for Magpie |
 | **thornswood-workers** | The five workers | Push to the Bot's own branches and open pull requests. It has no Workflows permission, so GitHub itself refuses a workflow change |
+| **thornswood-magpie-actions-read** | Magpie | Read the Actions permissions settings on Thornswood and skymp through the broker |
 
-Their ids and key paths are in `policy.yaml` `brokers.apps`.
+Their IDs and key paths are in `policy.yaml` under `brokers.apps` and `brokers.magpie_actions_read`.
 
 ## The decision core
 

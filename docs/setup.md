@@ -9,6 +9,7 @@ This page covers a VM's first install and the one-time settings it needs. Once i
 - Rootless podman for the `hermes` user, with the cpu, memory and pids cgroup controllers delegated to it.
 - Tailscale, with the VM reachable from the machine you install from under the ssh name `thornswood-bots`, and sudo on the VM.
 - The two GitHub Apps' private keys at the paths `policy.yaml` `brokers.apps` names, under `/etc/thornswood/apps/`. The install makes them `tw-git`'s alone, mode 400, and stops if one is missing.
+- For Magpie's repository Actions settings read, provision the separate key named by `brokers.magpie_actions_read` as `tw-git:tw-git` with mode 400. Its App has repository Administration read and Metadata read on Thornswood and skymp. A missing key only disables this read.
 
 The guard plugin runs inside Hermes's own Python, which has no YAML library, so it reads `policy.json` and needs nothing outside the standard library.
 

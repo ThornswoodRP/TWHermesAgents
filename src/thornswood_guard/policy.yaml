@@ -658,6 +658,12 @@ brokers:
       app_id: 5547094
       installation_id: 177393064
       key_file: /etc/thornswood/apps/thornswood-workers.pem
+  # Separate read-only installation on Thornswood and skymp. Only tw-git
+  # uses it, for Magpie's exact Actions settings GET on those repositories.
+  magpie_actions_read:
+    app_id: 5828279
+    installation_id: 183569606
+    key_file: /etc/thornswood/apps/magpie-actions-read.pem
 
 # The admission proxy for routes 2 and 4 (06 section 6.3). A loopback
 # endpoint run by tw-proxy: it maps each Bot's proxy token to the Bot, asks

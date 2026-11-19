@@ -604,6 +604,11 @@
         "installation_id": 177393064,
         "key_file": "/etc/thornswood/apps/thornswood-workers.pem"
       }
+    },
+    "magpie_actions_read": {
+      "app_id": 5828279,
+      "installation_id": 183569606,
+      "key_file": "/etc/thornswood/apps/magpie-actions-read.pem"
     }
   },
   "admission_proxy": {

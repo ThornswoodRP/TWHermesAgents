@@ -29,7 +29,9 @@ from test_policy_service import service as policy_service
 
 from thornswood_brokers.git_service import READ_MOST, GitService
 from thornswood_brokers.github_api import GitHub, Response
+from thornswood_brokers.serve import _magpie_actions_client
 from thornswood_brokers.wire import Refused
+from thornswood_guard.brokers import GIT_OPS, tool_handler
 
 APP = "ThornswoodRP/Thornswood"
 OPS = "ThornswoodRP/Thornswood-Ops"
@@ -1827,6 +1829,73 @@ class PullRequestsAndIssues(unittest.TestCase):
                 self.assertEqual(out["body"]["number"], number)
         query = urllib.parse.quote(f"repo:{APP} is:pr is:open")
         self.assertIn("items", w.git.read("hermes", {"bot": "bramble", "path": f"/search/issues?q={query}"})["body"])
+
+    def test_magpie_can_read_only_the_two_exact_actions_settings_with_the_dedicated_app(self):
+        w = World()
+        installation = "42"
+        app = {"app_id": 41, "installation_id": int(installation), "key_file": "/nonexistent"}
+        w.git.magpie_actions = GitHub({"magpie_actions_read": app}, transport=w.fake, signer=lambda data, key: b"sig")
+        w.fake.installed[installation] = {"Thornswood", "skymp"}
+        settings = {"enabled": True, "allowed_actions": "all", "sha_pinning_required": False}
+        for repo, args in ((APP, {"repo": APP}), (FORK, {})):
+            path = f"/repos/{repo}/actions/permissions"
+            w.fake.texts[path] = settings
+            self.assertEqual(w.git.read("hermes", {"bot": "magpie", "path": path, **args})["body"], settings)
+        self.assertEqual(w.fake.tokens, [
+            {"installation": installation, "repositories": ["Thornswood"],
+             "permissions": {"administration": "read", "metadata": "read"}},
+            {"installation": installation, "repositories": ["skymp"],
+             "permissions": {"administration": "read", "metadata": "read"}},
+        ])
+
+        for bot in ("bramble", "echo", "rift", "sprocket", "wisp"):
+            with self.subTest(bot=bot), self.assertRaisesRegex(Refused, "only Magpie"):
+                w.git.read("hermes", {"bot": bot, "path": f"/repos/{APP}/actions/permissions",
+                                     "app": "magpie_actions_read"})
+        handler = tool_handler("git", GIT_OPS, "echo", lambda broker, op, args: w.git.read("hermes", args))
+        with self.assertRaisesRegex(Refused, "only Magpie"):
+            handler({"op": "read", "bot": "magpie", "path": f"/repos/{APP}/actions/permissions"})
+        self.assertEqual(len(w.fake.tokens), 2)
+
+        for path in (f"/repos/{OPS}/actions/permissions", f"/repos/{APP}/actions/permissions/workflow",
+                     f"/repos/{APP}/actions/permissions?ignored=1", f"/repos/{APP}/actions/permissions/",
+                     f"/repos/{APP}/actions/%70ermissions", f"/repos/{APP}/rulesets"):
+            w.fake.texts[path.split("?", 1)[0]] = "a regular read"
+            self.assertEqual(w.git.read("hermes", {"bot": "magpie", "path": path})["body"], "a regular read")
+        self.assertEqual(len([t for t in w.fake.tokens if t["installation"] == installation]), 2)
+        self.assertTrue(all("administration" not in t["permissions"]
+                            for t in w.fake.tokens if t["installation"] != installation))
+        with self.assertRaisesRegex(Refused, "Patrick"):
+            w.git.refused("hermes", {"bot": "magpie", "method": "PUT", "path": f"/repos/{APP}/actions/permissions"})
+        self.assertFalse(w.fake.writes("PUT", "/actions/permissions"))
+
+    def test_missing_magpie_actions_app_does_not_use_fleet_credentials_or_break_ordinary_reads(self):
+        w = World()
+        with self.assertRaisesRegex(Refused, "not available"):
+            w.git.read("hermes", {"bot": "magpie", "path": f"/repos/{APP}/actions/permissions"})
+        self.assertEqual(w.fake.tokens, [])
+        w.fake.add_issue(APP, 4159)
+        self.assertEqual(w.git.read("hermes", {"bot": "magpie", "path": f"/repos/{APP}/issues/4159"})["body"]["number"],
+                         4159)
+
+    def test_the_magpie_app_key_must_be_private_and_a_regular_file(self):
+        spec = {"app_id": 41, "installation_id": 42}
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key.pem"
+            key_spec = dict(spec, key_file=str(key))
+            self.assertIsNone(_magpie_actions_client(None))
+            with self.assertLogs("thornswood_brokers", level="WARNING"):
+                self.assertIsNone(_magpie_actions_client(key_spec))
+            key.touch()
+            key.chmod(0o440)
+            with self.assertLogs("thornswood_brokers", level="WARNING"):
+                self.assertIsNone(_magpie_actions_client(key_spec))
+            key.chmod(0o400)
+            self.assertIsNotNone(_magpie_actions_client(key_spec))
+            alias = Path(tmp) / "alias.pem"
+            alias.symlink_to(key)
+            with self.assertLogs("thornswood_brokers", level="WARNING"):
+                self.assertIsNone(_magpie_actions_client(dict(spec, key_file=str(alias))))
 
     def test_missing_repo_never_infers_unapproved_ambiguous_or_conflicting_scope(self):
         w = World()
