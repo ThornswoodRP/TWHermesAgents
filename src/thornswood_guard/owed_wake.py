@@ -118,6 +118,10 @@ SCRIPT = OWED_WAKE_JOB + ".py"
 SCHEDULE = "every 5m"
 SWEEP_WAIT_SECONDS = 90.0
 SWEEP_POLL_SECONDS = 4.0
+# The next five-minute tick has time to run its grouped board read, even
+# with scheduler jitter. A disabled job never holds a routing slot.
+WORKER_SLOT_SECONDS = 540.0
+WORKER_SLOT_FILE = ("local", "thornswood-hermes", "worker-check-slot.json")
 SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
@@ -1047,15 +1051,51 @@ def _worker_check_due(home: Path, bot: str, ask: Caller, now: float, policy: dic
 
 
 def _cron_enabled(home: Path) -> bool:
-    return any(isinstance(job, dict) and job.get("name") == OWED_WAKE_JOB
+    jobs = _load(home.joinpath(*JOBS_FILE)).get("jobs")
+    return isinstance(jobs, list) and any(isinstance(job, dict) and job.get("name") == OWED_WAKE_JOB
                and job.get("enabled") is True and job.get("state") in ("scheduled", "running")
-               for job in _load(home.joinpath(*JOBS_FILE)).get("jobs") or [])
+               for job in jobs)
 
 
 def _only_sweep_occupied(bot: str, ask: Caller) -> bool:
     """Its single-sweep slot is occupied, while ordinary admission has room."""
     sweep = ask("policy", "turn_room", {"bot": bot, "sweep": True})
     return sweep.get("room") is False and ask("policy", "turn_room", {"bot": bot}).get("room") is True
+
+
+def _worker_checked_at(home: Path) -> float:
+    at = _load(home.joinpath(*IDLE_FILE)).get("idle_checked")
+    return at if type(at) in (int, float) and 0 <= at < float("inf") else 0.0
+
+
+def _reserve_worker_slot(home: Path, now: float) -> None:
+    """Reserve at most once between two actual worker-board attempts."""
+    path = home.joinpath(*WORKER_SLOT_FILE)
+    checked_at = _worker_checked_at(home)
+    previous = _load(path)
+    if previous.get("checked_at") == checked_at:
+        return
+    _save(path, {"checked_at": checked_at, "created_at": now, "consumed": False})
+
+
+def worker_slot_active(home: Path, policy: dict, now: float) -> bool:
+    slot = _load(home.joinpath(*WORKER_SLOT_FILE))
+    at = slot.get("created_at")
+    return (slot.get("consumed") is False and type(at) in (int, float)
+            and now - WORKER_SLOT_SECONDS < at <= now and _working(now, policy) and _cron_enabled(home))
+
+
+def consume_worker_slot(home: Path) -> None:
+    """A fresh board attempt needs the slot until its scheduled turn admits."""
+    path = home.joinpath(*WORKER_SLOT_FILE)
+    slot = _load(path)
+    checked_at = slot.get("checked_at")
+    if slot.get("consumed") is False and type(checked_at) in (int, float) and _worker_checked_at(home) > checked_at:
+        slot["consumed"] = True
+        try:
+            _save(path, slot)
+        except OSError:
+            pass  # a stale marker expires without interrupting an admitted turn
 
 
 def _cron_check(home: Path, bot: str, ask: Caller, policy: dict, *,
@@ -1077,9 +1117,16 @@ def _cron_check(home: Path, bot: str, ask: Caller, policy: dict, *,
                 if (monotonic() >= deadline or not _working(clock(), policy) or not _cron_enabled(home)
                         or not _only_sweep_occupied(bot, ask)):
                     break
+            now = clock()
+            if (monotonic() >= deadline and _working(now, policy) and _cron_enabled(home)
+                    and _only_sweep_occupied(bot, ask) and _worker_check_due(home, bot, ask, now, policy)):
+                _reserve_worker_slot(home, now)
     except BrokerRefused:
         pass  # the ordinary check reports its own refusal and preserves state
-    return check(home, bot, ask, now=clock(), policy=policy)
+    lines = check(home, bot, ask, now=clock(), policy=policy)
+    if lines[-1] == SLEEP:
+        consume_worker_slot(home)
+    return lines
 
 
 def main() -> int:

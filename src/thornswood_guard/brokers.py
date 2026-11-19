@@ -238,8 +238,16 @@ class TurnGate:
         with self.lock:
             held = self.turns.get(key)
         ticket = held["ticket"] if held and held.get("state") == "waiting" else None
-        scheduled = str(kwargs.get("platform") or "") in SCHEDULED
+        platform = str(kwargs.get("platform") or "")
+        scheduled = platform in SCHEDULED
         sweep = self._sweep(kwargs)
+        sweep_home = self.owed_file.parents[2] if sweep and self.owed_file is not None else None
+        if not held and sweep_home is not None and platform in SWEEP_PLATFORMS:
+            from .owed_wake import worker_slot_active
+            if worker_slot_active(sweep_home, self.policy.data, time.time()):
+                why = "the scheduled worker check has the next routing slot"
+                self._owe(why)
+                return {"context": self._owed(why)}
         if ticket is None and self._report_only(kwargs):
             self._low_risk(task)
         deadline = self.clock() + self.wait_seconds
@@ -247,12 +255,15 @@ class TurnGate:
         try:
             while True:
                 args = {"bot": self.bot, "ticket": ticket} if ticket else \
-                    {"bot": self.bot, "task": task, "source": str(kwargs.get("platform") or "chat"), "sweep": sweep}
+                    {"bot": self.bot, "task": task, "source": platform or "chat", "sweep": sweep}
                 got = self.ask("policy", "admit", args)
                 ticket = got["ticket"]
                 if got["state"] == "admitted":
                     with self.lock:
                         self.turns[key] = {"ticket": ticket, "state": "admitted", "sweep": sweep}
+                    if scheduled and sweep_home is not None:
+                        from .owed_wake import consume_worker_slot
+                        consume_worker_slot(sweep_home)
                     return None
                 # New turns are held for a reload, which ends this process and
                 # every turn still waiting in it. 12 Nov 2026, 10:09 PM Mountain:
