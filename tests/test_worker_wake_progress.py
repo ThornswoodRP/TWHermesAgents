@@ -183,6 +183,59 @@ class OpportunityLifecycle(unittest.TestCase):
     def check(self, at=NOON, broker=None):
         return "\n".join(owed_wake.check(self.home, "bramble", broker or self.b, now=at, policy=POLICY))
 
+    def test_finished_workers_get_the_first_quiet_check_and_alert_gets_the_next(self):
+        self.check()
+        for worker in ("echo", "sprocket"):
+            self.b.dispatches[worker] = receipt(worker, NOON + 30)
+            self.b.turns[worker]["last"] = stamp(NOON + 180)
+
+        def owed(broker, op, args):
+            if op == "wake_due":
+                if self.b.turns["bramble"]["running"]:
+                    return {"owed": True, "due": False, "why_not": "another sweep is running"}
+                return {"owed": True, "due": True, "refused": 1}
+            return self.b(broker, op, args)
+
+        self.b.turns["bramble"]["running"] = True
+        self.b.asked.clear()
+        for seconds in (900, 1200):
+            self.assertFalse(wakes(self.check(NOON + seconds, owed)))
+        self.assertFalse(any(b == "git" for b, _, _ in self.b.asked))
+        self.assertEqual(owed_wake._load(self.path)["idle_checked"], NOON)
+
+        self.b.turns["bramble"] = {"running": False, "sweep_done": stamp(NOON + 1210)}
+        first = self.check(NOON + 1500, owed)
+        for worker in ("echo", "sprocket"):
+            self.assertIn(f"Checked next issue for {worker}:", first)
+        self.assertEqual(owed_wake._load(self.path)["alert_checked"], NOON)
+        self.assertEqual(sum(op == "board" for _, op, _ in self.b.asked), 1)
+        self.assertFalse(any(a["repo"] == POLICY["repos"]["ops"] for a in self.b.reads()))
+
+        for worker in ("echo", "sprocket"):
+            self.b.dispatches[worker] = receipt(worker + "_next", NOON + 1540)
+            self.b.turns[worker]["last"] = stamp(NOON + 1680)
+        self.b.asked.clear()
+        self.check(NOON + 1800)
+        self.assertEqual(owed_wake._load(self.path)["alert_checked"], NOON + 1800)
+        self.assertTrue(any(a["repo"] == POLICY["repos"]["ops"] for a in self.b.reads()))
+        self.assertFalse(any(op == "board" for _, op, _ in self.b.asked))
+
+        again = self.check(NOON + 2100)
+        for worker in ("echo", "sprocket"):
+            self.assertIn(f"Checked next issue for {worker}:", again)
+
+    def test_full_board_check_still_detects_a_known_worker_completion(self):
+        self.check()
+        for worker in ("echo", "sprocket"):
+            self.b.dispatches[worker] = receipt(worker, NOON + 30)
+            self.b.turns[worker]["last"] = stamp(NOON + 180)
+        self.b.asked.clear()
+
+        out = self.check(NOON + owed_wake.IDLE_EVERY)
+        self.assertIn("Checked next issue for echo:", out)
+        self.assertEqual(owed_wake._load(self.path)["alert_checked"], NOON)
+        self.assertFalse(any(a["repo"] == POLICY["repos"]["ops"] for a in self.b.reads()))
+
     def test_partial_delivery_settles_only_that_worker_without_repeating_it(self):
         self.check()
         self.b.dispatches["echo"] = receipt("echo", NOON + 10)

@@ -58,9 +58,11 @@ A worker opportunity stays in IDLE_FILE until its exact assignment is sent,
 or a fresh canonical board read proves no eligible work is available. A
 completed coordinator sweep alone cannot acknowledge it. Pending idle
 workers share one board snapshot at the next five-minute check while
-Bramble has no turn running or queued. Each worker gets up to six checked
-issues in board order so it can move past issues that need a human test
-or owner decision. Source failure retains observations and defers passive
+Bramble has no turn running or queued. If its own periodic alert check is
+also due, confirmed worker progress gets the first available check and the
+alert gets the next one. Only one of those reads runs per check. Each worker
+gets up to six checked issues in board order so it can move past issues that
+need a human test or owner decision. Source failure retains observations and defers passive
 reads for an hour. Cached assignment hints never ride an
 unrelated wake. Legacy stopped-claim guidance still can, until a scheduled
 sweep carries it. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
@@ -273,14 +275,17 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
     night = None if local is None else (f"it is {local.strftime('%I:%M %p').lstrip('0')} Mountain: no worker starts "
                                         f"new work outside {says((start, end))}; overnight is the requested audit window")
     ended_said = None
+    worker_progress = False
     if state.get("said_at"):
         unheard, ended_said = _unheard(bot, ask, state, now, policy)
         _save(path, state)
         idle_due = idle_due or (working and unheard)
-    if working and (not idle_due or state.get("progress_workers")):
+        worker_progress = unheard and bool(_pending_workers(state, policy))
+    if working and (not idle_due or state.get("progress_workers") or (alert_due and not worker_progress)):
         ended, why_ended = _turns_ended(bot, ask, policy, float(state.get("idle_checked") or 0))
         ended_said = why_ended or ended_said
         idle_due = idle_due or bool(ended)
+        worker_progress = worker_progress or bool(ended)
         if ended and state.get("progress_workers"):
             state["progress_workers"] = sorted(set(state["progress_workers"]) | set(ended))
     if now < float(state.get("progress_retry_after") or 0):
@@ -303,8 +308,16 @@ def _idle(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> list[s
         _save(path, state)
         return [f"It is past {MORNING_HOUR} AM Mountain on {today}, the requested audit handoff: this is "
                 "the morning sweep, with their comments and the duplicate check's (bramble-duties, section 5)."]
+    if idle_due and alert_due and worker_progress and not state.get("alert_deferred_by_worker_check"):
+        # One coordinated GitHub read per check. After occupied ticks, a
+        # quiet slot must be able to route finished workers before a new
+        # alert sweep takes that slot. Give the next available check to the
+        # alert even if workers finish again first.
+        state["alert_deferred_by_worker_check"] = True
+        return [*([ended_said] if ended_said else []), *_free_workers(bot, ask, now, policy, path, state)]
     said = []
     if alert_due:
+        state.pop("alert_deferred_by_worker_check", None)
         state["alert_checked"] = now
         failed = _new_failed_reviews(home, state, now)
         try:
