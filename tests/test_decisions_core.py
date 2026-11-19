@@ -503,9 +503,15 @@ class MainCards(unittest.TestCase):
         with self.assertRaises(CoreError) as e:
             main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
         self.assertEqual(e.exception.reason, "main_already_authorized")
-        # Once Bramble has used his yes, the link is free again.
-        self.w.core.report_work_done(self.w.bramble, c["id"], "merged")
-        main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
+        # Reporting the exact head on auto-merge must not open a second card.
+        self.w.core.report_work_done(self.w.bramble, c["id"], "on auto-merge")
+        with self.assertRaises(CoreError) as e:
+            main_card(self.w, link=f"merge:{REPO}@{SHA}#6048", scope_of_yes=f"PR 6048 merges at {SHA}.")
+        self.assertEqual((e.exception.reason, e.exception.detail["decision_id"]),
+                         ("main_already_authorized", c["id"]))
+        # An approval does not stand for another pull request at the same commit.
+        self.assertIsNone(self.w.core.main_standing(self.w.ws, f"merge:{REPO}@{SHA}#6050"))
+        main_card(self.w, link=f"merge:{REPO}@{SHA}#6050", scope_of_yes=f"PR 6050 merges at {SHA}.")
 
     def test_main_standing_names_the_card_a_link_has_or_none(self):
         # tw_git held reads this for each held pull request, so Bramble sees
@@ -571,6 +577,18 @@ class MainCards(unittest.TestCase):
             with self.subTest(why), self.assertRaises(CoreError) as e:
                 main_card(self.w, link=link, scope_of_yes=f"At {SHA}:\n{line}")
             self.assertEqual(e.exception.reason, "release_link")
+
+    def test_a_second_live_run_still_requires_a_new_card_after_work_done(self):
+        import hashlib
+        line = f"Deploy-Server -Build {SHA}"
+        link = f"live:{REPO}@{SHA}!{hashlib.sha256(line.encode()).hexdigest()}"
+        scope = f"One live box run at {SHA}:\n{line}"
+        c = main_card(self.w, link=link, scope_of_yes=scope)
+        self.w.core.answer(self.w.patrick(), **World.answer_args(c, "authorize"))
+        self.w.core.report_work_done(self.w.bramble, c["id"], "ran once")
+        d = main_card(self.w, link=link, scope_of_yes=scope)
+        self.assertNotEqual(c["id"], d["id"])
+        self.assertFalse(self.w.core.states(d["id"])["release_authorized"])
 
     def test_main_answer_is_for_main_cards_only(self):
         c = self.w.card()

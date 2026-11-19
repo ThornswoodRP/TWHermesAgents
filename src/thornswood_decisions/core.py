@@ -587,21 +587,28 @@ class DecisionCore:
 
     def _no_second_main(self, db, workspace_id: str, release: dict) -> None:
         """Refuses a Main card for a release link that already has one Patrick
-        is asked on, or has authorized and Bramble has not used. Main cards
+        is asked on or has authorized and Bramble can still use. A merge
+        approval stands for that pull request's exact head after Bramble
+        reports it on auto-merge. Main cards
         take no source_key, so until 15 Nov 2026 nothing tied a card to its
         link: Thornswood #6048 at a8abf30 got three Main cards, each opened by
         a Bramble turn that did not see the one before, and Patrick answered
         all three (Thornswood-Ops #331). An authorization is used once and
         lives DEFAULT_EXPIRY (tw-policy's default_expiry_hours), so a card
-        whose yes Bramble reported done, that expired, or that was answered
-        before a restore leaves the link free for a new card."""
-        found = self._main_standing(db, workspace_id, release)
+        that expired or was answered before a restore leaves the link free
+        for a new card. A completed non-merge step also leaves its link free."""
+        found = self._main_standing(db, workspace_id, release, with_used=release["for"] == "merge")
         if not found:
             return
         head = self._link_head(release)
         if found["state"] == "asked":
             raise CoreError(409, "main_already_asked", f"Main card {found['decision_id']} already asks Patrick about "
                             f"{head}: use it (revise_card if it changed) instead of opening another",
+                            decision_id=found["decision_id"])
+        if found["state"] == "used":
+            raise CoreError(409, "main_already_authorized", f"Main card {found['decision_id']} still stands for "
+                            f"pull request #{release['pr']} at {head}. Check its current merge state and use the "
+                            "existing exact-head approval if the queue dropped it.",
                             decision_id=found["decision_id"])
         raise CoreError(409, "main_already_authorized", f"Patrick already authorized {head} on Main card "
                         f"{found['decision_id']}: act on that answer, then report_work_done, instead of asking again",
@@ -632,10 +639,13 @@ class DecisionCore:
 
     def _main_standing(self, db, workspace_id: str, release: dict, with_used: bool = False) -> dict | None:
         head = self._link_head(release)
+        # The merge gate binds to the pull request as well as its commit.
+        exact = f"{head}#{release['pr']}" if release["for"] == "merge" else head
+        variant = None if release["for"] == "merge" else head + "#%"
         rows = db.execute("SELECT d.id, d.status, d.expires_at, d.revision FROM decisions d JOIN task_links l "
                           "ON l.decision_id = d.id AND l.kind = 'release' WHERE d.workspace_id = ? "
                           "AND d.kind = 'main' AND d.status IN ('pending', 'resolved') AND (l.ref = ? OR l.ref LIKE ?)",
-                          (workspace_id, head, head + "#%")).fetchall()
+                          (workspace_id, exact, variant)).fetchall()
         now = self.s.clock()
         used = None
         for r in rows:
