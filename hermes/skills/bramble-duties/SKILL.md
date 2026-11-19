@@ -566,6 +566,15 @@ you verify an issue-specific blocker, such as an outstanding owner decision or a
 fix that only needs a human test. Once you attempt a claim or assignment,
 finish the normal steps for that issue and leave other candidates alone.
 An unavailable source or a worker-level blocker stops that worker's list.
+For ThornswoodRP/Thornswood#4159, Bramble checks eligibility from issue
+and pull request metadata. Magpie is the reader for the exact
+`GET /repos/{owner}/{repo}/actions/permissions` on Thornswood and skymp.
+If a fresh settings read would advance the eligible issue, assign that
+read and its report to Magpie through the normal claim gates. Patrick
+decides whether to enable SHA pinning and makes the settings change.
+If the read is already documented and only Patrick's action remains,
+leave the issue for him and continue to Magpie's next checked candidate
+in this sweep.
 Record its assignment receipt or the concrete blocker. Do not end that
 obligation after assigning another worker. A completed sweep or
 your own summary is not delivery proof; reporting a blocker does not clear
