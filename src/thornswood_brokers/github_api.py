@@ -1,4 +1,4 @@
-"""GitHub for tw-git: the two Apps' installation tokens, and plain REST calls.
+"""GitHub for tw-git: the Apps' installation tokens and plain REST calls.
 
 Tokens are minted from each App's private key, which only tw-git can read
 (mode 0400). A token is asked for one repository and only the permissions the
@@ -29,6 +29,7 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 API = "https://api.github.com"
+MAGPIE_ACTIONS_APP = "magpie_actions_read"
 
 
 class GitHubError(Exception):
@@ -134,7 +135,7 @@ def openssl_sign(data: bytes, key_file: str) -> bytes:
 
 
 class GitHub:
-    """One App's view of GitHub. `app` is "bramble" or "workers"."""
+    """GitHub access through the App installations configured for this client."""
 
     def __init__(self, apps: dict, *, transport: Transport = urllib_transport,
                  signer: Callable[[bytes, str], bytes] | None = None, clock: Callable[[], float] = time.time):

@@ -1,6 +1,6 @@
 """tw-git: the only GitHub writer on the VM (08 section 4).
 
-Runs as tw-git, the only user that can read the two Apps' private keys. The
+Runs as tw-git, the only user that can read the Apps' private keys. The
 gateway asks it over /run/tw/git.sock; the Bot is the profile the call came
 from (the gateway plugin sends it, never the model), and the socket checks the
 caller is the gateway's user.
@@ -32,7 +32,7 @@ from typing import Callable
 from thornswood_guard.github import SHA, CheckRun, Credit, GitHubRules, Issue, PullRequest
 from thornswood_guard.policy import Policy, Verdict
 
-from .github_api import GitHub, GitHubError, quote
+from .github_api import GitHub, GitHubError, MAGPIE_ACTIONS_APP, quote
 from .repeats import likely_repeats
 from .wire import Refused
 
@@ -140,6 +140,7 @@ WRITE = {
     "actions": {"actions": "write", "contents": "read", "metadata": "read"},
 }
 READ = {"contents": "read", "pull_requests": "read", "issues": "read", "actions": "read", "checks": "read", "metadata": "read"}
+ACTION_SETTINGS_READ = {"administration": "read", "metadata": "read"}
 CHECKS_APP = "github-actions"
 # Each App's own login, as GitHub names the author of what it writes
 # (Thornswood records/github-apps.json, the slugs).
@@ -277,9 +278,11 @@ class GitService:
     def __init__(self, policy: Policy, github: GitHub, ask_policy: Callable[[str, dict], dict], *,
                  mirrors: Path, spool: Path, git_base: str = "https://github.com/",
                  git_env: dict | None = None, allow_file_protocol: bool = False,
-                 ask_decide: Callable[[str, dict], object] | None = None):
+                 ask_decide: Callable[[str, dict], object] | None = None,
+                 magpie_actions: GitHub | None = None):
         self.policy = policy
         self.gh = github
+        self.magpie_actions = magpie_actions
         self.ask = ask_policy
         # tw-git's read of Patrick's answers on outside pull request cards
         # (#132) and Main cards (step 6): tw-decide-bots' socket for tw-git alone.
@@ -1558,8 +1561,7 @@ class GitService:
         return out
 
     def read(self, caller: str, args: dict) -> dict:
-        """A GET for any Bot, in the three repos only: as the workers' App, or
-        Bramble's in Ops, where the workers' App is not installed."""
+        """A GET within a work repo, normally through its shared reader."""
         bot = self._bot(args)
         path = str(args.get("path") or "")
         if "repo" not in args:
@@ -1573,6 +1575,14 @@ class GitService:
         if not self._read_within(repo, path):
             raise Refused(f"reads stay inside {root}, or search its issues with repo:{repo} in the query")
         self._check(self.rules.admin_call(bot, "GET", path))
+        repos = self.policy.data["repos"]
+        if repo in (repos["app"], repos["fork"]) and path == f"{root}/actions/permissions":
+            if bot != "magpie":
+                raise Refused("only Magpie may read the repository Actions settings")
+            if self.magpie_actions is None:
+                raise Refused("Magpie's read-only GitHub Actions settings App is not available")
+            body = self.magpie_actions.get(MAGPIE_ACTIONS_APP, repo, path, permissions=ACTION_SETTINGS_READ)
+            return {"body": body}
         body = self.gh.get(self.policy.reader_for(repo), repo, path)
         pick = _lines_wanted(args)
         if isinstance(body, str):

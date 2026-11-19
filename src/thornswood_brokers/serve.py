@@ -11,6 +11,7 @@ import logging
 import os
 import pwd
 import signal
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -35,6 +36,25 @@ def _asker(policy: Policy):
     def ask(op: str, args: dict):
         return wire.call(path, op, args)
     return ask
+
+
+def _magpie_actions_client(spec: dict | None):
+    """Load only tw-git's private, separately provisioned read credential."""
+    from .github_api import GitHub, MAGPIE_ACTIONS_APP
+
+    if spec is None:
+        return None
+    key = Path(spec["key_file"])
+    try:
+        info = key.stat(follow_symlinks=False)
+        private = (stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o400
+                   and info.st_uid == os.getuid() and os.access(key, os.R_OK))
+    except OSError:
+        private = False
+    if not private:
+        logger.warning("Magpie's Actions settings read is unavailable: its private App key is not provisioned")
+        return None
+    return GitHub({MAGPIE_ACTIONS_APP: spec})
 
 
 # The first socket systemd passes (sd_listen_fds(3)).
@@ -140,7 +160,8 @@ def main(argv: list[str]) -> None:
                 raise SystemExit(f"tw-git cannot read {app['key_file']}; the install script says where the App keys go")
         decide = policy.data["brokers"]["sockets"]["decide_git"]["path"]
         svc = GitService(policy, gh, _asker(policy), mirrors=Path(state["git_mirrors"]), spool=Path(state["spool"]),
-                         ask_decide=lambda op, args: wire.call(decide, op, args, timeout=30))
+                         ask_decide=lambda op, args: wire.call(decide, op, args, timeout=30),
+                         magpie_actions=_magpie_actions_client(policy.data["brokers"].get("magpie_actions_read")))
         gone = svc.prune_spool_in()
         if gone:
             print(f"tw-git: {len(gone)} superseded base bundles left the spool", flush=True)
