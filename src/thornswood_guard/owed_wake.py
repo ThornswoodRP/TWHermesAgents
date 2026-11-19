@@ -62,8 +62,10 @@ Bramble has no turn running or queued. If its own periodic alert check is
 also due, confirmed worker progress gets the first available check and the
 alert gets the next one. Only one of those reads runs per check. Each worker
 gets up to six checked issues in board order so it can move past issues that
-need a human test or owner decision. Source failure retains observations and defers passive
-reads for an hour. Cached assignment hints never ride an
+need a human test or owner decision. A scheduled check with concrete worker
+demand can wait briefly for the current sweep to finish before this read.
+Source failure retains observations and defers passive reads for an hour.
+Cached assignment hints never ride an
 unrelated wake. Legacy stopped-claim guidance still can, until a scheduled
 sweep carries it. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
 Sprocket, Echo and Wisp free; its sweep was turned away because another was
@@ -114,6 +116,8 @@ ASK_SECONDS = 10.0
 SCRIPT = OWED_WAKE_JOB + ".py"
 # Every five minutes the script runs; the model runs only when it says so.
 SCHEDULE = "every 5m"
+SWEEP_WAIT_SECONDS = 90.0
+SWEEP_POLL_SECONDS = 4.0
 SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
@@ -1019,6 +1023,65 @@ def _wake_caller(policy) -> Caller:
     return ask
 
 
+def _worker_check_due(home: Path, bot: str, ask: Caller, now: float, policy: dict) -> bool:
+    state = _load(home.joinpath(*IDLE_FILE))
+    if now < float(state.get("progress_retry_after") or 0):
+        return False
+    since = float(state.get("idle_checked") or 0)
+    pending = _pending_workers(state, policy) or {}
+    turns = ask("policy", "bot_turns", {"bot": bot}).get("bots")
+    if not isinstance(turns, dict):
+        return False
+    ready = []
+    for worker in _workers(policy):
+        turn = turns.get(worker)
+        if isinstance(turn, dict) and turn.get("running") is False and turn.get("waiting") is False:
+            if worker in pending or _when(str(turn.get("last") or "")) > since:
+                ready.append(worker)
+    if not ready:
+        return False
+    queued = ask("decide", "queued_for", {"bot": bot}).get("bots")
+    if not isinstance(queued, dict):
+        return False
+    return any(type(count) is int and count == 0 for count in (queued.get(worker, 0) for worker in ready))
+
+
+def _cron_enabled(home: Path) -> bool:
+    return any(isinstance(job, dict) and job.get("name") == OWED_WAKE_JOB
+               and job.get("enabled") is True and job.get("state") in ("scheduled", "running")
+               for job in _load(home.joinpath(*JOBS_FILE)).get("jobs") or [])
+
+
+def _only_sweep_occupied(bot: str, ask: Caller) -> bool:
+    """Its single-sweep slot is occupied, while ordinary admission has room."""
+    sweep = ask("policy", "turn_room", {"bot": bot, "sweep": True})
+    return sweep.get("room") is False and ask("policy", "turn_room", {"bot": bot}).get("room") is True
+
+
+def _cron_check(home: Path, bot: str, ask: Caller, policy: dict, *,
+                clock=time.time, monotonic=time.monotonic, sleep=time.sleep) -> list[str]:
+    """Use a quiet gap after another sweep without starting an extra turn.
+
+    A scheduled check on 18 November missed the end of three unrelated
+    webhooks by less than a minute. Wait briefly when there is a concrete
+    reason to look for worker work. The regular check still decides what is
+    eligible and whether this scheduled turn may run.
+    """
+    now = clock()
+    deadline = monotonic() + SWEEP_WAIT_SECONDS
+    try:
+        if (_working(now, policy) and _cron_enabled(home) and _only_sweep_occupied(bot, ask)
+                and _worker_check_due(home, bot, ask, now, policy)):
+            while (remaining := deadline - monotonic()) > 0:
+                sleep(min(SWEEP_POLL_SECONDS, remaining))
+                if (monotonic() >= deadline or not _working(clock(), policy) or not _cron_enabled(home)
+                        or not _only_sweep_occupied(bot, ask)):
+                    break
+    except BrokerRefused:
+        pass  # the ordinary check reports its own refusal and preserves state
+    return check(home, bot, ask, now=clock(), policy=policy)
+
+
 def main() -> int:
     """Run from <profile>/scripts/, with <profile>/plugins on the path."""
     try:
@@ -1026,8 +1089,7 @@ def main() -> int:
 
         home = Path(__file__).resolve().parents[2]
         policy = Policy.load()
-        lines = check(home, policy.data["wake"]["app"], _wake_caller(policy),
-                      policy=policy.data)
+        lines = _cron_check(home, policy.data["wake"]["app"], _wake_caller(policy), policy.data)
     except Exception as e:  # never a failed script: Hermes would run the agent on it
         lines = [f"the owed-wake check could not run ({type(e).__name__}: {e})", SLEEP]
     for line in lines:
