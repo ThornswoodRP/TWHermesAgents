@@ -1410,7 +1410,8 @@ class PullRequestsAndIssues(unittest.TestCase):
         args = {"op": "open_card", "bot": "rift", "kind": "question", "title": "Choose compatible format",
                 "body": "Measured options.", "scope_of_yes": "Only this format.", "options": OPTIONS,
                 "recommendation": "a"}
-        for candidate in (f"{APP}#3151", f"{APP}#3152", f"{APP}#3153", f"{APP}#3154", "3150"):
+        for candidate in (f"{APP}#3151", f"{APP}#3152", f"{APP}#3153", f"{APP}#3154",
+                          f"{APP.lower()}#3150", "3150"):
             with self.subTest(candidate=candidate):
                 denied = json.loads(decide(dict(args, task=candidate, verified_claim=True)))
                 self.assertFalse(denied["ok"])

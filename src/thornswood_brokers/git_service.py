@@ -985,7 +985,7 @@ class GitService:
         self._check(self.rules.add_label(bot, issue, label))
         if self.ask_decide is None:
             raise Refused("the decision core is unavailable")
-        return self.ask_decide("open_claim_question", args)
+        return self.ask_decide("open_claim_question", dict(args, task=f"{repo}#{issue.number}"))
 
     def _waits_on(self, repo: str, number: int) -> str | None:
         """The open issue this issue waits on, by the newest comment that says
