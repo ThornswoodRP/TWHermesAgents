@@ -564,7 +564,7 @@ class OwedSweeps(unittest.TestCase):
         from pathlib import Path
         from unittest.mock import patch
         from test_owed_wake import NOON
-        from thornswood_guard import owed_wake
+        from thornswood_guard import owed_wake, worker_slot
 
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
@@ -579,7 +579,7 @@ class OwedSweeps(unittest.TestCase):
         owed_wake._save(state, {"idle_checked": NOON - 600})
         with patch("time.time", return_value=NOON):
             self.assertIsNone(g.before_llm(session_id="first", platform="webhook"))
-            owed_wake._reserve_worker_slot(home, NOON)
+            worker_slot.reserve(home, NOON)
             self.assertIn("next routing slot", g.before_llm(session_id="later", platform="webhook")["context"])
             self.assertIsNone(g.before_tool("tw_git", session_id="first"))
             self.assertTrue(f.policy.wake_due("hermes", {"bot": "bramble"})["owed"])
@@ -598,10 +598,10 @@ class OwedSweeps(unittest.TestCase):
             g.after_turn(session_id="direct")
             self.assertIsNone(g.before_llm(session_id="weekly", platform="cron", user_message="Board review"))
             g.after_turn(session_id="weekly")
-            self.assertTrue(owed_wake.worker_slot_active(home, ready_policy().data, NOON))
+            self.assertTrue(worker_slot.active(home, ready_policy().data, NOON))
 
             self.assertIsNone(g.before_llm(session_id="worker-cron", platform="cron", user_message=owed_wake.PROMPT))
-            self.assertFalse(owed_wake.worker_slot_active(home, ready_policy().data, NOON))
+            self.assertFalse(worker_slot.active(home, ready_policy().data, NOON))
             g.after_turn(session_id="worker-cron")
             self.assertIsNone(g.before_llm(session_id="next", platform="webhook"))
 
@@ -610,9 +610,9 @@ class OwedSweeps(unittest.TestCase):
         from pathlib import Path
         from unittest.mock import patch
         from test_owed_wake import NOON
-        from thornswood_guard import owed_wake
+        from thornswood_guard import owed_wake, worker_slot
 
-        for now, created, enabled in ((NOON, NOON - owed_wake.WORKER_SLOT_SECONDS, True),
+        for now, created, enabled in ((NOON, NOON - worker_slot.WORKER_SLOT_SECONDS, True),
                                       (NOON, NOON, False), (NOON + 12 * 3600, NOON + 12 * 3600, True)):
             with self.subTest(now=now, created=created, enabled=enabled), tempfile.TemporaryDirectory() as temp:
                 home = Path(temp)
@@ -622,7 +622,7 @@ class OwedSweeps(unittest.TestCase):
                 owed_wake._save(home.joinpath(*owed_wake.JOBS_FILE), {"jobs": [
                     {"name": owed_wake.OWED_WAKE_JOB, "enabled": enabled, "state": "scheduled"},
                 ]})
-                owed_wake._reserve_worker_slot(home, created)
+                worker_slot.reserve(home, created)
                 with patch("time.time", return_value=now):
                     self.assertIsNone(g.before_llm(session_id="ordinary", platform="webhook"))
 
@@ -631,16 +631,16 @@ class OwedSweeps(unittest.TestCase):
         from pathlib import Path
         from unittest.mock import patch
         from test_owed_wake import NOON
-        from thornswood_guard import owed_wake
+        from thornswood_guard import owed_wake, worker_slot
 
         with tempfile.TemporaryDirectory() as root:
             home = Path(root)
             f = Fleet()
             g = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None,
                          owed_file=home.joinpath(*brokers.OWED_FILE))
-            owed_wake._reserve_worker_slot(home, NOON)
+            worker_slot.reserve(home, NOON)
             owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"idle_checked": NOON})
-            with patch.object(owed_wake, "_save", side_effect=OSError("local marker cannot be written")):
+            with patch.object(worker_slot, "save", side_effect=OSError("local marker cannot be written")):
                 self.assertIsNone(g.before_llm(session_id="worker-cron", platform="cron", user_message=owed_wake.PROMPT))
             self.assertIsNone(g.before_tool("tw_git", session_id="worker-cron"))
             g.after_turn(session_id="worker-cron")

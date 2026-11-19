@@ -67,7 +67,8 @@ class Loaded(unittest.TestCase):
         # it starts. tw-policy answers the connector for the policy now.
         for rel in ("src/thornswood_guard/policy.json", "src/thornswood_guard/policy.yaml",
                     "src/thornswood_guard/brokers.py", "src/thornswood_guard/routes.py",
-                    "src/thornswood_guard/policy.py", "src/thornswood_guard/profile_config.py"):
+                    "src/thornswood_guard/policy.py", "src/thornswood_guard/profile_config.py",
+                    "src/thornswood_guard/worker_slot.py"):
             self.assertEqual(self.changed(change={rel: "\n# x\n" if rel.endswith(".py") else " "}),
                              {"brokers": True, "connector": False}, rel)
 

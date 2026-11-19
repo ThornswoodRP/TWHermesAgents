@@ -10,7 +10,7 @@ from pathlib import Path
 from test_owed_wake import BUSY, Idle, NOON, POLICY, wakes
 from decisions_helpers import World
 from thornswood_decisions.bots import BotRoute
-from thornswood_guard import owed_wake
+from thornswood_guard import owed_wake, worker_slot
 from thornswood_guard.brokers import BrokerRefused
 
 
@@ -110,13 +110,13 @@ class CronQuietWindow(unittest.TestCase):
         self.assertEqual(self.elapsed, 90)
         self.assertFalse(any(b == "git" for b, _, _ in self.b.asked))
         now = self.now + self.elapsed
-        path = self.home.joinpath(*owed_wake.WORKER_SLOT_FILE)
+        path = self.home.joinpath(*worker_slot.WORKER_SLOT_FILE)
         initial = owed_wake._load(path)
-        self.assertTrue(owed_wake.worker_slot_active(self.home, POLICY, now))
-        later = now + owed_wake.WORKER_SLOT_SECONDS
-        owed_wake._reserve_worker_slot(self.home, later)
+        self.assertTrue(worker_slot.active(self.home, POLICY, now))
+        later = now + worker_slot.WORKER_SLOT_SECONDS
+        worker_slot.reserve(self.home, later)
         self.assertEqual(owed_wake._load(path), initial, "the same board watermark does not extend the reservation")
-        self.assertFalse(owed_wake.worker_slot_active(self.home, POLICY, later))
+        self.assertFalse(worker_slot.active(self.home, POLICY, later))
 
     def test_a_checked_board_keeps_the_slot_until_its_cron_turn_can_admit(self):
         self.webhook_ends = (120,)
@@ -126,9 +126,9 @@ class CronQuietWindow(unittest.TestCase):
                                     clock=lambda: self.now + self.elapsed, monotonic=lambda: self.elapsed,
                                     sleep=self.advance)
         self.assertIn("Checked next issue for echo: ThornswoodRP/Thornswood#9000.", got)
-        self.assertTrue(owed_wake.worker_slot_active(self.home, POLICY, self.now + self.elapsed))
-        owed_wake.consume_worker_slot(self.home)
-        self.assertFalse(owed_wake.worker_slot_active(self.home, POLICY, self.now + self.elapsed))
+        self.assertTrue(worker_slot.active(self.home, POLICY, self.now + self.elapsed))
+        worker_slot.consume(self.home)
+        self.assertFalse(worker_slot.active(self.home, POLICY, self.now + self.elapsed))
 
     def test_a_checked_board_without_work_consumes_the_slot_without_a_turn(self):
         self.webhook_ends = (120,)
@@ -139,21 +139,21 @@ class CronQuietWindow(unittest.TestCase):
                                     clock=lambda: self.now + self.elapsed, monotonic=lambda: self.elapsed,
                                     sleep=self.advance)
         self.assertFalse(wakes("\n".join(got)))
-        self.assertFalse(owed_wake.worker_slot_active(self.home, POLICY, self.now + self.elapsed))
+        self.assertFalse(worker_slot.active(self.home, POLICY, self.now + self.elapsed))
 
     def test_reservation_write_failure_still_runs_the_normal_cron_check(self):
         from unittest.mock import patch
 
         self.webhook_ends = (120,)
-        normal_save = owed_wake._save
-        slot_path = self.home.joinpath(*owed_wake.WORKER_SLOT_FILE)
+        normal_save = worker_slot.save
+        slot_path = self.home.joinpath(*worker_slot.WORKER_SLOT_FILE)
 
         def save(path, value):
             if path == slot_path:
                 raise OSError("local marker cannot be written")
             return normal_save(path, value)
 
-        with (patch.object(owed_wake, "_save", side_effect=save),
+        with (patch.object(worker_slot, "save", side_effect=save),
               patch.object(owed_wake, "check", wraps=owed_wake.check) as check):
             self.assertFalse(wakes(self.run_check()))
             check.assert_called_once()
@@ -164,7 +164,7 @@ class CronQuietWindow(unittest.TestCase):
         self.assertFalse(wakes(self.run_check()))
         self.assertEqual(self.elapsed, 8)
         self.assertFalse(any(b == "git" for b, _, _ in self.b.asked))
-        self.assertFalse(self.home.joinpath(*owed_wake.WORKER_SLOT_FILE).exists())
+        self.assertFalse(self.home.joinpath(*worker_slot.WORKER_SLOT_FILE).exists())
 
     def test_a_queued_delivery_is_not_unsettled_worker_demand(self):
         self.b.queued = {"echo": 1}

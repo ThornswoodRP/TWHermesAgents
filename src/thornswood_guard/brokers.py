@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import worker_slot
 from .policy import Policy
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,6 @@ SCHEDULED = ("cron",)
 # profile until the owed-wake check can hand it over.
 SWEEP_PLATFORMS = ("webhook",)
 OWED_WAKE_MARK = "[Thornswood owed wake]"
-OWED_WAKE_JOB = "tw-owed-wake"
 # Bramble's two weekly reviews (scripts/apply.py REVIEW_JOBS) report only and
 # change nothing, so their turns are low-risk work, which Patrick's route order
 # (29 Oct) lets Claude's included API credits take when the subscription is
@@ -243,8 +243,7 @@ class TurnGate:
         sweep = self._sweep(kwargs)
         sweep_home = self.owed_file.parents[2] if sweep and self.owed_file is not None else None
         if not held and sweep_home is not None and platform in SWEEP_PLATFORMS:
-            from .owed_wake import worker_slot_active
-            if worker_slot_active(sweep_home, self.policy.data, time.time()):
+            if worker_slot.active(sweep_home, self.policy.data, time.time()):
                 why = "the scheduled worker check has the next routing slot"
                 self._owe(why)
                 return {"context": self._owed(why)}
@@ -262,8 +261,7 @@ class TurnGate:
                     with self.lock:
                         self.turns[key] = {"ticket": ticket, "state": "admitted", "sweep": sweep}
                     if scheduled and sweep_home is not None:
-                        from .owed_wake import consume_worker_slot
-                        consume_worker_slot(sweep_home)
+                        worker_slot.consume(sweep_home)
                     return None
                 # New turns are held for a reload, which ends this process and
                 # every turn still waiting in it. 12 Nov 2026, 10:09 PM Mountain:

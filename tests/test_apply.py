@@ -177,7 +177,8 @@ class Apply(unittest.TestCase):
             r = self.run_apply(home)
             self.assertTrue(r.stdout.strip().splitlines()[-1].startswith("RELOAD: not needed"), (name, r.stdout))
         # One it imports still does.
-        (home / "profiles" / "wisp" / "plugins" / "thornswood_guard" / "brokers.py").write_text("# changed\n")
+        brokers_file = home / "profiles" / "wisp" / "plugins" / "thornswood_guard" / "brokers.py"
+        brokers_file.write_text(brokers_file.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
         r = self.run_apply(home)
         self.assertEqual(r.stdout.strip().splitlines()[-1], "RELOAD: needed; 1 file a running Bot holds changed: "
                                                             "profiles/wisp/plugins/thornswood_guard/brokers.py")

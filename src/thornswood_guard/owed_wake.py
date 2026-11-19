@@ -100,16 +100,17 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
-import tempfile
 import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .brokers import OWED_FILE, OWED_WAKE_JOB, OWED_WAKE_MARK, BrokerRefused, Caller
+from . import worker_slot
+from .brokers import OWED_FILE, OWED_WAKE_MARK, BrokerRefused, Caller
 from .hours import rule, says, work_hours
+from .worker_slot import IDLE_FILE, JOBS_FILE, MOUNTAIN, OWED_WAKE_JOB, load as _load, save as _save
+from .worker_slot import mountain_time as _local, working as _working
 
 SLEEP = json.dumps({"wakeAgent": False})
 ASK_SECONDS = 10.0
@@ -118,10 +119,6 @@ SCRIPT = OWED_WAKE_JOB + ".py"
 SCHEDULE = "every 5m"
 SWEEP_WAIT_SECONDS = 90.0
 SWEEP_POLL_SECONDS = 4.0
-# The next five-minute tick has time to run its grouped board read, even
-# with scheduler jitter. A disabled job never holds a routing slot.
-WORKER_SLOT_SECONDS = 540.0
-WORKER_SLOT_FILE = ("local", "thornswood-hermes", "worker-check-slot.json")
 SKILL = "bramble-duties"
 PROMPT = (
     OWED_WAKE_MARK + " This is a sweep the wake check owed you; the lines before this say why (a GitHub wake the "
@@ -145,12 +142,8 @@ PROMPT = (
 # The requested Grok audit window is midnight to 7 AM Mountain; comments wait for the
 # first sweep after this hour.
 MORNING_HOUR = 7
-# New work starts only in policy.yaml's work hours, Mountain (hours.py); the
-# decision core holds briefs to the same hours.
-MOUNTAIN = "America/Denver"
 # How often the free worker wake reads the claims and the board.
 IDLE_EVERY = 3600.0
-IDLE_FILE = ("local", "thornswood-hermes", "idle-wake.json")
 # The grouped read checks dependencies for this many ordered issues per field,
 # giving each worker alternatives without a second board walk.
 CANDIDATE_LIMIT = 6
@@ -159,7 +152,6 @@ ALERT_EVERY = 900.0
 # Bramble's two weekly reviews, by the names scripts/apply.py gives them
 # (REVIEW_JOBS), and the file Hermes keeps a profile's cron jobs in.
 REVIEWS = ("tw-weekly-board-review", "tw-weekly-project-review")
-JOBS_FILE = ("cron", "jobs.json")
 # How much of Hermes's error line a wake carries.
 ERROR_CHARS = 400
 # The free worker look's pull request pages (_worked): REST reads, not
@@ -239,21 +231,6 @@ def _check(home: Path, bot: str, ask: Caller, now: float, policy: dict | None) -
     if policy is None:
         return ["no wake is owed", SLEEP]
     return ["no wake is owed", *_idle(home, bot, ask, now, policy)]
-
-
-def _local(now: float):
-    """now as Mountain time, or None when the time zone data cannot be read."""
-    try:
-        from zoneinfo import ZoneInfo
-        return datetime.fromtimestamp(now, ZoneInfo(MOUNTAIN))
-    except Exception:
-        return None
-
-
-def _working(now: float, policy: dict | None = None) -> bool:
-    local = _local(now)
-    start, end = work_hours(policy)
-    return local is not None and start <= local.hour < end
 
 
 def _clock(t: float) -> str:
@@ -995,22 +972,6 @@ def _count(bot: str, ask: Caller, repo: str, terms: str) -> int:
     return int((body.get("body") or {}).get("total_count") or 0)
 
 
-def _load(path: Path) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _save(path: Path, state: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".idle-wake-")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-    os.replace(tmp, path)
-
-
 def _wake_caller(policy) -> Caller:
     """Use the existing full-read budget only for the grouped snapshot.
     That read traverses the project; live single board calls took33 seconds,
@@ -1050,55 +1011,10 @@ def _worker_check_due(home: Path, bot: str, ask: Caller, now: float, policy: dic
     return any(type(count) is int and count == 0 for count in (queued.get(worker, 0) for worker in ready))
 
 
-def _cron_enabled(home: Path) -> bool:
-    jobs = _load(home.joinpath(*JOBS_FILE)).get("jobs")
-    return isinstance(jobs, list) and any(isinstance(job, dict) and job.get("name") == OWED_WAKE_JOB
-               and job.get("enabled") is True and job.get("state") in ("scheduled", "running")
-               for job in jobs)
-
-
 def _only_sweep_occupied(bot: str, ask: Caller) -> bool:
     """Its single-sweep slot is occupied, while ordinary admission has room."""
     sweep = ask("policy", "turn_room", {"bot": bot, "sweep": True})
     return sweep.get("room") is False and ask("policy", "turn_room", {"bot": bot}).get("room") is True
-
-
-def _worker_checked_at(home: Path) -> float:
-    at = _load(home.joinpath(*IDLE_FILE)).get("idle_checked")
-    return at if type(at) in (int, float) and 0 <= at < float("inf") else 0.0
-
-
-def _reserve_worker_slot(home: Path, now: float) -> None:
-    """Reserve at most once between two actual worker-board attempts."""
-    path = home.joinpath(*WORKER_SLOT_FILE)
-    checked_at = _worker_checked_at(home)
-    previous = _load(path)
-    if previous.get("checked_at") == checked_at:
-        return
-    try:
-        _save(path, {"checked_at": checked_at, "created_at": now, "consumed": False})
-    except OSError:
-        pass  # a local marker failure does not change the ordinary cron check
-
-
-def worker_slot_active(home: Path, policy: dict, now: float) -> bool:
-    slot = _load(home.joinpath(*WORKER_SLOT_FILE))
-    at = slot.get("created_at")
-    return (slot.get("consumed") is False and type(at) in (int, float)
-            and now - WORKER_SLOT_SECONDS < at <= now and _working(now, policy) and _cron_enabled(home))
-
-
-def consume_worker_slot(home: Path) -> None:
-    """A fresh board attempt needs the slot until its scheduled turn admits."""
-    path = home.joinpath(*WORKER_SLOT_FILE)
-    slot = _load(path)
-    checked_at = slot.get("checked_at")
-    if slot.get("consumed") is False and type(checked_at) in (int, float) and _worker_checked_at(home) > checked_at:
-        slot["consumed"] = True
-        try:
-            _save(path, slot)
-        except OSError:
-            pass  # a stale marker expires without interrupting an admitted turn
 
 
 def _cron_check(home: Path, bot: str, ask: Caller, policy: dict, *,
@@ -1113,22 +1029,22 @@ def _cron_check(home: Path, bot: str, ask: Caller, policy: dict, *,
     now = clock()
     deadline = monotonic() + SWEEP_WAIT_SECONDS
     try:
-        if (_working(now, policy) and _cron_enabled(home) and _only_sweep_occupied(bot, ask)
+        if (_working(now, policy) and worker_slot.cron_enabled(home) and _only_sweep_occupied(bot, ask)
                 and _worker_check_due(home, bot, ask, now, policy)):
             while (remaining := deadline - monotonic()) > 0:
                 sleep(min(SWEEP_POLL_SECONDS, remaining))
-                if (monotonic() >= deadline or not _working(clock(), policy) or not _cron_enabled(home)
+                if (monotonic() >= deadline or not _working(clock(), policy) or not worker_slot.cron_enabled(home)
                         or not _only_sweep_occupied(bot, ask)):
                     break
             now = clock()
-            if (monotonic() >= deadline and _working(now, policy) and _cron_enabled(home)
+            if (monotonic() >= deadline and _working(now, policy) and worker_slot.cron_enabled(home)
                     and _only_sweep_occupied(bot, ask) and _worker_check_due(home, bot, ask, now, policy)):
-                _reserve_worker_slot(home, now)
+                worker_slot.reserve(home, now)
     except BrokerRefused:
         pass  # the ordinary check reports its own refusal and preserves state
     lines = check(home, bot, ask, now=clock(), policy=policy)
     if lines[-1] == SLEEP:
-        consume_worker_slot(home)
+        worker_slot.consume(home)
     return lines
 
 
