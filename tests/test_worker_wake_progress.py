@@ -48,6 +48,95 @@ class UndispatchedOpportunity(unittest.TestCase):
         self.assertIn("sprocket", "\n".join(again))
 
 
+class CronQuietWindow(unittest.TestCase):
+    def setUp(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name)
+        self.now = NOON
+        self.elapsed = 0
+        self.webhook_ends = (45,)
+        self.capacity = True
+        self.block_after = None
+        self.enabled = True
+        self.ended = True
+        self.probes = []
+        self.b = Idle(claimed=dict(BUSY, **{"claimed: Echo": 0}), open_={'"area: Website"': 1})
+
+    def ask(self, broker, op, args):
+        webhook = next((i for i, end in enumerate(self.webhook_ends) if self.elapsed < end), None)
+        if op == "turn_room":
+            self.probes.append((self.elapsed, bool(args.get("sweep")), webhook))
+            return {"room": self.capacity and (self.block_after is None or self.elapsed < self.block_after)
+                    and not (args.get("sweep") and webhook is not None)}
+        if op == "bot_turns":
+            return {"bots": {"bramble": {"running": webhook is not None, "waiting": False},
+                             "echo": {"running": False, "waiting": False,
+                                      "last": stamp(self.now - (60 if self.ended else 600))}}}
+        return self.b(broker, op, args)
+
+    def run_check(self):
+        owed_wake._save(self.home.joinpath(*owed_wake.JOBS_FILE), {"jobs": [
+            {"name": owed_wake.OWED_WAKE_JOB, "enabled": self.enabled, "state": "scheduled"},
+        ]})
+        owed_wake._save(self.home.joinpath(*owed_wake.IDLE_FILE), {
+            "morning": "2026-11-09", "alert_checked": self.now, "idle_checked": self.now - 300,
+        })
+        return "\n".join(owed_wake._cron_check(self.home, "bramble", self.ask, POLICY,
+                                             clock=lambda: self.now + self.elapsed, monotonic=lambda: self.elapsed,
+                                             sleep=self.advance))
+
+    def advance(self, seconds):
+        self.elapsed += seconds
+
+    def test_the_same_scheduled_check_routes_workers_after_the_active_sweep_ends(self):
+        self.assertIn("Checked next issue for echo:", self.run_check())
+        self.assertGreaterEqual(self.elapsed, self.webhook_ends[-1])
+        self.assertEqual(sum(op == "board" for _, op, _ in self.b.asked), 1)
+
+    def test_consecutive_webhooks_do_not_restart_or_consume_the_deadline(self):
+        # The first webhook ended, but the replacement was already admitted
+        # when the next probe ran. A later check sees the queue clear.
+        self.webhook_ends = (22, 79)
+        self.assertIn("Checked next issue for echo:", self.run_check())
+        self.assertEqual({webhook for _, sweep, webhook in self.probes if sweep}, {0, 1, None})
+        self.assertGreaterEqual(self.elapsed, 79)
+        self.assertLessEqual(self.elapsed, 90)
+        self.assertEqual(sum(op == "board" for _, op, _ in self.b.asked), 1)
+
+    def test_persistent_occupancy_times_out_without_a_board_read_or_agent_turn(self):
+        self.webhook_ends = (40, 120)
+        self.assertFalse(wakes(self.run_check()))
+        self.assertEqual(self.elapsed, 90)
+        self.assertFalse(any(b == "git" for b, _, _ in self.b.asked))
+
+    def test_a_global_hold_stops_waiting_even_while_a_sweep_is_running(self):
+        self.block_after = 8
+        self.assertFalse(wakes(self.run_check()))
+        self.assertEqual(self.elapsed, 8)
+        self.assertFalse(any(b == "git" for b, _, _ in self.b.asked))
+
+    def test_a_queued_delivery_is_not_unsettled_worker_demand(self):
+        self.b.queued = {"echo": 1}
+        self.assertFalse(wakes(self.run_check()))
+        self.assertEqual(self.elapsed, 0)
+
+    def test_no_wait_without_canonical_demand_or_an_enabled_workday(self):
+        for knob, value in (("ended", False), ("enabled", False), ("capacity", False), ("now", NOON + 12 * 3600)):
+            with self.subTest(knob=knob):
+                old = getattr(self, knob)
+                setattr(self, knob, value)
+                self.assertFalse(wakes(self.run_check()))
+                self.assertEqual(self.elapsed, 0)
+                setattr(self, knob, old)
+
+    def test_the_work_window_is_rechecked_after_waiting_across_midnight(self):
+        self.now = NOON + 11.5 * 3600 - 8
+        self.assertFalse(wakes(self.run_check()))
+        self.assertEqual(self.elapsed, 8)
+        self.assertFalse(any(b == "git" for b, _, _ in self.b.asked))
+
+
 class DispatchReceipts(unittest.TestCase):
     def setUp(self):
         self.world = World()
