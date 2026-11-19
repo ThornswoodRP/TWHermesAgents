@@ -559,6 +559,93 @@ if __name__ == "__main__":
 
 
 class OwedSweeps(unittest.TestCase):
+    def test_worker_slot_coalesces_later_webhooks_until_the_checked_cron_admits(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from test_owed_wake import NOON
+        from thornswood_guard import owed_wake, worker_slot
+
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        home = Path(root.name)
+        f = Fleet()
+        g = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None,
+                     owed_file=home.joinpath(*brokers.OWED_FILE))
+        owed_wake._save(home.joinpath(*owed_wake.JOBS_FILE), {"jobs": [
+            {"name": owed_wake.OWED_WAKE_JOB, "enabled": True, "state": "scheduled"},
+        ]})
+        state = home.joinpath(*owed_wake.IDLE_FILE)
+        owed_wake._save(state, {"idle_checked": NOON - 600})
+        with patch("time.time", return_value=NOON):
+            self.assertIsNone(g.before_llm(session_id="first", platform="webhook"))
+            worker_slot.reserve(home, NOON)
+            self.assertIn("next routing slot", g.before_llm(session_id="later", platform="webhook")["context"])
+            self.assertIsNone(g.before_tool("tw_git", session_id="first"))
+            self.assertTrue(f.policy.wake_due("hermes", {"bot": "bramble"})["owed"])
+            def temporarily_offline(broker, op, args):
+                if op == "owe_wake":
+                    raise BrokerRefused("wake broker is temporarily unavailable")
+                return f.ask(broker, op, args)
+
+            with patch.object(g, "ask", side_effect=temporarily_offline):
+                self.assertIn("is owed", g.before_llm(session_id="retry", platform="webhook")["context"])
+                self.assertIsNone(g.before_tool("tw_git", session_id="first"))
+            self.assertTrue(home.joinpath(*brokers.OWED_FILE).is_file())
+            g.after_turn(session_id="first")
+            owed_wake._save(state, {"idle_checked": NOON})  # the next board read has started
+            self.assertIsNone(g.before_llm(session_id="direct", platform="desktop"))
+            g.after_turn(session_id="direct")
+            self.assertIsNone(g.before_llm(session_id="weekly", platform="cron", user_message="Board review"))
+            g.after_turn(session_id="weekly")
+            self.assertTrue(worker_slot.active(home, ready_policy().data, NOON))
+
+            self.assertIsNone(g.before_llm(session_id="worker-cron", platform="cron", user_message=owed_wake.PROMPT))
+            self.assertFalse(worker_slot.active(home, ready_policy().data, NOON))
+            g.after_turn(session_id="worker-cron")
+            self.assertIsNone(g.before_llm(session_id="next", platform="webhook"))
+
+    def test_expired_disabled_and_overnight_worker_slots_do_not_hold_webhooks(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from test_owed_wake import NOON
+        from thornswood_guard import owed_wake, worker_slot
+
+        for now, created, enabled in ((NOON, NOON - worker_slot.WORKER_SLOT_SECONDS, True),
+                                      (NOON, NOON, False), (NOON + 12 * 3600, NOON + 12 * 3600, True)):
+            with self.subTest(now=now, created=created, enabled=enabled), tempfile.TemporaryDirectory() as temp:
+                home = Path(temp)
+                f = Fleet()
+                g = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None,
+                             owed_file=home.joinpath(*brokers.OWED_FILE))
+                owed_wake._save(home.joinpath(*owed_wake.JOBS_FILE), {"jobs": [
+                    {"name": owed_wake.OWED_WAKE_JOB, "enabled": enabled, "state": "scheduled"},
+                ]})
+                worker_slot.reserve(home, created)
+                with patch("time.time", return_value=now):
+                    self.assertIsNone(g.before_llm(session_id="ordinary", platform="webhook"))
+
+    def test_a_worker_slot_write_failure_cannot_interrupt_an_admitted_cron_turn(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from test_owed_wake import NOON
+        from thornswood_guard import owed_wake, worker_slot
+
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            f = Fleet()
+            g = TurnGate(ready_policy(), "bramble", f.ask, wait_seconds=0, sleep=lambda s: None,
+                         owed_file=home.joinpath(*brokers.OWED_FILE))
+            worker_slot.reserve(home, NOON)
+            owed_wake._save(home.joinpath(*owed_wake.IDLE_FILE), {"idle_checked": NOON})
+            with patch.object(worker_slot, "save", side_effect=OSError("local marker cannot be written")):
+                self.assertIsNone(g.before_llm(session_id="worker-cron", platform="cron", user_message=owed_wake.PROMPT))
+            self.assertIsNone(g.before_tool("tw_git", session_id="worker-cron"))
+            g.after_turn(session_id="worker-cron")
+            self.assertIsNone(g.before_llm(session_id="direct", platform="desktop"))
+
     """1 Nov, 10:02 PM on: Bramble's wakes were refused with "already took its
     20 tickets this hour" and dropped. A sweep the queue turns away is owed in
     tw-policy; a sweep that runs to its end pays it."""
