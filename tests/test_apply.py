@@ -202,6 +202,9 @@ class Apply(unittest.TestCase):
         self.assertIn("each checked worker", job["prompt"])
         self.assertIn("before unrelated sweep work", job["prompt"])
         self.assertIn("assignment receipt", job["prompt"])
+        self.assertIn("Checked alternative", job["prompt"])
+        self.assertIn("only after a concrete issue-specific blocker", job["prompt"])
+        self.assertIn("stop after a claim or assignment attempt", job["prompt"])
         self.assertNotIn("then a free worker's next issue", job["prompt"])
         installed_skill = (home / "profiles" / "bramble" / "skills" / "thornswood" /
                            "bramble-duties" / "SKILL.md").read_text(encoding="utf-8")
@@ -212,6 +215,8 @@ class Apply(unittest.TestCase):
         self.assertIn("reporting a blocker does not clear the scheduler's pending observation",
                       " ".join(installed_skill.split()))
         self.assertIn("The later general pass covers remaining workers",
+                      " ".join(installed_skill.split()))
+        self.assertIn("a worker-level blocker stops that worker's list",
                       " ".join(installed_skill.split()))
         self.assertIn(f"owed-wake job {job['id']} is active", r.stdout)
         for bot in policy().bots:

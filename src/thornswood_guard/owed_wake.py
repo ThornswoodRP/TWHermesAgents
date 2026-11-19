@@ -58,8 +58,10 @@ A worker opportunity stays in IDLE_FILE until its exact assignment is sent,
 or a fresh canonical board read proves no eligible work is available. A
 completed coordinator sweep alone cannot acknowledge it. Pending idle
 workers share one board snapshot at the next five-minute check while
-Bramble has no turn running or queued. Source failure retains observations
-and defers passive reads for an hour. Cached assignment hints never ride an
+Bramble has no turn running or queued. Each worker gets up to six checked
+issues in board order so it can move past issues that need a human test
+or owner decision. Source failure retains observations and defers passive
+reads for an hour. Cached assignment hints never ride an
 unrelated wake. Legacy stopped-claim guidance still can, until a scheduled
 sweep carries it. 11 Nov 2026: the 6:31 PM look named Rift and Magpie stopped and
 Sprocket, Echo and Wisp free; its sweep was turned away because another was
@@ -117,7 +119,10 @@ PROMPT = (
     "work on the board, or a worker that handed back or stopped mid-issue). "
     "During the stated work hours, first handle each checked worker named by a 'Checked next issue' line "
     "before unrelated sweep work, through bramble-duties section 6's current eligibility, claim and assignment "
-    "gates. Account for each with its assignment receipt or a concrete current eligibility, activity, "
+    "gates. Consider the first issue and each 'Checked alternative' for that worker in the printed order. "
+    "Move to the next checked issue only after a concrete issue-specific blocker. When considering alternatives, "
+    "stop after a claim or assignment attempt or when a worker-level blocker or unavailable source prevents work. "
+    "Account for each worker with its assignment receipt or a concrete current eligibility, activity, "
     "admission or explicit Stop blocker. Work assigned to another worker and a completed sweep do not "
     "settle that worker's observation. Never replay held old work or force an assignment. "
     "Do your whole bramble-duties skill through tw_git and tw_decide: every open pull "
@@ -136,6 +141,9 @@ MOUNTAIN = "America/Denver"
 # How often the free worker wake reads the claims and the board.
 IDLE_EVERY = 3600.0
 IDLE_FILE = ("local", "thornswood-hermes", "idle-wake.json")
+# The grouped read checks dependencies for this many ordered issues per field,
+# giving each worker alternatives without a second board walk.
+CANDIDATE_LIMIT = 6
 # How often the alert wake looks at Bramble's own work, at any hour.
 ALERT_EVERY = 900.0
 # Bramble's two weekly reviews, by the names scripts/apply.py gives them
@@ -765,7 +773,7 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     # Filter each field before truncation, from the same complete snapshot.
     groups = {w: {"areas": list(AREAS.get(w, ()))} for w in free}
     groups["shared"] = {"not_areas": [*(a for mine in AREAS.values() for a in mine), *BRAMBLES_OWN]}
-    board = ask("git", "board", {"bot": bot, "eligible": True, "limit": 1, "groups": groups,
+    board = ask("git", "board", {"bot": bot, "eligible": True, "limit": CANDIDATE_LIMIT, "groups": groups,
                                   **({"excluded_issues": [{"repo": repo, "number": n} for repo, n in sorted(excluded)]}
                                      if excluded else {})})
     results = board.get("groups") if isinstance(board, dict) else None
@@ -773,6 +781,7 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
         raise BrokerRefused("the grouped eligible board snapshot is unavailable")
     for group in results.values():
         if (not isinstance(group, dict) or not isinstance(group.get("issues"), list)
+                or len(group["issues"]) > CANDIDATE_LIMIT
                 or not isinstance(group.get("open"), int) or isinstance(group.get("open"), bool)
                 or group["open"] < 0 or (not group["issues"] and group["open"] != 0)):
             raise BrokerRefused("the grouped eligible board snapshot is malformed or incomplete")
@@ -791,13 +800,15 @@ def _look(bot: str, ask: Caller, now: float, policy: dict, workers: dict[str, st
     candidates = []
     for worker in free:
         rows = results[worker]["issues"] or results["shared"]["issues"]
-        if rows:
-            item = rows[0]
+        for index, item in enumerate(rows):
             if (not isinstance(item, dict) or item.get("repo") not in allowed_repos
-                    or not isinstance(item.get("number"), int) or isinstance(item["number"], bool)):
+                    or not isinstance(item.get("number"), int) or isinstance(item["number"], bool)
+                    or not 0 < item["number"] <= 9999999999):
                 raise BrokerRefused("the checked candidate issue reference is malformed")
-            candidates.append(f"Checked next issue for {worker}: {item['repo']}#{item['number']}.")
-    direction = " Only pick these checked issue refs; recheck claim eligibility before assigning. Never replay a held receipt."
+            kind = "Checked next issue" if index == 0 else "Checked alternative"
+            candidates.append(f"{kind} for {worker}: {item['repo']}#{item['number']}.")
+    direction = (" Only pick these checked issue refs in the printed order. "
+                 "Recheck claim eligibility before assigning. Never replay a held receipt.")
     capacity = (f"{', '.join(free)} have capacity for checked new issues"
                 if recovered else f"{', '.join(free)} hold no active issue (none claimed, or each claimed one waits)")
     if fed:
