@@ -11,7 +11,7 @@ credentials (thornswood_brokers.wire): only the Bots' user, hermes, and root.
 The Bot is the one the tw_decide tool names from its own profile, never the
 model, as the tw-git broker takes it; each Bot acts as its own service
 principal in the core, so Bramble opens any card and a specialist only a
-question on a task Bramble assigned it, exactly as DecisionCore allows. No Bot
+question on its assigned task or current claim verified by tw-git. No Bot
 holds a token or a GitHub credential for this. No Bot can answer a card: only
 Patrick does, in the app.
 
@@ -96,7 +96,7 @@ class BotRoute:
 
     # ── the ops ───────────────────────────────────────────────────────────
 
-    def open_card(self, p: Principal, args: dict) -> dict:
+    def open_card(self, p: Principal, args: dict, *, verified_claim: bool = False) -> dict:
         days = args.get("expires_in_days", 3)
         if not isinstance(days, int) or not 1 <= days <= MAX_EXPIRY_DAYS:
             raise CoreError(400, "expiry", f"a card expires in 1 to {MAX_EXPIRY_DAYS} days")
@@ -111,7 +111,8 @@ class BotRoute:
             scope_of_yes=_text(args, "scope_of_yes"), risk=args.get("risk") or "normal",
             urgent=bool(args.get("urgent")), expires_in=timedelta(days=days),
             source_key=args.get("source_key") or None, task=args.get("task") or None,
-            links=[(x["kind"], x["ref"]) for x in links])
+            links=[(x["kind"], x["ref"]) for x in links], verified_claim=verified_claim,
+            shared_project=args.get("shared_project", False))
 
     def revise_card(self, p: Principal, args: dict) -> dict:
         refs = [r["ref"] for r in self.store.db.execute(
@@ -136,6 +137,11 @@ class BotRoute:
     def get_card(self, p: Principal, args: dict) -> dict:
         card = self.core.get_card(p, _text(args, "decision_id"))
         return self._with_answer(card)
+
+    def project_cards(self, p: Principal, args: dict) -> list[dict] | dict:
+        decision_id = _text(args, "decision_id") if "decision_id" in args else None
+        return self.core.project_cards(p, task=args.get("task"), decision_id=decision_id,
+                                       offset=args.get("offset", 0))
 
     def my_cards(self, p: Principal, args: dict) -> list[dict]:
         """The cards this Bot opened that are waiting or answered in the last two
@@ -243,7 +249,8 @@ class BotRoute:
     def git_ops(self) -> dict:
         """tw-git's ops, for its own socket: read Patrick's outside answers, his
         answer on one Main card, and the Main card that stands for a release
-        link (tw_git held)."""
+        link (tw_git held). It also opens a specialist question after its
+        current claim has been checked through GitHub."""
         def outside(caller: str, args: dict):
             with self.lock:
                 return self.outside_answers()
@@ -263,8 +270,18 @@ class BotRoute:
                 except CoreError as e:
                     from thornswood_brokers.wire import Refused
                     raise Refused(f"{e.reason}: {e}") from None
+        def claim_question(caller: str, args: dict):
+            with self.lock:
+                try:
+                    p = self._principal(args)
+                    if p.kind != "specialist" or args.get("kind") != "question":
+                        raise CoreError(403, "claim_question", "only a specialist question can use a verified claim")
+                    return self.open_card(p, args, verified_claim=True)
+                except CoreError as e:
+                    from thornswood_brokers.wire import Refused
+                    raise Refused(f"{e.reason}: {e}") from None
         return {"outside_answers": (outside, set(GIT_CALLERS)), "main_answer": (main, set(GIT_CALLERS)),
-                "main_standing": (standing, set(GIT_CALLERS))}
+                "main_standing": (standing, set(GIT_CALLERS)), "open_claim_question": (claim_question, set(GIT_CALLERS))}
 
     def _with_answer(self, card: dict) -> dict:
         """The four states, and once Patrick answered, the words the Bot is told."""
@@ -370,7 +387,7 @@ class BotRoute:
             result["scan_after"] = rows[min(31, len(rows) - 1)]["cursor"] if rows else cursor
         return result
 
-    OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
+    OPS = ("open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "project_cards", "report_work_done",
            "keep_turned_away", "queued_for", "ask_one", "one_answer")
 
     def ops(self) -> dict:

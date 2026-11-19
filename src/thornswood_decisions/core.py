@@ -63,6 +63,7 @@ MAX_BODY_BYTES = 256 * 1024
 MAX_OPTIONS = 6
 LIVE = ("draft", "pending")
 ROOM_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+PROJECT_TASK = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]{0,9}")
 # A Main card's one release link: what Patrick's "authorize" is for.
 # A live box run (Ops #289) also names its exact gate line, by the sha256 of
 # the line after "!", and the card's scope of a yes holds that line on a line
@@ -213,7 +214,8 @@ class DecisionCore:
     def open_card(self, p: Principal, *, kind: str, title: str, body: str, options: list[dict],
                   recommendation: str, scope_of_yes: str, risk: str = "normal", urgent: bool = False,
                   expires_in: timedelta = DEFAULT_EXPIRY, source_key: str | None = None,
-                  task: str | None = None, links: Iterable[tuple[str, str]] = ()) -> dict:
+                  task: str | None = None, links: Iterable[tuple[str, str]] = (),
+                  verified_claim: bool = False, shared_project: bool = False) -> dict:
         self._writes_on(p.workspace_id)
         if kind not in KINDS:
             raise CoreError(400, "bad_kind", f"no card kind {kind!r}")
@@ -234,9 +236,16 @@ class DecisionCore:
                 raise CoreError(403, "specialist_needs_task", "a specialist's question names its assigned task")
         elif p.kind != "bramble":
             raise CoreError(403, "not_a_requester", f"{p.label} does not open cards")
+        if not isinstance(shared_project, bool):
+            raise CoreError(400, "shared_project", "shared_project is true or false")
+        if shared_project and (kind != "question" or risk != "normal" or not isinstance(task, str)
+                               or not PROJECT_TASK.fullmatch(task)
+                               or any(lk == "pr" and ref.startswith(("outside:", "carried:")) for lk, ref in links)):
+            raise CoreError(400, "shared_project", "only an ordinary project task question can be shared")
         self._check_card(title, body, options, recommendation, scope_of_yes, risk)
         with self.s.tx() as db:
-            if p.kind == "specialist":
+            # Only the tw-git peer can supply proof of a current GitHub claim.
+            if p.kind == "specialist" and not verified_claim:
                 a = db.execute("SELECT bot FROM task_assignments WHERE workspace_id = ? AND task = ?",
                                (p.workspace_id, task)).fetchone()
                 if not a or a["bot"] != p.bot:
@@ -247,11 +256,13 @@ class DecisionCore:
                 req = db.execute("SELECT decision_id FROM decision_requests WHERE workspace_id = ? "
                                  "AND source_key = ?", (p.workspace_id, source_key)).fetchone()
                 if req:
+                    previous = self._row(db, req["decision_id"], p.workspace_id)
+                    self._may_read(p, previous)
                     db.execute("UPDATE decision_requests SET last_at = ?, count = count + 1 WHERE workspace_id = ? "
                                "AND source_key = ?", (self.s.now(), p.workspace_id, source_key))
                     self.s.event(db, p.workspace_id, "decision.request_merged", req["decision_id"], p.label,
                                  {"source_key": source_key})
-                    return self._card(db, self._row(db, req["decision_id"], p.workspace_id)) | {"merged": True}
+                    return self._card(db, previous) | {"merged": True}
             now = self.s.now()
             art = new_id("art")
             sha = sha256_hex(body)
@@ -263,10 +274,10 @@ class DecisionCore:
             expires = (self.s.clock() + expires_in).isoformat()
             db.execute("INSERT INTO decisions(id, workspace_id, kind, status, revision, attention_revision, title, "
                        "artifact_id, artifact_revision, artifact_sha256, recommendation, scope_of_yes, required_actor, "
-                       "risk, urgent, requested_by, task, source_key, expires_at, created_at, updated_at) "
-                       "VALUES(?,?,?,'pending',1,1,?,?,1,?,?,?,'patrick',?,?,?,?,?,?,?,?)",
+                       "risk, urgent, requested_by, task, source_key, expires_at, created_at, updated_at, shared_project) "
+                       "VALUES(?,?,?,'pending',1,1,?,?,1,?,?,?,'patrick',?,?,?,?,?,?,?,?,?)",
                        (did, p.workspace_id, kind, title, art, sha, recommendation, scope_of_yes, risk, int(urgent),
-                        p.id, task, source_key, expires, now, now))
+                        p.id, task, source_key, expires, now, now, int(shared_project)))
             self._write_options(db, did, 1, options)
             for lk, ref in links:
                 db.execute("INSERT INTO task_links(id, decision_id, kind, ref) VALUES(?,?,?,?)",
@@ -449,6 +460,39 @@ class DecisionCore:
         row = self._row(self.s.db, decision_id, p.workspace_id)
         self._may_read(p, row)
         return self._card(self.s.db, row)
+
+    def project_cards(self, p: Principal, *, task: str | None = None, decision_id: str | None = None,
+                      offset: int = 0) -> list[dict] | dict:
+        """Read explicit shared questions, without private or approval receipts."""
+        if p.kind not in ("bramble", "specialist"):
+            raise CoreError(403, "not_a_bot", "only project Bots use the shared decision board")
+        if task is not None and (not isinstance(task, str) or not PROJECT_TASK.fullmatch(task)):
+            raise CoreError(400, "project_task", "a task is owner/repo#number")
+        if type(offset) is not int or not 0 <= offset <= 10000:
+            raise CoreError(400, "offset", "offset is a whole number from 0 to 10000")
+        db = self.s.db
+        if decision_id is None:
+            rows = db.execute(
+                "SELECT d.id, d.task, d.title, d.status, d.updated_at, b.bot AS 'from' "
+                "FROM decisions d JOIN principals b ON b.id = d.requested_by "
+                "WHERE d.workspace_id = ? AND d.shared_project = 1 AND (? IS NULL OR d.task = ?) "
+                "ORDER BY d.updated_at DESC, d.id LIMIT 20 OFFSET ?", (p.workspace_id, task, task, offset))
+            return [dict(row) for row in rows]
+        row = self._row(db, decision_id, p.workspace_id)
+        if not row["shared_project"] or (task is not None and row["task"] != task):
+            raise CoreError(404, "no_card", "no such shared project card")
+        card = self._card(db, row)
+        artifact = db.execute("SELECT body FROM artifact_revisions WHERE artifact_id = ? AND revision = ?",
+                              (row["artifact_id"], row["artifact_revision"])).fetchone()
+        if not artifact or sha256_hex(artifact["body"]) != row["artifact_sha256"]:
+            raise CoreError(500, "artifact_corrupt", "the shared question does not match its stored hash")
+        answer = db.execute("SELECT r.option_key, r.note, r.answered_at FROM responses r "
+                            "JOIN principals b ON b.id = r.principal_id AND b.kind = 'patrick' "
+                            "WHERE r.decision_id = ? AND r.revision = ?",
+                            (row["id"], row["revision"])).fetchone()
+        return {k: card[k] for k in ("id", "task", "title", "status", "from", "options")} | {
+            "body": bytes(artifact["body"]).decode("utf-8"), "answer": dict(answer) if answer else None,
+        }
 
     def asked_by(self, p: Principal, bot: str) -> list[dict]:
         """The cards waiting on Patrick that this Bot asked, oldest first: shown in its Bot Chat, where

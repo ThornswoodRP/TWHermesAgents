@@ -968,6 +968,25 @@ class GitService:
         return self._guarded_write(bot, task, f"label-{action}", repo, f"issue/{number}/{label}", "", write=write,
                                    read_back=read_back, undone=True)
 
+    def open_claim_question(self, caller: str, args: dict) -> dict:
+        """Verify current claim ownership before forwarding a question to the core."""
+        bot = self._bot(args)
+        if self.policy.is_router(bot) or args.get("kind") != "question":
+            raise Refused("only a specialist question can use a verified claim")
+        ref = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]{0,9})",
+                           args.get("task") if isinstance(args.get("task"), str) else "")
+        if not ref:
+            raise Refused("a self-claimed task uses the exact owner/repo#number")
+        repo = self._repo({"repo": ref[1]})
+        issue = self._issue(repo, int(ref[2]))
+        label = self.policy.bots[bot]["claim_label"]
+        if not issue.open or issue.pull_request or label not in issue.labels:
+            raise Refused(f"{args['task']} is not currently an open issue claimed by {bot}")
+        self._check(self.rules.add_label(bot, issue, label))
+        if self.ask_decide is None:
+            raise Refused("the decision core is unavailable")
+        return self.ask_decide("open_claim_question", dict(args, task=f"{repo}#{issue.number}"))
+
     def _waits_on(self, repo: str, number: int) -> str | None:
         """The open issue this issue waits on, by the newest comment that says
         what it waits on, or None. An issue whose wait names an open issue is
@@ -1809,6 +1828,7 @@ class GitService:
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
                  "close_issue", "delete_branch", "start_run", "read", "board", "held", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
+        ops["open_claim_question"] = (self.open_claim_question, {gw})
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):
         # root's follower alone, never a Bot.
         from .vm_report import VmReport

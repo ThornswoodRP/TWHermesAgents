@@ -490,19 +490,22 @@ TW_FILES_SCHEMA = {
 }
 
 
-DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "report_work_done",
+DECIDE_OPS = ["open_card", "revise_card", "close_card", "assign_task", "get_card", "my_cards", "project_cards", "report_work_done",
               "ask_one", "one_answer"]
 
 TW_DECIDE_SCHEMA = {
     "name": "tw_decide",
     "description": (
         "Patrick's decisions, through the decision core: the only place his answer is recorded. Ops: open_card "
-        "(Bramble: any kind; a specialist: a question on a task Bramble assigned it), revise_card (a new revision; "
+        "(Bramble: any kind; a specialist: a question on an assigned or currently claimed issue, with its exact "
+        "owner/repo#number under task), revise_card (a new revision; "
         "an answer to an old one approves nothing), close_card (Bramble: cancelled or superseded), assign_task "
         "(Bramble: give a task to a specialist; with brief, the brief goes to its chat and starts its turn), get_card (the card, its four states and, once "
         "Patrick answered, the answer and what to do with it), my_cards (your waiting cards whole, and those answered or "
         "closed in the last two days as id, title, task, links, states and answer: get_card reads one whole; "
-        "Bramble sees all), report_work_done (Bramble, on an answered card), ask_one (text: a "
+        "Bramble sees all), project_cards (shared project questions only, optionally filtered by exact task, "
+        "or one full shared question and its answer by decision_id; this does not authorize anything), "
+        "report_work_done (Bramble, on an answered card), ask_one (text: a "
         "step of the agreed plan that only Patrick's PC can run, such as the launcher, the game or a box step over "
         "ssh, sent to One's Hermes, which runs it without asking him; its answer comes back to your Bot Chat. Never "
         "a step that needs a secret, money or something destructive outside the plan: that is a card), one_answer "
@@ -530,6 +533,8 @@ TW_DECIDE_SCHEMA = {
             "recommendation": {"type": "string", "description": "the key of the option you recommend"},
             "scope_of_yes": {"type": "string", "description": "exactly what a yes allows, and nothing more"},
             "risk": {"type": "string", "enum": ["normal", "high"]}, "urgent": {"type": "boolean"},
+            "shared_project": {"type": "boolean", "description": "Share this ordinary project question and its answer with all project Bots"},
+            "offset": {"type": "integer", "description": "project_cards: offset for the next page of up to 20 questions"},
             "expires_in_days": {"type": "integer"}, "source_key": {"type": "string"},
             "task": {"type": "string"}, "assign_to": {"type": "string"},
             "brief": {"type": "string", "description": "assign_task: what to do, for the specialist"},
@@ -558,6 +563,13 @@ def tool_handler(broker: str, ops: list[str], bot: str, ask: Caller):
         try:
             return json.dumps({"ok": True, "result": ask(broker, op, args)})
         except BrokerRefused as e:
+            # This refusal is before the core writes the card. A lost or
+            # unknown result is never retried through the other route.
+            if broker == "decide" and op == "open_card" and str(e).startswith("not_your_task:"):
+                try:
+                    return json.dumps({"ok": True, "result": ask("git", "open_claim_question", args)})
+                except BrokerRefused as claim_error:
+                    return json.dumps({"ok": False, "reason": str(claim_error)})
             return json.dumps({"ok": False, "reason": str(e)})
     return handle
 
