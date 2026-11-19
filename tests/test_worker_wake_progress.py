@@ -338,6 +338,47 @@ class OpportunityLifecycle(unittest.TestCase):
         self.assertEqual(checked, [f"Checked next issue for sprocket: {POLICY['repos']['app']}#13."])
         self.assertIn("Only pick these checked issue refs", out)
 
+    def test_each_specialist_gets_ordered_alternatives_from_one_guarded_board_read(self):
+        from test_grouped_board_projection import issue, page, projection, Snapshot
+
+        self.b.claimed = {}
+        rows = [
+            issue(3721, "GitHub & CI"), issue(3722, "GitHub & CI"),
+            issue(3723, "GitHub & CI"), issue(3724, "GitHub & CI"),
+            issue(3725, "GitHub & CI"), issue(3726, "GitHub & CI"),
+            issue(3727, "GitHub & CI"), issue(3728, "GitHub & CI"),
+            issue(5041, "Launcher"), issue(5043, "Launcher"),
+            issue(4602, "Engine"), issue(4603, "Engine"),
+            issue(4500, "Shared"), issue(4501, "Shared"),
+        ]
+        rows[1]["content"]["labels"]["nodes"].append({"name": "claimed: Magpie"})
+        rows[3]["order"]["number"] = 3730
+        board = projection()()
+        board.policy = type("Policy", (), {"data": POLICY, "is_bot": lambda _, name: name in POLICY["bots"],
+                                           "is_router": lambda _, name: name == "bramble"})()
+        board.gh = Snapshot([page(list(reversed(rows)))])
+        board._waits_on = lambda repo, number: "ThornswoodRP/Thornswood#99" if number == 5043 else None
+        board_requests = []
+
+        def broker(kind, op, args):
+            if op == "board":
+                board_requests.append(args)
+                return board.board("gateway", args)
+            return self.b(kind, op, args)
+
+        out = self.check(broker=broker)
+        repo = POLICY["repos"]["app"]
+        for worker, expected in (("magpie", (3721, 3723, 3725, 3726, 3727, 3728)),
+                                 ("sprocket", (5041,)), ("wisp", (4602, 4603))):
+            picks = [line for line in out.splitlines()
+                     if line.startswith((f"Checked next issue for {worker}:", f"Checked alternative for {worker}:"))]
+            first, *alternatives = expected
+            self.assertEqual(picks, [f"Checked next issue for {worker}: {repo}#{first}.",
+                                     *(f"Checked alternative for {worker}: {repo}#{n}." for n in alternatives)])
+        self.assertEqual(len(board_requests), 1)
+        self.assertEqual(board_requests[0]["limit"], 6)
+        self.assertEqual(len(board.gh.calls), 1)
+
     def test_two_failures_between_scan_and_latest_read_suppress_the_stale_hint(self):
         self.b.open['"area: Website"'] = 3
         injected = False

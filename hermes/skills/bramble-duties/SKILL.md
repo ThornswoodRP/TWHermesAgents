@@ -543,29 +543,33 @@ work hours.
 
 The wake can explicitly verify that a worker has no running or waiting turn
 and no queued delivery while its old task identity remains ambiguous, then
-name `Checked next issue for <Bot>: <owner>/<repo>#N.` For that worker and
-that checked candidate only, this takes priority over the active-claim
+name `Checked next issue for <Bot>: <owner>/<repo>#N.` and any
+`Checked alternative` for the same Bot. For that worker and those
+checked candidates only, this takes priority over the active-claim
 classification and parked or stopped recovery in items 1, 5 and 6 below.
 Keep all prior claims and old briefs for review; do not release them or
 send them back because of this notice. Do not reclassify the worker as busy
-solely because those retained claims remain. Re-read only the checked new
-issue and apply item 2's current eligibility, then items 3 and 4's normal
-claim and assignment gates. If it is no longer eligible or admission is
-refused, leave it for a fresh check. This exception never resumes an old
-task or overrides Patrick's explicit pause or Stop.
+solely because those retained claims remain. Within the checked list apply
+item 2's current eligibility, then items 3 and 4's normal claim and
+assignment gates. This exception never resumes an old task or overrides
+Patrick's explicit pause or Stop.
 
 When the current wake names checked candidates, account for each checked
-worker before unrelated sweep work. Recheck that exact issue through the
-normal steps below, then record its assignment receipt or the concrete
-current eligibility, activity, admission or explicit Stop blocker. Do not
-end that obligation after assigning another worker. A completed sweep or
+worker before unrelated sweep work. Recheck its first issue and any checked
+alternatives in the printed order. Move down only after you verify an
+issue-specific blocker, such as an outstanding owner decision or a finished
+fix that only needs a human test. Once you attempt a claim or assignment,
+finish the normal steps for that issue and leave other candidates alone.
+An unavailable source or a worker-level blocker stops that worker's list.
+Record its assignment receipt or the concrete blocker. Do not end that
+obligation after assigning another worker. A completed sweep or
 your own summary is not delivery proof; reporting a blocker does not clear
 the scheduler's pending observation. If a source is unavailable, say so
 and leave that worker unresolved for the next guarded check; never invent
 no-work, release retained claims, or replay an old brief to finish the list.
 The later general pass covers remaining workers. Do not repeat this wake's
 checked-worker handling or turn an unresolved checked target into generic
-continuation; a replacement candidate needs the next guarded check.
+continuation. Candidates outside the printed list need the next guarded check.
 
 1. For each worker (Rift, Sprocket, Echo, Magpie, Wisp), see whether it
    holds an open issue: `tw_git read`
