@@ -126,6 +126,8 @@ PROMPT = (
     "During the stated work hours, first handle each checked worker named by a 'Checked next issue' line "
     "before unrelated sweep work, through bramble-duties section 6's current eligibility, claim and assignment "
     "gates. Consider the first issue and each 'Checked alternative' for that worker in the printed order. "
+    "On each tw_git read, supply op, repo from the checked reference, and path separately. If you omitted repo "
+    "and the read was refused, correct the missing argument and retry that read once. "
     "Move to the next checked issue only after a concrete issue-specific blocker. When considering alternatives, "
     "stop after a claim or assignment attempt or when a worker-level blocker or unavailable source prevents work. "
     "Account for each worker with its assignment receipt or a concrete current eligibility, activity, "

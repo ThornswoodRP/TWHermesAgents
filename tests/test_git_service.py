@@ -1817,6 +1817,31 @@ class PullRequestsAndIssues(unittest.TestCase):
         w.fake.add_issue(APP, 3150)
         self.assertEqual(w.git.read("hermes", {"bot": "rift", "repo": APP, "path": f"/repos/{APP}/issues/3150"})["body"]["number"], 3150)
 
+    def test_read_uses_a_single_canonical_repo_already_named_in_the_path(self):
+        w = World()
+        w.fake.add_issue(APP, 4313)
+        w.fake.add_issue(OPS, 12)
+        for repo, number in ((APP, 4313), (OPS, 12)):
+            with self.subTest(repo=repo):
+                out = w.git.read("hermes", {"bot": "bramble", "path": f"/repos/{repo}/issues/{number}"})
+                self.assertEqual(out["body"]["number"], number)
+        query = urllib.parse.quote(f"repo:{APP} is:pr is:open")
+        self.assertIn("items", w.git.read("hermes", {"bot": "bramble", "path": f"/search/issues?q={query}"})["body"])
+
+    def test_missing_repo_never_infers_unapproved_ambiguous_or_conflicting_scope(self):
+        w = World()
+        for path in ("/issues/4313", f"/repos/{APP}/../issues/4313", "/repos/ThornswoodRP/TWHermesAgents/issues/1",
+                     "/repos/elsewhere/other/issues/1", "/search/issues?q=is:pr",
+                     f"/search/issues?q={urllib.parse.quote(f'repo:{APP} repo:{OPS} is:pr')}"):
+            with self.subTest(path=path), self.assertRaises(Refused):
+                w.git.read("hermes", {"bot": "bramble", "path": path})
+        with self.assertRaises(Refused):
+            w.git.read("hermes", {"bot": "bramble", "repo": OPS, "path": f"/repos/{APP}/issues/4313"})
+        with self.assertRaises(Refused):
+            w.git.comment("hermes", {"bot": "bramble", "number": 4313, "task": "4313", "body": "done",
+                                     "path": f"/repos/{APP}/issues/4313/comments"})
+        self.assertEqual(w.fake.writes("POST", "/comments"), [])
+
     def test_a_bot_searches_the_issues_of_one_repo_before_filing(self):
         w = World()
         w.fake.add_issue(APP, 5547)
