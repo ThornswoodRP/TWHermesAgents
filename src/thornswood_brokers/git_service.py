@@ -1560,15 +1560,17 @@ class GitService:
     def read(self, caller: str, args: dict) -> dict:
         """A GET for any Bot, in the three repos only: as the workers' App, or
         Bramble's in Ops, where the workers' App is not installed."""
-        bot, repo = self._bot(args), self._repo(args)
+        bot = self._bot(args)
         path = str(args.get("path") or "")
+        if "repo" not in args:
+            repos = self.policy.data["repos"]
+            matches = {repos[name] for name in ("app", "fork", "ops") if self._read_within(repos[name], path)}
+            if len(matches) != 1:
+                raise Refused("read needs the exact repo field or a path naming one allowed repo")
+            args = dict(args, repo=matches.pop())
+        repo = self._repo(args)
         root = f"/repos/{repo}"
-        # The repository itself (default_branch and its other fields), or
-        # anything under it. 1 Nov: Bramble could not read default_branch.
-        inside = path == root or path.startswith((root + "/", root + "?"))
-        if not inside and path.startswith("/search/issues?"):
-            inside = self._search_in(repo, path)
-        if not inside or ".." in path:
+        if not self._read_within(repo, path):
             raise Refused(f"reads stay inside {root}, or search its issues with repo:{repo} in the query")
         self._check(self.rules.admin_call(bot, "GET", path))
         body = self.gh.get(self.policy.reader_for(repo), repo, path)
@@ -1582,6 +1584,11 @@ class GitService:
             return {"body": {"files": {n: f["body"] for n, f in files.items()}},
                     "cut": {n: f["cut"] for n, f in files.items() if f.get("cut")}}
         return {"body": body}
+
+    def _read_within(self, repo: str, path: str) -> bool:
+        root = f"/repos/{repo}"
+        return ".." not in path and (path == root or path.startswith((root + "/", root + "?"))
+                                     or (path.startswith("/search/issues?") and self._search_in(repo, path)))
 
     def board(self, caller: str, args: dict) -> dict:
         """The board's open issues in do-order, for any Bot: each one's repo,

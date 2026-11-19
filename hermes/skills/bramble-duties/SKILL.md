@@ -556,8 +556,13 @@ Patrick's explicit pause or Stop.
 
 When the current wake names checked candidates, account for each checked
 worker before unrelated sweep work. Recheck its first issue and any checked
-alternatives in the printed order. Move down only after you verify an
-issue-specific blocker, such as an outstanding owner decision or a finished
+alternatives in the printed order. Send `repo` as a separate argument on
+each `tw_git` read. Use the repository from the checked reference. For an
+issue read, send `{"op":"read","repo":"ThornswoodRP/Thornswood","path":"/repos/ThornswoodRP/Thornswood/issues/4313"}`.
+For an open pull request search, send `{"op":"read","repo":"ThornswoodRP/Thornswood","path":"/search/issues?q=repo%3AThornswoodRP%2FThornswood%20is%3Apr%20is%3Aopen"}`.
+If you omitted `repo` and the read was refused, correct that argument from
+the checked reference and retry the same read once. Move down only after
+you verify an issue-specific blocker, such as an outstanding owner decision or a finished
 fix that only needs a human test. Once you attempt a claim or assignment,
 finish the normal steps for that issue and leave other candidates alone.
 An unavailable source or a worker-level blocker stops that worker's list.
