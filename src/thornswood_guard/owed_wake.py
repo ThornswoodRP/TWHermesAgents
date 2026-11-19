@@ -1075,7 +1075,10 @@ def _reserve_worker_slot(home: Path, now: float) -> None:
     previous = _load(path)
     if previous.get("checked_at") == checked_at:
         return
-    _save(path, {"checked_at": checked_at, "created_at": now, "consumed": False})
+    try:
+        _save(path, {"checked_at": checked_at, "created_at": now, "consumed": False})
+    except OSError:
+        pass  # a local marker failure does not change the ordinary cron check
 
 
 def worker_slot_active(home: Path, policy: dict, now: float) -> bool:

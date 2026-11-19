@@ -141,6 +141,24 @@ class CronQuietWindow(unittest.TestCase):
         self.assertFalse(wakes("\n".join(got)))
         self.assertFalse(owed_wake.worker_slot_active(self.home, POLICY, self.now + self.elapsed))
 
+    def test_reservation_write_failure_still_runs_the_normal_cron_check(self):
+        from unittest.mock import patch
+
+        self.webhook_ends = (120,)
+        normal_save = owed_wake._save
+        slot_path = self.home.joinpath(*owed_wake.WORKER_SLOT_FILE)
+
+        def save(path, value):
+            if path == slot_path:
+                raise OSError("local marker cannot be written")
+            return normal_save(path, value)
+
+        with (patch.object(owed_wake, "_save", side_effect=save),
+              patch.object(owed_wake, "check", wraps=owed_wake.check) as check):
+            self.assertFalse(wakes(self.run_check()))
+            check.assert_called_once()
+        self.assertFalse(slot_path.exists())
+
     def test_a_global_hold_stops_waiting_even_while_a_sweep_is_running(self):
         self.block_after = 8
         self.assertFalse(wakes(self.run_check()))
