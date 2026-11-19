@@ -119,6 +119,53 @@ class Cards(unittest.TestCase):
             self.w.core.get_card(self.w.rift, other["id"])
         self.assertEqual(e.exception.status, 404)
 
+    def test_only_explicitly_shared_project_questions_are_visible_to_other_workers(self):
+        task = f"{REPO}#9001"
+        self.w.core.assign_task(self.w.bramble, task, "rift")
+        shared = self.w.card(by=self.w.rift, task=task, shared_project=True, title="Project choice")
+        private = self.w.card(by=self.w.rift, task=task, title="Private question")
+        release = main_card(self.w)
+        echo = self.w.core.auth.ensure_service(self.w.ws, "specialist", "echo")
+        self.w.core.answer(self.w.patrick(), **World.answer_args(shared))
+        for bot in ("bramble", "echo", "magpie", "rift", "sprocket", "wisp"):
+            reader = self.w.core.auth.ensure_service(self.w.ws, "bramble" if bot == "bramble" else "specialist", bot)
+            self.assertEqual([c["id"] for c in self.w.core.project_cards(reader, task=task)], [shared["id"]])
+        self.assertEqual(self.w.core.project_cards(echo, task=f"{REPO}#9002"), [])
+        got = self.w.core.project_cards(echo, decision_id=shared["id"])
+        self.assertEqual((got["from"], got["status"], got["answer"]["option_key"]), ("rift", "resolved", "a"))
+        self.assertNotIn("receipt", got)
+        self.assertNotIn("release_authorized", got)
+        for hidden in (private, release):
+            with self.assertRaises(CoreError) as e:
+                self.w.core.project_cards(echo, decision_id=hidden["id"])
+            self.assertEqual(e.exception.status, 404)
+        with self.assertRaises(CoreError) as e:
+            self.w.core.answer(echo, **World.answer_args(shared))
+        self.assertEqual(e.exception.reason, "not_patrick")
+
+    def test_a_worker_can_file_for_an_exact_verified_claim_and_keep_another_task(self):
+        first = f"{REPO}#9001"
+        second = f"{REPO}#9002"
+        with self.assertRaises(CoreError) as e:
+            self.w.card(by=self.w.rift, task=first)
+        self.assertEqual(e.exception.reason, "not_your_task")
+        card = self.w.card(by=self.w.rift, task=first, verified_claim=True)
+        self.w.core.assign_task(self.w.bramble, second, "rift", "Continue on the other issue.")
+        self.assertEqual((card["from"], card["task"], card["status"]), ("rift", first, "pending"))
+        self.assertEqual(self.w.core.get_card(self.w.rift, card["id"])["status"], "pending")
+        assignments = self.w.store.db.execute("SELECT task FROM task_assignments").fetchall()
+        self.assertEqual([r[0] for r in assignments], [second])
+
+    def test_a_specialist_cannot_merge_into_another_workers_private_source_key(self):
+        self.w.core.assign_task(self.w.bramble, "t1", "rift")
+        card = self.w.card(by=self.w.rift, task="t1", source_key="private-question")
+        echo = self.w.core.auth.ensure_service(self.w.ws, "specialist", "echo")
+        self.w.core.assign_task(self.w.bramble, "t2", "echo")
+        with self.assertRaises(CoreError) as e:
+            self.w.card(by=echo, task="t2", source_key="private-question")
+        self.assertEqual(e.exception.status, 404)
+        self.assertEqual(self.w.core.get_card(self.w.rift, card["id"])["from"], "rift")
+
     def test_needs_you_counts_only_pending(self):
         a = self.w.card()
         self.w.card()

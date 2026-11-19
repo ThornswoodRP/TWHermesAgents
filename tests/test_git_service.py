@@ -1376,6 +1376,55 @@ class PullRequestsAndIssues(unittest.TestCase):
         with self.assertRaises(Refused):
             w.git.comment("hermes", {"bot": "sprocket", "repo": APP, "task": "t", "number": 3151, "body": "Mine now."})
 
+    def test_self_claimed_decision_uses_live_authority_and_preserves_the_worker_identity(self):
+        from decisions_helpers import OPTIONS, World as DecisionWorld
+        from thornswood_decisions.bots import BotRoute
+        from thornswood_guard.brokers import BrokerRefused, DECIDE_OPS, tool_handler
+        from thornswood_guard.owed_wake import _active
+
+        github = World()
+        decisions = DecisionWorld()
+        self.addCleanup(decisions.close)
+        route = BotRoute(decisions.path, "test", clock=decisions.clock)
+        self.addCleanup(route.close)
+        _, permitted = route.git_ops()["open_claim_question"]
+        self.assertIn("tw-git", permitted)
+        self.assertNotIn("hermes", permitted)
+        github.git.ask_decide = lambda op, args: route.git_ops()[op][0]("tw-git", args)
+        github.fake.add_issue(APP, 3150, labels=["claimed: Sprocket"])
+        github.fake.add_issue(APP, 3151, labels=["claimed: Rift"])
+        github.fake.add_issue(APP, 3152, labels=["claimed: Sprocket", "claimed: Rift"])
+        github.fake.add_issue(APP, 3153, author="WiccanDjinn", labels=["claimed: Sprocket"])
+        github.fake.add_issue(APP, 3154, labels=["claimed: Sprocket"])
+        github.fake.issues[(APP, 3154)]["state"] = "closed"
+
+        def ask(broker, op, args):
+            try:
+                if broker == "decide":
+                    return route.ops()[op][0]("hermes", args)
+                return github.git.ops()[op][0]("hermes", args)
+            except Refused as error:
+                raise BrokerRefused(str(error)) from error
+
+        decide = tool_handler("decide", DECIDE_OPS, "sprocket", ask)
+        args = {"op": "open_card", "bot": "rift", "kind": "question", "title": "Choose compatible format",
+                "body": "Measured options.", "scope_of_yes": "Only this format.", "options": OPTIONS,
+                "recommendation": "a"}
+        for candidate in (f"{APP}#3151", f"{APP}#3152", f"{APP}#3153", f"{APP}#3154", "3150"):
+            with self.subTest(candidate=candidate):
+                denied = json.loads(decide(dict(args, task=candidate, verified_claim=True)))
+                self.assertFalse(denied["ok"])
+        task = f"{APP}#3150"
+        response = json.loads(decide(dict(args, task=task)))
+        self.assertTrue(response["ok"], response)
+        self.assertEqual((response["result"]["from"], response["result"]["task"]), ("sprocket", task))
+        waiting = {c["task"] for c in route.ops()["my_cards"][0]("hermes", {"bot": "bramble"})
+                   if c["status"] == "pending"}
+        claim = {"number": 3150, "labels": [{"name": "claimed: Sprocket"}]}
+        self.assertFalse(_active(APP, "sprocket", [claim], {}, waiting),
+                         "the pending question parks only the claimed task")
+        self.assertEqual(github.fake.writes(contains="/repos/"), [])
+
     def test_a_comment_on_a_pull_request_is_sent_with_pull_requests_write(self):
         # GitHub answers 403 to a comment on a pull request from a token with
         # issues write alone (Thornswood-Ops #220, 2 Nov 2026); the stand-in
@@ -2012,7 +2061,8 @@ class ClaimLabels(unittest.TestCase):
     def test_the_tool_offers_every_op_the_broker_has(self):
         from thornswood_guard.brokers import GIT_OPS
         # vm_install is root's follower's, never a Bot's tool (vm_report.py).
-        self.assertEqual(sorted(GIT_OPS + ["refused", "vm_install"]), sorted(World().git.ops()))
+        # The self-claim check is only reached from tw_decide after a definite refusal.
+        self.assertEqual(sorted(GIT_OPS + ["refused", "vm_install", "open_claim_question"]), sorted(World().git.ops()))
         self.assertEqual(World().git.ops()["vm_install"][1], {"root"})
 
 

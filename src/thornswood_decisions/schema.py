@@ -999,6 +999,10 @@ ALTER TABLE own_messages ADD COLUMN folder TEXT CHECK (folder IS NULL OR length(
     """
 ALTER TABLE chat_messages ADD COLUMN thread_id TEXT CHECK (thread_id IS NULL OR length(thread_id) BETWEEN 1 AND 128);
 """,
+    # 29: ordinary project questions can be explicitly shared with coworkers.
+    """
+ALTER TABLE decisions ADD COLUMN shared_project INTEGER NOT NULL DEFAULT 0 CHECK (shared_project IN (0, 1));
+""",
 ]
 
 
@@ -1320,5 +1324,8 @@ ALTER TABLE own_messages DROP COLUMN folder;
     28: ([("SELECT count(*) FROM chat_messages WHERE thread_id IS NOT NULL AND status IN ('queued', 'leased')",
            "messages on their way into a room's thread")], """
 ALTER TABLE chat_messages DROP COLUMN thread_id;
+""", ""),
+    29: ([("SELECT count(*) FROM decisions WHERE shared_project = 1", "shared project questions")], """
+ALTER TABLE decisions DROP COLUMN shared_project;
 """, ""),
 }

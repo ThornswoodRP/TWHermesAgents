@@ -499,6 +499,26 @@ class Tools(unittest.TestCase):
         self.assertEqual(f.seen[-1], ("decide", "my_cards", {"bot": "echo"}))
         self.assertFalse(json.loads(ctx.tools["tw_decide"][2]({"op": "answer"}))["ok"], "no Bot answers a card")
 
+    def test_decision_open_only_uses_claim_route_after_definite_unassigned_refusal(self):
+        for reason in ("not_your_task: this task is not assigned", "transport outcome unknown"):
+            calls = []
+
+            def ask(broker, op, args):
+                calls.append((broker, op, args))
+                if broker == "decide":
+                    raise BrokerRefused(reason)
+                return {"from": args["bot"]}
+
+            handle = brokers.tool_handler("decide", brokers.DECIDE_OPS, "wisp", ask)
+            result = json.loads(handle({"op": "open_card", "bot": "bramble", "kind": "question"}))
+            if reason.startswith("not_your_task:"):
+                self.assertEqual(result, {"ok": True, "result": {"from": "wisp"}})
+                self.assertEqual([c[:2] for c in calls], [("decide", "open_card"), ("git", "open_claim_question")])
+                self.assertEqual(calls[-1][2]["bot"], "wisp")
+            else:
+                self.assertFalse(result["ok"])
+                self.assertEqual(len(calls), 1, "an unclear write result is not retried")
+
     def test_only_the_named_ops(self):
         f = Fleet()
         ctx = Ctx("rift")
