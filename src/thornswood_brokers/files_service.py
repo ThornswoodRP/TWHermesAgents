@@ -527,6 +527,25 @@ class FilesService:
             removed.append(name)
         return removed
 
+    def sweep(self, caller: str, args: dict) -> dict:
+        """Every Bot's finished trees, by the branch lists tw-git wrote last:
+        root's tw-sweep, every hour, right after tw-git's branches. A
+        checkout removes them too, but only inside a Bot turn, and the disk
+        floor that the trees bring on stops every turn (26 Nov 2026: 23 GB
+        of trees, 24 GB free, the floor 25 GB, nothing admitted for a day
+        and a half)."""
+        repos = self.policy.data["repos"]
+        removed: dict[str, list[str]] = {}
+        for bot in self.policy.bots:
+            for repo in (repos["app"], repos["fork"], repos["ops"]):
+                if repo == repos["fork"] and not self.policy.bots[bot].get("fork_branches"):
+                    continue
+                with self._lock(bot):
+                    gone = self._remove_finished(bot, repo)
+                if gone:
+                    removed.setdefault(bot, []).extend(f"{repo.split('/')[1]} {t}" for t in gone)
+        return {"removed": removed}
+
     def _sent(self, bot: str, task: str) -> list[Path]:
         """The bundles tw-files made of this tree for tw-git to push."""
         d = self.spool_out / bot
@@ -717,7 +736,10 @@ class FilesService:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("trees", "read", "write", "edit", "delete", "list", "checkout", "status", "diff", "search", "commit",
                  "merge_base", "bundle", "remove", "run_check")
-        return {n: (getattr(self, n), {gw}) for n in names}
+        ops = {n: (getattr(self, n), {gw}) for n in names}
+        # The hourly sweep of finished trees (tw-sweep): root's alone.
+        ops["sweep"] = (self.sweep, {"root"})
+        return ops
 
 
 def check_argv(policy: Policy, bot: str, tree: str, cmd: list[str]) -> list[str]:

@@ -24,16 +24,32 @@ class Routes(unittest.TestCase):
     def ids(self, bot, **kw):
         return [r["id"] for r in chain_for(self.p, bot, **kw)]
 
-    def test_order_today_is_max_then_credits_for_bramble_then_chatgpt_then_qwen(self):
-        """Both proxy routes are ready (Qwen 8 Nov 2026, credits 9 Nov); only Bramble gets the credits."""
-        self.assertEqual(self.ids("bramble"), ["max", "credits", "chatgpt", "qwen"])
+    def test_order_today_is_max_then_credits_for_bramble_then_chatgpt(self):
+        """Both proxy routes are ready (Qwen 8 Nov 2026, credits 9 Nov); only Bramble gets the credits.
+        Qwen takes no tools, so no Hermes chain names it (26 Nov 2026)."""
+        self.assertEqual(self.ids("bramble"), ["max", "credits", "chatgpt"])
         for bot in WORKERS:
-            self.assertEqual(self.ids(bot), ["max", "chatgpt", "qwen"])
+            self.assertEqual(self.ids(bot), ["max", "chatgpt"])
 
     def test_once_the_proxy_exists_only_bramble_gets_the_credits(self):
-        self.assertEqual(self.ids("bramble", proxy_ready=True), ["max", "credits", "chatgpt", "qwen"])
+        self.assertEqual(self.ids("bramble", proxy_ready=True), ["max", "credits", "chatgpt"])
         for bot in WORKERS:
-            self.assertEqual(self.ids(bot, proxy_ready=True), ["max", "chatgpt", "qwen"])
+            self.assertEqual(self.ids(bot, proxy_ready=True), ["max", "chatgpt"])
+
+    def test_no_hermes_chain_names_a_route_that_takes_no_tools(self):
+        # 22 Nov 2026: the weekly reviews fell through Max and ChatGPT to Qwen,
+        # whose 403 ("never tools") was the error the failed turn reported.
+        tool_less = [r["id"] for r in self.p.data["routes"] if r.get("tools") is False]
+        self.assertEqual(tool_less, ["qwen"])
+        for bot in ("bramble",) + WORKERS:
+            cfg = build(self.p, bot)
+            self.assertNotIn("qwen", str(cfg), bot)
+            self.assertEqual(check_config(self.p, bot, cfg, set()), [], bot)
+            with_qwen = copy.deepcopy(cfg)
+            with_qwen["fallback_providers"].append({"provider": "custom", "model": "qwen3.5-9b",
+                                                    "base_url": "http://127.0.0.1:8611/qwen/v1",
+                                                    "key_env": "TW_PROXY_TOKEN"})
+            self.assertTrue(any("route order" in x for x in check_config(self.p, bot, with_qwen, set())), bot)
 
     def test_19_route_one_out(self):
         kw = dict(one_on=True, proxy_ready=True)
@@ -215,7 +231,6 @@ class Routes(unittest.TestCase):
         fb = cfg["fallback_providers"]
         self.assertEqual(fb[0], {"provider": "anthropic", "model": "claude-opus-5-5",
                                  "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
-        self.assertEqual(fb[2]["base_url"], "http://127.0.0.1:8611/qwen/v1")
         self.assertEqual(check_config(p, "bramble", cfg, set()), [])
         self.assertEqual(check_config(p, "rift", build(p, "rift"), set()), [])
 
@@ -246,8 +261,8 @@ class Routes(unittest.TestCase):
     def test_a_route_not_ready_stays_out_while_the_other_is_in(self):
         p = self.ready(credits=False, qwen=True)
         cfg = build(p, "bramble")
-        self.assertIn("http://127.0.0.1:8611/qwen/v1", str(cfg))
         self.assertNotIn("/credits", str(cfg))
+        self.assertEqual(self.ids("bramble", proxy_ready={"qwen"}), ["max", "chatgpt"])
         cfg["fallback_providers"].insert(0, {"provider": "anthropic", "model": "claude-opus-5-5",
                                              "base_url": "http://127.0.0.1:8611/credits/anthropic", "key_env": "TW_PROXY_TOKEN"})
         self.assertTrue(check_config(p, "bramble", cfg, set()))

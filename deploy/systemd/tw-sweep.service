@@ -1,0 +1,19 @@
+# The Bots' finished trees, removed every hour without waiting for a Bot
+# turn (src/thornswood_brokers/sweep.py): tw-git lists each Bot's branches
+# from a fresh fetch, then tw-files removes each sent tree whose branch
+# GitHub no longer has. Root only to reach both brokers' root-only ops; the
+# work is the brokers' own, as their users.
+[Unit]
+Description=Thornswood: remove the Bots' finished trees
+After=tw-git.socket tw-files.socket
+Wants=tw-git.socket tw-files.socket
+
+[Service]
+Type=oneshot
+Slice=tw-brokers.slice
+ExecStart=/opt/thornswood-hermes/bin/tw-sweep
+TimeoutStartSec=20min
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes

@@ -40,13 +40,18 @@ def proxy_url(policy: Policy, route: dict) -> str:
 
 
 def chain_for(policy: Policy, bot: str, *, proxy_ready: bool | set[str] | None = None) -> list[dict]:
-    """The routes a Bot may use, in order. A route behind the admission proxy
-    is left out until a PR sets it ready in admission_proxy.ready."""
+    """The routes of a Bot's Hermes chain, in order. A route behind the
+    admission proxy is left out until a PR sets it ready in
+    admission_proxy.ready, and a route that takes no tools (tools: false) is
+    left out always: every Hermes turn sends its tools, so the proxy would
+    refuse each request it got."""
     ready = _ready_set(policy, proxy_ready)
     out = []
     for r in policy.data["routes"]:
         who = r["who"]
         if who != "all" and bot not in who:
+            continue
+        if r.get("tools") is False:
             continue
         if r.get("needs") == "admission-proxy" and r["id"] not in ready:
             continue

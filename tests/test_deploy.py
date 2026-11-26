@@ -254,6 +254,58 @@ class Units(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("tw-new.automount is not a kind of unit file", r.stdout)
 
+    def test_the_install_removes_only_the_old_leftovers_in_tmp(self):
+        # 26 Nov 2026: 25,019 test folders (6.9 GB) from 31 Oct to 8 Nov and
+        # two runner packages held the disk under the turn floor.
+        import getpass
+        text = (REPO / "deploy" / "install.sh").read_text()
+        block = text[text.index("tmp_gone=0\n"):text.index("# 7d. ")]
+        t = Path(tempfile.mkdtemp())
+        me = getpass.getuser()
+        block = (block.replace("find /tmp", f"find {t}").replace("'/tmp/tmp", f"'{t}/tmp")
+                 .replace("-user hermes -o -user ubuntu", f"-user {me}").replace("-user root", f"-user {me}"))
+        old = datetime(2026, 11, 8, tzinfo=timezone.utc).timestamp()
+        made = {}
+        for name, inside in (("tmpabc_e9gh", "policy.db"), ("tmpnew12345", "policy.db"), ("tmp.ABCDEFGHIJ",
+                             "actions-runner-linux-arm64-2.337.0.tar.gz"), ("tmp.KLMNOPQRST", "notes.txt"),
+                             ("keepme", "policy.db"), ("tmpshort", "policy.db")):
+            d = t / name
+            d.mkdir()
+            (d / inside).write_text("x")
+            made[name] = d
+            if name != "tmpnew12345":
+                os.utime(d, (old, old))
+        r = subprocess.run(["bash", "-c", 'set -euo pipefail\nok() { echo "PASS $*"; }\n' + block],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(p.name for p in t.iterdir()), ["keepme", "tmp.KLMNOPQRST", "tmpnew12345", "tmpshort"])
+        self.assertIn("removed 2 folders", r.stdout)
+        r = subprocess.run(["bash", "-c", 'set -euo pipefail\nok() { echo "PASS $*"; }\n' + block],
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_needrestart_leaves_every_oneshot_run_alone(self):
+        # 26 Nov 2026: the unattended libexpat1 upgrade at 13:39:58 UTC was
+        # followed by a stop of tw-follow-main.service mid-apply, and main
+        # 6ac15c24 stayed half installed. A oneshot run is killed by a restart;
+        # its next run takes the new library anyway.
+        conf = REPO / "deploy" / "needrestart" / "50-thornswood.conf"
+        named = set(re.findall(r"^\$nrconf\{override_rc\}\{qr\(\^([\w@-]+)\\\.service\$\)\} = 0;$",
+                               conf.read_text(), re.M))
+        oneshots = {f.stem for d in ("systemd", "decisions") for f in (REPO / "deploy" / d).glob("*.service")
+                    if re.search(r"^Type=oneshot$", f.read_text(), re.M)}
+        self.assertIn("tw-follow-main", oneshots)
+        self.assertEqual(named, oneshots)
+        text = (REPO / "deploy" / "install.sh").read_text()
+        self.assertIn('install -m 0644 "$here/deploy/needrestart/50-thornswood.conf" '
+                      '/etc/needrestart/conf.d/50-thornswood.conf', text)
+        if shutil.which("perl"):
+            r = subprocess.run(["perl", "-e", 'our %nrconf; do $ARGV[0]; die $@ if $@; '
+                                + 'print join("\\n", map { "$_" } keys %{$nrconf{override_rc}})', str(conf)],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(len(r.stdout.split("\n")), len(oneshots))
+
     def test_the_install_makes_and_proves_every_bots_folder(self):
         # 31 Oct: a listing of /srv/tw/work showed no wisp folder, and the
         # file broker no longer makes a Bot's own folder.

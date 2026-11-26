@@ -709,20 +709,51 @@ class GitService:
                 self._git(mirror, "bundle", "create", "-q", str(tmp), f"refs/heads/{base}")
             os.replace(tmp, out / name)
         prune_base_bundles(out, current=name)
-        # The Bot's branches GitHub has now, read from the mirror the fetch
-        # above pruned, for tw-files: a pushed tree whose branch is gone
-        # (merged, and GitHub deleted it, or deleted by hand) is finished.
-        on_github = sorted(b for b in self._git(mirror, "for-each-ref", "--format=%(refname:lstrip=3)",
-                                                "refs/remotes/origin/").split("\n")
-                           if b and self.policy.own_branch(bot, b))
-        listed = out / branches_file(repo)
-        tmp = out / f".{listed.name}.tmp"
-        tmp.write_text(json.dumps({"repo": repo, "branches": on_github}))
-        os.replace(tmp, listed)
+        self._list_branches(bot, repo, mirror)
         got = {"bundle": name, "base": base, "sha": sha}
         if branch:
             got.update(branch=branch, branch_sha=tip)
         return got
+
+    def _list_branches(self, bot: str, repo: str, mirror: Path) -> int:
+        """The Bot's branches GitHub has now, read from the mirror its last
+        fetch pruned, for tw-files: a pushed tree whose branch is gone
+        (merged, and GitHub deleted it, or deleted by hand) is finished."""
+        on_github = sorted(b for b in self._git(mirror, "for-each-ref", "--format=%(refname:lstrip=3)",
+                                                "refs/remotes/origin/").split("\n")
+                           if b and self.policy.own_branch(bot, b))
+        out = self.spool / "in" / bot
+        out.mkdir(parents=True, exist_ok=True)
+        listed = out / branches_file(repo)
+        tmp = out / f".{listed.name}.tmp"
+        tmp.write_text(json.dumps({"repo": repo, "branches": on_github}))
+        os.replace(tmp, listed)
+        return len(on_github)
+
+    def branches(self, caller: str, args: dict) -> dict:
+        """Every Bot's branch list, as base writes it, from a fresh fetch of
+        each repo's mirror: root's tw-sweep, every hour, so tw-files can
+        remove the trees whose branches went without waiting for a Bot's
+        next checkout. Until 26 Nov 2026 only base wrote the lists and only a
+        checkout removed a tree, both inside a Bot turn, and a turn is what
+        the disk floor stops: from 25 Nov 01:55 UTC every Bramble turn was
+        turned away with 24 GB free against the 25 GB floor while 23 GB of
+        trees sat in /srv/tw/work, so nothing could free the space. Read
+        only on GitHub."""
+        repos = self.policy.data["repos"]
+        listed: dict[str, dict[str, int]] = {}
+        failed: dict[str, str] = {}
+        for repo in (repos["app"], repos["fork"], repos["ops"]):
+            bots = [b for b in self.policy.bots if self.policy.app_reaches(self._app(b), repo)
+                    and (repo != repos["fork"] or self.policy.bots[b].get("fork_branches"))]
+            if not bots:
+                continue
+            try:
+                mirror = self._mirror(repo, self.policy.reader_for(repo))
+                listed[repo] = {b: self._list_branches(b, repo, mirror) for b in bots}
+            except (Refused, GitHubError, OSError, subprocess.SubprocessError) as e:
+                failed[repo] = str(e)[-300:]
+        return {"listed": listed, "failed": failed}
 
     def prune_spool_in(self) -> list[str]:
         """At start, each Bot's spool/in back to its newest base per repo."""
@@ -1850,4 +1881,6 @@ class GitService:
         # root's follower alone, never a Bot.
         from .vm_report import VmReport
         ops["vm_install"] = (VmReport(self.policy, self.gh).install, {"root"})
+        # The hourly sweep's fresh branch lists (tw-sweep): root's alone.
+        ops["branches"] = (self.branches, {"root"})
         return ops

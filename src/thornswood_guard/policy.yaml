@@ -342,6 +342,14 @@ routes:
     risk: low
     needs: admission-proxy
     needs_one: true
+    # The proxy gives Qwen a sealed task packet and never tools (tw-proxy
+    # _body_problem), and every Hermes turn carries tools, so a Bot's Hermes
+    # chain never names this route (routes.chain_for). Until 26 Nov 2026 it
+    # was each chain's last rung: every request it got was refused with 403,
+    # and that refusal was the error a failed turn reported, in place of the
+    # real one (the 22 Nov weekly reviews read "Qwen gets a sealed task
+    # packet, never tools" after Max had refused them).
+    tools: false
 
 # Providers no profile may name anywhere in its config: each bills by use.
 paid_providers:
