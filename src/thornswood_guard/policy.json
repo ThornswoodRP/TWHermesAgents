@@ -772,7 +772,7 @@
       "box_store": "/srv/tw/boxbackups",
       "box_keep_days": 30,
       "box_keep_newest": 7,
-      "box_address": "192.135.112.23",
+      "box_address": "165.217.135.167",
       "box_key_file": "deploy/keys/box-drop.pub"
     }
   },
