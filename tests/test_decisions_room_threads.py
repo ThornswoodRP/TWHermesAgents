@@ -75,6 +75,43 @@ class TheReader(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.db = shared_state(self.dir)
 
+    def gateway_store(self, *rooms):
+        """The root gateway's own state.db after Hermes 0.23 took `rooms` over from shared-state.db
+        (gateway/hosted_rooms_gateway_import.py), with one newer message in the first."""
+        db = self.dir / "state.db"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE hosted_rooms (room_id TEXT PRIMARY KEY, name TEXT, members_json TEXT, "
+                    "authority_gateway_id TEXT, authority_epoch INTEGER, disbanded_at REAL)")
+        con.execute("CREATE TABLE hosted_room_events (room_id TEXT, seq INTEGER, event_id TEXT, kind TEXT, "
+                    "actor_json TEXT, authority_epoch INTEGER, payload_json TEXT, created_at REAL)")
+        for r in rooms:
+            con.execute("INSERT INTO hosted_rooms VALUES(?,?,?,?,?,?)", (r, "Thornswood Workbench", "[]", "gw", 3, None))
+        con.execute("INSERT INTO hosted_room_events VALUES(?,?,?,?,?,?,?,?)",
+                    (rooms[0], 10, "e10", "message.user", json.dumps({"display_name": "Patrick"}), 3,
+                     json.dumps({"text": "Anyone on the cursor bug?", "thread_id": "tw-chat.msg_c"}), 1_795_000_000))
+        con.commit()
+        con.close()
+        return db
+
+    def test_a_room_the_gateway_took_over_is_read_from_its_own_store(self):
+        # Read on the VM, 26 Nov 2026: the Workbench moved to the gateway's state.db on 8 Nov, and
+        # shared-state.db kept a copy that has not changed since, so the phone showed that copy.
+        gateway = self.gateway_store(ROOM)
+        self.assertEqual(feed_reader.room_store(self.dir, ROOM), gateway)
+        self.assertEqual(feed_reader.room_store(self.dir, OTHER_ROOM), self.db, "a room it never took stays put")
+        snap = feed_reader.rooms_snapshot(self.db, [ROOM, OTHER_ROOM], NOW,
+                                          store_for=lambda r: feed_reader.room_store(self.dir, r))
+        mine, other = snap["rooms"]
+        self.assertEqual([e["seq"] for e in mine["events"]], [10])
+        self.assertEqual([e["seq"] for e in other["events"]], [1])
+        page = feed_reader.room_page(feed_reader.room_store(self.dir, ROOM), ROOM, None, 50)
+        self.assertEqual([e["seq"] for e in page["events"]], [10])
+
+    def test_without_the_gateways_rooms_the_shared_store_is_read(self):
+        self.assertEqual(feed_reader.room_store(self.dir, ROOM), self.db)
+        sqlite3.connect(self.dir / "state.db").close()  # a gateway store with no room tables yet
+        self.assertEqual(feed_reader.room_store(self.dir, ROOM), self.db)
+
     def test_each_thread_with_its_count_start_and_last_message_newest_first(self):
         snap = feed_reader.room_snapshot(self.db, ROOM, NOW)
         self.assertEqual([(t["thread"], t["count"], t["by"], t["title"], t["last_seq"]) for t in snap["threads"]], [

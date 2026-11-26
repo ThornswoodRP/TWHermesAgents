@@ -1,0 +1,114 @@
+From 4db086d88faca70e22b10af5787e38a6bf347ef5 Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 21:25:21 +0000
+Subject: [PATCH] fix(bot-mode): a DM into a reset Bot Chat is admitted, not
+ refused admission_conflict
+
+find_canonical_live_owner pins a delivery to the compression tip of the
+row titled "Bot Chat". A reset (/new, an idle or daily reset) keeps the
+title and the FIFO on the chat's creation id while the route moves to a
+new segment, and a reset is no compression, so the pin stays the creation
+id. The door compared the pin only with the route's current segment, so
+every DM to a reset Bot Chat was refused admission_conflict ("Live delivery
+admission could not be confirmed ... Do not resend") for as long as the
+chat lived: on one install every worker's DM to the router failed so for
+two weeks after its Bot Chat was reset.
+
+The door now also takes a pin that is the Bot Chat's own id (the ref it
+admits into). A pin naming any other chat is still refused.
+---
+ gateway/session_bot.py                        |  6 +-
+ .../test_bot_chat_reset_delivery_pin.py       | 64 +++++++++++++++++++
+ 2 files changed, 69 insertions(+), 1 deletion(-)
+ create mode 100644 tests/gateway/test_bot_chat_reset_delivery_pin.py
+
+diff --git a/gateway/session_bot.py b/gateway/session_bot.py
+index 136e0eebac..010b6066f3 100644
+--- a/gateway/session_bot.py
++++ b/gateway/session_bot.py
+@@ -870,7 +870,11 @@ async def _deliver(connection, params):
+             holder = authority.db.get_session_by_title('Bot Chat')
+             ref, live, entry = await _target(authority, actor)
+             pinned = params.get('session_id', entry.session_id)
+-            if pinned != entry.session_id and not _moved_aside_by_this_door(authority, holder, pinned):
++            # The producer pins the compression tip of the row titled "Bot Chat". After a reset the
++            # title and the FIFO stay on the chat's creation id (``ref``) while the route moves to a
++            # new segment (``entry``), and a reset is no compression: that pin is this same chat.
++            if (pinned not in (entry.session_id, ref.session_id)
++                    and not _moved_aside_by_this_door(authority, holder, pinned)):
+                 raise RuntimeStoreError('admission_conflict')
+             return await _admit(authority, actor, home, root, key, message, ref, live, entry, author=author,
+                                 notification_category=category)
+diff --git a/tests/gateway/test_bot_chat_reset_delivery_pin.py b/tests/gateway/test_bot_chat_reset_delivery_pin.py
+new file mode 100644
+index 0000000000..7abe2096c0
+--- /dev/null
++++ b/tests/gateway/test_bot_chat_reset_delivery_pin.py
+@@ -0,0 +1,64 @@
++"""A Bot DM into a Bot Chat that was reset lands, pinned as its producer discovered it.
++
++``find_canonical_live_owner`` pins the delivery to the compression tip of the row titled "Bot
++Chat". A reset (``/new``, an idle or daily reset) keeps that title on the chat's creation id,
++which still owns the FIFO, while the route moves to a new segment, and a reset is no compression,
++so the pin stays the creation id. The door compared the pin only with the route's current segment,
++so every DM to a reset Bot Chat was refused ``admission_conflict`` for good: on one install all
++of the five workers' DMs to the router failed so for two weeks after its Bot Chat was reset.
++"""
++from pathlib import Path
++
++import pytest
++
++from tests.gateway import test_peer_dm_bot_chat_headless as _headless_gateway
++
++pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")
++
++headless = _headless_gateway.headless
++_local_owner = _headless_gateway._local_owner
++
++
++async def _deliver(authority, key):
++    from gateway.session_authorities import served_profile_name
++    from gateway.session_bot import deliver
++    from tools.bot_live_delivery import _bot_chat_tip
++    home = Path(authority.db.db_path).parent.resolve()
++    pinned = _bot_chat_tip(home)  # what a sender's find_canonical_live_owner pins
++    return await deliver(_local_owner(authority), dict(
++        id=key * 32, profile=served_profile_name(home), message=f'dm {key}',
++        **({'session_id': pinned} if pinned else {})))
++
++
++@pytest.mark.asyncio
++async def test_a_dm_to_a_reset_bot_chat_lands_in_it(headless):
++    from tests.waiting import async_wait_until
++    authority = headless.authority
++    db = authority.db
++    first = await _deliver(authority, 'a')
++    chat = first['session_id']
++    await async_wait_until(lambda: len(headless.executed) == 1, timeout=10, interval=.05)
++    authority.runner.session_store.reset_session(authority.sessions[chat].route)
++    assert db.get_session_by_title('Bot Chat')['id'] == chat, 'the title stays on the creation id'
++    second = await _deliver(authority, 'b')  # refused admission_conflict before the fix
++    assert second['session_id'] == chat, second
++    await async_wait_until(lambda: len(headless.executed) == 2, timeout=10, interval=.05)
++    assert [sid for sid, _, _ in headless.executed] == [chat, chat]
++    third = await _deliver(authority, 'c')  # and every later DM
++    assert third['session_id'] == chat
++
++
++@pytest.mark.asyncio
++async def test_a_pin_to_another_chat_is_still_refused(headless):
++    """The pin still means something: an id that is not this Bot Chat is refused."""
++    from gateway.session_authorities import served_profile_name
++    from gateway.session_bot import deliver
++    from hermes_state_runtime import RuntimeStoreError
++    authority = headless.authority
++    await _deliver(authority, 'd')
++    home = Path(authority.db.db_path).parent.resolve()
++    authority.db.create_session('some_other_chat', 'cli')
++    with pytest.raises(RuntimeStoreError) as refused:
++        await deliver(_local_owner(authority), dict(id='e' * 32, profile=served_profile_name(home),
++                                                    message='dm e', session_id='some_other_chat'))
++    assert refused.value.reason == 'admission_conflict'
+-- 
+2.43.0
+
