@@ -1,6 +1,7 @@
 """scripts/apply.py against a stand-in for the VM's Hermes home, the rendered
 profile files, and the repo itself holding no tokens."""
 
+import importlib.util
 import json
 import os
 import re
@@ -37,6 +38,33 @@ def make_home(root: Path, bots, *, skip_skill=None, env_root="", env_bot=None) -
     return home
 
 
+# hermes_patches.py reads the checkout with GIT_CONFIG_NOSYSTEM, so the fake
+# checkout is made the same way: a Windows runner's system core.autocrlf would
+# otherwise store loop.py with LF while the script sees its CRLF as a change.
+GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t",
+               GIT_CONFIG_NOSYSTEM="1")
+
+
+def fake_hermes_checkout(home: Path, patches: dict[str, str] | None = None) -> Path:
+    """A stand-in for Hermes's own git checkout at <home>/hermes-agent, and a
+    series file naming the patches its HEAD takes (none unless given)."""
+    d = home / "hermes-agent"
+    if not (d / ".git").exists():
+        (d / "agent").mkdir(parents=True)
+        (d / "agent" / "loop.py").write_text("def turn():\n    return 'ended'\n", encoding="utf-8", newline="\n")
+        for cmd in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "v0"]):
+            subprocess.run(["git", "-C", str(d), *cmd], check=True, env=GIT_ENV, capture_output=True)
+    head = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], check=True, capture_output=True,
+                          text=True).stdout.strip()
+    folder = home.parent / "patches"
+    folder.mkdir(exist_ok=True)
+    for name, body in (patches or {}).items():
+        (folder / name).write_text(body, encoding="utf-8", newline="\n")
+    series = folder / "series.json"
+    series.write_text(json.dumps({"series": {head: sorted(patches or {})}}), encoding="utf-8")
+    return series
+
+
 class Apply(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -51,7 +79,7 @@ class Apply(unittest.TestCase):
                                     capture_output=True, text=True).stdout.strip()
 
     def run_apply(self, home: Path, *extra, expect=None, image="present", podman=None, wake_secret=True,
-                  hermes=None):
+                  hermes=None, hermes_patches=None):
         work = home.parent / "tw-work"
         secret = home.parent / "github-webhook.env"
         if wake_secret:
@@ -63,9 +91,11 @@ class Apply(unittest.TestCase):
         fake = f"{Path(sys.executable).as_posix()} {(Path(__file__).with_name('fake_podman.py')).as_posix()}"
         fake_hermes = f"{Path(sys.executable).as_posix()} {(Path(__file__).with_name('fake_hermes.py')).as_posix()}"
         env = dict(os.environ, FAKE_PODMAN_STATE=str(state), FAKE_HERMES_STATE=str(home.parent / "hermes.json"))
+        series = fake_hermes_checkout(home, hermes_patches)
         return subprocess.run([sys.executable, str(self.repo / "scripts" / "apply.py"), "--expect", expect or self.commit,
                                "--hermes-home", str(home), "--work-root", str(work), "--podman", podman or fake,
-                               "--hermes", hermes or fake_hermes, "--wake-secret-file", str(secret), *extra],
+                               "--hermes", hermes or fake_hermes, "--wake-secret-file", str(secret),
+                               "--hermes-series", str(series), *extra],
                               capture_output=True, text=True, env=env)
 
     def hermes_state(self, home: Path) -> dict:
@@ -108,6 +138,73 @@ class Apply(unittest.TestCase):
 
     def home(self, **kw):
         return make_home(Path(tempfile.mkdtemp()), list(policy().bots), **kw)
+
+    # Patrick's answer A on q-hermes-vm-patches (26 Nov 2026): the VM's
+    # Hermes runs our reviewed fixes until a Hermes release has them.
+    FIX = ("--- a/agent/loop.py\n+++ b/agent/loop.py\n@@ -1,2 +1,3 @@\n def turn():\n"
+           "+    fire_end_hook()\n     return 'ended'\n")
+
+    def test_our_hermes_patches_go_on_once_and_reload_the_bots(self):
+        home = self.home()
+        hermes = home / "hermes-agent"
+        patches = {"0013-turn-left-early-ends.patch": self.FIX}
+        r = self.run_apply(home, "--check", hermes_patches=patches)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("runs none of our patches yet; the install puts on 0013", r.stdout)
+        self.assertNotIn("fire_end_hook", (hermes / "agent" / "loop.py").read_text())
+        r = self.run_apply(home, hermes_patches=patches)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("put our patches 0013 on Hermes", r.stdout)
+        self.assertIn("fire_end_hook", (hermes / "agent" / "loop.py").read_text())
+        head = subprocess.run(["git", "-C", str(hermes), "log", "--format=%s"], capture_output=True, text=True).stdout
+        self.assertEqual(head.strip(), "v0", "HEAD stays the pinned commit")
+        r = self.run_apply(home, hermes_patches=patches)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("runs our patches 0013, as hermes/patches/series.json says", r.stdout)
+        self.assertTrue(r.stdout.strip().splitlines()[-1].startswith("RELOAD: not needed"), r.stdout)
+
+    def test_the_first_patching_reloads_the_bots_even_with_their_configs_current(self):
+        home = self.home()
+        self.assertEqual(self.run_apply(home).returncode, 0)
+        r = self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1],
+                         "RELOAD: needed; 1 file a running Bot holds changed: hermes-agent (our patches)")
+
+    def test_a_hermes_checkout_changed_by_anything_else_stops_the_apply(self):
+        home = self.home()
+        fake_hermes_checkout(home)
+        (home / "hermes-agent" / "agent" / "loop.py").write_text("changed by hand\n", encoding="utf-8")
+        r = self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("has changes that are neither", r.stdout)
+        self.assertFalse((home / "profiles" / "rift" / "plugins" / "thornswood_guard").exists(), "nothing was written")
+
+    def test_a_patch_that_does_not_apply_stops_the_apply(self):
+        home = self.home()
+        bad = self.FIX.replace("return 'ended'", "return 'other'")
+        r = self.run_apply(home, hermes_patches={"0099-stale.patch": bad})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("0099-stale.patch does not apply on Hermes", r.stdout)
+
+    def test_a_hermes_commit_with_no_series_stops_the_apply(self):
+        home = self.home()
+        series = fake_hermes_checkout(home)
+        series.write_text('{"series": {}}', encoding="utf-8")
+        r = subprocess.run([sys.executable, str(self.repo / "scripts" / "hermes_patches.py"), "--check",
+                            "--hermes-dir", str(home / "hermes-agent")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("names no patch series for it", r.stdout)
+
+    def test_the_repos_series_names_only_patches_it_has_for_the_pinned_hermes(self):
+        from thornswood_decisions.contracts import CONTRACT_FILE
+        pin = json.loads(CONTRACT_FILE.read_text(encoding="utf-8"))["hermes"]["commit"]
+        spec = importlib.util.spec_from_file_location("hermes_patches", REPO / "scripts" / "hermes_patches.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        names = [p.name for p in mod.series_for(pin)]
+        self.assertEqual(names, ["0011-cron-gated-fire-ends-session.patch", "0013-turn-left-early-ends.patch",
+                                 "0014-codex-fallback-early-reopen.patch"])
 
     def test_applies_to_the_six_existing_profiles(self):
         home = self.home(env_root="DISCORD_BOT_TOKEN=canary\nDISCORD_ALLOWED_USERS=1\n")

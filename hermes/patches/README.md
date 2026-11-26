@@ -1,6 +1,8 @@
 # Fixes for Hermes itself
 
-Some problems the Bots hit are caused in [Hermes Agent](https://github.com/NousResearch/hermes-agent), not in this repository. Those are fixed where they come from: as patches to Hermes, sent upstream as pull requests. Nothing here is applied to the VM's Hermes by hand; the VM takes a fix in a Hermes release.
+Some problems the Bots hit are caused in [Hermes Agent](https://github.com/NousResearch/hermes-agent), not in this repository. Those are fixed where they come from: as patches to Hermes, sent upstream as pull requests.
+
+Until a Hermes release carries one, the VM's Hermes runs it (Patrick's answer A on q-hermes-vm-patches, 26 Nov 2026). `series.json` names, for each Hermes commit the VM may run, the patches it takes in order, and `scripts/hermes_patches.py` puts them on at every install, from `apply.py`, as the `hermes` user: the checkout's HEAD stays the pinned commit, and the patches sit in its index and working tree. A checkout that is neither the commit nor the commit with its series stops the install with nothing changed. A patch leaves the series when the release the VM moves to carries the fix. Nothing is ever applied by hand.
 
 ## Layout
 

@@ -1,0 +1,10 @@
+{
+  "about": "For each Hermes commit the VM may run, our patches it takes, in order (scripts/hermes_patches.py; Patrick's answer A on q-hermes-vm-patches, 26 Nov 2026). A patch leaves a commit's list when that Hermes release carries the fix.",
+  "series": {
+    "ae2a81ccc00e9b7c06301523e5bb09608397149c": [
+      "v0.23.0/0011-cron-gated-fire-ends-session.patch",
+      "v0.23.0/0013-turn-left-early-ends.patch",
+      "v0.23.2/0014-codex-fallback-early-reopen.patch"
+    ]
+  }
+}

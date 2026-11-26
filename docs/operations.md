@@ -83,6 +83,8 @@ Before the maintenance window, read the installed commit and clean source status
 /home/hermes/.local/bin/hermes update --plan --channel stable
 ```
 
+Our Hermes patches (`hermes/patches/series.json`) sit uncommitted in the checkout; the pull request that moves the pin also gives the new commit its series, without each patch that release carries. While held, and before the source moves, take them off as `hermes` from the installed release: `python3 -I scripts/hermes_patches.py --remove`. The follower's apply puts the new series on.
+
 Finish any follower install first. Record whether `follow-main.paused` already existed, then pause the follower as above before making the pin ready to merge. Use the policy broker's normal `hold_turns` operation with `spare_connector: false`, and poll `turns_running` until zero. Do not interrupt a running turn when a wait expires: end this maintenance attempt and preserve its work. A hold has an expiry; require it to remain valid throughout the update and reload.
 
 The normal `hermes update --channel stable --yes --no-gateway-restart` follows a mutable release. For an exact reviewed pin, use the official installer's documented `--commit` path over the existing source install ([upstream updating instructions](https://github.com/NousResearch/hermes-agent/blob/ae2a81ccc00e9b7c06301523e5bb09608397149c/website/docs/getting-started/updating.md#updating)). Download `scripts/install.sh` from that immutable commit, verify SHA256 `c73dad4dcf7c9ecadb98578e28cc763d23d7be3fa1b513545319038795493214`, and run the verified local file as `hermes` while held:
