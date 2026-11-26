@@ -52,7 +52,9 @@ case, 1 Nov), and the connector claims nothing more until the helper answers.
 Every few seconds, whatever connector_effects says, it also answers the pages of
 full history the phone asked for (`POST /api/v1/connector/pages`, then
 `/connector/page`): a Bot's Bot Chat from that profile's state.db and a room
-from shared-state.db, both read only, 50 messages at a time.
+from the store that holds it (feed_reader.room_store: the gateway's own state.db
+since Hermes 0.23 moved the rooms there, else shared-state.db), both read only,
+50 messages at a time.
 The same claim hands it Patrick's reactions on Bot Chat messages: each is set in
 that Bot's own store with `room_send.py` op `react` (Hermes's SessionDB), and
 what came of it goes to `POST /api/v1/connector/reacted`.
@@ -231,6 +233,11 @@ def bot_page(hermes_home: Path, bot: str, before: int | None, session: str | Non
         if len(json.dumps(page, ensure_ascii=False).encode("utf-8")) <= PAGE_BYTES or n <= 1:
             return page
         n //= 2
+
+
+def room_store(hermes_home: Path, room_id: str) -> Path:
+    from .feed_reader import room_store as where
+    return where(hermes_home, room_id)
 
 
 def room_page(shared_db: Path, room_id: str, before: int | None, thread: str | None = None) -> dict:
@@ -1340,10 +1347,10 @@ class Connector:
                       and isinstance(req.get("q"), str) and SESSION_ID.match(req["q"])):
                     page = bot_page(self.hermes_home, target, before, session=req["q"])
                 elif req.get("kind") == "room" and isinstance(target, str) and ROOM_ID.match(target):
-                    page = room_page(self.hermes_home / "shared-state.db", target, before)
+                    page = room_page(room_store(self.hermes_home, target), target, before)
                 elif (req.get("kind") == "room_thread" and isinstance(target, str) and ROOM_ID.match(target)
                       and isinstance(req.get("q"), str) and THREAD_ID.fullmatch(req["q"])):
-                    page = room_page(self.hermes_home / "shared-state.db", target, before, thread=req["q"])
+                    page = room_page(room_store(self.hermes_home, target), target, before, thread=req["q"])
                 else:
                     continue
             except (sqlite3.Error, OSError) as exc:

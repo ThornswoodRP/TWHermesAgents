@@ -5,8 +5,10 @@ tw-decide-feed.timer:
 
     python3 -I -m thornswood_decisions.feed_reader --room <room id> [--room <another room id>]
 
-It opens Hermes's own stores read-only (`shared-state.db` under ~/.hermes, and
-each Bot's `profiles/<id>/state.db`; the tables named in contracts.json), keeps
+It opens Hermes's own stores read-only (a room's store under ~/.hermes, which is
+the gateway's `state.db` once Hermes 0.23 moved the room there and
+`shared-state.db` before, and each Bot's `profiles/<id>/state.db`; the tables
+named in contracts.json), keeps
 only what the phone's Room and Bot Chat views show, and sends each to the core
 on 127.0.0.1 with that feed's token (~/.config/thornswood/feed-<name>.token,
 0600). It writes nothing to Hermes, holds no other credential and logs no
@@ -87,6 +89,26 @@ def room_threads(con: sqlite3.Connection, room_id: str, limit: int = ROOM_THREAD
     return out
 
 
+def room_store(hermes_home: Path, room_id: str) -> Path:
+    """The store that holds a room now. Hermes 0.23's root gateway runs its rooms on its own state.db: at
+    each start it copies the standalone backend's rooms there from shared-state.db and fences that copy, which
+    never changes again (gateway/hosted_rooms_gateway_import.py:120 import_standalone_rooms,
+    gateway/session_hosted_service.py:49). So a room the gateway's state.db holds is read there; one it does
+    not is still the standalone backend's, in shared-state.db."""
+    gateway = hermes_home / "state.db"
+    if gateway.is_file():
+        con = _ro(gateway)
+        try:
+            held = (con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hosted_rooms'").fetchone()
+                    and con.execute("SELECT 1 FROM hosted_rooms WHERE room_id = ? AND disbanded_at IS NULL",
+                                    (room_id,)).fetchone())
+        finally:
+            con.close()
+        if held:
+            return gateway
+    return hermes_home / "shared-state.db"
+
+
 def room_snapshot(state_db: Path, room_id: str, now: datetime, limit: int = 200) -> dict:
     con = _ro(state_db)
     try:
@@ -123,10 +145,11 @@ def room_page(state_db: Path, room_id: str, before: int | None, n: int = 50, thr
     return {"events": events, "more": len(rows) > n}
 
 
-def rooms_snapshot(state_db: Path, room_ids: list[str], now: datetime) -> dict:
-    """Every room in one snapshot; with several, fewer of each one's last events, so the feed stays small."""
+def rooms_snapshot(state_db: Path, room_ids: list[str], now: datetime, store_for=None) -> dict:
+    """Every room in one snapshot; with several, fewer of each one's last events, so the feed stays small.
+    `store_for(room_id)` names each room's store (room_store); without it every room is read in `state_db`."""
     limit = max(25, 200 // max(1, len(room_ids)))
-    rooms = [room_snapshot(state_db, r, now, limit) for r in room_ids]
+    rooms = [room_snapshot(store_for(r) if store_for else state_db, r, now, limit) for r in room_ids]
     return {"source_time": now.isoformat(),
             "rooms": [{"room_id": r["room_id"], "events": r["events"], "threads": r["threads"]} for r in rooms]}
 
@@ -268,7 +291,8 @@ def main(argv: list[str]) -> int:
     bad = 0
     from . import contracts
     bots = contracts.load()["profiles"]["ids"]
-    feeds = [("room", lambda: rooms_snapshot(hh / "shared-state.db", args.room, now)),
+    feeds = [("room", lambda: rooms_snapshot(hh / "shared-state.db", args.room, now,
+                                             store_for=lambda r: room_store(hh, r))),
              ("bots", lambda: bots_snapshot(hh, bots, now))]
     for name, make in feeds:
         try:

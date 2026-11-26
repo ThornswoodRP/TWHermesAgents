@@ -142,6 +142,44 @@ class VmCheck(unittest.TestCase):
         r = self.run_check()
         self.assertTrue(any("seats" in s for s in r["stop"]), r["stop"])
 
+    def gateway_takes_over(self, room_id, profiles, *, keep_shared=True):
+        """Hermes 0.23's root gateway copies a room into its own state.db (hosted_rooms_gateway_import)."""
+        gateway = self.home / "state.db"
+        con = sqlite3.connect(gateway)
+        con.execute("""CREATE TABLE IF NOT EXISTS hosted_rooms (room_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+            members_json TEXT NOT NULL, authority_gateway_id TEXT NOT NULL,
+            authority_epoch INTEGER NOT NULL DEFAULT 1, next_seq INTEGER NOT NULL DEFAULT 1,
+            event_bytes INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL, disbanded_at REAL)""")
+        members = [{"member_id": f"m-{p}", "profile": p, "display_name": p.title()} for p in profiles]
+        con.execute("INSERT INTO hosted_rooms(room_id, name, members_json, authority_gateway_id, authority_epoch, "
+                    "created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (room_id, "Thornswood Workbench", json.dumps(members), "gw-1", 3, 1.0, 2.0))
+        con.commit()
+        con.close()
+        if not keep_shared:
+            con = sqlite3.connect(self.db)
+            con.execute("DELETE FROM hosted_rooms")
+            con.commit()
+            con.close()
+
+    def test_a_room_the_gateway_took_over_is_one_room(self):
+        self.gateway_takes_over("room-wb", SIX)
+        self.assertEqual(self.run_check()["stop"], [])
+        r = check_script.run_room(self.home, "room-wb", self.c)
+        self.assertEqual(r["stop"], [])
+        self.assertEqual(len(r["facts"]["rooms"]), 1)
+
+    def test_the_gateways_copy_of_the_room_is_the_one_checked(self):
+        # Its seats are the gateway's now: the fenced copy in shared-state.db never changes again.
+        self.gateway_takes_over("room-wb", SIX[:5])
+        stops = check_script.run_room(self.home, "room-wb", self.c)["stop"]
+        self.assertTrue(any("but the policy seats" in s for s in stops), stops)
+
+    def test_a_room_only_the_gateway_holds_passes(self):
+        self.gateway_takes_over("room-wb", SIX, keep_shared=False)
+        self.assertEqual(check_script.run_room(self.home, "room-wb", self.c)["stop"], [])
+
     def test_the_room_check_passes_for_the_bound_room_seating_the_policys_bots(self):
         r = check_script.run_room(self.home, "room-wb", self.c)
         self.assertEqual(r["stop"], [])
