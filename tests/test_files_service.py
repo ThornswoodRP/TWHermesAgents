@@ -301,6 +301,58 @@ class Work(unittest.TestCase):
         self.assertTrue(w.tree(bot="rift", task="4-rifts").is_dir())
         self.assertNotIn("removed", self._start(w, "6-after"))
 
+    def test_the_hourly_sweep_removes_finished_trees_with_no_bot_turn(self):
+        # 26 Nov 2026: the disk floor stopped every turn, and only a turn's
+        # base and checkout listed branches and removed trees, so 23 GB of
+        # trees stayed while the floor held.
+        w = World()
+        self._start(w, "1-merged")
+        self._send(w, "1-merged")
+        self._start(w, "2-open")
+        self._send(w, "2-open")
+        self._start(w, "3-not-sent")
+        git(w.fake.remote(APP), "branch", "-D", "sprocket/1-merged")
+        listed = w.spool / "in" / "sprocket" / "branches-Thornswood.json"
+        os.utime(listed, (1000, 1000))  # the last list is from before the push
+        self.assertEqual(w.files.sweep("root", {}), {"removed": {}})
+        got = w.git.branches("root", {})
+        self.assertNotIn(APP, got["failed"])  # this fake GitHub has only Thornswood
+        self.assertEqual(got["listed"]["ThornswoodRP/Thornswood"]["sprocket"], 1)
+        self.assertEqual(json.loads(listed.read_text())["branches"], ["sprocket/2-open"])
+        self.assertEqual(w.files.sweep("root", {}), {"removed": {"sprocket": ["Thornswood 1-merged"]}})
+        self.assertEqual([t["task"] for t in w.files.trees("hermes", {"bot": "sprocket"})["trees"]],
+                         ["2-open", "3-not-sent"])
+        self.assertEqual(w.files.sweep("root", {}), {"removed": {}})
+
+    def test_the_sweep_ops_are_roots_alone(self):
+        w = World()
+        self.assertEqual(w.files.ops()["sweep"][1], {"root"})
+        self.assertEqual(w.git.ops()["branches"][1], {"root"})
+
+    def test_tw_sweep_lists_then_sweeps_and_says_what_went(self):
+        from thornswood_brokers import sweep
+        from thornswood_brokers.wire import Refused as WireRefused
+        calls, said = [], []
+        answers = {"branches": {"listed": {APP: {"sprocket": 1}}, "failed": {}},
+                   "sweep": {"removed": {"sprocket": ["Thornswood 1-merged"]}}}
+
+        def call(path, op, args, timeout):
+            calls.append((path, op))
+            return answers[op]
+        p = policy()
+        self.assertEqual(sweep.sweep(p, call=call, say=said.append), 0)
+        socks = p.data["brokers"]["sockets"]
+        self.assertEqual(calls, [(socks["git"]["path"], "branches"), (socks["files"]["path"], "sweep")])
+        self.assertIn("removed 1 finished tree(s) of sprocket: Thornswood 1-merged", said)
+
+        def no_git(path, op, args, timeout):
+            if op == "branches":
+                raise WireRefused("down")
+            raise AssertionError("no sweep without a fresh list")
+        self.assertEqual(sweep.sweep(p, call=no_git, say=said.append), 1)
+        answers["branches"] = {"listed": {}, "failed": {APP: "fetch failed"}}
+        self.assertEqual(sweep.sweep(p, call=call, say=said.append), 1)
+
     def test_a_tree_sent_after_the_branch_list_stays(self):
         w = World()
         self._start(w, "1-first")
@@ -442,7 +494,8 @@ class Work(unittest.TestCase):
 
     def test_the_tool_offers_every_op_the_broker_has(self):
         from thornswood_guard.brokers import FILES_OPS, TW_FILES_SCHEMA
-        self.assertEqual(sorted(FILES_OPS), sorted(World().files.ops()))
+        # sweep is root's tw-sweep's, never a Bot's tool (sweep.py).
+        self.assertEqual(sorted(FILES_OPS + ["sweep"]), sorted(World().files.ops()))
         self.assertEqual(TW_FILES_SCHEMA["parameters"]["required"], ["op"])
 
     def test_a_status_without_a_task_points_at_trees(self):
@@ -832,7 +885,10 @@ class Checks(unittest.TestCase):
         self.assertNotIn("*", env["GIT_CONFIG_VALUE_0"])
 
     def test_only_the_gateway_user_calls_tw_files(self):
-        self.assertTrue(all(users == {"hermes"} for _, users in World().files.ops().values()))
+        # All but sweep, which is root's tw-sweep's alone (sweep.py).
+        ops = World().files.ops()
+        self.assertTrue(all(users == {"hermes"} for name, (_, users) in ops.items() if name != "sweep"))
+        self.assertEqual(ops["sweep"][1], {"root"})
 
 
 if __name__ == "__main__":

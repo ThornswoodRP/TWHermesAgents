@@ -8,6 +8,7 @@ Some problems the Bots hit are caused in [Hermes Agent](https://github.com/NousR
 |---|---|
 | `v0.22.5/` | The patches made against Hermes v0.22.5 (`bf0203a794a07aac3ff764972ab9087baa4e4f4e`). They apply in number order |
 | `v0.23.0/` | The patches made against Hermes v0.23.0 (`2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`). 0011 and 0013 also apply to upstream `main` as they are |
+| `v0.23.2/` | The patches made against Hermes v0.23.2 (`ae2a81ccc00e9b7c06301523e5bb09608397149c`), the version the VM runs since 16 Nov 2026 |
 | `main/` | The patches remade on upstream `main`, where upstream had changed the same lines. 0002, 0003 and 0004 apply to upstream `main` as they are, so they have no copy here |
 | `followups/` | Commits for the upstream pull request branches that answer upstream's code health check, each at its cause |
 
@@ -27,6 +28,14 @@ git am --3way main/0001-spill-path-idle-sandbox.patch v0.22.5/0002-ratelimit-hea
 
 The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already has the upstream code their `main/` copies were made for. Neither does 0009: v0.23.0 has upstream's rewrite of that flow.
 
+## On v0.23.2
+
+The VM runs Hermes v0.23.2 (`ae2a81ccc00e9b7c06301523e5bb09608397149c`), the version `src/thornswood_decisions/contracts.json` pins since 16 Nov 2026. 0011, 0013 and 0014 apply on it as they are (checked 26 Nov 2026), and 0013's and 0014's tests pass on it:
+
+```bash
+git am --3way v0.23.0/0011-cron-gated-fire-ends-session.patch v0.23.0/0013-turn-left-early-ends.patch v0.23.2/0014-codex-fallback-early-reopen.patch
+```
+
 ## The patches
 
 | # | Fixes | Upstream pull request | Base for `main/` |
@@ -43,6 +52,7 @@ The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already 
 | 0010 | The Bot Screen watcher reads each home under its own terminal policy | not opened yet | `013bde47` (only on `main`; the file is the same in v0.22.5) |
 | 0011 | A cron fire a gate stopped ends the session its owner admitted | not opened yet | made on v0.23.0; applies to `main` as is |
 | 0013 | A turn that leaves the loop early still fires on_session_end | not opened yet | made on v0.23.0; applies to `main` (`ddc5d27e`, 11 Nov 2026) as is |
+| 0014 | A benched Codex fallback is probed for an early reopen before it is skipped | not opened yet | made on v0.23.2 |
 
 GitHub allows an account without write access five open pull requests in a repository, so the later patches open as the earlier ones merge or close.
 
@@ -162,6 +172,17 @@ Its tests (`tests/agent/test_turn_end_hook_early_exit.py`) have not been run her
 git am v0.23.0/0013-turn-left-early-ends.patch
 python -m pm.build_env --source . --out /venv --group dev --group test --extra messaging
 HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/agent/test_turn_end_hook_early_exit.py tests/agent/test_turn_finalizer_cleanup_guard.py -q -rfE
+```
+
+## 0014: a benched Codex fallback is probed for an early reopen before it is skipped
+
+**Cause.** A Codex 429 benches the pool entry until the window's `resets_at`, which can be days out. The window can reopen sooner, and the pool's usage probe notices, but only on `select()`. `_candidate_pool_exhausted` (`agent/chat_completion_helpers.py`) asks `has_available` and `next_available_at`, which never run the probe, so a Codex fallback benched past the retry cap was skipped on every turn until its `resets_at`. Read on the VM on 26 Nov 2026: Bramble's Codex entry was benched "exhausted" until 2 Dec, 2:04 AM UTC, while `hermes usage` said 23% of the week used, and every turn Claude refused had no fallback.
+
+**Fix.** Ask `lift_reopened_cooldowns` for the candidate's model before skipping it, at most once per probe interval per agent, as the primary's restore check (`_primary_quota_reopened_early`) already does. A probe that errors keeps the skip; a short throttle still gets its chance without one; other providers are not probed.
+
+```bash
+git am v0.23.2/0014-codex-fallback-early-reopen.patch
+python -m pytest -q tests/agent/test_fallback_codex_quota_reopen.py tests/agent/test_provider_fallback.py tests/agent/test_fallback_restore_codex_early_reopen.py
 ```
 
 ## The follow-up commits

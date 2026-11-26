@@ -259,10 +259,13 @@ class Push(unittest.TestCase):
         self.assertEqual(w.git._git(mirror, "rev-parse", "refs/tw/in"), sha)
 
     def test_only_the_gateway_user_calls_tw_git(self):
-        # All but vm_install, which is root's follower's alone (vm_report.py).
+        # All but vm_install, which is root's follower's alone (vm_report.py),
+        # and branches, which is root's tw-sweep's alone (sweep.py).
         ops = World().git.ops()
-        self.assertTrue(all(users == {"hermes"} for name, (_, users) in ops.items() if name != "vm_install"))
+        self.assertTrue(all(users == {"hermes"} for name, (_, users) in ops.items()
+                            if name not in ("vm_install", "branches")))
         self.assertEqual(ops["vm_install"][1], {"root"})
+        self.assertEqual(ops["branches"][1], {"root"})
 
 
 class Merge(unittest.TestCase):
@@ -2157,7 +2160,9 @@ class ClaimLabels(unittest.TestCase):
         from thornswood_guard.brokers import GIT_OPS
         # vm_install is root's follower's, never a Bot's tool (vm_report.py).
         # The self-claim check is only reached from tw_decide after a definite refusal.
-        self.assertEqual(sorted(GIT_OPS + ["refused", "vm_install", "open_claim_question"]), sorted(World().git.ops()))
+        # branches is root's tw-sweep's (sweep.py).
+        self.assertEqual(sorted(GIT_OPS + ["refused", "vm_install", "open_claim_question", "branches"]),
+                         sorted(World().git.ops()))
         self.assertEqual(World().git.ops()["vm_install"][1], {"root"})
 
 

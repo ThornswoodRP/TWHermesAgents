@@ -657,9 +657,26 @@ class Follower:
             self.record(result="fetched", why=None)
             self.report("fetched", commit=tip)
         before = self.installed()
-        if tip == before:
-            return 0
         st = self.state()
+        done = st.get("installed")
+        if before and done and done != before and st.get("failed") != before:
+            # deploy/install.sh points current at the release early, and this
+            # run records it as installed only once the apply, the reload, the
+            # canary and the connector are done. A run stopped in between left
+            # current at a release nothing finished. 26 Nov 2026: the run for
+            # 6ac15c24 was stopped at 13:40:03 UTC, during its apply (apt's
+            # needrestart restarted the unit after an unattended upgrade), and
+            # every run after it read current, took the release as installed
+            # and did nothing, so the apply, reload and canary never ran and
+            # follow-main.json kept saying d797677e from 19 Nov. The release
+            # before is the one the last finished run installed, for what the
+            # install keeps running and for a put-back.
+            self.say(f"{before[:12]} is current but no run finished installing it; "
+                     f"{done[:12]} is the last release a run finished"
+                     + (f"; installing {tip[:12]} again" if tip == before else ""))
+            before = done
+        elif tip == before:
+            return 0
         if st.get("failed") == tip:
             # Said once, when it failed; a new merge on main is the fix.
             return 1

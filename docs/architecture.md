@@ -91,13 +91,19 @@ Patrick's 17 Nov handoff is 7 AM to midnight Mountain for new worker issues, and
 `tw-follow-main.timer` runs `src/thornswood_brokers/follow_main.py` as root every ten minutes. It:
 
 1. fetches `main` with the VM's own read-only deploy key, checking GitHub's published host keys only;
-2. stops if that commit is already installed, or already failed here;
+2. stops if that commit is already installed, or already failed here; a release `current` points at that no run finished installing (a run stopped part way) is installed again, from the release the last finished run installed;
 3. puts the commit in a root-owned release folder, `/opt/thornswood-hermes/releases/<commit>`;
 4. runs the whole suite at that commit as `tw-ci`, with no network, and installs nothing if a test fails;
 5. runs that release's `deploy/install.sh` and, where the decision core is installed, `deploy/decisions/install.sh`; then `apply.py --check` and `apply.py` as `hermes`; then `tw-reload-bots`, which ends the `hermes` user's login sessions and restarts the gateway so every Bot process loads the new code; then the canary;
 6. if any of step 5 fails, installs and applies the release that ran before, the same way, and says both.
 
 [operations.md](operations.md) says how to watch it, pause it and roll back by hand.
+
+apt's needrestart never restarts a run of the follower or of any other oneshot unit (`deploy/needrestart/50-thornswood.conf`): on 26 Nov 2026 an unattended library upgrade restarted the follower in the middle of an install.
+
+## The Bots' finished trees
+
+`tw-sweep.timer` runs `src/thornswood_brokers/sweep.py` as root every hour. tw-git fetches each repository's mirror and writes every Bot's branch list (`branches`), then tw-files removes each tree that was sent and whose branch GitHub no longer has (`sweep`), as a Bot's checkout does. It needs no Bot turn, so the disk floor that stops turns cannot stop it.
 
 The copy of the follower that runs is the one already installed, and it calls each new release's own `deploy/install.sh`, `deploy/decisions/install.sh`, `scripts/apply.py` and `tests/`, so those paths stay put. Where a release keeps its Python packages is in its own `deploy/layout.json`; the follower reads it before it runs another release's code (to count its store migrations, or to have it put the store back), and so does One's connector before it takes its two files from a release. A release made before that file keeps its packages at its root.
 

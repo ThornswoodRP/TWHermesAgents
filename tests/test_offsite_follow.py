@@ -290,6 +290,51 @@ class FollowMain(unittest.TestCase):
         self.assertEqual(vm.ran("install.sh"), [])
         self.assertEqual(vm.ran("systemd-run"), [])
 
+    def test_a_release_its_run_recorded_as_installed_is_left_alone(self):
+        vm = FakeVM(OLD)
+        f = self.follower(vm)
+        f.record(result="installed", installed=OLD, failed=None)
+        self.assertEqual(f.follow(), 0)
+        self.assertEqual(vm.ran("install.sh"), [])
+
+    # 26 Nov 2026: the run for 6ac15c24 was stopped during its apply, after
+    # deploy/install.sh had pointed current at it; every run after it read
+    # current, did nothing, and the apply, reload and canary never ran.
+    def test_a_release_current_points_at_that_no_run_finished_is_installed_again(self):
+        vm = FakeVM(NEW)
+        f = self.follower(vm, installed=NEW)
+        (f.opt / "releases" / OLD).mkdir(parents=True)
+        f.record(result="installed", installed=OLD, failed=None)
+        self.assertEqual(f.follow(), 0, self.said)
+        for step in ("systemd-run", "install.sh", "apply.py", "tw-reload-bots", "tw-canary"):
+            self.assertTrue(vm.ran(step), f"{step} did not run: {vm.calls}")
+        self.assertTrue(any("no run finished installing it" in s for s in self.said), self.said)
+        self.assertEqual(json.loads(f.state_file.read_text())["installed"], NEW)
+        self.assertEqual(self.reports[-1]["before"], OLD)
+
+    def test_a_cut_short_release_that_fails_again_goes_back_to_the_last_finished_one(self):
+        vm = FakeVM(NEW, fail={"tw-canary": 1})
+        f = self.follower(vm, installed=NEW)
+        (f.opt / "releases" / OLD).mkdir(parents=True)
+        f.record(result="installed", installed=OLD, failed=None)
+        self.assertEqual(f.follow(), 1, self.said)
+        self.assertTrue(any(f"releases/{OLD}/deploy/install.sh {OLD}" in c for c in vm.ran("install.sh")), vm.calls)
+        self.assertEqual(json.loads(f.state_file.read_text())["failed"], NEW)
+
+    def test_a_new_merge_after_a_cut_short_release_starts_from_the_last_finished_one(self):
+        # What the install keeps running and a put-back go by the release a
+        # run last finished, never by one current points at half done.
+        cut = "c" * 40
+        vm = FakeVM(NEW, fail={"tw-canary": 1})
+        f = self.follower(vm, installed=cut)
+        (f.opt / "releases" / OLD).mkdir(parents=True)
+        f.record(result="installed", installed=OLD, failed=None)
+        self.assertEqual(f.follow(), 1, self.said)
+        self.assertTrue(any(f"{cut[:12]} is current but no run finished installing it" in s
+                            and "installing" not in s.split(";")[-1] for s in self.said), self.said)
+        self.assertTrue(any(f"releases/{OLD}/deploy/install.sh {OLD}" in c for c in vm.ran("install.sh")), vm.calls)
+        self.assertEqual(self.reports[-1]["before"], OLD)
+
     def test_a_new_commit_is_tested_installed_applied_restarted_and_checked_in_that_order(self):
         vm = FakeVM(NEW)
         f = self.follower(vm)

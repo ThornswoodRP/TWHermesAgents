@@ -487,6 +487,27 @@ if [[ -z "$(swapon --show --noheadings)" ]]; then
   ok "a 4 GB swapfile is on, and in /etc/fstab for every boot"
 fi
 
+# 7c2. What earlier runs left in /tmp, which nothing would ever remove. The
+# test suite made its temporary folders with tempfile.mkdtemp and never
+# removed them until ee8d524 (12 Nov 2026) put them in one folder that goes
+# with the run; and the Actions runner install of 3 and 8 Nov (taken out
+# since) left its 133 MB package in a mktemp folder each time. Read on
+# 26 Nov: 25,019 such folders, 6.9 GB, the newest from 8 Nov, while the
+# disk floor turned every Bot turn away with 24 GB free against 25. Only
+# folders of those exact shapes, owners and dates go; once gone, this
+# finds nothing.
+tmp_gone=0
+while IFS= read -r -d '' d; do
+  rm -rf --one-file-system -- "$d" && tmp_gone=$((tmp_gone + 1))
+done < <(find /tmp -mindepth 1 -maxdepth 1 -type d \( -user hermes -o -user ubuntu \) -regextype posix-extended \
+           -regex '/tmp/tmp[a-z0-9_]{8}' ! -newermt '2026-11-12 00:00:00 UTC' -print0)
+while IFS= read -r -d '' d; do
+  if [[ "$(ls -A "$d")" =~ ^actions-runner-linux-[a-z0-9]+-[0-9.]+\.tar\.gz$ ]]; then
+    rm -rf --one-file-system -- "$d" && tmp_gone=$((tmp_gone + 1))
+  fi
+done < <(find /tmp -mindepth 1 -maxdepth 1 -type d -user root -name 'tmp.??????????' ! -newermt '2026-11-12 00:00:00 UTC' -print0)
+[[ "$tmp_gone" -eq 0 ]] || ok "removed $tmp_gone folders the test suite and the old runner install left in /tmp"
+
 # 7d. The disk cap inside each Bot's Tier A container (policy tier_a_disk):
 # /workspace is the Bot's folder, and that folder is a filesystem of its own,
 # a sparse image of the Bot's size in brokers.files.disk_quota_gb, mounted by
@@ -595,6 +616,10 @@ install -d "/etc/systemd/system/user-$hermes_uid.slice.d"
 install -m 0644 "$here/deploy/systemd/user-hermes.slice.conf" "/etc/systemd/system/user-$hermes_uid.slice.d/50-thornswood.conf"
 install -d /etc/systemd/system/tw-hermes-gateway.service.d
 install -m 0644 "$here/deploy/systemd/tw-hermes-gateway-webhook.conf" /etc/systemd/system/tw-hermes-gateway.service.d/50-github-webhook.conf
+# needrestart (run by apt after every upgrade, unattended ones too) leaves a
+# run of a oneshot unit alone; deploy/needrestart/50-thornswood.conf says why.
+install -d -m 0755 /etc/needrestart/conf.d
+install -m 0644 "$here/deploy/needrestart/50-thornswood.conf" /etc/needrestart/conf.d/50-thornswood.conf
 systemctl daemon-reload
 systemctl enable --quiet tw-limits-check.service
 systemctl restart tw-limits-check.service
@@ -607,7 +632,7 @@ for sock in tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket; do
 done
 systemctl enable --quiet --now tw-checks.socket tw-policy.socket tw-git.socket tw-files.socket tw-proxy.socket \
   tw-policy.service tw-git.service tw-files.service tw-proxy.service tw-snapshot.timer tw-backup.timer \
-  tw-offsite.timer tw-offsite.path tw-follow-main.timer
+  tw-offsite.timer tw-offsite.path tw-follow-main.timer tw-sweep.timer
 # A path unit watches what it was started with, so a changed one is started
 # again to watch what it says now (12 Nov: PathChanged became PathExistsGlob).
 systemctl restart tw-offsite.path

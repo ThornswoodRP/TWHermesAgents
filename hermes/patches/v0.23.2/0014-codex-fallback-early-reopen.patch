@@ -1,0 +1,133 @@
+From a225d79fd3ed6673b67f8f188152231683684bef Mon Sep 17 00:00:00 2001
+From: EvilPatrick06 <187923600+EvilPatrick06@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 19:19:05 +0000
+Subject: [PATCH] fix(agent): probe a benched Codex fallback for an early
+ reopen before skipping it
+
+A Codex 429 benches the pool entry until the window's resets_at, which can
+be days out. The window can reopen sooner, and the pool's throttled usage
+probe notices, but only on select(). _candidate_pool_exhausted asks
+has_available and next_available_at, which never run that probe, so a Codex
+fallback benched past the retry cap was skipped on every turn until its
+resets_at even after its window had reopened, while the primary failed each
+turn. Seen on 26 Nov 2026: an entry benched until 2 Dec while the usage API
+said 23% of the week used.
+
+Ask lift_reopened_cooldowns for the candidate's model before skipping it, at
+most once per probe interval per agent, as the primary's restore check
+(_primary_quota_reopened_early) already does. Fails closed: a probe that
+errors keeps the skip. A short throttle still gets its chance without a
+probe, and other providers are not probed.
+---
+ agent/chat_completion_helpers.py              | 28 ++++++++-
+ .../agent/test_fallback_codex_quota_reopen.py | 59 +++++++++++++++++++
+ 2 files changed, 86 insertions(+), 1 deletion(-)
+ create mode 100644 tests/agent/test_fallback_codex_quota_reopen.py
+
+diff --git a/agent/chat_completion_helpers.py b/agent/chat_completion_helpers.py
+index 89d1f2d9fb..6cf80cfe64 100644
+--- a/agent/chat_completion_helpers.py
++++ b/agent/chat_completion_helpers.py
+@@ -1917,7 +1917,33 @@ def _candidate_pool_exhausted(agent, fb_provider: str, fb_model: str) -> bool:
+     if pool is None or not pool.has_credentials() or pool.has_available(model=fb_model):
+         return False
+     until = pool.next_available_at(model=fb_model)
+-    return until is None or until - time.time() > 600
++    if until is not None and until - time.time() <= 600:
++        return False
++    return not _fallback_quota_reopened_early(agent, pool, fb_provider, fb_model)
++
++
++def _fallback_quota_reopened_early(agent, pool, fb_provider: str, fb_model: str) -> bool:
++    """True when a Codex quota window the candidate's pool still has benched has reopened.
++
++    ``has_available`` and ``next_available_at`` never run the early-reopen probe; only ``select()``
++    does, and a candidate this check skips is never selected. A Codex entry benched until a weekly
++    ``resets_at`` was therefore skipped as a fallback until that time even when the window had
++    reopened days sooner, while the primary failed every turn. The primary's restore check asks the
++    same probe (``_primary_quota_reopened_early``); this asks it for the candidate, at most once per
++    probe interval per agent, and fails closed.
++    """
++    if fb_provider != "openai-codex":
++        return False
++    from hermes_cli.auth_codex import CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS
++    now = time.monotonic()
++    if now - getattr(agent, "_codex_fallback_reopen_checked_at", float("-inf")) < CODEX_QUOTA_PROBE_MIN_INTERVAL_SECONDS:
++        return False
++    agent._codex_fallback_reopen_checked_at = now
++    try:
++        return bool(pool.lift_reopened_cooldowns(model=fb_model or None))
++    except Exception:
++        logger.debug("Early quota-reopen check for a fallback failed; keeping the cooldown", exc_info=True)
++        return False
+ 
+ 
+ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider: str, fb_model: str, unavailable: set) -> bool:
+diff --git a/tests/agent/test_fallback_codex_quota_reopen.py b/tests/agent/test_fallback_codex_quota_reopen.py
+new file mode 100644
+index 0000000000..1cf3263378
+--- /dev/null
++++ b/tests/agent/test_fallback_codex_quota_reopen.py
+@@ -0,0 +1,59 @@
++"""A Codex fallback whose pool is benched past the retry cap is probed for an early reopen
++before it is skipped (``_candidate_pool_exhausted``)."""
++
++import time
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++from agent import chat_completion_helpers as cch
++
++
++def _pool(provider="openai-codex", reopened=False, benched_for=5 * 86400):
++    pool = MagicMock()
++    pool.provider = provider
++    pool.has_credentials.return_value = True
++    pool.has_available.return_value = False
++    pool.next_available_at.return_value = time.time() + benched_for
++    pool.lift_reopened_cooldowns.return_value = reopened
++    return pool
++
++
++def _agent(pool):
++    return SimpleNamespace(_credential_pool=pool)
++
++
++def test_a_codex_window_that_reopened_early_is_not_skipped():
++    pool = _pool(reopened=True)
++    assert cch._candidate_pool_exhausted(_agent(pool), "openai-codex", "gpt-6.2-sol") is False
++    pool.lift_reopened_cooldowns.assert_called_once_with(model="gpt-6.2-sol")
++
++
++def test_a_codex_window_still_closed_is_skipped():
++    pool = _pool(reopened=False)
++    assert cch._candidate_pool_exhausted(_agent(pool), "openai-codex", "gpt-6.2-sol") is True
++
++
++def test_the_probe_runs_at_most_once_per_interval():
++    pool = _pool(reopened=False)
++    agent = _agent(pool)
++    assert cch._candidate_pool_exhausted(agent, "openai-codex", "gpt-6.2-sol") is True
++    assert cch._candidate_pool_exhausted(agent, "openai-codex", "gpt-6.2-sol") is True
++    assert pool.lift_reopened_cooldowns.call_count == 1
++
++
++def test_a_failed_probe_keeps_the_skip():
++    pool = _pool()
++    pool.lift_reopened_cooldowns.side_effect = RuntimeError("usage endpoint down")
++    assert cch._candidate_pool_exhausted(_agent(pool), "openai-codex", "gpt-6.2-sol") is True
++
++
++def test_other_providers_are_not_probed():
++    pool = _pool(provider="anthropic")
++    assert cch._candidate_pool_exhausted(_agent(pool), "anthropic", "claude-opus-5-5") is True
++    pool.lift_reopened_cooldowns.assert_not_called()
++
++
++def test_a_short_throttle_still_gets_its_chance_without_a_probe():
++    pool = _pool(benched_for=60)
++    assert cch._candidate_pool_exhausted(_agent(pool), "openai-codex", "gpt-6.2-sol") is False
++    pool.lift_reopened_cooldowns.assert_not_called()
+-- 
+2.43.0
+

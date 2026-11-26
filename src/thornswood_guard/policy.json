@@ -306,7 +306,8 @@
       "who": "all",
       "risk": "low",
       "needs": "admission-proxy",
-      "needs_one": true
+      "needs_one": true,
+      "tools": false
     }
   ],
   "paid_providers": [
