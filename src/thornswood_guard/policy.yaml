@@ -878,7 +878,13 @@ backups:
     box_store: /srv/tw/boxbackups
     box_keep_days: 30
     box_keep_newest: 7
-    box_address: 192.135.112.23
+    # The only address the box's drop key works from (from= in its
+    # authorized_keys line, install.sh 5b). The box moved to this address
+    # in the IP cutover of 18 Nov 2026 (play.thornswood.net's A record,
+    # 4:24 PM MT); the old address stayed here, so the VM refused every
+    # nightly from 19 Nov on (Thornswood #6895). Move it with the box:
+    # Send-Backups.ps1 -Status says which address the box sends from.
+    box_address: 165.217.135.167
     # The box's public key, in this repository so a merge is how it changes.
     box_key_file: deploy/keys/box-drop.pub
 

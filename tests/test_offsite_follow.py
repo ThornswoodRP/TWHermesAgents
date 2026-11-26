@@ -199,7 +199,7 @@ class TheDropJail(unittest.TestCase):
         text = (REPO / "deploy" / "install.sh").read_text()
         self.assertIn("printf 'from=\"%s\",restrict %s\\n' \"$box_addr\"", text)
         self.assertIn("install -d -m 0730 -o root -g tw-boxdrop /srv/tw/boxdrop/in", text)
-        self.assertEqual(policy().data["backups"]["offsite"]["box_address"], "192.135.112.23")
+        self.assertEqual(policy().data["backups"]["offsite"]["box_address"], "165.217.135.167")
 
     def test_drive_and_the_units(self):
         self.assertEqual(unit("tw-offsite.service")["User"], ["tw-offsite"])
