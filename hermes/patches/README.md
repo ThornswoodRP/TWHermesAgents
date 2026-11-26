@@ -32,10 +32,10 @@ The v0.22.5 copies of 0001 and 0006 do not apply there, because v0.23.0 already 
 
 ## On v0.23.2
 
-The VM runs Hermes v0.23.2 (`ae2a81ccc00e9b7c06301523e5bb09608397149c`), the version `src/thornswood_decisions/contracts.json` pins since 16 Nov 2026. 0011, 0013 and 0014 apply on it as they are (checked 26 Nov 2026), and 0013's and 0014's tests pass on it:
+The VM runs Hermes v0.23.2 (`ae2a81ccc00e9b7c06301523e5bb09608397149c`), the version `src/thornswood_decisions/contracts.json` pins since 16 Nov 2026. 0011, 0013, 0014 and 0015 apply on it as they are (checked 26 Nov 2026), and the tests of 0013, 0014 and 0015 pass on it:
 
 ```bash
-git am --3way v0.23.0/0011-cron-gated-fire-ends-session.patch v0.23.0/0013-turn-left-early-ends.patch v0.23.2/0014-codex-fallback-early-reopen.patch
+git am --3way v0.23.0/0011-cron-gated-fire-ends-session.patch v0.23.0/0013-turn-left-early-ends.patch v0.23.2/0014-codex-fallback-early-reopen.patch v0.23.2/0015-reset-bot-chat-dm-admitted.patch
 ```
 
 ## The patches
@@ -55,6 +55,7 @@ git am --3way v0.23.0/0011-cron-gated-fire-ends-session.patch v0.23.0/0013-turn-
 | 0011 | A cron fire a gate stopped ends the session its owner admitted | not opened yet | made on v0.23.0; applies to `main` as is |
 | 0013 | A turn that leaves the loop early still fires on_session_end | not opened yet | made on v0.23.0; applies to `main` (`ddc5d27e`, 11 Nov 2026) as is |
 | 0014 | A benched Codex fallback is probed for an early reopen before it is skipped | not opened yet | made on v0.23.2 |
+| 0015 | A Bot DM into a Bot Chat that was reset is admitted, not refused `admission_conflict` | not opened yet | made on v0.23.2; upstream `main` (`c925e8bb`, 26 Nov 2026) has the same check |
 
 GitHub allows an account without write access five open pull requests in a repository, so the later patches open as the earlier ones merge or close.
 
@@ -185,6 +186,17 @@ HERMES_PYTHON=/venv/bin/python scripts/run_tests.sh tests/agent/test_turn_end_ho
 ```bash
 git am v0.23.2/0014-codex-fallback-early-reopen.patch
 python -m pytest -q tests/agent/test_fallback_codex_quota_reopen.py tests/agent/test_provider_fallback.py tests/agent/test_fallback_restore_codex_early_reopen.py
+```
+
+## 0015: a Bot DM into a Bot Chat that was reset is admitted
+
+**Cause.** `message_agent` pins each delivery to the Bot Chat its sender finds: `find_canonical_live_owner` (`tools/bot_live_delivery.py`) reads the row titled "Bot Chat" and takes its compression tip. A reset (`/new`, an idle or daily reset) keeps that title and the chat's FIFO on its creation id while the route moves to a new segment, and a reset is no compression, so the pin stays the creation id. The door (`_deliver` in `gateway/session_bot.py`) compared the pin only with the route's current segment and refused anything else `admission_conflict`, which the sender reports as "Live delivery admission could not be confirmed: admission_conflict. Do not resend." Read on the VM on 26 Nov 2026: Bramble's Bot Chat was reset on 13 Nov 03:28 UTC, and since 19 Nov every one of the 73 messages the five workers sent Bramble came back that way, while every message between workers was queued.
+
+**Fix.** The door also takes a pin that is the Bot Chat's own id, the `ref` it admits into. A pin naming any other chat is still refused. Its test (`tests/gateway/test_bot_chat_reset_delivery_pin.py`) fails on v0.23.2 at that refusal and passes with the fix; the 60 test files that use the door pass with it, apart from six tests that need `snowballstemmer`, which the test environment here lacks.
+
+```bash
+git am v0.23.2/0015-reset-bot-chat-dm-admitted.patch
+python -m pytest -q tests/gateway/test_bot_chat_reset_delivery_pin.py tests/gateway/test_bot_chat_unadoptable_local_title.py tests/gateway/test_peer_dm_bot_chat_headless.py tests/gateway/test_handoff_local_receipt.py
 ```
 
 ## The follow-up commits

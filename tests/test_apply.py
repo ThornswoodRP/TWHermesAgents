@@ -171,6 +171,80 @@ class Apply(unittest.TestCase):
         self.assertEqual(r.stdout.strip().splitlines()[-1],
                          "RELOAD: needed; 1 file a running Bot holds changed: hermes-agent (our patches)")
 
+    ADDS = ("--- /dev/null\n+++ b/agent/door.py\n@@ -0,0 +1,2 @@\n+def admit(pin, chat):\n"
+            "+    return pin == chat\n")
+    FIX_AGAIN = FIX.replace("fire_end_hook()", "fire_end_hook(once=True)")
+
+    def hermes_patches(self, *args, home):
+        return subprocess.run([sys.executable, str(self.repo / "scripts" / "hermes_patches.py"), *args,
+                               "--hermes-dir", str(home / "hermes-agent"),
+                               "--series", str(home.parent / "patches" / "series.json")], capture_output=True, text=True)
+
+    def git_status(self, home):
+        return subprocess.run(["git", "-C", str(home / "hermes-agent"), "status", "--porcelain"],
+                              capture_output=True, text=True, env=GIT_ENV).stdout
+
+    def test_a_series_that_grows_moves_the_checkout_to_it(self):
+        home = self.home()
+        hermes = home / "hermes-agent"
+        self.assertEqual(self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX}).returncode, 0)
+        grown = {"0013-turn-left-early-ends.patch": self.FIX, "0015-door.patch": self.ADDS}
+        r = self.run_apply(home, "--check", hermes_patches=grown)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("runs an earlier series of our patches; the install moves it to 0013, 0015", r.stdout)
+        r = self.run_apply(home, hermes_patches=grown)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("from an earlier series of ours to our patches 0013, 0015", r.stdout)
+        self.assertEqual(r.stdout.strip().splitlines()[-1],
+                         "RELOAD: needed; 1 file a running Bot holds changed: hermes-agent (our patches)")
+        self.assertIn("fire_end_hook()", (hermes / "agent" / "loop.py").read_text())
+        self.assertTrue((hermes / "agent" / "door.py").is_file())
+        r = self.run_apply(home, hermes_patches=grown)
+        self.assertIn("runs our patches 0013, 0015, as hermes/patches/series.json says", r.stdout)
+
+    def test_a_checkout_patched_before_the_record_moves_when_its_series_grows(self):
+        # The VM's checkout took 0011, 0013 and 0014 before installs recorded their tree.
+        home = self.home()
+        hermes = home / "hermes-agent"
+        fake_hermes_checkout(home)
+        fix = home.parent / "by-an-older-install.patch"
+        fix.write_text(self.FIX, encoding="utf-8", newline="\n")
+        subprocess.run(["git", "-C", str(hermes), "apply", "--index", str(fix)], check=True, env=GIT_ENV)
+        r = self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX, "0015-door.patch": self.ADDS})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("from an earlier series of ours to our patches 0013, 0015", r.stdout)
+
+    def test_a_patch_changed_in_place_is_moved_by_the_recorded_tree(self):
+        home = self.home()
+        hermes = home / "hermes-agent"
+        self.assertEqual(self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX}).returncode, 0)
+        r = self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX_AGAIN})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("from an earlier series of ours to our patches 0013", r.stdout)
+        self.assertIn("fire_end_hook(once=True)", (hermes / "agent" / "loop.py").read_text())
+
+    def test_remove_takes_every_patch_off_with_the_files_they_added(self):
+        home = self.home()
+        hermes = home / "hermes-agent"
+        both = {"0013-turn-left-early-ends.patch": self.FIX, "0015-door.patch": self.ADDS}
+        self.assertEqual(self.run_apply(home, hermes_patches=both).returncode, 0)
+        r = self.hermes_patches("--remove", home=home)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("took our patches off Hermes", r.stdout)
+        self.assertEqual(self.git_status(home), "")
+        self.assertFalse((hermes / "agent" / "door.py").exists())
+        self.assertNotIn("fire_end_hook", (hermes / "agent" / "loop.py").read_text())
+
+    def test_a_hand_edit_over_our_patches_still_stops_the_apply(self):
+        home = self.home()
+        hermes = home / "hermes-agent"
+        self.assertEqual(self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX}).returncode, 0)
+        (hermes / "agent" / "loop.py").write_text("changed by hand\n", encoding="utf-8")
+        r = self.run_apply(home, hermes_patches={"0013-turn-left-early-ends.patch": self.FIX, "0015-door.patch": self.ADDS})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("has changes that are neither", r.stdout)
+        self.assertEqual((hermes / "agent" / "loop.py").read_text(), "changed by hand\n", "nothing was changed")
+
     def test_a_hermes_checkout_changed_by_anything_else_stops_the_apply(self):
         home = self.home()
         fake_hermes_checkout(home)
@@ -204,7 +278,8 @@ class Apply(unittest.TestCase):
         spec.loader.exec_module(mod)
         names = [p.name for p in mod.series_for(pin)]
         self.assertEqual(names, ["0011-cron-gated-fire-ends-session.patch", "0013-turn-left-early-ends.patch",
-                                 "0014-codex-fallback-early-reopen.patch"])
+                                 "0014-codex-fallback-early-reopen.patch",
+                                 "0015-reset-bot-chat-dm-admitted.patch"])
 
     def test_applies_to_the_six_existing_profiles(self):
         home = self.home(env_root="DISCORD_BOT_TOKEN=canary\nDISCORD_ALLOWED_USERS=1\n")

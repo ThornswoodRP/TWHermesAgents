@@ -4,7 +4,8 @@
     "ae2a81ccc00e9b7c06301523e5bb09608397149c": [
       "v0.23.0/0011-cron-gated-fire-ends-session.patch",
       "v0.23.0/0013-turn-left-early-ends.patch",
-      "v0.23.2/0014-codex-fallback-early-reopen.patch"
+      "v0.23.2/0014-codex-fallback-early-reopen.patch",
+      "v0.23.2/0015-reset-bot-chat-dm-admitted.patch"
     ]
   }
 }
