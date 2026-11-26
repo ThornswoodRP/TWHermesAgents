@@ -11,9 +11,16 @@ Two kinds of backup leave the VM for Google Drive (Patrick, 31 Oct, #2862):
                  tw-boxdrop user, over SFTP, into a jail that can only add a
                  file: it cannot list, read, rename, overwrite or delete one
                  (deploy/sshd/51-tw-boxdrop.conf), so a stolen box cannot reach
-                 the copies it already sent. After the file it drops
-                 <name>.done, holding "<sha256> <size>", which says the file is
-                 whole.
+                 the copies it already sent. After the file it drops an empty
+                 marker named <name>.<sha256>.<size>.done, which says the file
+                 is whole. What the marker says is in its name, so it is
+                 complete the moment it exists: on 26 Nov 2026 the intake read
+                 a marker that held "<sha256> <size>" in its body while the
+                 box was still writing it, found it empty and set a whole
+                 backup aside (Thornswood #6895). A marker cannot be written
+                 under another name and renamed, because the jail allows no
+                 rename. The old <name>.done with the body is still read
+                 until the box sends the new one (Send-Backups.ps1 -Install).
 
 Neither passphrase nor age key is ever on the VM, so every copy here and on
 Drive stays encrypted.
@@ -48,6 +55,7 @@ from thornswood_guard.policy import Policy
 HERMES_NAME = re.compile(r"^hermes-(\d{8})-(\d{6})\.tar\.gz\.age$")
 BOX_NAME = re.compile(r"^thornswood-(\d{8})-(\d{6})\.zip\.enc$")
 MARK = re.compile(r"^([0-9a-f]{64}) ([0-9]{1,12})\s*$")
+NAMED_MARK = re.compile(r"^(thornswood-\d{8}-\d{6}\.zip\.enc)\.([0-9a-f]{64})\.([0-9]{1,12})\.done$")
 
 
 # rclone's exit code for "directory not found" (rclone docs, Exit code).
@@ -74,13 +82,24 @@ def intake(drop: Path, store: Path, rejected: Path, *, owner: tuple[int, int] | 
     the next run, which its marker's own arrival starts (tw-offsite.path)."""
     taken, problems = [], []
     for mark in sorted(drop.glob("*.done")):
-        name = mark.name[: -len(".done")]
+        named = NAMED_MARK.match(mark.name)
+        want_sha, want_size = "", "0"
+        if named:
+            # Everything is in the name; the body is never read.
+            name, m = named.group(1), named
+            want_sha, want_size = named.group(2), named.group(3)
+        else:
+            name = mark.name[: -len(".done")]
+            m = None
         f = drop / name
         if not BOX_NAME.match(name):
             problems.append(f"{mark.name} names no backup the box makes; set aside")
             _set_aside(mark, rejected)
             continue
-        m = MARK.match(mark.read_text(encoding="ascii", errors="replace"))
+        if not named:
+            m = MARK.match(mark.read_text(encoding="ascii", errors="replace"))
+            if m:
+                want_sha, want_size = m.group(1), m.group(2)
         if not m or not f.is_file():
             problems.append(f"{name}: its marker is not '<sha256> <size>' or the file is not there; set aside")
             _set_aside(mark, rejected)
@@ -88,7 +107,7 @@ def intake(drop: Path, store: Path, rejected: Path, *, owner: tuple[int, int] | 
                 _set_aside(f, rejected)
             continue
         size = f.stat().st_size
-        if size != int(m.group(2)) or _sha256(f) != m.group(1):
+        if size != int(want_size) or _sha256(f) != want_sha:
             problems.append(f"{name} is not the file its marker names ({size} bytes); set aside")
             _set_aside(f, rejected)
             _set_aside(mark, rejected)
@@ -96,7 +115,7 @@ def intake(drop: Path, store: Path, rejected: Path, *, owner: tuple[int, int] | 
         dest = store / name
         if dest.exists():
             # The same backup sent twice: the one already here is kept.
-            if _sha256(dest) != m.group(1):
+            if _sha256(dest) != want_sha:
                 problems.append(f"{name} was sent again with other bytes; the first is kept, the second set aside")
                 _set_aside(f, rejected)
             else:
