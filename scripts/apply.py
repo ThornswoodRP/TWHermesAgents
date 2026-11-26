@@ -70,6 +70,9 @@ from thornswood_guard.profile_config import (  # noqa: E402
 from thornswood_guard.routes import check_config, check_gateway_config  # noqa: E402
 from thornswood_guard.secrets_check import check_env, check_files, env_names  # noqa: E402
 
+sys.path.insert(0, str(REPO / "scripts"))
+import hermes_patches  # noqa: E402
+
 SKILLS = ("thornswood-ops", "thornswood-guide")
 SKILLS_DIR = HERMES / "skills" / "thornswood"
 # Skills this repository owns and installs, by Bot, from hermes/skills/<name>/SKILL.md
@@ -474,6 +477,10 @@ def main() -> int:
     ap.add_argument("--podman", default="podman", help="the container runtime command (tests pass a stand-in)")
     ap.add_argument("--hermes", default="/home/hermes/.local/bin/hermes",
                     help="the hermes command, for Bramble's owed-wake cron job (tests pass a stand-in)")
+    ap.add_argument("--hermes-dir", default=None,
+                    help="Hermes's own source checkout, which takes our patches (default: <hermes-home>/hermes-agent)")
+    ap.add_argument("--hermes-series", default=str(hermes_patches.SERIES),
+                    help="which of our Hermes patches each Hermes commit takes (tests pass a stand-in)")
     ap.add_argument("--wake-secret-file", default=None,
                     help="where deploy/install.sh made the webhook secret (default: the policy's wake.secret_file; tests pass a stand-in)")
     a = ap.parse_args()
@@ -525,6 +532,15 @@ def main() -> int:
         problems.append(f"{wake_secret} is not there; deploy/install.sh makes it, so run the install for this commit first")
     problems += scan_files(policy, home)
     problems += check_skills()
+    # Our fixes for Hermes itself (hermes/patches/series.json; Patrick's
+    # answer A on q-hermes-vm-patches, 26 Nov 2026), checked before anything
+    # is written and put on below.
+    hermes_dir = Path(a.hermes_dir or home / "hermes-agent")
+    series = Path(a.hermes_series)
+    try:
+        print(hermes_patches.run(hermes_dir, check=True, series_file=series)[1])
+    except (hermes_patches.Refused, OSError, ValueError) as e:
+        problems.append(f"Hermes's own patches: {e}")
     # Bramble's owed-wake job is written through the hermes command, so it must
     # answer before anything is written.
     waker = policy.data["wake"]["app"]
@@ -563,6 +579,12 @@ def main() -> int:
         print(f"Pulled {SANDBOX_IMAGE}.")
 
     before = held(home, plans)
+    try:
+        patched, said = hermes_patches.run(hermes_dir, series_file=series)
+    except (hermes_patches.Refused, OSError, ValueError) as e:
+        print(f"\nSTOP. Hermes's own patches were not put on, so nothing was changed: {e}")
+        return 1
+    print(said)
     stamp = datetime.now(timezone.utc).isoformat()
     for bot, (pdir, cfg_path, _, merged) in plans.items():
         work = Path(a.work_root) / bot
@@ -606,7 +628,11 @@ def main() -> int:
             print(f"  - {f}")
         return 1
     print(f"\nApplied {a.expect} to {', '.join(plans)} and the gateway's own profile. The guard's self-test passed in every profile.")
-    line = reload_line(before, held(home, plans))
+    after = held(home, plans)
+    if patched:
+        # Hermes's own code changed: every Hermes process loads it when it starts again.
+        before["hermes-agent (our patches)"], after["hermes-agent (our patches)"] = "before", "after"
+    line = reload_line(before, after)
     if line.startswith(RELOAD_LINE + "needed"):
         print("Every Bot process picks up the plugin and config when it starts again. End the hermes user's login sessions"
               " (Hermes Desktop's backends) and restart the gateway in one step: ssh -t thornswood-bots sudo /opt/thornswood-hermes/bin/tw-reload-bots")
