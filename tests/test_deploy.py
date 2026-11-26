@@ -301,7 +301,7 @@ class Units(unittest.TestCase):
                       '/etc/needrestart/conf.d/50-thornswood.conf', text)
         if shutil.which("perl"):
             r = subprocess.run(["perl", "-e", 'our %nrconf; do $ARGV[0]; die $@ if $@; '
-                                'print join("\\n", map { "$_" } keys %{$nrconf{override_rc}})', str(conf)],
+                                + 'print join("\\n", map { "$_" } keys %{$nrconf{override_rc}})', str(conf)],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(len(r.stdout.split("\n")), len(oneshots))
