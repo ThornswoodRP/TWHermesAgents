@@ -79,6 +79,25 @@ def workbench_rooms(db_path: Path, name: str) -> list[dict]:
     return rooms
 
 
+def live_workbench(home: Path, name: str) -> tuple[list[dict], list[Path]]:
+    """Live rooms with this name in the stores that hold rooms now, and the stores read. The root
+    gateway's own state.db holds every room it took from shared-state.db (Hermes 0.23,
+    gateway/hosted_rooms_gateway_import.py:120); a room only shared-state.db has is the standalone
+    backend's. Raises sqlite3.Error on a store it cannot read."""
+    stores = [db for db in (home / "state.db", home / "shared-state.db") if db.is_file()]
+    rooms: list[dict] = []
+    for db in stores:
+        con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            has = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hosted_rooms'").fetchone()
+        finally:
+            con.close()
+        if has:
+            seen = {r["room_id"] for r in rooms}
+            rooms += [r for r in workbench_rooms(db, name) if r["room_id"] not in seen]
+    return rooms, stores
+
+
 def run(home: Path, hermes_cmd: list[str], contract: dict | None = None) -> dict:
     contract = contract or contracts.load()
     report: dict = {"pass": [], "stop": [], "facts": {}}
@@ -120,15 +139,14 @@ def run(home: Path, hermes_cmd: list[str], contract: dict | None = None) -> dict
         report["facts"]["other_profiles"] = extra
 
     room = contract["room"]
-    db = home / "shared-state.db"
-    if not db.is_file():
-        stop(f"no room store at {db}")
+    if not (home / "state.db").is_file() and not (home / "shared-state.db").is_file():
+        stop(f"no room store under {home}")
     else:
         try:
-            rooms = workbench_rooms(db, room["name"])
+            rooms, _ = live_workbench(home, room["name"])
         except sqlite3.Error as exc:
             rooms = None
-            stop(f"could not read the room store {db} read-only: {exc}")
+            stop(f"could not read the room stores under {home} read-only: {exc}")
         if rooms is not None:
             report["facts"]["rooms"] = rooms
             if len(rooms) != 1:
@@ -149,14 +167,13 @@ def run_room(home: Path, room_id: str, contract: dict | None = None) -> dict:
     contract = contract or contracts.load()
     report: dict = {"pass": [], "stop": [], "facts": {}}
     room = contract["room"]
-    db = home / "shared-state.db"
     try:
-        rooms = workbench_rooms(db, room["name"]) if db.is_file() else None
+        rooms, stores = live_workbench(home, room["name"])
     except sqlite3.Error as exc:
-        report["stop"].append(f"could not read the room store {db} read-only: {exc}")
+        report["stop"].append(f"could not read the room stores under {home} read-only: {exc}")
         return report
-    if rooms is None:
-        report["stop"].append(f"no room store at {db}")
+    if not stores:
+        report["stop"].append(f"no room store under {home}")
         return report
     report["facts"]["rooms"] = rooms
     want = sorted(room["members"])

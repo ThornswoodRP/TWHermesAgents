@@ -20,8 +20,8 @@
   "room": {
     "name": "Thornswood Workbench",
     "members": ["bramble", "rift", "sprocket", "echo", "magpie", "wisp"],
-    "store": "~/.hermes/shared-state.db, table hosted_rooms (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, revision, created_at, updated_at, disbanded_at)",
-    "store_source": "gateway/hosted_rooms.py:89 (schema), gateway/hosted_rooms.py:435 default_db_path (profile gateways resolve to the root shared-state.db)",
+    "store": "table hosted_rooms (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, revision, created_at, updated_at, disbanded_at) and its hosted_room_events, in ~/.hermes/state.db for every room the root gateway holds, else in ~/.hermes/shared-state.db. The root gateway runs its rooms on its own state.db and at each start copies the standalone backend's rooms there from shared-state.db, fencing that copy (authority.lost to <install>:gateway-store), which never changes again: the VM's Workbench moved so on 8 Nov 2026, 19:56 UTC (feed_reader.room_store).",
+    "store_source": "gateway/hosted_rooms.py:89 (schema), gateway/hosted_rooms.py:435 default_db_path (profile gateways resolve to the root shared-state.db), gateway/session_hosted_service.py:49 (the gateway's room service on its authority's state.db), gateway/session_hosted_service.py:343 and gateway/hosted_rooms_gateway_import.py:120 import_standalone_rooms, gateway/hosted_rooms_gateway_import.py:55 source_for",
     "protocol_version": 2,
     "protocol_version_source": "gateway/hosted_rooms.py:23",
     "transport": "JSON-RPC methods groups.* on the gateway's native connection (the one Desktop uses through hermes serve); not on the api_server platform",
