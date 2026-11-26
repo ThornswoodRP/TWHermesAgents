@@ -47,6 +47,15 @@ def drop(folder: Path, name: str, data: bytes, mark: str | None = None) -> None:
     (folder / (name + ".done")).write_text(mark)
 
 
+def drop_named(folder: Path, name: str, data: bytes, sha: str | None = None, size: int | None = None) -> Path:
+    """The marker the box sends since #6895: empty, its sha256 and size in its name."""
+    (folder / name).write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest() if sha is None else sha
+    mark = folder / f"{name}.{sha}.{len(data) if size is None else size}.done"
+    mark.write_bytes(b"")
+    return mark
+
+
 class Intake(unittest.TestCase):
     def setUp(self):
         t = Path(tempfile.mkdtemp())
@@ -62,6 +71,33 @@ class Intake(unittest.TestCase):
         f = self.store / "thornswood-20261101-031500.zip.enc"
         self.assertEqual(f.read_bytes(), b"encrypted bytes")
         self.assertEqual(f.stat().st_mode & 0o777, 0o440)
+
+    def test_a_marker_that_says_it_in_its_name_is_taken_with_its_body_empty(self):
+        # 26 Nov 2026 (#6895): the intake read a marker the box was still
+        # writing, found no "<sha256> <size>" in it and set a whole backup
+        # aside. A marker whose name says it is complete the moment it exists.
+        drop_named(self.drop, "thornswood-20261120-011502.zip.enc", b"encrypted bytes")
+        taken, problems = offsite.intake(self.drop, self.store, self.rejected)
+        self.assertEqual((taken, problems), (["thornswood-20261120-011502.zip.enc"], []))
+        self.assertEqual(list(self.drop.iterdir()), [])
+        self.assertEqual((self.store / "thornswood-20261120-011502.zip.enc").read_bytes(), b"encrypted bytes")
+
+    def test_a_named_marker_that_does_not_match_its_file_sets_both_aside(self):
+        drop_named(self.drop, "thornswood-20261120-011502.zip.enc", b"cut short", size=999)
+        drop_named(self.drop, "thornswood-20261121-011502.zip.enc", b"other", sha="0" * 64)
+        taken, problems = offsite.intake(self.drop, self.store, self.rejected)
+        self.assertEqual(taken, [])
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(all("is not the file its marker names" in p for p in problems))
+        self.assertEqual(list(self.store.iterdir()), [])
+        self.assertEqual(len(list(self.rejected.iterdir())), 4)
+
+    def test_a_named_marker_for_a_name_the_box_never_gives_is_set_aside(self):
+        (self.drop / ("x.zip.enc." + "a" * 64 + ".5.done")).write_bytes(b"")
+        taken, problems = offsite.intake(self.drop, self.store, self.rejected)
+        self.assertEqual(taken, [])
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(list(self.store.iterdir()), [])
 
     def test_a_file_still_arriving_waits_for_its_marker(self):
         (self.drop / "thornswood-20261101-031500.zip.enc").write_bytes(b"half")
