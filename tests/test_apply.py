@@ -38,7 +38,11 @@ def make_home(root: Path, bots, *, skip_skill=None, env_root="", env_bot=None) -
     return home
 
 
-GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+# hermes_patches.py reads the checkout with GIT_CONFIG_NOSYSTEM, so the fake
+# checkout is made the same way: a Windows runner's system core.autocrlf would
+# otherwise store loop.py with LF while the script sees its CRLF as a change.
+GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t",
+               GIT_CONFIG_NOSYSTEM="1")
 
 
 def fake_hermes_checkout(home: Path, patches: dict[str, str] | None = None) -> Path:
@@ -47,7 +51,7 @@ def fake_hermes_checkout(home: Path, patches: dict[str, str] | None = None) -> P
     d = home / "hermes-agent"
     if not (d / ".git").exists():
         (d / "agent").mkdir(parents=True)
-        (d / "agent" / "loop.py").write_text("def turn():\n    return 'ended'\n", encoding="utf-8")
+        (d / "agent" / "loop.py").write_text("def turn():\n    return 'ended'\n", encoding="utf-8", newline="\n")
         for cmd in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "v0"]):
             subprocess.run(["git", "-C", str(d), *cmd], check=True, env=GIT_ENV, capture_output=True)
     head = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], check=True, capture_output=True,
@@ -55,7 +59,7 @@ def fake_hermes_checkout(home: Path, patches: dict[str, str] | None = None) -> P
     folder = home.parent / "patches"
     folder.mkdir(exist_ok=True)
     for name, body in (patches or {}).items():
-        (folder / name).write_text(body, encoding="utf-8")
+        (folder / name).write_text(body, encoding="utf-8", newline="\n")
     series = folder / "series.json"
     series.write_text(json.dumps({"series": {head: sorted(patches or {})}}), encoding="utf-8")
     return series
