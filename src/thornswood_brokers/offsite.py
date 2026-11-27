@@ -19,8 +19,8 @@ Two kinds of backup leave the VM for Google Drive (Patrick, 31 Oct, #2862):
                  box was still writing it, found it empty and set a whole
                  backup aside (Thornswood #6895). A marker cannot be written
                  under another name and renamed, because the jail allows no
-                 rename. The old <name>.done with the body is still read
-                 until the box sends the new one (Send-Backups.ps1 -Install).
+                 rename. Any other marker is set aside: the box has sent only
+                 this one since Send-Backups.ps1 -Install on 26 Nov 2026.
 
 Neither passphrase nor age key is ever on the VM, so every copy here and on
 Drive stays encrypted.
@@ -54,7 +54,6 @@ from thornswood_guard.policy import Policy
 
 HERMES_NAME = re.compile(r"^hermes-(\d{8})-(\d{6})\.tar\.gz\.age$")
 BOX_NAME = re.compile(r"^thornswood-(\d{8})-(\d{6})\.zip\.enc$")
-MARK = re.compile(r"^([0-9a-f]{64}) ([0-9]{1,12})\s*$")
 NAMED_MARK = re.compile(r"^(thornswood-\d{8}-\d{6}\.zip\.enc)\.([0-9a-f]{64})\.([0-9]{1,12})\.done$")
 
 
@@ -83,28 +82,19 @@ def intake(drop: Path, store: Path, rejected: Path, *, owner: tuple[int, int] | 
     taken, problems = [], []
     for mark in sorted(drop.glob("*.done")):
         named = NAMED_MARK.match(mark.name)
-        want_sha, want_size = "", "0"
-        if named:
-            # Everything is in the name; the body is never read.
-            name, m = named.group(1), named
-            want_sha, want_size = named.group(2), named.group(3)
-        else:
-            name = mark.name[: -len(".done")]
-            m = None
-        f = drop / name
-        if not BOX_NAME.match(name):
-            problems.append(f"{mark.name} names no backup the box makes; set aside")
-            _set_aside(mark, rejected)
-            continue
         if not named:
-            m = MARK.match(mark.read_text(encoding="ascii", errors="replace"))
-            if m:
-                want_sha, want_size = m.group(1), m.group(2)
-        if not m or not f.is_file():
-            problems.append(f"{name}: its marker is not '<sha256> <size>' or the file is not there; set aside")
+            problems.append(f"{mark.name} is not a marker the box sends (<backup>.<sha256>.<size>.done); set aside")
             _set_aside(mark, rejected)
-            if f.exists():
+            f = drop / mark.name[: -len(".done")]
+            if BOX_NAME.match(f.name) and f.is_file():
                 _set_aside(f, rejected)
+            continue
+        # Everything is in the name; the body is never read.
+        name, want_sha, want_size = named.group(1), named.group(2), named.group(3)
+        f = drop / name
+        if not f.is_file():
+            problems.append(f"{name}: its marker is here but the file is not; set aside")
+            _set_aside(mark, rejected)
             continue
         size = f.stat().st_size
         if size != int(want_size) or _sha256(f) != want_sha:

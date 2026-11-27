@@ -40,14 +40,7 @@ def unit(name: str) -> dict[str, list[str]]:
     return out
 
 
-def drop(folder: Path, name: str, data: bytes, mark: str | None = None) -> None:
-    (folder / name).write_bytes(data)
-    if mark is None:
-        mark = f"{hashlib.sha256(data).hexdigest()} {len(data)}\n"
-    (folder / (name + ".done")).write_text(mark)
-
-
-def drop_named(folder: Path, name: str, data: bytes, sha: str | None = None, size: int | None = None) -> Path:
+def drop(folder: Path, name: str, data: bytes, sha: str | None = None, size: int | None = None) -> Path:
     """The marker the box sends since #6895: empty, its sha256 and size in its name."""
     (folder / name).write_bytes(data)
     sha = hashlib.sha256(data).hexdigest() if sha is None else sha
@@ -76,15 +69,15 @@ class Intake(unittest.TestCase):
         # 26 Nov 2026 (#6895): the intake read a marker the box was still
         # writing, found no "<sha256> <size>" in it and set a whole backup
         # aside. A marker whose name says it is complete the moment it exists.
-        drop_named(self.drop, "thornswood-20261120-011502.zip.enc", b"encrypted bytes")
+        drop(self.drop, "thornswood-20261120-011502.zip.enc", b"encrypted bytes")
         taken, problems = offsite.intake(self.drop, self.store, self.rejected)
         self.assertEqual((taken, problems), (["thornswood-20261120-011502.zip.enc"], []))
         self.assertEqual(list(self.drop.iterdir()), [])
         self.assertEqual((self.store / "thornswood-20261120-011502.zip.enc").read_bytes(), b"encrypted bytes")
 
     def test_a_named_marker_that_does_not_match_its_file_sets_both_aside(self):
-        drop_named(self.drop, "thornswood-20261120-011502.zip.enc", b"cut short", size=999)
-        drop_named(self.drop, "thornswood-20261121-011502.zip.enc", b"other", sha="0" * 64)
+        drop(self.drop, "thornswood-20261120-011502.zip.enc", b"cut short", size=999)
+        drop(self.drop, "thornswood-20261121-011502.zip.enc", b"other", sha="0" * 64)
         taken, problems = offsite.intake(self.drop, self.store, self.rejected)
         self.assertEqual(taken, [])
         self.assertEqual(len(problems), 2)
@@ -105,7 +98,7 @@ class Intake(unittest.TestCase):
         self.assertTrue((self.drop / "thornswood-20261101-031500.zip.enc").exists())
 
     def test_a_file_that_is_not_what_its_marker_says_is_set_aside(self):
-        drop(self.drop, "thornswood-20261101-031500.zip.enc", b"cut short", mark="0" * 64 + " 999\n")
+        drop(self.drop, "thornswood-20261101-031500.zip.enc", b"cut short", sha="0" * 64, size=999)
         taken, problems = offsite.intake(self.drop, self.store, self.rejected)
         self.assertEqual(taken, [])
         self.assertIn("is not the file its marker names", problems[0])
@@ -119,6 +112,25 @@ class Intake(unittest.TestCase):
         self.assertEqual(taken, [])
         self.assertEqual(len(problems), 3)
         self.assertEqual(list(self.store.iterdir()), [])
+
+    def test_a_marker_that_names_nothing_in_its_name_is_set_aside_with_its_file(self):
+        # The "<sha256> <size>" body the box sent before 26 Nov 2026 is
+        # never read: a marker being written can be read half done (#6895).
+        name = "thornswood-20261101-031500.zip.enc"
+        (self.drop / name).write_bytes(b"encrypted bytes")
+        (self.drop / (name + ".done")).write_text(hashlib.sha256(b"encrypted bytes").hexdigest() + " 15\n")
+        taken, problems = offsite.intake(self.drop, self.store, self.rejected)
+        self.assertEqual(taken, [])
+        self.assertIn("is not a marker the box sends", problems[0])
+        self.assertEqual(list(self.drop.iterdir()), [])
+        self.assertEqual(len(list(self.rejected.iterdir())), 2)
+
+    def test_a_marker_whose_file_is_not_there_is_set_aside(self):
+        (self.drop / ("thornswood-20261101-031500.zip.enc." + "a" * 64 + ".5.done")).write_bytes(b"")
+        taken, problems = offsite.intake(self.drop, self.store, self.rejected)
+        self.assertEqual(taken, [])
+        self.assertIn("the file is not", problems[0])
+        self.assertEqual(list(self.drop.iterdir()), [])
 
     def test_the_same_backup_sent_twice_keeps_the_first(self):
         drop(self.drop, "thornswood-20261101-031500.zip.enc", b"first")
