@@ -69,7 +69,10 @@ class World:
         self.standing: dict[str, dict] = {}
         self.git = GitService(p, gh, self.ask, mirrors=self.root / "mirrors", spool=self.spool,
                               git_base=f"file://{self.fake.remotes}/", allow_file_protocol=True,
-                              ask_decide=self.ask_decide)
+                              ask_decide=self.ask_decide,
+                              # The seal's library is the suite's own here (CI installs the
+                              # decision core's requirements); on the VM it is that venv's (#265).
+                              seal_python=_sys.executable)
 
     def ask_decide(self, op: str, args: dict):
         if op == "main_answer":
@@ -2389,6 +2392,114 @@ class Runs(unittest.TestCase):
             Policy(data)
 
 
+
+
+def _seal_like_the_runner(zip_bytes: bytes, recipient_b64: str) -> bytes:
+    """What box-run.yml's runner does (Thornswood scripts/ops/Sealed.ps1,
+    Protect-ThornswoodSealed): TWSEAL1, the wrapped key's length, the key
+    wrapped with RSA-OAEP-SHA256, the nonce, the tag, then AES-256-GCM."""
+    import os as _os
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    pub = serialization.load_der_public_key(base64.b64decode(recipient_b64))
+    assert pub.key_size >= 3072, "the runner refuses a recipient under 3072 bits"
+    key, nonce = _os.urandom(32), _os.urandom(12)
+    ct = AESGCM(key).encrypt(nonce, zip_bytes, None)
+    cipher, tag = ct[:-16], ct[-16:]
+    wrapped = pub.encrypt(key, padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+    return b"TWSEAL1" + bytes([len(wrapped) >> 8, len(wrapped) & 255]) + wrapped + nonce + tag + cipher
+
+
+def _sealed_log(sealed: bytes) -> str:
+    """The job log's TWSEAL-LOG lines, each after its time (Write-ThornswoodSealedLog)."""
+    import hashlib as _hashlib
+    b64 = base64.b64encode(sealed).decode()
+    parts = [b64[i:i + 2000] for i in range(0, len(b64), 2000)]
+    lines = ["2026-11-27T10:29:40.0000000Z Ask the gate", "2026-11-27T10:29:41.0000000Z \x1b[36;1mENDED 1\x1b[0m"]
+    lines += [f"2026-11-27T10:29:42.{n:07d}Z TWSEAL-LOG {n} {part}" for n, part in enumerate(parts, 1)]
+    lines.append(f"2026-11-27T10:29:43.0000000Z TWSEAL-LOG END {len(parts)} {_hashlib.sha256(sealed).hexdigest()}")
+    return "\n".join(lines) + "\n"
+
+
+class BoxRunOutput(unittest.TestCase):
+    """TWHermesAgents #265: Bramble's box runs sent no recipient key, so
+    box-run.yml sealed nothing back and every Bramble run's output stayed on
+    the box (Ops box run 45982471857, 27 Nov 2026). tw-git now seals each
+    start to a key it keeps and opens what comes back."""
+
+    def world(self) -> World:
+        try:
+            import cryptography  # noqa: F401
+        except ImportError:
+            self.skipTest("the seal needs the cryptography library, which the VM has in the decision core's venv")
+        w = World()
+        Runs.lists(self, w)
+        return w
+
+    def start(self, w: World, line: str = "Get-Logs -Dev -Lines 2000") -> dict:
+        return w.git.start_run("hermes", {"bot": "bramble", "task": "6879", "workflow": "box-run.yml",
+                                          "inputs": {"line": line}})
+
+    def test_a_box_run_is_sent_a_recipient_whose_private_half_tw_git_keeps(self):
+        w = self.world()
+        out = self.start(w)
+        self.assertTrue(out["done"] and out.get("sealed"), out)
+        sent = w.fake.runs[-1]["inputs"]
+        self.assertEqual(sent["line"], "Get-Logs -Dev -Lines 2000")
+        self.assertRegex(sent["recipient"], r"^[A-Za-z0-9+/=]{500,4096}$", "the base64 public key box-run.yml takes")
+        key = w.root / "mirrors" / "seal-keys" / f"run-{out['receipt']['run']}.pem"
+        self.assertTrue(key.is_file(), "the private half is kept by the run's id")
+        self.assertEqual(key.stat().st_mode & 0o077, 0, "and only tw-git reads it")
+        self.assertNotIn("PRIVATE", json.dumps(out), "the private half never leaves tw-git")
+
+    def test_a_recipient_the_caller_sent_is_left_as_it_is(self):
+        w = self.world()
+        out = w.git.start_run("hermes", {"bot": "bramble", "task": "t", "workflow": "box-run.yml",
+                                         "inputs": {"line": "Get-Logs -Dev -Lines 2000", "recipient": "QUJD"}})
+        self.assertFalse(out.get("sealed"), out)
+        self.assertEqual(w.fake.runs[-1]["inputs"]["recipient"], "QUJD")
+
+    def test_run_output_opens_what_the_runner_sealed_to_that_key(self):
+        import io
+        import zipfile
+        w = self.world()
+        out = self.start(w)
+        run = out["receipt"]["run"]
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("output.txt", "inputs at 7fe2e412\nSTOP. The argument is null or empty. (run.ps1 line 213)\n@END 1\n")
+            z.writestr("files/", "")
+        sealed = _seal_like_the_runner(buf.getvalue(), w.fake.runs[-1]["inputs"]["recipient"])
+        w.fake.run_jobs[run] = [{"id": 501, "conclusion": "skipped"}, {"id": 502, "conclusion": "failure"}]
+        w.fake.job_logs[502] = _sealed_log(sealed)
+        got = w.git.run_output("hermes", {"bot": "bramble", "run": run})
+        self.assertIn("STOP. The argument is null or empty. (run.ps1 line 213)", got["body"])
+        self.assertTrue(got["body"].rstrip().endswith("@END 1"), got)
+        self.assertEqual((got["run"], got["files"]), (run, []))
+
+    def test_run_output_says_why_when_nothing_comes_back(self):
+        w = self.world()
+        run = self.start(w)["receipt"]["run"]
+        w.fake.run_jobs[run] = [{"id": 601, "conclusion": "failure"}]
+        w.fake.job_logs[601] = "2026-11-27T10:29:43Z TWSEAL-LOG NONE\n"
+        with self.assertRaisesRegex(Refused, "wrote no sealed output"):
+            w.git.run_output("hermes", {"bot": "bramble", "run": run})
+        w.fake.job_logs[601] = "2026-11-27T10:29:43Z TWSEAL-LOG 1 QUJD\n2026-11-27T10:29:43Z TWSEAL-LOG END 2 " + "0" * 64 + "\n"
+        with self.assertRaisesRegex(Refused, "names 2 sealed part"):
+            w.git.run_output("hermes", {"bot": "bramble", "run": run})
+        w.fake.job_logs[601] = "2026-11-27T10:29:43Z TWSEAL-LOG 1 QUJD\n2026-11-27T10:29:43Z TWSEAL-LOG END 1 " + "0" * 64 + "\n"
+        with self.assertRaisesRegex(Refused, "do not hash"):
+            w.git.run_output("hermes", {"bot": "bramble", "run": run})
+
+    def test_only_bramble_reads_and_only_a_run_tw_git_sealed(self):
+        w = self.world()
+        run = self.start(w)["receipt"]["run"]
+        with self.assertRaisesRegex(Refused, "only Bramble"):
+            w.git.run_output("hermes", {"bot": "wisp", "run": run})
+        with self.assertRaisesRegex(Refused, "keeps no seal key for run 999"):
+            w.git.run_output("hermes", {"bot": "bramble", "run": 999})
+        self.assertIn("run_output", GIT_OPS)
 
 
 class OneExecutor(unittest.TestCase):

@@ -432,7 +432,16 @@ every wake, and whenever you are asked to work the queue.
    one is a card. If One's answer says a step needs one of those, open the
    card then and do not send that step to One again.
 4. After a run:
-   - put what ran, when, what it printed and the health check on the issue;
+   - read what it printed with `tw_git run_output` and the run's id once
+     the run has ended. A box-run.yml run you start is sealed to a key
+     tw-git keeps for it, so its output comes back to you alone
+     (TWHermesAgents #265: until then your box runs sent no key, and what
+     they printed stayed on the box). Its last line is the result: MATCHES,
+     DIFFERS or a STOP and its reason. When run_output says the run wrote
+     no sealed output, say so on the issue and do not start the line again
+     to find out;
+   - put what ran, when, its last lines from `run_output` and the health
+     check on the issue;
    - make one Ops pull request for the batch that takes the items that ran
      off the list and rewrites `ops/status.md`;
    - close the issue the run finished with `tw_git close_issue`, reason
