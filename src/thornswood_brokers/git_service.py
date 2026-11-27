@@ -1314,10 +1314,38 @@ class GitService:
                      "held_files": held[:10], "held_count": len(held), "release_link": link, "card": card}
             if card:
                 entry["shown"] = self._card_note(repo, number, head, card["state"])
+            if not (card and card.get("state") in ("authorized", "used")):
+                off = self._held_unseen_off(repo, number, base, head_ref, head)
+                if off:
+                    entry["taken_off"] = off
             out.append(entry)
         return {"repo": repo, "base": base, "held": out,
                 "owed": [h["number"] for h in out if not h["card"]],
                 **({"unread": unread} if unread else {})}
+
+    def _held_unseen_off(self, repo: str, number: int, base: str, branch: str, head: str) -> str:
+        """A held pull request on auto-merge or in the merge queue at a head
+        Patrick has not authorized comes off both. Bramble turns auto-merge on
+        at the head his yes names, but GitHub leaves it on when anybody pushes
+        again, and only a push through tw_git took it off (_auto_merge_off).
+        A Claude session pushes with its own sign-in: Thornswood #7186 went
+        on auto-merge at d803d7d on his yes on 27 Nov 2026, the thread pushed
+        cf780e0 (a change to the limited run on the box) 19 s later, and the
+        queue would have merged that head unseen once its checks passed.
+        Bramble reads this list on every finished check suite, which comes
+        before the queue can take a head, so the new head waits for its own
+        card. Says what it did, or nothing when there was nothing to do."""
+        state = self._queue_state(repo, number, base)
+        if state["head"] != head or not (state["auto"] or state["queued"]):
+            return ""
+        if self.policy.data["executor"] != "bramble":
+            return "not taken off: until the cutover the Bots write nothing"
+        try:
+            self._auto_merge_off("bramble", f"held-head-{number}", repo, branch, head)
+        except Refused as e:
+            return f"not taken off: {e}"
+        return ("out of the merge queue and off auto-merge" if state["queued"] else "off auto-merge") + \
+            f" at {head[:12]}, which has no authorize of Patrick's"
 
     # One comment per held head, which says where its Main card stands
     # (TWHermesAgents #214). The card itself lives only in the decision core
