@@ -1075,7 +1075,10 @@ class Held(unittest.TestCase):
         w.standing[f"merge:{APP}@{sha}#6235"] = {"decision_id": "dec_cardfor6235abc", "state": "asked"}
         w.standing[f"merge:{APP}@{bot}#6260"] = {"decision_id": "dec_cardfor6260abc", "state": "authorized"}
         before = len(w.fake.writes())
-        self.assertEqual([c for c in w.fake.writes() if "access_tokens" not in c[1]], [], "a card owed writes nothing")
+        # A GraphQL read (whether it is on auto-merge) is a POST, and no write.
+        self.assertEqual([c for c in w.fake.writes() if "access_tokens" not in c[1]
+                          and not (c[1] == "/graphql" and not c[2]["query"].lstrip().startswith("mutation"))], [],
+                         "a card owed writes nothing")
         out = self.held(w)
         self.assertEqual(out["owed"], [])
         self.assertEqual(out["held"][0]["card"], {"decision_id": "dec_cardfor6235abc", "state": "asked"})
@@ -1117,6 +1120,57 @@ class Held(unittest.TestCase):
         w.standing[f"merge:{APP}@{new}#6259"] = {"decision_id": "dec_cardfor6259new", "state": "asked"}
         self.held(w)
         self.assertEqual(len(w.fake.comments[(APP, 6259)]), 2)
+
+    def test_a_new_head_comes_off_auto_merge_until_its_own_card(self):
+        """Thornswood #7186, 27 Nov 2026: Bramble put it on auto-merge at
+        d803d7d on Patrick's yes, a thread pushed cf780e0 to it with its own
+        sign-in 19 s later, and GitHub left auto-merge on, so the queue would
+        have merged a box change he never saw."""
+        w = self.world()
+        old = self.add(w, 7186, "claude/project-thread-9zelrc-6879", ["scripts/vps/gate/Gate.ps1",
+                                                                        "scripts/vps/gate/verbs.json"])
+        w.standing[f"merge:{APP}@{old}#7186"] = {"decision_id": "dec_cardfor7186old", "state": "authorized"}
+        pr = w.fake.prs[(APP, 7186)]
+        pr["auto_merge"] = {"enabled_at": "2026-11-27T04:27:20Z", "merge_method": "merge"}
+        out = self.held(w)
+        self.assertNotIn("taken_off", out["held"][0], "his yes stands for this head")
+        self.assertEqual(w.fake.auto_merge_off, [])
+        new = "cf780e0439635a85011b5f2d01940b7381bc8130"
+        pr["head"]["sha"] = new
+        out = self.held(w)
+        self.assertEqual(out["owed"], [7186])
+        self.assertEqual(out["held"][0]["taken_off"], f"off auto-merge at {new[:12]}, which has no authorize of Patrick's")
+        self.assertEqual(w.fake.auto_merge_off, [(APP, 7186, new)])
+        self.assertIsNone(pr["auto_merge"])
+        self.assertNotIn("taken_off", self.held(w)["held"][0], "once off, nothing more is done")
+        self.assertEqual(len(w.fake.auto_merge_off), 1)
+        # A card asked for the new head is not his yes either, and a head in
+        # the queue comes out of it as well.
+        w.standing[f"merge:{APP}@{new}#7186"] = {"decision_id": "dec_cardfor7186new", "state": "asked"}
+        pr.update(in_queue=True, auto_merge={"enabled_at": "2026-11-27T04:40:00Z", "merge_method": "merge"})
+        out = self.held(w)
+        self.assertEqual(out["held"][0]["taken_off"],
+                         f"out of the merge queue and off auto-merge at {new[:12]}, which has no authorize of Patrick's")
+        self.assertEqual(w.fake.dequeued, [(APP, 7186, new)])
+        self.assertFalse(pr["in_queue"])
+        # His yes for the new head lets Bramble put it on again.
+        w.standing[f"merge:{APP}@{new}#7186"] = {"decision_id": "dec_cardfor7186new", "state": "authorized"}
+        pr["auto_merge"] = {"enabled_at": "2026-11-27T04:50:00Z", "merge_method": "merge"}
+        self.assertNotIn("taken_off", self.held(w)["held"][0])
+        self.assertIsNotNone(pr["auto_merge"])
+
+    def test_an_unseen_head_on_auto_merge_says_why_it_was_not_taken_off(self):
+        w = self.world()
+        self.add(w, 7186, "claude/project-thread-9zelrc-6879", ["scripts/vps/gate/Gate.ps1"])
+        w.fake.prs[(APP, 7186)]["auto_merge"] = {"enabled_at": "2026-11-27T04:27:20Z", "merge_method": "merge"}
+        w.fake.refuse_auto_merge_off = True
+        self.assertIn("not taken off: GitHub refused auto-merge-off", self.held(w)["held"][0]["taken_off"])
+        w = self.world()
+        w.git.policy.data["executor"] = "patrick"
+        self.add(w, 7186, "claude/project-thread-9zelrc-6879", ["scripts/vps/gate/Gate.ps1"])
+        w.fake.prs[(APP, 7186)]["auto_merge"] = {"enabled_at": "2026-11-27T04:27:20Z", "merge_method": "merge"}
+        self.assertEqual(self.held(w)["held"][0]["taken_off"], "not taken off: until the cutover the Bots write nothing")
+        self.assertEqual(w.fake.auto_merge_off, [])
 
     def test_before_the_cutover_nothing_is_written(self):
         w = self.world()
