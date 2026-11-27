@@ -21,6 +21,26 @@ from .policy import Policy, Verdict
 CLAUDE_BRANCH = re.compile(r"^claude/")
 
 SHA = re.compile(r"[0-9a-f]{40}")
+# GitHub's closing keywords before an issue or pull request reference, as it
+# reads them in a merged pull request's body: #N, owner/repo#N, or the link.
+# It closes what they name as whoever merged, a pull request included
+# (Thornswood-Ops #445, 26 Nov 2026: "the fork fix ThornswoodRP/skymp#199"
+# closed skymp #199 unmerged, as Bramble, the second Bramble merged #445).
+CLOSES = re.compile(
+    r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?[ \t]+"
+    r"(?:https://github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/|([\w.-]+/[\w.-]+)?#)([1-9][0-9]*)\b",
+    re.IGNORECASE)
+
+
+def body_closes(repo: str, body: str) -> list[tuple[str, int, str]]:
+    """What a pull request's body would close on merge: (repo, number, the
+    words that close it), in order, each once. A bare #N is in its own repo."""
+    out: list[tuple[str, int, str]] = []
+    for m in CLOSES.finditer(body or ""):
+        where = m.group(2) or m.group(3) or repo
+        if not any(r.lower() == where.lower() and n == int(m.group(4)) for r, n, _ in out):
+            out.append((where, int(m.group(4)), m.group(0)))
+    return out
 
 
 @dataclass
@@ -54,6 +74,9 @@ class PullRequest:
     # Carried-from lines in its body. Only a Bot's own replaced pull request
     # is closed on these (close_pr); outside work binds to its commits alone.
     body_carried_from: list[tuple[str, int]] = field(default_factory=list)
+    # What its body or a commit message names with a closing keyword
+    # (body_closes), which GitHub closes when it merges.
+    body_closes: list[tuple[str, int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -218,7 +241,7 @@ class GitHubRules:
     def merge(self, bot: str, pr: PullRequest, sha: str, method: str,
               checks: list[CheckRun], *, branch_checks: set[str] | None = None,
               allowed_people: set[str] | None = None, verb_paths: list[str] | None = None,
-              decision_id: str | None = None) -> Verdict:
+              decision_id: str | None = None, closes_prs: list[tuple[str, int, str]] | None = None) -> Verdict:
         """Bramble's merge. Where the policy has GitHub's auto-merge do it
         (merge.auto_merge), a yes here turns auto-merge on at this head and
         GitHub merges once the checks its branch rules require pass:
@@ -230,7 +253,12 @@ class GitHubRules:
         base branch's verb lists name, read by tw-git) merges only on
         Patrick's "authorize" on a Main card for it at this exact head,
         release link merge:<repo>@<head>#<number>, passed as decision_id
-        (Ops #276)."""
+        (Ops #276).
+
+        closes_prs: the open pull requests its body names with a closing
+        keyword, read by tw-git from what pr.body_closes lists. GitHub would
+        close each of them unmerged, as Bramble, the moment this one merges,
+        so nothing merges while one is named (Ops #445 closed skymp #199)."""
         p = self.policy
         if not p.is_router(bot):
             return Verdict.no(f"only Bramble merges; {p.bot_name(bot) if p.is_bot(bot) else bot} never does, its own work included")
@@ -248,6 +276,16 @@ class GitHubRules:
             return Verdict.no("a merge names the full 40-character head SHA it was checked at")
         if sha != pr.head_sha:
             return Verdict.no(f"the head moved: checked {sha[:12]}, the PR is at {pr.head_sha[:12]}; re-read and review the new head")
+        if pr.body_closes and closes_prs is None:
+            return Verdict.no(f"PR {pr.number}'s body closes {len(pr.body_closes)} issues or pull requests on merge "
+                              "and they were not read; nothing merges unseen")
+        if closes_prs:
+            r, n, said = closes_prs[0]
+            return Verdict.no(f"PR {pr.number}'s body says \"{said}\", and {r}#{n} is an open pull request: GitHub "
+                              "closes what a merged body names after close, fix or resolve, pull requests too, "
+                              "as whoever merged it, so merging this would close it unmerged (Ops #445 closed "
+                              "skymp #199). Its owner rewords the body, for example \"Refs\" or no closing word "
+                              "before the link, and it merges at the same head after that")
         want_base = p.data["merge"]["base"].get(pr.repo)
         if pr.base_ref != want_base:
             return Verdict.no(f"PR {pr.number} targets {pr.base_ref}, not {want_base}")

@@ -29,7 +29,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable
 
-from thornswood_guard.github import SHA, CheckRun, Credit, GitHubRules, Issue, PullRequest
+from thornswood_guard.github import SHA, CheckRun, Credit, GitHubRules, Issue, PullRequest, body_closes
 from thornswood_guard.policy import Policy, Verdict
 
 from .github_api import GitHub, GitHubError, MAGPIE_ACTIONS_APP, quote
@@ -430,6 +430,13 @@ class GitService:
             for r, n in CARRIED_FROM.findall(body.get("message") or ""):
                 if (r, int(n)) not in carried_from:
                     carried_from.append((r, int(n)))
+        # What it closes on merge: GitHub reads the closing words in its body
+        # and in each commit's message that reaches the default branch.
+        closes = []
+        for text in [raw.get("body") or ""] + [(c.get("commit") or {}).get("message") or "" for c in commits]:
+            for found in body_closes(repo, text):
+                if not any(r.lower() == found[0].lower() and n == found[1] for r, n, _ in closes):
+                    closes.append(found)
         body_carried = []
         for r, n in CARRIED_FROM.findall(raw.get("body") or ""):
             if (r, int(n)) not in body_carried:
@@ -438,7 +445,29 @@ class GitService:
                            base_ref=raw["base"]["ref"], author_bot=author_bot, author_login=raw["user"]["login"],
                            files=files, labels=[l["name"] for l in raw.get("labels", [])],
                            draft=bool(raw.get("draft")), merged=bool(raw.get("merged")), credits=credits,
-                           carried_from=carried_from, body_carried_from=body_carried)
+                           carried_from=carried_from, body_carried_from=body_carried,
+                           body_closes=closes)
+
+    def _open_prs_named(self, pr: PullRequest) -> list[tuple[str, int, str]]:
+        """The open pull requests pr's body names with a closing keyword.
+        GitHub closes only where the one merging may write, so a repo
+        Bramble's App is not on cannot lose one this way and is not read."""
+        reach = {r.lower(): r for r in self.policy.data["github_apps"]["bramble"]["repos"]}
+        out = []
+        for where, number, said in pr.body_closes:
+            repo = reach.get(where.lower())
+            if repo is None:
+                continue
+            try:
+                raw = self.gh.get(self.policy.reader_for(repo), repo, f"/repos/{repo}/issues/{int(number)}")
+            except GitHubError as e:
+                if e.status == 404:
+                    continue  # nothing there to close
+                raise Refused(f"{repo}#{number}, which PR {pr.number}'s body closes, cannot be read ({e}); "
+                              "nothing merges unseen") from e
+            if raw.get("pull_request") and raw.get("state") == "open":
+                out.append((repo, int(number), said))
+        return out
 
     def _merged_pr(self, repo: str, number: int) -> PullRequest:
         """A pull request as it stands, without its files and commits: all
@@ -1153,8 +1182,11 @@ class GitService:
         # for this head (Ops #276); what the verbs run is read from the base.
         verb_paths = self._verb_paths(repo, pr.base_ref) if self.policy.patrick_verb_lists(repo) else []
         decision_id = args.get("decision_id")
+        # What the body closes on merge, read only when it names something.
+        closes_prs = self._open_prs_named(pr) if pr.body_closes else None
         self._check(self.rules.merge(bot, pr, sha, method, checks, branch_checks=branch_checks,
-                                     allowed_people=allowed, verb_paths=verb_paths, decision_id=decision_id))
+                                     allowed_people=allowed, verb_paths=verb_paths, decision_id=decision_id,
+                                     closes_prs=closes_prs))
         # Patrick's own pull request needs no yes (rules.patricks_own_pr), so it spends none.
         uses = bool(self.policy.patrick_files(repo, pr.files, verb_paths)) and not self.rules.patricks_own_pr(pr)
 
