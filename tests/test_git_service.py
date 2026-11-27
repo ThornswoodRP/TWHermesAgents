@@ -393,6 +393,75 @@ class Merge(unittest.TestCase):
         self.assertIn("already merged", str(e.exception))
 
 
+class MergeClosesNoPullRequest(unittest.TestCase):
+    """GitHub closes what a merged body names after close, fix or resolve,
+    pull requests too, as whoever merged it. Bramble merged Thornswood-Ops
+    #445, whose body said "the fork fix ThornswoodRP/skymp#199", and skymp
+    #199 closed unmerged as Bramble in the same second (26 Nov 2026)."""
+
+    def ops_pr(self, w: World, body: str) -> str:
+        sha = w.green_pr()
+        w.fake.prs[(OPS, 42)]["body"] = body
+        return sha
+
+    def test_a_body_that_would_close_an_open_pull_request_does_not_merge(self):
+        w = World()
+        w.fake.add_pr(FORK, 199, head_ref="claude/project-thread-yl63yj", head_sha="e" * 40,
+                      base="thornswood/engine-changes", files=["a.cpp"], author="EvilPatrick06")
+        sha = self.ops_pr(w, "Adds issues/6884.md, the measurements behind Thornswood #6884 and the fork fix "
+                             "ThornswoodRP/skymp#199. Docs only.")
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha)
+        self.assertIn('"fix ThornswoodRP/skymp#199"', str(e.exception))
+        self.assertIn("open pull request", str(e.exception))
+        self.assertEqual(w.fake.writes("PUT"), [])
+        # Reworded, the same head merges.
+        w.fake.prs[(OPS, 42)]["body"] = "Adds the evidence for the fork's fix, Refs ThornswoodRP/skymp#199."
+        self.assertTrue(w.merge(sha=sha)["done"])
+
+    def test_every_way_github_reads_the_reference(self):
+        for said in ("Closes #77", "fixes: #77", "Resolved ThornswoodRP/Thornswood-Ops#77",
+                     "FIX https://github.com/ThornswoodRP/Thornswood-Ops/pull/77"):
+            with self.subTest(said=said):
+                w = World()
+                w.fake.add_pr(OPS, 77, head_ref="bramble/77-other", head_sha="7" * 40, files=["b"])
+                sha = self.ops_pr(w, f"Something. {said}.")
+                with self.assertRaises(Refused):
+                    w.merge(sha=sha)
+                self.assertEqual(w.fake.writes("PUT"), [])
+
+    def test_a_commit_message_that_would_close_one_does_not_merge(self):
+        w = World()
+        w.fake.add_pr(OPS, 77, head_ref="bramble/77-other", head_sha="7" * 40, files=["b"])
+        sha = self.ops_pr(w, "Docs only.")
+        w.fake.pr_commits[(OPS, 42)] = [{"sha": sha, "author": None, "commit": {
+            "author": {"name": "Bramble (Thornswood Bot)", "email": "bramble@bots.thornswood.invalid"},
+            "message": "Evidence\n\nThis closes #77 for good."}}]
+        with self.assertRaises(Refused) as e:
+            w.merge(sha=sha)
+        self.assertIn('"closes #77"', str(e.exception))
+        self.assertEqual(w.fake.writes("PUT"), [])
+
+    def test_the_fork_is_not_put_on_auto_merge_either(self):
+        w = World()
+        w.fake.add_pr(APP, 7042, head_ref="claude/project-thread-sji3xi", head_sha="d" * 40, files=["c"],
+                      author="EvilPatrick06")
+        sha = w.green_pr(branch="wisp/6884-load", repo=FORK)
+        w.fake.prs[(FORK, 42)]["body"] = "Fixes ThornswoodRP/Thornswood#7042"
+        with self.assertRaises(Refused):
+            w.merge(sha=sha, repo=FORK)
+        self.assertEqual(w.fake.auto_merged, [])
+
+    def test_closing_an_issue_or_a_closed_pull_request_still_merges(self):
+        w = World()
+        w.fake.add_issue(OPS, 300)
+        w.fake.add_pr(OPS, 301, head_ref="bramble/301-old", head_sha="3" * 40, files=["d"])
+        w.fake.prs[(OPS, 301)]["state"] = w.fake.issues[(OPS, 301)]["state"] = "closed"
+        sha = self.ops_pr(w, "Closes #300. Fixes #301. Fixes #999. Closes SomeoneElse/elsewhere#5.")
+        self.assertTrue(w.merge(sha=sha)["done"])
+        self.assertEqual(len(w.fake.writes("PUT", "/merge")), 1)
+
+
 
 class MergeQueue(unittest.TestCase):
     """The redesign's part 5: with a merge queue on main, GitHub refuses a
