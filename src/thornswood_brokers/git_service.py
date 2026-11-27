@@ -34,6 +34,7 @@ from thornswood_guard.policy import Policy, Verdict
 
 from .github_api import GitHub, GitHubError, MAGPIE_ACTIONS_APP, quote
 from .repeats import likely_repeats
+from . import seal
 from .wire import Refused
 
 # The board through the workers' App (policy.yaml board).
@@ -58,6 +59,9 @@ logger = logging.getLogger(__name__)
 # a CI job's log (250 KB to 760 KB) could not be read at all: Thornswood-Ops
 # #266 (Thornswood #5630, #5752, #5882, skymp #148).
 READ_MOST = 40_000
+# The workflows whose output comes back sealed in the job's log, to a key
+# tw-git makes for each start (#265).
+SEALED_WORKFLOWS = ("box-run.yml",)
 
 
 def _lines_wanted(args: dict) -> tuple[str | None, int, int]:
@@ -279,8 +283,10 @@ class GitService:
                  mirrors: Path, spool: Path, git_base: str = "https://github.com/",
                  git_env: dict | None = None, allow_file_protocol: bool = False,
                  ask_decide: Callable[[str, dict], object] | None = None,
-                 magpie_actions: GitHub | None = None):
+                 magpie_actions: GitHub | None = None, seal_python: str = seal.VENV_PYTHON):
         self.policy = policy
+        # The python with the cryptography library the seal needs (seal.py).
+        self.seal_python = seal_python
         self.gh = github
         self.magpie_actions = magpie_actions
         self.ask = ask_policy
@@ -1625,6 +1631,17 @@ class GitService:
         where = (self.policy.data["runs"]["workflows"][workflow] or {}).get("repo", repo)
         at = commit if where == repo else self._ref_sha(where, ref)
         digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:16]
+        # THE OUTPUT COMES BACK (TWHermesAgents #265). box-run.yml seals the
+        # verb's output to the recipient it is sent and writes it into the
+        # job's log; with none it writes nothing, and until #265 no Bramble
+        # run sent one, so no Bramble run could say what it printed. tw-git
+        # makes the key, by the line's digest so a retry of the same start
+        # sends the same one, and run_output opens what comes back.
+        key_file = None
+        if workflow in SEALED_WORKFLOWS and not inputs.get("recipient"):
+            key_file = self._seal_keys() / f"start-{digest}.pem"
+            public = self._seal_public(key_file)
+            inputs = dict(inputs, recipient=public)
         started: dict = {}
 
         def find():
@@ -1644,12 +1661,99 @@ class GitService:
             return {"dispatched": True}
 
         out = self._guarded_write(bot, task, f"run-{workflow}", where, f"{workflow}/{digest}", at, write=write, read_back=find)
+        if key_file is not None:
+            run_id = (out.get("receipt") or {}).get("run")
+            if isinstance(run_id, int):
+                os.replace(key_file, self._seal_keys() / f"run-{run_id}.pem")
+                out["sealed"] = True
         if decision_id and not out.get("reconciled"):
             self.ask("decision_use", {"id": decision_id})
         out["commit"] = commit
         if where != repo:
             out["repo"], out["repo_commit"] = where, at
         return out
+
+    # Where tw-git keeps the private halves of the seal keys it sent with box
+    # runs (#265), in its own folder, which only tw-git reads. A key goes 30
+    # days after it was made: a run's log is kept 90, and its output is read
+    # the hour it ends.
+    SEAL_KEEP_DAYS = 30
+
+    def _seal_keys(self) -> Path:
+        d = self.mirrors / "seal-keys"
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return d
+
+    def _seal_public(self, key_file: Path) -> str:
+        """The public half to send for key_file, made now unless a start of
+        the same line left one."""
+        import time
+        cutoff = time.time() - self.SEAL_KEEP_DAYS * 86400
+        for old in [*key_file.parent.glob("*.pem"), *key_file.parent.glob("*.pub")]:
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+        pub_file = key_file.with_suffix(".pub")
+        if key_file.is_file() and pub_file.is_file():
+            return pub_file.read_text().strip()
+        try:
+            public, private = seal.new_key(self.seal_python)
+        except seal.SealError as e:
+            raise Refused(f"no seal key for the run, so its output could not come back: {e}") from e
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(private)
+        pub_file.write_text(public + "\n")
+        return public
+
+    def run_output(self, caller: str, args: dict) -> dict:
+        """Bramble only: what a box run tw-git started printed, opened from the
+        sealed lines box-run.yml wrote into its job's log (#265)."""
+        bot = self._bot(args)
+        if not self.policy.is_router(bot):
+            raise Refused("only Bramble reads a box run's output")
+        run = args.get("run")
+        if not isinstance(run, int) or isinstance(run, bool) or run <= 0:
+            raise Refused("run_output needs run, the run's id")
+        key_file = self._seal_keys() / f"run-{run}.pem"
+        if not key_file.is_file():
+            raise Refused(f"tw-git keeps no seal key for run {run}: it did not start that run with one "
+                          f"(a run started before #265 sent none), or the key is over {self.SEAL_KEEP_DAYS} days old")
+        runs = self.policy.data["runs"]
+        repo = (runs["workflows"].get("box-run.yml") or {}).get("repo", runs["repo"])
+        info = self.gh.get("bramble", repo, f"/repos/{repo}/actions/runs/{run}")
+        if not isinstance(info, dict) or info.get("status") not in (None, "completed"):
+            raise Refused(f"run {run} has not ended yet ({(info or {}).get('status')}); read it once it has")
+        jobs = self.gh.get("bramble", repo, f"/repos/{repo}/actions/runs/{run}/jobs?per_page=100")
+        why = "no job of the run has TWSEAL-LOG lines"
+        sealed_bytes = None
+        for job in (jobs or {}).get("jobs", []):
+            # A skipped job never ran and GitHub keeps no log for it
+            # (Sealed.ps1, Read-ThornswoodSealedLog).
+            if job.get("conclusion") == "skipped":
+                continue
+            log = self.gh.get("bramble", repo, f"/repos/{repo}/actions/jobs/{job['id']}/logs")
+            got, said = seal.sealed_from_log(log if isinstance(log, str) else "")
+            if got is not None:
+                sealed_bytes = got
+                break
+            if said:
+                why = said
+                break
+        if sealed_bytes is None:
+            raise Refused(f"run {run}'s output could not be read: {why}")
+        try:
+            plain = seal.unseal(sealed_bytes, key_file.read_bytes(), self.seal_python)
+        except seal.SealError as e:
+            raise Refused(f"run {run}'s sealed output did not open: {e}") from e
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(plain)) as z:
+            names = [n for n in z.namelist() if not n.endswith("/")]
+            text = z.read("output.txt").decode("utf-8", errors="replace") if "output.txt" in names else ""
+        reply = _text_reply(text, *_lines_wanted(args))
+        reply.update({"run": run, "conclusion": info.get("conclusion"),
+                      "files": [n for n in names if n != "output.txt"]})
+        return reply
 
     def read(self, caller: str, args: dict) -> dict:
         """A GET within a work repo, normally through its shared reader."""
@@ -1934,7 +2038,7 @@ class GitService:
     def ops(self) -> dict:
         gw = self.policy.data["brokers"]["users"]["gateway"]
         names = ("base", "push", "open_pr", "edit_pr", "open_issue", "comment", "label", "claim_labels", "merge", "close_pr",
-                 "close_issue", "delete_branch", "start_run", "read", "board", "held", "refused", "ledger_event")
+                 "close_issue", "delete_branch", "start_run", "read", "run_output", "board", "held", "refused", "ledger_event")
         ops = {n: (self._executor_only(n, getattr(self, n)) if n in self.WRITES else getattr(self, n), {gw}) for n in names}
         ops["open_claim_question"] = (self.open_claim_question, {gw})
         # The VM's own install results (vm_report.py, ThornswoodRP/Thornswood#5564):

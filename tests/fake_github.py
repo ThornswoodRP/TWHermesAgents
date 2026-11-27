@@ -47,6 +47,9 @@ class FakeGitHub:
         self.comments: dict[tuple[str, int], list[dict]] = {}
         self.contents: dict[tuple[str, str, str], bytes] = {}
         self.runs: list[dict] = []
+        # A run's jobs by run id, and a job's log by job id (#265).
+        self.run_jobs: dict[int, list[dict]] = {}
+        self.job_logs: dict[int, str] = {}
         self.texts: dict[str, object] = {}   # path -> a text answer, as a job's log
         self.board_items: list[dict] = []   # the org project's items, as GraphQL gives them
         self.repo_labels: dict[tuple[str, str], dict] = {}   # (repo, lower-case name) -> label
@@ -462,6 +465,11 @@ class FakeGitHub:
                 return Response(204, None, {})
             return Response(200, {"workflow_runs": [r for r in self.runs if r["workflow"] == wf
                                                     and r["head_sha"] == query.get("head_sha")]}, {})
+        if rest[0] == "actions" and rest[1] == "runs" and len(rest) == 4 and rest[3] == "jobs" and method == "GET":
+            return Response(200, {"jobs": self.run_jobs.get(int(rest[2]), [])}, {})
+        if rest[0] == "actions" and rest[1] == "jobs" and len(rest) == 4 and rest[3] == "logs" and method == "GET":
+            log = self.job_logs.get(int(rest[2]))
+            return Response(200, log, {}) if log is not None else Response(404, {"message": "Not Found"}, {})
         if rest[0] == "actions" and rest[1] == "runs" and len(rest) == 3 and method == "GET":
             run = next((r for r in self.runs if r["id"] == int(rest[2]) and r.get("repo", repo) == repo), None)
             return Response(200, run, {}) if run else Response(404, {"message": "Not Found"}, {})
